@@ -377,6 +377,41 @@ func (s *Store) UpsertIssueCache(ic IssueCache) error {
 	return nil
 }
 
+// ListCachedIssueNums returns all issue numbers in the cache for a repo,
+// excluding PR entries (those with state starting with "pr:").
+func (s *Store) ListCachedIssueNums(repo string) ([]int, error) {
+	rows, err := s.db.Query(
+		`SELECT issue_num FROM issue_cache WHERE repo = ? AND (state IS NULL OR state NOT LIKE 'pr:%')`,
+		repo,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: list cached issue nums: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var nums []int
+	for rows.Next() {
+		var n int
+		if err := rows.Scan(&n); err != nil {
+			return nil, fmt.Errorf("store: scan issue num: %w", err)
+		}
+		nums = append(nums, n)
+	}
+	return nums, rows.Err()
+}
+
+// DeleteIssueCache removes a cached issue entry.
+func (s *Store) DeleteIssueCache(repo string, issueNum int) error {
+	_, err := s.db.Exec(
+		`DELETE FROM issue_cache WHERE repo = ? AND issue_num = ?`,
+		repo, issueNum,
+	)
+	if err != nil {
+		return fmt.Errorf("store: delete issue cache: %w", err)
+	}
+	return nil
+}
+
 // QueryIssueCache returns the cached issue, or nil if not found.
 func (s *Store) QueryIssueCache(repo string, issueNum int) (*IssueCache, error) {
 	var ic IssueCache

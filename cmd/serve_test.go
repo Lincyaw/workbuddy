@@ -320,3 +320,71 @@ func TestServe_HealthEndpoint(t *testing.T) {
 		t.Fatal("serve did not exit within timeout")
 	}
 }
+
+// TestRunningTasks_RegisterCancelRemove verifies the RunningTasks registry.
+func TestRunningTasks_RegisterCancelRemove(t *testing.T) {
+	rt := NewRunningTasks()
+
+	// Cancel non-existent task returns false.
+	if rt.Cancel("owner/repo", 1) {
+		t.Error("expected Cancel to return false for unregistered task")
+	}
+
+	// Register a task with a cancellable context.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rt.Register("owner/repo", 1, cancel)
+
+	// Cancel should return true and actually cancel the context.
+	if !rt.Cancel("owner/repo", 1) {
+		t.Error("expected Cancel to return true for registered task")
+	}
+	if ctx.Err() == nil {
+		t.Error("expected context to be cancelled after Cancel()")
+	}
+
+	// Second cancel should return false (already removed).
+	if rt.Cancel("owner/repo", 1) {
+		t.Error("expected Cancel to return false after already cancelled")
+	}
+}
+
+// TestRunningTasks_Remove verifies that Remove prevents future Cancel.
+func TestRunningTasks_Remove(t *testing.T) {
+	rt := NewRunningTasks()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rt.Register("owner/repo", 5, cancel)
+
+	// Remove without cancelling.
+	rt.Remove("owner/repo", 5)
+
+	// Cancel should now return false.
+	if rt.Cancel("owner/repo", 5) {
+		t.Error("expected Cancel to return false after Remove")
+	}
+
+	// Context should NOT have been cancelled by Remove.
+	if ctx.Err() != nil {
+		t.Error("expected context to still be active after Remove (not Cancel)")
+	}
+}
+
+// TestRunningTasks_Concurrent verifies thread safety.
+func TestRunningTasks_Concurrent(t *testing.T) {
+	rt := NewRunningTasks()
+	var wg sync.WaitGroup
+
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			_, cancel := context.WithCancel(context.Background())
+			rt.Register("owner/repo", n, cancel)
+			rt.Cancel("owner/repo", n)
+			rt.Remove("owner/repo", n)
+		}(i)
+	}
+	wg.Wait()
+}
