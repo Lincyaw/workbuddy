@@ -14,19 +14,21 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
+	"github.com/Lincyaw/workbuddy/internal/workspace"
 	"github.com/google/uuid"
 )
 
 // WorkerTask is the unit of work sent to an embedded Worker via channel.
 type WorkerTask struct {
-	TaskID    string
-	Repo      string
-	IssueNum  int
-	AgentName string
-	Agent     *config.AgentConfig
-	Context   *launcher.TaskContext
-	Workflow  string
-	State     string
+	TaskID      string
+	Repo        string
+	IssueNum    int
+	AgentName   string
+	Agent       *config.AgentConfig
+	Context     *launcher.TaskContext
+	Workflow    string
+	State       string
+	WorktreePath string // path to isolated worktree, empty if isolation disabled
 }
 
 // Router receives DispatchRequests from the StateMachine and routes them
@@ -37,15 +39,18 @@ type Router struct {
 	store    *store.Store
 	repo     string
 	taskChan chan<- WorkerTask
+	wsMgr    *workspace.Manager // nil = no workspace isolation
 }
 
 // NewRouter creates a Router for v0.1.0 channel-based dispatch.
+// Pass nil for wsMgr to disable workspace isolation (agents use CWD).
 func NewRouter(
 	agents map[string]*config.AgentConfig,
 	reg *registry.Registry,
 	st *store.Store,
 	repo string,
 	taskChan chan<- WorkerTask,
+	wsMgr *workspace.Manager,
 ) *Router {
 	return &Router{
 		agents:   agents,
@@ -53,6 +58,7 @@ func NewRouter(
 		store:    st,
 		repo:     repo,
 		taskChan: taskChan,
+		wsMgr:    wsMgr,
 	}
 }
 
@@ -103,8 +109,22 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 		issueCtx.Labels = labels
 	}
 
-	// Use CWD as WorkDir for v0.1.0 single-process mode.
-	workDir, _ := os.Getwd()
+	// Determine WorkDir: use an isolated worktree if workspace manager is set,
+	// otherwise fall back to CWD.
+	var workDir string
+	var worktreePath string
+	if r.wsMgr != nil {
+		wt, err := r.wsMgr.Create(req.IssueNum, taskID)
+		if err != nil {
+			log.Printf("[router] failed to create worktree for issue #%d: %v, falling back to CWD", req.IssueNum, err)
+			workDir, _ = os.Getwd()
+		} else {
+			workDir = wt
+			worktreePath = wt
+		}
+	} else {
+		workDir, _ = os.Getwd()
+	}
 
 	taskCtx := &launcher.TaskContext{
 		Issue:   issueCtx,
@@ -116,14 +136,15 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 	}
 
 	task := WorkerTask{
-		TaskID:    taskID,
-		Repo:      req.Repo,
-		IssueNum:  req.IssueNum,
-		AgentName: req.AgentName,
-		Agent:     agent,
-		Context:   taskCtx,
-		Workflow:  req.Workflow,
-		State:     req.State,
+		TaskID:       taskID,
+		Repo:         req.Repo,
+		IssueNum:     req.IssueNum,
+		AgentName:    req.AgentName,
+		Agent:        agent,
+		Context:      taskCtx,
+		Workflow:     req.Workflow,
+		State:        req.State,
+		WorktreePath: worktreePath,
 	}
 
 	select {

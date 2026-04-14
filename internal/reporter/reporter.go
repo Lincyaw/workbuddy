@@ -46,6 +46,16 @@ func (r *Reporter) SetBaseURL(baseURL string) {
 	r.baseURL = baseURL
 }
 
+// ReportStarted posts an "Agent Started" comment with a session link before execution begins.
+func (r *Reporter) ReportStarted(repo string, issueNum int, agentName, sessionID, workerID string) error {
+	var sessionURL string
+	if r.baseURL != "" {
+		sessionURL = r.baseURL + "/sessions/" + sessionID
+	}
+	body := FormatStartedReport(agentName, sessionID, workerID, sessionURL, time.Now())
+	return r.gh.WriteComment(repo, issueNum, body)
+}
+
 // Report formats and posts an agent execution report to the issue.
 func (r *Reporter) Report(repo string, issueNum int, agentName string, result *launcher.Result,
 	sessionID, workerID string, retryCount, maxRetries int) error {
