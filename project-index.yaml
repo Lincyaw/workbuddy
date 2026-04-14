@@ -87,7 +87,7 @@ requirements:
       transition to "failed" state instead.
     priority: P0
     version: v0.1.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-003-1: 根据 Issue 的 label 确定当前所处状态（匹配 workflow 中 enter_label 定义）"
       - "AC-003-2: 收到 Poller 事件后，查找当前状态的 transitions，评估 when 条件"
@@ -101,8 +101,11 @@ requirements:
       - "AC-003-10: 同一 Issue 在有 Agent 正在执行时，不派发新的同类 Agent（执行互斥锁，基于 task_queue 状态检查）"
       - "AC-003-11: Stuck 检测——任务状态变为 completed/failed/timeout 后，如果 N 分钟内（可配置，默认 5min）对应 Issue 的 label 未发生变化，标记为 stuck 并记录事件到 Event Log（触发条件是 Agent 执行结束但没改 label，而非纯时间窗口）"
       - "AC-003-12: 单元测试：正常转换、回退计数、超过上限转 failed、无匹配跳过、多 workflow 匹配拒绝、幂等、执行互斥、stuck 检测 8 种场景"
-    code: []
-    tests: []
+    code:
+      - internal/statemachine/statemachine.go
+      - internal/statemachine/rules.go
+    tests:
+      - internal/statemachine/statemachine_test.go
     deps: [REQ-001, REQ-024]
 
   - id: REQ-004
@@ -372,7 +375,7 @@ requirements:
       Unchanged from original design.
     priority: P0
     version: v0.1.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-013-1: 解析 when 字段中的条件表达式字符串"
       - "AC-013-2: 支持条件类型：labeled \"<label>\", pr_opened, checks_passed, checks_failed, approved, changes_requested, comment_command \"<cmd>\""
@@ -380,8 +383,10 @@ requirements:
       - "AC-013-4: EvalContext 包含：当前事件类型、Issue 状态、关联 PR 状态、最新评论"
       - "AC-013-5: 未知条件类型记录警告日志并返回 false（不崩溃）"
       - "AC-013-6: 单元测试：每种条件类型至少 1 个正例 + 1 个反例"
-    code: []
-    tests: []
+    code:
+      - internal/statemachine/rules.go
+    tests:
+      - internal/statemachine/statemachine_test.go
     deps: [REQ-003]
 
   - id: REQ-014
