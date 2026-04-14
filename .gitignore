@@ -1,5 +1,5 @@
 # Build output
-workbuddy
+/workbuddy
 /dist/
 
 # Local state and logs

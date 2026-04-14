@@ -1,3 +1,3 @@
-module github.com/AoyangSpace/workbuddy
+module github.com/Lincyaw/workbuddy
 
 go 1.23

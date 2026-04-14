@@ -1,24 +1,51 @@
 # Workbuddy — Requirements Index
 # Single source of truth for all requirements.
 # See CLAUDE.md for maintenance rules.
+#
+# Architecture: Hub-Spoke (Coordinator + Worker)
+# v0.1.0: single-process serve (Coordinator + Worker via channel)
+# v0.2.0: distributed (Coordinator HTTP API + Worker long-polling)
+# v0.3.0: advanced orchestration
 
 project:
   name: workbuddy
-  description: GitHub Issue-driven agent orchestration platform
+  description: GitHub Issue-driven agent orchestration platform (Hub-Spoke architecture)
   version: v0.1.0
 
+# Version scope:
+#   v0.1.0 (单机合体): REQ-001~006, REQ-009, REQ-010, REQ-013, REQ-017, REQ-023, REQ-024, REQ-030
+#   v0.2.0 (分布式+可观测): REQ-007, REQ-008, REQ-011, REQ-018~022, REQ-025~029
+#   v0.3.0 (高级编排): REQ-012, REQ-014~016
+
 requirements:
-  # === Layer 1: Core Engine ===
+  # ============================================================
+  # Layer 1: Core Engine
+  # ============================================================
 
   - id: REQ-001
     title: Config Loader
     description: >
-      Parse agent definitions and workflow definitions from Markdown files
-      with YAML frontmatter in `.github/workbuddy/agents/` and
-      `.github/workbuddy/workflows/`. Also load environment config from
-      `.github/workbuddy/config.yaml`.
+      Parse agent definitions (with role field for routing) and workflow
+      definitions (with max_retries for cycle limits) from Markdown files
+      with YAML frontmatter. Also load environment config from config.yaml.
     priority: P0
+    version: v0.1.0
     status: pending
+    acceptance_criteria:
+      - "AC-001-1: 解析 agents/*.md 的 YAML frontmatter，提取 name/description/triggers/role/command/timeout 字段"
+      - "AC-001-2: 解析 workflows/*.md 的 YAML frontmatter（含 max_retries 字段，默认值 3）和 Markdown 内嵌 YAML code block 中的 states 定义"
+      - "AC-001-3: states 定义中的 failed 状态可选，若 workflow 有回退边但未定义 failed 状态则自动补充"
+      - "AC-001-4: 解析 config.yaml，提取 repo/poll_interval/server 等配置"
+      - "AC-001-5: 缺少必填字段（name, triggers, role, command）时返回明确错误，包含文件名和字段名"
+      - "AC-001-6: 配置目录不存在时返回明确错误，不 panic"
+      - "AC-001-7: states schema 明确定义：每个 state 含 enter_label, agent (可选), transitions[] (含 when, target, assign 字段)，在 config/types.go 中有对应结构体"
+      - "AC-001-8: Workflow states 从 Markdown 正文中第一个 yaml 代码块提取；无 yaml 代码块时返回明确错误"
+      - "AC-001-9: 单边约束——同一 workflow 中，对于同一对 (from_state, to_state)，只允许存在一条 transition edge；重复定义时返回校验错误"
+      - "AC-001-10: 配置不支持热更新——修改后需重启进程生效（v0.1.0 限制，文档中标注）"
+      - "AC-001-11: Agent 定义新增 `runtime` 字段（可选，默认 'claude-code'），支持枚举值：claude-code, codex；不同 runtime 对应不同的子进程启动方式和 session 采集逻辑"
+      - "AC-001-12: Workflow trigger 冲突检测——不同 workflow 的 trigger.issue_label 不得重复（例如两个 workflow 都 trigger on 'type:feature'）；重复时返回校验错误，包含冲突的 workflow 名称"
+      - "AC-001-13: Agent trigger label 一致性校验——agent 的 triggers[].label 必须在至少一个 workflow 的 states 中作为 enter_label 出现；不匹配时返回 warning（不阻塞启动，但日志中明确提示）"
+      - "AC-001-14: 单元测试覆盖：正常解析、缺字段、空目录、格式错误、max_retries 默认值、states schema 验证、重复 edge 校验、无 yaml 代码块、workflow trigger 冲突、agent-label 不一致 10 种场景"
     code: []
     tests: []
     deps: []
@@ -26,75 +53,147 @@ requirements:
   - id: REQ-002
     title: GitHub Poller
     description: >
-      Periodically poll GitHub Issues via `gh issue list` to detect new issues,
-      label changes, and status updates. Maintain a local cache of known issue
-      state to detect transitions. Support configurable poll interval.
+      Coordinator 定时轮询 GitHub Issues/PRs via `gh` CLI，检测状态变化。
+      Issue 状态缓存存储在 SQLite 中。支持多仓库轮询。
     priority: P0
+    version: v0.1.0
     status: pending
+    acceptance_criteria:
+      - "AC-002-1: 以可配置间隔（默认 30s）调用 `gh issue list --json` 获取 open issues"
+      - "AC-002-2: 以可配置间隔调用 `gh pr list --json` 获取 open PRs"
+      - "AC-002-3: Issue/PR 状态缓存存入 SQLite issue_cache 表，对比前后两次 poll 识别变化"
+      - "AC-002-4: 能检测以下事件：新 Issue 创建、Label 增加/移除、PR 创建、PR checks 状态变化、PR review 状态变化"
+      - "AC-002-5: 变化事件通过 channel 推送给 State Machine"
+      - "AC-002-6: gh CLI 调用失败时记录错误日志并继续下一轮 poll，不崩溃"
+      - "AC-002-7: 感知 GitHub API rate limit（gh CLI 返回 HTTP 403/429），触发指数退避（初始 60s，最大 15min），退避期间跳过 poll 并记录 warning 日志"
+      - "AC-002-8: 支持通过 context 取消 poll 循环（用于 graceful shutdown）"
+      - "AC-002-9: 启动时对每个配置的 repo 执行 `gh api repos/{owner}/{repo}` 权限预检，无权限时打印明确错误并 exit 1"
+      - "AC-002-10: 单元测试：定义 GHReader 接口（封装 Poller 的 gh CLI 读取调用：issue list, pr list, api repos），使用 mock GHReader 验证变化检测逻辑（新 issue、label 变更、PR 事件、rate limit 退避）。注意：label 变更由 Agent 子进程自己调用 gh issue edit，Go 代码不负责改 label"
+      - "AC-002-11: 崩溃恢复——重启后首次 poll 做全量 diff（GitHub 当前状态 vs SQLite 缓存），而非仅增量检测；首次 poll 完成后恢复增量模式"
     code: []
     tests: []
-    deps: []
+    deps: [REQ-024]
 
   - id: REQ-003
-    title: State Machine
+    title: State Machine (with Cycle Detection)
     description: >
-      Implement a label-driven state machine for issue lifecycle management.
-      States are defined in workflow config files. Transitions are triggered
-      by label changes, PR events, and check results. The state machine
-      updates GitHub labels via `gh issue edit`.
+      Label-driven state machine with cycle detection and retry limits.
+      When a back-edge (e.g. reviewing→developing) is traversed, increment
+      a per-issue per-edge counter. If counter >= workflow.max_retries,
+      transition to "failed" state instead.
     priority: P0
+    version: v0.1.0
     status: pending
+    acceptance_criteria:
+      - "AC-003-1: 根据 Issue 的 label 确定当前所处状态（匹配 workflow 中 enter_label 定义）"
+      - "AC-003-2: 收到 Poller 事件后，查找当前状态的 transitions，评估 when 条件"
+      - "AC-003-3: 条件匹配时执行状态转换：移除旧 status label、添加新 status label（通过 gh issue edit）"
+      - "AC-003-4: 转换时如果 transition 指定了 assign agent，通知 Task Router"
+      - "AC-003-5: 回退边（目标状态在历史中出现过）触发 CycleTracker 计数"
+      - "AC-003-6: CycleTracker 计数 >= max_retries 时，拒绝回退，转到 failed 状态并添加 needs-human label"
+      - "AC-003-7: CycleTracker 数据持久化到 SQLite transition_counts 表"
+      - "AC-003-8: Issue 没有匹配任何 workflow 时静默跳过（不报错）；匹配多个 workflow 时记录 error 事件到 Event Log 并跳过该 Issue（不执行任何 workflow），防止歧义执行"
+      - "AC-003-9: 同一 Issue 不会因为一次 poll 触发多次转换（幂等性）"
+      - "AC-003-10: 同一 Issue 在有 Agent 正在执行时，不派发新的同类 Agent（执行互斥锁，基于 task_queue 状态检查）"
+      - "AC-003-11: Stuck 检测——任务状态变为 completed/failed/timeout 后，如果 N 分钟内（可配置，默认 5min）对应 Issue 的 label 未发生变化，标记为 stuck 并记录事件到 Event Log（触发条件是 Agent 执行结束但没改 label，而非纯时间窗口）"
+      - "AC-003-12: 单元测试：正常转换、回退计数、超过上限转 failed、无匹配跳过、多 workflow 匹配拒绝、幂等、执行互斥、stuck 检测 8 种场景"
     code: []
     tests: []
-    deps: [REQ-001]
+    deps: [REQ-001, REQ-024]
 
   - id: REQ-004
-    title: Dispatcher
+    title: Task Router
     description: >
-      When a state transition matches an agent trigger, dispatch the task
-      to the corresponding agent. Select runner type (local/remote) based
-      on agent config. Pass issue context (title, body, labels, comments)
-      to the agent.
+      Route tasks to matching Workers based on repo + agent role.
+      In v0.1.0, routes to the embedded Worker via Go channel.
+      In v0.2.0, places tasks in SQLite queue for Worker long-polling.
     priority: P0
+    version: v0.1.0
     status: pending
+    acceptance_criteria:
+      - "AC-004-1: 收到 State Machine 的派发请求后，从 Config 查找对应 agent 定义获取 role"
+      - "AC-004-2: 在 Worker Registry 查找匹配 repo + role + status=online 的 Worker"
+      - "AC-004-3: 无匹配 Worker → 任务进入 pending 队列，等待 Worker 上线后分配"
+      - "AC-004-4: 构造任务上下文：通过 `gh issue view --json` 获取完整 issue 信息，加上 agent config"
+      - "AC-004-5: v0.1.0 通过 Go channel 将任务发送给内嵌 Worker"
+      - "AC-004-6: agent 定义不存在时记录错误并跳过，不崩溃"
+      - "AC-004-7: 任务记录到 SQLite task_queue 表（含 status/worker_id/timestamps）"
+      - "AC-004-8: 单元测试：有匹配 Worker、无匹配 Worker、agent 不存在 3 种场景"
     code: []
     tests: []
-    deps: [REQ-001, REQ-003]
+    deps: [REQ-001, REQ-003, REQ-023, REQ-024]
 
   - id: REQ-005
     title: Reporter
     description: >
-      Write agent execution results back to GitHub Issues as comments.
-      Update issue labels to reflect state transitions. Include execution
-      summary, duration, and outcome (success/failure/timeout).
+      Coordinator writes agent execution results back to GitHub Issues
+      as comments via `gh issue comment`. Includes retry count in report.
+      Note: label changes are done by the Agent subprocess itself (gh issue edit),
+      not by Reporter. Reporter only writes comments and reads PR info.
     priority: P0
+    version: v0.1.0
     status: pending
+    acceptance_criteria:
+      - "AC-005-1: Agent 执行完成后，通过 `gh issue comment` 写入执行摘要"
+      - "AC-005-2: 摘要包含：agent 名称、执行状态、耗时、session ID、Worker 信息、重试计数 (N/max)"
+      - "AC-005-3: Agent stdout/stderr 超过 200 行时使用 <details> 折叠"
+      - "AC-005-4: 如果 agent 创建了 PR，在评论中包含 PR 链接（优先从 Result.Meta.pr_url 获取，fallback 到正则匹配 stdout）"
+      - "AC-005-5: 重试上限触发时，评论中明确说明 'Retry limit reached, needs human intervention'"
+      - "AC-005-6: gh 命令失败时重试 1 次，仍失败则记录错误日志"
+      - "AC-005-7: 单元测试：验证成功/失败/超时/重试上限 4 种场景的 Markdown 格式"
     code: []
     tests: []
     deps: [REQ-004]
 
-  # === Layer 2: Agent Runtime ===
+  # ============================================================
+  # Layer 2: Agent Runtime
+  # ============================================================
 
   - id: REQ-006
-    title: Local Runner
+    title: Agent Launcher (Multi-Runtime)
     description: >
-      Execute agent commands as local subprocesses. Capture stdout/stderr.
-      Support timeout and cancellation. Pass issue context via environment
-      variables and/or stdin. Work directory isolation per agent run.
+      Worker-side component that launches agent instances. Supports multiple
+      runtimes (claude-code, codex, etc.) via a Runtime interface. Each runtime
+      knows how to start the subprocess, capture output, and collect session data.
+      The `runtime` field in agent config selects the implementation.
     priority: P0
+    version: v0.1.0
     status: pending
+    acceptance_criteria:
+      - "AC-006-1: 定义 Runtime 接口：Launch(ctx, AgentConfig, TaskContext) → Result；不同 runtime 实现该接口"
+      - "AC-006-2: 内置 runtime 实现：claude-code（claude -p 模式）、codex（codex exec 模式）；根据 agent config 的 runtime 字段选择实现"
+      - "AC-006-3: 在 task 指定的 repo 本地目录下执行 agent command 作为 shell 子进程"
+      - "AC-006-4: 执行前对 command 进行 Go template 渲染，支持 {{.Issue.Number}}, {{.Issue.Title}}, {{.Issue.Body}}, {{.Issue.Labels}}, {{.PR.URL}}, {{.PR.Branch}}, {{.Repo}}, {{.Session.ID}}"
+      - "AC-006-5: 设置环境变量 WORKBUDDY_ISSUE_NUMBER, WORKBUDDY_ISSUE_TITLE, WORKBUDDY_ISSUE_BODY, WORKBUDDY_REPO, WORKBUDDY_SESSION_ID"
+      - "AC-006-6: 捕获 stdout 和 stderr，作为 Result 返回"
+      - "AC-006-7: 超时控制——超过 agent 定义的 timeout 后终止子进程，返回 timeout 状态"
+      - "AC-006-8: 支持通过 context 取消正在运行的子进程"
+      - "AC-006-9: 返回 Result{ExitCode, Stdout, Stderr, Duration, Meta, SessionPath}"
+      - "AC-006-10: 解析 stdout 中 WORKBUDDY_META 结构化输出块（JSON），提取 pr_url/branch/commit_sha/summary 等可选字段存入 Result.Meta；不存在或解析失败时 Meta 为空（不报错）"
+      - "AC-006-11: claude-code runtime：执行后采集 session 文件路径（~/.claude/projects/ 下对应 session），存入 Result.SessionPath"
+      - "AC-006-12: codex runtime：执行后采集 codex 输出日志路径，存入 Result.SessionPath"
+      - "AC-006-13: 未知 runtime 值时返回明确错误（'unsupported runtime: X, supported: claude-code, codex'）"
+      - "AC-006-14: 单元测试：正常执行、超时终止、模板渲染、取消、Meta 解析成功、Meta 缺失、claude-code runtime、codex runtime、未知 runtime 9 种场景"
     code: []
     tests: []
     deps: []
 
   - id: REQ-007
-    title: Remote Runner
+    title: Remote Runner (GitHub Actions)
     description: >
-      Trigger GitHub Actions workflows via `gh workflow run` with issue
-      context as inputs. Poll workflow run status. Collect run output
-      and artifacts.
+      Optional alternative Worker type that triggers GitHub Actions
+      workflows instead of local Claude Code.
     priority: P1
+    version: v0.2.0
     status: pending
+    acceptance_criteria:
+      - "AC-007-1: 通过 `gh workflow run <workflow>.yml` 触发远程 workflow"
+      - "AC-007-2: 触发后通过 `gh run list` 获取 run ID"
+      - "AC-007-3: 轮询 `gh run view` 等待 workflow 完成"
+      - "AC-007-4: 完成后通过 `gh run view --log` 收集输出"
+      - "AC-007-5: workflow 不存在或触发失败时返回明确错误"
+      - "AC-007-6: 支持超时"
+      - "AC-007-7: 单元测试：mock gh 命令验证触发和结果收集流程"
     code: []
     tests: []
     deps: []
@@ -102,38 +201,107 @@ requirements:
   - id: REQ-008
     title: Session Manager
     description: >
-      Track active agent sessions with unique IDs. Support querying session
-      status, cancelling running sessions, and retrying failed sessions.
-      Persist session state to local storage.
+      Track agent execution sessions in SQLite. Support querying,
+      cancelling, and duplicate prevention.
     priority: P1
+    version: v0.2.0
     status: pending
+    acceptance_criteria:
+      - "AC-008-1: 为每次 agent 执行创建唯一 session ID (格式: sess-YYYYMMDD-<random>)"
+      - "AC-008-2: 维护 session 状态：pending → running → completed/failed/cancelled/timeout"
+      - "AC-008-3: Session 记录包含 repo, issue_num, agent_name, worker_id, retry_num"
+      - "AC-008-4: 支持查询：按 session ID、按 issue number、按 agent name、按 worker、按状态"
+      - "AC-008-5: 支持取消正在运行的 session"
+      - "AC-008-6: 防止同一 Issue 同时运行多个同类 agent 实例"
+      - "AC-008-7: 所有数据持久化到 SQLite sessions 表"
+      - "AC-008-8: 单元测试：创建/查询/取消/重复检测 4 种场景"
     code: []
     tests: []
-    deps: [REQ-006]
+    deps: [REQ-024]
 
-  # === Layer 3: Observability ===
+  # ============================================================
+  # Layer 3: Communication (v0.2.0)
+  # ============================================================
+
+  - id: REQ-025
+    title: Coordinator HTTP API
+    description: >
+      HTTP API for Worker long-polling, task management, and audit.
+      In v0.1.0 only /health endpoint is active. Full API in v0.2.0.
+    priority: P1
+    version: v0.2.0
+    status: pending
+    acceptance_criteria:
+      - "AC-025-1: POST /api/v1/workers/register 接受 Worker 注册（worker_id, repo, roles）"
+      - "AC-025-2: GET /api/v1/tasks/poll 支持长轮询——有任务立即返回，无任务挂起最多 timeout 秒后返回 204"
+      - "AC-025-3: POST /api/v1/tasks/:id/result 接受 Worker 提交的执行结果"
+      - "AC-025-4: POST /api/v1/tasks/:id/heartbeat 更新任务心跳"
+      - "AC-025-5: GET /health 返回 200 + JSON 健康状态"
+      - "AC-025-6: 请求参数校验，无效请求返回 400"
+      - "AC-025-7: 集成测试：模拟完整 register → poll → result 流程"
+    code: []
+    tests: []
+    deps: [REQ-023, REQ-024]
+
+  - id: REQ-026
+    title: Worker Client
+    description: >
+      Worker-side HTTP client for communicating with Coordinator.
+      Handles registration, long-polling, result submission, and heartbeat.
+    priority: P1
+    version: v0.2.0
+    status: pending
+    acceptance_criteria:
+      - "AC-026-1: Register() 向 Coordinator 注册 worker_id + repo + roles"
+      - "AC-026-2: PollTask() 长轮询获取任务，无任务时阻塞（最多 timeout 秒）"
+      - "AC-026-3: SubmitResult() 提交执行结果"
+      - "AC-026-4: Heartbeat() 定期发送心跳"
+      - "AC-026-5: Coordinator 不可达时自动重试（指数退避，最大间隔 60s）"
+      - "AC-026-6: 实现与 v0.1.0 channel-based client 相同的接口"
+      - "AC-026-7: 单元测试：mock HTTP server 验证各操作"
+    code: []
+    tests: []
+    deps: [REQ-025]
+
+  # ============================================================
+  # Layer 4: Observability
+  # ============================================================
 
   - id: REQ-009
     title: Event Log
     description: >
-      Append-only JSONL event log in `.workbuddy/logs/`. Log all significant
-      events: poll results, state transitions, agent dispatches, agent
-      completions, errors. Each event has timestamp, event type, issue
-      number, and payload.
+      Record all significant events to SQLite events table.
+      Replaces the original JSONL file approach.
     priority: P0
+    version: v0.1.0
     status: pending
+    acceptance_criteria:
+      - "AC-009-1: 事件存入 SQLite events 表，含 id/ts/type/repo/issue_num/payload 字段"
+      - "AC-009-2: 支持的事件类型：poll, transition, dispatch, completed, error, report, retry_limit, worker_registered, worker_offline"
+      - "AC-009-3: payload 为 JSON 字符串"
+      - "AC-009-4: 写入失败时 stderr 输出警告，不影响主流程"
+      - "AC-009-5: 并发安全（SQLite WAL 模式）"
+      - "AC-009-6: 支持按时间范围 + 事件类型 + repo + issue 查询"
+      - "AC-009-7: 单元测试：写入/查询/并发写入 3 种场景"
     code: []
     tests: []
-    deps: []
+    deps: [REQ-024]
 
   - id: REQ-010
-    title: Issue Reporter
+    title: Issue Reporter (Rich Format)
     description: >
-      Post execution summaries as GitHub Issue comments. Include: agent name,
-      duration, outcome, key output lines. Use collapsible sections for
-      verbose output. Link to PR if one was created.
+      Format execution reports as rich Markdown for GitHub Issue comments.
+      Includes Worker info and retry count.
     priority: P0
+    version: v0.1.0
     status: pending
+    acceptance_criteria:
+      - "AC-010-1: 生成符合 design.md 3.1.6 模板的 Markdown 评论"
+      - "AC-010-2: 包含 agent 名称、状态标记、耗时、session ID、Worker 信息、重试计数"
+      - "AC-010-3: 长输出（>200 行）使用 <details><summary> 折叠"
+      - "AC-010-4: 评论末尾包含 workbuddy coordinator 签名 + 时间戳"
+      - "AC-010-5: 与 REQ-005 Reporter 共用接口，此需求是格式增强"
+      - "AC-010-6: 单元测试：验证成功/失败/超时/重试上限 4 种结果的 Markdown 格式"
     code: []
     tests: []
     deps: [REQ-005]
@@ -141,36 +309,64 @@ requirements:
   - id: REQ-011
     title: Audit HTTP Server
     description: >
-      Each workbuddy instance serves an HTTP endpoint for inspecting agent
-      sessions, viewing logs, and auditing execution history. Read-only.
-      Serves local JSONL logs in a browsable format.
+      HTTP endpoints for inspecting sessions, events, and Workers.
+      Data sourced from SQLite.
     priority: P2
+    version: v0.2.0
     status: pending
+    acceptance_criteria:
+      - "AC-011-1: GET / 返回 dashboard 概览页面"
+      - "AC-011-2: GET /sessions 返回会话列表，支持筛选"
+      - "AC-011-3: GET /sessions/:id 返回会话详情"
+      - "AC-011-4: GET /events 返回事件流，支持筛选"
+      - "AC-011-5: GET /workers 返回 Worker 列表"
+      - "AC-011-6: GET /health 返回健康状态"
+      - "AC-011-7: 所有端点只读"
+      - "AC-011-8: 集成测试：启动 server → 请求各端点 → 验证响应"
     code: []
     tests: []
-    deps: [REQ-009]
+    deps: [REQ-009, REQ-024]
 
   - id: REQ-012
     title: Dashboard API
     description: >
-      REST API exposing agent status, execution history, and metrics.
-      Consumed by the audit UI and external monitoring tools.
+      REST API exposing agent status, execution history, Worker status,
+      and metrics. Consumed by the audit UI and external monitoring.
     priority: P2
+    version: v0.3.0
     status: pending
+    acceptance_criteria:
+      - "AC-012-1: GET /api/v1/status 返回当前状态（活跃 session 数、Worker 数、最近 poll 时间）"
+      - "AC-012-2: GET /api/v1/sessions 返回 JSON session 列表，支持分页"
+      - "AC-012-3: GET /api/v1/sessions/:id 返回 JSON session 详情"
+      - "AC-012-4: GET /api/v1/events 支持 ?since=&until=&type=&repo= 查询"
+      - "AC-012-5: GET /api/v1/metrics 返回成功率、平均耗时、重试率、各 agent 执行次数"
+      - "AC-012-6: GET /api/v1/workers 返回 Worker 列表和状态"
+      - "AC-012-7: 所有响应使用 application/json"
+      - "AC-012-8: 集成测试：验证各端点 JSON schema"
     code: []
     tests: []
     deps: [REQ-011]
 
-  # === Layer 4: Workflow Orchestration ===
+  # ============================================================
+  # Layer 5: Workflow Orchestration
+  # ============================================================
 
   - id: REQ-013
     title: Transition Rules Engine
     description: >
-      Evaluate transition conditions defined in workflow configs. Support
-      conditions: label added/removed, PR opened/merged, checks passed/failed,
-      comment command (e.g., `/approve`). Trigger next agent on match.
+      Evaluate transition conditions defined in workflow configs.
+      Unchanged from original design.
     priority: P0
+    version: v0.1.0
     status: pending
+    acceptance_criteria:
+      - "AC-013-1: 解析 when 字段中的条件表达式字符串"
+      - "AC-013-2: 支持条件类型：labeled \"<label>\", pr_opened, checks_passed, checks_failed, approved, changes_requested, comment_command \"<cmd>\""
+      - "AC-013-3: 每种条件类型有对应的 evaluator 函数，接收 EvalContext 返回 bool"
+      - "AC-013-4: EvalContext 包含：当前事件类型、Issue 状态、关联 PR 状态、最新评论"
+      - "AC-013-5: 未知条件类型记录警告日志并返回 false（不崩溃）"
+      - "AC-013-6: 单元测试：每种条件类型至少 1 个正例 + 1 个反例"
     code: []
     tests: []
     deps: [REQ-003]
@@ -178,11 +374,17 @@ requirements:
   - id: REQ-014
     title: Workflow Engine
     description: >
-      Orchestrate multi-step workflows defined in workflow config files.
-      Track workflow instance state per issue. Support parallel and
-      sequential step execution.
+      Orchestrate multi-step workflows. Track workflow instance state
+      per issue. Persist to SQLite.
     priority: P1
+    version: v0.3.0
     status: pending
+    acceptance_criteria:
+      - "AC-014-1: 为每个匹配 workflow trigger 的 Issue 创建 WorkflowInstance"
+      - "AC-014-2: WorkflowInstance 记录：workflow 名称、issue 编号、当前状态、转换历史"
+      - "AC-014-3: 支持查询某个 Issue 的 workflow 进度"
+      - "AC-014-4: 持久化 workflow instance 到 SQLite"
+      - "AC-014-5: 单元测试：创建实例、状态推进、历史记录 3 种场景"
     code: []
     tests: []
     deps: [REQ-013]
@@ -190,11 +392,17 @@ requirements:
   - id: REQ-015
     title: Parallel Dispatch
     description: >
-      Allow a single state transition to trigger multiple agents in parallel
-      (e.g., lint + test simultaneously). Collect all results before
-      evaluating the next transition.
+      Allow a single state transition to trigger multiple agents
+      in parallel. Collect all results before evaluating next transition.
     priority: P2
+    version: v0.3.0
     status: pending
+    acceptance_criteria:
+      - "AC-015-1: workflow state 支持 agents (列表) 字段"
+      - "AC-015-2: 多 agent 并发路由到不同 Worker"
+      - "AC-015-3: 支持 join 策略：all_passed / any_passed"
+      - "AC-015-4: 所有 agent 完成后再评估下一个 transition"
+      - "AC-015-5: 单元测试：2 agent 并行、全部成功、部分失败 3 种场景"
     code: []
     tests: []
     deps: [REQ-014]
@@ -202,36 +410,65 @@ requirements:
   - id: REQ-016
     title: Issue Dependency Graph
     description: >
-      Track dependencies between issues (via issue body links or labels).
-      Block downstream issues until dependencies are resolved. Visualize
-      dependency graph.
+      Track dependencies between issues. Block downstream issues
+      until dependencies are resolved.
     priority: P2
+    version: v0.3.0
     status: pending
+    acceptance_criteria:
+      - "AC-016-1: 解析 Issue body 中的 'Depends on #N' 和 'Blocked by #N'"
+      - "AC-016-2: 构建 DAG"
+      - "AC-016-3: 依赖未关闭时阻止进入 developing"
+      - "AC-016-4: 依赖关闭时自动解除阻塞"
+      - "AC-016-5: `workbuddy status --deps` 显示依赖关系"
+      - "AC-016-6: 单元测试：解析、阻塞、解除、环形检测 4 种场景"
     code: []
     tests: []
     deps: [REQ-014]
 
-  # === CLI ===
+  # ============================================================
+  # CLI Commands
+  # ============================================================
 
   - id: REQ-017
-    title: CLI - serve command
+    title: CLI - serve command (single-process mode)
     description: >
-      `workbuddy serve` — start the poller, dispatcher, and HTTP audit
-      server. Accept --env, --port, --poll-interval flags. Graceful
-      shutdown on SIGINT/SIGTERM.
+      `workbuddy serve` — v0.1.0 single-process mode running both
+      Coordinator and Worker in the same binary. Coordinator polls
+      GitHub and manages state machine; embedded Worker executes
+      Claude Code via channel communication.
     priority: P0
+    version: v0.1.0
     status: pending
+    acceptance_criteria:
+      - "AC-017-1: cobra 命令 `workbuddy serve`，支持 --port, --poll-interval, --roles 标志"
+      - "AC-017-2: 启动时加载配置 + 初始化 SQLite，失败则打印错误并 exit 1"
+      - "AC-017-3: 启动 Poller goroutine"
+      - "AC-017-4: 启动 State Machine + Task Router（channel 模式）"
+      - "AC-017-5: 启动内嵌 Worker（从 channel 接收任务，启动 Claude Code）"
+      - "AC-017-6: 启动 HTTP Server（/health + 审计端点）"
+      - "AC-017-7: 监听 SIGINT/SIGTERM，graceful shutdown：停止 poller → 等待 agent（最多 60s）→ 关闭 HTTP"
+      - "AC-017-8: 启动成功时打印 'workbuddy serving (repo=X, roles=[dev,test], poll=30s, port=8080)'"
+      - "AC-017-9: 重启恢复——启动时从 SQLite 读取 task_queue 中 status=running 的任务，标记为 failed（子进程已丢失），status=pending 的任务重新路由"
+      - "AC-017-10: 集成测试：启动 serve → 发送 SIGTERM → 验证优雅退出；重启后 pending 任务重新路由"
+      - "AC-017-11: E2E 集成测试（mock-based）：使用 mock GHExecutor 模拟完整闭环——创建 Issue → Agent mock 执行 → mock Agent 改 label → 状态机检测 → 下一个 Agent 触发 → 完成或重试上限触发 failed"
     code: []
     tests: []
-    deps: [REQ-002, REQ-004, REQ-009]
+    deps: [REQ-002, REQ-004, REQ-006, REQ-009, REQ-024]
 
   - id: REQ-018
     title: CLI - init command
     description: >
-      `workbuddy init` — scaffold `.github/workbuddy/` directory with
-      example agent and workflow configs, and config.yaml.
+      `workbuddy init` — scaffold config directory with examples.
     priority: P1
+    version: v0.2.0
     status: pending
+    acceptance_criteria:
+      - "AC-018-1: 创建 .github/workbuddy/{agents,workflows} 目录"
+      - "AC-018-2: 生成示例 config.yaml（含 repo 字段）、agent 定义（含 role 字段）、workflow（含 max_retries 和 failed 状态）"
+      - "AC-018-3: 如果 .workbuddy 不在 .gitignore 中，追加"
+      - "AC-018-4: 目录已存在时报错，除非 --force"
+      - "AC-018-5: 单元测试：正常创建、已存在报错、--force 覆盖"
     code: []
     tests: []
     deps: [REQ-001]
@@ -239,21 +476,39 @@ requirements:
   - id: REQ-019
     title: CLI - status command
     description: >
-      `workbuddy status` — show current agent run status, active sessions,
-      and any stuck issues. Support --stuck flag to filter.
+      `workbuddy status` — show Coordinator status, Worker list,
+      active sessions, stuck issues, retry warnings.
     priority: P1
+    version: v0.2.0
     status: pending
+    acceptance_criteria:
+      - "AC-019-1: 显示 Coordinator 状态、数据库大小、已注册 repo 数"
+      - "AC-019-2: 列出已注册 Worker（ID、repo、roles、状态、最近心跳时间）"
+      - "AC-019-3: 列出活跃 session（ID、repo、issue、agent、worker、状态）"
+      - "AC-019-4: --stuck 过滤中间状态 > 1h 的 issue"
+      - "AC-019-5: --workers 只显示 Worker 列表"
+      - "AC-019-6: --json 输出 JSON"
+      - "AC-019-7: 显示 retry warnings（接近 max_retries 的 issue）"
+      - "AC-019-8: 单元测试：有/无 session、Worker 列表、--stuck 过滤"
     code: []
     tests: []
-    deps: [REQ-008]
+    deps: [REQ-008, REQ-023, REQ-024]
 
   - id: REQ-020
     title: CLI - run command
     description: >
-      `workbuddy run <agent> <issue-number>` — manually trigger an agent
-      for a specific issue. Bypass the poller for ad-hoc execution.
+      `workbuddy run <agent> <issue-number>` — manually trigger
+      agent for an issue, bypassing poller and state machine.
     priority: P1
+    version: v0.2.0
     status: pending
+    acceptance_criteria:
+      - "AC-020-1: 接受 agent name 和 issue number 作为位置参数"
+      - "AC-020-2: 跳过 poller 和状态机，直接执行 agent"
+      - "AC-020-3: --dry-run 只打印渲染后的命令"
+      - "AC-020-4: 执行完成后打印结果摘要"
+      - "AC-020-5: agent 或 issue 不存在时报错"
+      - "AC-020-6: 单元测试：正常运行、dry-run、不存在"
     code: []
     tests: []
     deps: [REQ-004, REQ-006]
@@ -261,10 +516,181 @@ requirements:
   - id: REQ-021
     title: CLI - validate command
     description: >
-      `workbuddy validate` — parse and validate all config files in
-      `.github/workbuddy/`. Report errors with file and line number.
+      `workbuddy validate` — validate all config files including
+      role references and workflow cycle detection.
     priority: P1
+    version: v0.2.0
     status: pending
+    acceptance_criteria:
+      - "AC-021-1: 解析所有 agent 定义、workflow 定义、config.yaml"
+      - "AC-021-2: 交叉验证：workflow 引用的 agent 必须存在"
+      - "AC-021-3: 交叉验证：agent 的 trigger label 应与 workflow 状态 label 对应"
+      - "AC-021-4: 检测不可达状态"
+      - "AC-021-5: 验证 workflow 中有回退边时存在 failed 状态（或可自动生成）"
+      - "AC-021-5.1: 验证同一 workflow 中不存在重复的 (from_state, to_state) edge"
+      - "AC-021-6: 报告格式：文件名:行号: 错误描述"
+      - "AC-021-7: 全部通过 exit 0，有错误 exit 1"
+      - "AC-021-8: 单元测试：合法、缺引用、不可达、缺 failed 状态"
     code: []
     tests: []
     deps: [REQ-001]
+
+  - id: REQ-022
+    title: CLI - logs command
+    description: >
+      `workbuddy logs` — query event log from SQLite.
+    priority: P1
+    version: v0.2.0
+    status: pending
+    acceptance_criteria:
+      - "AC-022-1: 默认显示今天的事件"
+      - "AC-022-2: --since/--until 日期范围筛选"
+      - "AC-022-3: --type 事件类型筛选"
+      - "AC-022-4: --issue 按 issue number 筛选"
+      - "AC-022-5: --agent 按 agent name 筛选"
+      - "AC-022-6: --repo 按仓库筛选"
+      - "AC-022-7: --follow (-f) 实时追踪"
+      - "AC-022-8: --json 输出原始 JSON"
+      - "AC-022-9: 无日志时提示 'No events found'"
+      - "AC-022-10: 单元测试：日期/类型/repo 筛选"
+    code: []
+    tests: []
+    deps: [REQ-009, REQ-024]
+
+  # ============================================================
+  # New Requirements (Architecture Change)
+  # ============================================================
+
+  - id: REQ-023
+    title: Worker Registry
+    description: >
+      Manage registered Workers. In v0.1.0, a single embedded Worker
+      auto-registers. In v0.2.0, remote Workers register via HTTP API.
+      Stores repo+roles per Worker, tracks heartbeat and online/offline.
+    priority: P0
+    version: v0.1.0
+    status: pending
+    acceptance_criteria:
+      - "AC-023-1: Worker 注册时存储 worker_id, repo, roles ([]string), hostname"
+      - "AC-023-2: 每次任务领取/心跳更新 last_heartbeat"
+      - "AC-023-3: last_heartbeat 超过 3 个 poll 周期 → 标记 offline"
+      - "AC-023-4: 支持按 repo + role 查询 online Worker 列表"
+      - "AC-023-5: v0.1.0 内嵌 Worker 自动注册（无需 HTTP）"
+      - "AC-023-6: 数据持久化到 SQLite workers 表"
+      - "AC-023-7: 单元测试：注册/心跳/离线检测/按 repo+role 查询 4 种场景"
+    code: []
+    tests: []
+    deps: [REQ-024]
+
+  - id: REQ-024
+    title: SQLite Store
+    description: >
+      Coordinator persistence layer using SQLite. Initialize database,
+      create tables, provide typed query methods. Use WAL mode.
+    priority: P0
+    version: v0.1.0
+    status: pending
+    acceptance_criteria:
+      - "AC-024-1: 数据库文件位于 .workbuddy/workbuddy.db"
+      - "AC-024-2: 启动时自动创建目录和数据库文件"
+      - "AC-024-3: 使用 CREATE TABLE IF NOT EXISTS 建表，支持反复启动"
+      - "AC-024-4: 开启 WAL 模式（PRAGMA journal_mode=WAL）"
+      - "AC-024-5: 表结构包含：repos, workers, issue_cache, task_queue, transition_counts, events, sessions"
+      - "AC-024-6: 使用纯 Go SQLite 库（modernc.org/sqlite），无 CGO 依赖"
+      - "AC-024-7: 提供 Close() 方法用于 graceful shutdown"
+      - "AC-024-8: 单元测试：建表/读写/并发/重启后数据保留 4 种场景"
+    code: []
+    tests: []
+    deps: []
+
+  - id: REQ-027
+    title: CLI - coordinator command
+    description: >
+      `workbuddy coordinator` — run Coordinator only (no embedded Worker).
+      For v0.2.0 distributed deployment.
+    priority: P1
+    version: v0.2.0
+    status: pending
+    acceptance_criteria:
+      - "AC-027-1: cobra 命令 `workbuddy coordinator`，支持 --port, --poll-interval"
+      - "AC-027-2: 启动 Poller + State Machine + Task Router + HTTP API"
+      - "AC-027-3: 不启动 Worker，任务通过 HTTP API 长轮询分发"
+      - "AC-027-4: 支持多仓库注册"
+      - "AC-027-5: graceful shutdown"
+    code: []
+    tests: []
+    deps: [REQ-025]
+
+  - id: REQ-028
+    title: CLI - worker command
+    description: >
+      `workbuddy worker` — run Worker only, connecting to a remote
+      Coordinator via long-polling.
+    priority: P1
+    version: v0.2.0
+    status: pending
+    acceptance_criteria:
+      - "AC-028-1: cobra 命令 `workbuddy worker`，支持 --coordinator, --worker-config, --worker-id"
+      - "AC-028-2: 读取 worker-config.yaml 获取 repo→local_path + roles 映射"
+      - "AC-028-3: 启动时向 Coordinator 注册"
+      - "AC-028-4: 循环长轮询获取任务"
+      - "AC-028-5: 收到任务 → 启动 Claude Code 实例"
+      - "AC-028-6: 执行期间定期心跳"
+      - "AC-028-7: 执行完成 → 提交结果"
+      - "AC-028-8: Coordinator 不可达时指数退避重试"
+      - "AC-028-9: graceful shutdown：等待当前任务完成"
+    code: []
+    tests: []
+    deps: [REQ-026, REQ-006]
+
+  # ============================================================
+  # Layer 6: Security & Resilience
+  # ============================================================
+
+  - id: REQ-029
+    title: Worker Authentication
+    description: >
+      Authenticate Workers connecting to Coordinator via shared secret.
+      Prevent unauthorized Workers from registering and receiving tasks.
+      v0.1.0 内嵌 Worker 免认证；v0.2.0 HTTP 通信必须认证。
+    priority: P1
+    version: v0.2.0
+    status: pending
+    acceptance_criteria:
+      - "AC-029-1: Coordinator 启动时从 config.yaml 或环境变量 WORKBUDDY_AUTH_TOKEN 读取共享密钥"
+      - "AC-029-2: Worker HTTP 请求须携带 Authorization: Bearer <token> header"
+      - "AC-029-3: 无 token 或 token 不匹配的请求返回 401 Unauthorized"
+      - "AC-029-4: v0.1.0 内嵌 Worker 通过 channel 通信，跳过认证"
+      - "AC-029-5: 未配置 token 时 Coordinator 启动打印 warning（不阻塞，但明确提示不安全）"
+      - "AC-029-6: 单元测试：有效 token、无效 token、缺失 token、v0.1.0 跳过认证 4 种场景"
+    code: []
+    tests: []
+    deps: [REQ-025]
+
+  # ============================================================
+  # Layer 7: Audit & Traceability
+  # ============================================================
+
+  - id: REQ-030
+    title: Agent Session Audit
+    description: >
+      Capture and persist full agent session/conversation data beyond
+      stdout/stderr. Different runtimes produce different session artifacts:
+      Claude Code has session JSON files, Codex has execution logs.
+      All session data is stored in SQLite and linked to the task/issue.
+    priority: P0
+    version: v0.1.0
+    status: pending
+    acceptance_criteria:
+      - "AC-030-1: Agent 执行完成后，Worker 从 Result.SessionPath 读取 session 数据"
+      - "AC-030-2: claude-code runtime：读取 Claude Code session 文件（JSON 对话记录），提取关键信息（tool calls, 代码修改摘要, token 使用量）"
+      - "AC-030-3: codex runtime：读取 codex 执行日志，提取关键信息"
+      - "AC-030-4: Session 数据存入 SQLite agent_sessions 表，关联 task_id/session_id/issue_num/repo"
+      - "AC-030-5: 原始 session 文件复制到 .workbuddy/sessions/{session_id}/ 目录归档"
+      - "AC-030-6: 支持按 session_id/issue_num/agent_name 查询 session 数据"
+      - "AC-030-7: Session 数据过大（>1MB）时只存摘要到 SQLite，原始文件保留在磁盘"
+      - "AC-030-8: Reporter（REQ-005）在 Issue comment 中包含 session 摘要链接或关键对话片段"
+      - "AC-030-9: 单元测试：claude-code session 采集、codex session 采集、大文件截断、查询 4 种场景"
+    code: []
+    tests: []
+    deps: [REQ-006, REQ-024]
