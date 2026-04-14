@@ -59,7 +59,6 @@ requirements:
       Issue 状态缓存存储在 SQLite 中。支持多仓库轮询。
     priority: P0
     version: v0.1.0
-    status: pending
     acceptance_criteria:
       - "AC-002-1: 以可配置间隔（默认 30s）调用 `gh issue list --json` 获取 open issues"
       - "AC-002-2: 以可配置间隔调用 `gh pr list --json` 获取 open PRs"
@@ -72,8 +71,11 @@ requirements:
       - "AC-002-9: 启动时对每个配置的 repo 执行 `gh api repos/{owner}/{repo}` 权限预检，无权限时打印明确错误并 exit 1"
       - "AC-002-10: 单元测试：定义 GHReader 接口（封装 Poller 的 gh CLI 读取调用：issue list, pr list, api repos），使用 mock GHReader 验证变化检测逻辑（新 issue、label 变更、PR 事件、rate limit 退避）。注意：label 变更由 Agent 子进程自己调用 gh issue edit，Go 代码不负责改 label"
       - "AC-002-11: 崩溃恢复——重启后首次 poll 做全量 diff（GitHub 当前状态 vs SQLite 缓存），而非仅增量检测；首次 poll 完成后恢复增量模式"
-    code: []
-    tests: []
+    code:
+      - internal/poller/poller.go
+    tests:
+      - internal/poller/poller_test.go
+    status: tested
     deps: [REQ-024]
 
   - id: REQ-003
