@@ -43,71 +43,7 @@ func statusBadge(status string) string {
 
 // FormatReport generates a rich Markdown report from the given data.
 func FormatReport(d ReportData) string {
-	var b strings.Builder
-
-	// Header
-	fmt.Fprintf(&b, "## Agent Report: %s\n\n", d.AgentName)
-
-	// Status badge
-	b.WriteString(statusBadge(d.Status))
-	b.WriteString("\n\n")
-
-	// Metadata table
-	b.WriteString("| Field | Value |\n")
-	b.WriteString("|-------|-------|\n")
-	fmt.Fprintf(&b, "| Agent | `%s` |\n", d.AgentName)
-	fmt.Fprintf(&b, "| Duration | %s |\n", formatDuration(d.Duration))
-	fmt.Fprintf(&b, "| Session ID | `%s` |\n", d.SessionID)
-	fmt.Fprintf(&b, "| Worker | `%s` |\n", d.WorkerID)
-	fmt.Fprintf(&b, "| Retry | %d / %d |\n", d.RetryCount, d.MaxRetries)
-	b.WriteString("\n")
-
-	// PR link if present
-	if d.PRLink != "" {
-		fmt.Fprintf(&b, ":link: **Pull Request**: %s\n\n", d.PRLink)
-	}
-
-	// Session detail link if present
-	if d.SessionURL != "" {
-		fmt.Fprintf(&b, ":mag: **[View Session Details](%s)**\n\n", d.SessionURL)
-	}
-
-	// Error detail for failure/timeout/retry-limit
-	if d.ErrorDetail != "" {
-		b.WriteString("### Error\n\n")
-		b.WriteString("```\n")
-		b.WriteString(d.ErrorDetail)
-		b.WriteString("\n```\n\n")
-	}
-
-	// Retry-limit specific message
-	if d.Status == "retry-limit" {
-		b.WriteString("> :warning: **Retry limit reached, needs human intervention**\n\n")
-	}
-
-	// Output section
-	if d.Output != "" {
-		lines := strings.Split(d.Output, "\n")
-		if len(lines) > maxOutputLines {
-			b.WriteString("<details>\n")
-			fmt.Fprintf(&b, "<summary>Agent output (%d lines, click to expand)</summary>\n\n", len(lines))
-			b.WriteString("```\n")
-			b.WriteString(d.Output)
-			b.WriteString("\n```\n\n")
-			b.WriteString("</details>\n\n")
-		} else {
-			b.WriteString("### Output\n\n")
-			b.WriteString("```\n")
-			b.WriteString(d.Output)
-			b.WriteString("\n```\n\n")
-		}
-	}
-
-	// Footer with signature and timestamp
-	b.WriteString("---\n")
-	fmt.Fprintf(&b, "*workbuddy coordinator | %s*\n", time.Now().UTC().Format(time.RFC3339))
-
-	return b.String()
+	return FormatReportAt(d, time.Now())
 }
 
 // FormatReportAt is like FormatReport but accepts an explicit timestamp (for testing).
@@ -173,6 +109,30 @@ func FormatReportAt(d ReportData, ts time.Time) string {
 	}
 
 	// Footer with signature and timestamp
+	b.WriteString("---\n")
+	fmt.Fprintf(&b, "*workbuddy coordinator | %s*\n", ts.UTC().Format(time.RFC3339))
+
+	return b.String()
+}
+
+// FormatStartedReport generates a Markdown "Agent Started" notification comment.
+func FormatStartedReport(agentName, sessionID, workerID, sessionURL string, ts time.Time) string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "## :robot: Agent Started: %s\n\n", agentName)
+
+	b.WriteString("| Field | Value |\n")
+	b.WriteString("|-------|-------|\n")
+	fmt.Fprintf(&b, "| Agent | `%s` |\n", agentName)
+	fmt.Fprintf(&b, "| Session ID | `%s` |\n", sessionID)
+	fmt.Fprintf(&b, "| Worker | `%s` |\n", workerID)
+	fmt.Fprintf(&b, "| Started | %s |\n", ts.UTC().Format(time.RFC3339))
+	b.WriteString("\n")
+
+	if sessionURL != "" {
+		fmt.Fprintf(&b, ":mag: **[View Live Session](%s)**\n\n", sessionURL)
+	}
+
 	b.WriteString("---\n")
 	fmt.Fprintf(&b, "*workbuddy coordinator | %s*\n", ts.UTC().Format(time.RFC3339))
 

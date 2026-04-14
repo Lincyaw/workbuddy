@@ -41,7 +41,7 @@ func TestRouter_MatchingWorker(t *testing.T) {
 	}
 
 	taskCh := make(chan WorkerTask, 10)
-	r := NewRouter(agents, reg, st, "test/repo", taskCh)
+	r := NewRouter(agents, reg, st, "test/repo", taskCh, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -82,7 +82,7 @@ func TestRouter_AgentNotFound(t *testing.T) {
 	agents := map[string]*config.AgentConfig{} // empty
 
 	taskCh := make(chan WorkerTask, 10)
-	r := NewRouter(agents, reg, st, "test/repo", taskCh)
+	r := NewRouter(agents, reg, st, "test/repo", taskCh, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -124,7 +124,7 @@ func TestRouter_NoMatchingWorker(t *testing.T) {
 	}
 
 	taskCh := make(chan WorkerTask, 10)
-	r := NewRouter(agents, reg, st, "test/repo", taskCh)
+	r := NewRouter(agents, reg, st, "test/repo", taskCh, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -25,6 +25,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/webui"
+	"github.com/Lincyaw/workbuddy/internal/workspace"
 	"github.com/spf13/cobra"
 )
 
@@ -246,8 +247,13 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	// State machine
 	sm := statemachine.NewStateMachine(cfg.Workflows, st, dispatchCh, evlog)
 
+	// Workspace isolation via git worktrees
+	repoDir, _ := os.Getwd()
+	wsMgr := workspace.NewManager(repoDir)
+	wsMgr.Prune() // clean up orphaned worktrees from prior crashes
+
 	// Router
-	rt := router.NewRouter(cfg.Agents, reg, st, cfg.Global.Repo, taskCh)
+	rt := router.NewRouter(cfg.Agents, reg, st, cfg.Global.Repo, taskCh, wsMgr)
 
 	// Launcher
 	lnch := launcherOverride
@@ -352,12 +358,22 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	}()
 
 	// 9. Start embedded Worker goroutine
+	deps := &workerDeps{
+		launcher: lnch,
+		auditor:  auditor,
+		reporter: rep,
+		store:    st,
+		sm:       sm,
+		workerID: workerID,
+		cfg:      cfg,
+		wsMgr:    wsMgr,
+	}
 	workerDone := make(chan struct{})
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		defer close(workerDone)
-		runEmbeddedWorker(ctx, taskCh, lnch, auditor, rep, st, sm, workerID, cfg)
+		runEmbeddedWorker(ctx, taskCh, deps)
 	}()
 
 	// Print startup message
@@ -405,18 +421,20 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	return nil
 }
 
+// workerDeps bundles the dependencies for the embedded worker, avoiding parameter sprawl.
+type workerDeps struct {
+	launcher *launcher.Launcher
+	auditor  *audit.Auditor
+	reporter *reporter.Reporter
+	store    *store.Store
+	sm       *statemachine.StateMachine
+	workerID string
+	cfg      *config.FullConfig
+	wsMgr    *workspace.Manager
+}
+
 // runEmbeddedWorker runs the embedded worker loop.
-func runEmbeddedWorker(
-	ctx context.Context,
-	taskCh <-chan router.WorkerTask,
-	lnch *launcher.Launcher,
-	auditor *audit.Auditor,
-	rep *reporter.Reporter,
-	st *store.Store,
-	sm *statemachine.StateMachine,
-	workerID string,
-	cfg *config.FullConfig,
-) {
+func runEmbeddedWorker(ctx context.Context, taskCh <-chan router.WorkerTask, deps *workerDeps) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -425,33 +443,40 @@ func runEmbeddedWorker(
 			if !ok {
 				return
 			}
-			executeTask(ctx, task, lnch, auditor, rep, st, sm, workerID, cfg)
+			executeTask(ctx, task, deps)
 		}
 	}
 }
 
 // executeTask runs a single agent task and handles reporting/auditing.
-func executeTask(
-	ctx context.Context,
-	task router.WorkerTask,
-	lnch *launcher.Launcher,
-	auditor *audit.Auditor,
-	rep *reporter.Reporter,
-	st *store.Store,
-	sm *statemachine.StateMachine,
-	workerID string,
-	cfg *config.FullConfig,
-) {
+func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) {
+	// Clean up worktree after task completes.
+	if task.WorktreePath != "" && deps.wsMgr != nil {
+		defer func() {
+			if err := deps.wsMgr.Remove(task.WorktreePath); err != nil {
+				log.Printf("[worker] worktree cleanup failed: %v", err)
+			}
+		}()
+	}
 	log.Printf("[worker] executing task %s: agent=%s issue=%s#%d",
 		task.TaskID, task.AgentName, task.Repo, task.IssueNum)
 
-	result, err := lnch.Launch(ctx, task.Agent, task.Context)
+	// Add claim reaction (eyes) to signal this issue is being worked on.
+	addClaimReaction(task.Repo, task.IssueNum, task.AgentName)
+
+	// Post "Agent Started" comment with session link.
+	sessionID := task.Context.Session.ID
+	if err := deps.reporter.ReportStarted(task.Repo, task.IssueNum, task.AgentName, sessionID, deps.workerID); err != nil {
+		log.Printf("[worker] report started failed: %v", err)
+	}
+
+	result, err := deps.launcher.Launch(ctx, task.Agent, task.Context)
 	if err != nil {
 		log.Printf("[worker] agent %s failed: %v", task.AgentName, err)
-		if err := st.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
+		if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
 			log.Printf("[worker] failed to update task status: %v", err)
 		}
-		sm.MarkAgentCompleted(task.Repo, task.IssueNum, nil)
+		deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, nil)
 		return
 	}
 
@@ -465,23 +490,22 @@ func executeTask(
 	}
 
 	// Update task status
-	if err := st.UpdateTaskStatus(task.TaskID, status); err != nil {
+	if err := deps.store.UpdateTaskStatus(task.TaskID, status); err != nil {
 		log.Printf("[worker] failed to update task status: %v", err)
 	}
 
 	// Audit session
-	sessionID := task.Context.Session.ID
-	if err := auditor.Capture(sessionID, task.TaskID, task.Repo, task.IssueNum, task.AgentName, result); err != nil {
+	if err := deps.auditor.Capture(sessionID, task.TaskID, task.Repo, task.IssueNum, task.AgentName, result); err != nil {
 		log.Printf("[worker] audit capture failed: %v", err)
 	}
 
 	// Get retry count for reporting
 	retryCount := 0
 	maxRetries := 3
-	if wf, ok := cfg.Workflows[task.Workflow]; ok {
+	if wf, ok := deps.cfg.Workflows[task.Workflow]; ok {
 		maxRetries = wf.MaxRetries
 	}
-	counts, err := st.QueryTransitionCounts(task.Repo, task.IssueNum)
+	counts, err := deps.store.QueryTransitionCounts(task.Repo, task.IssueNum)
 	if err == nil {
 		for _, tc := range counts {
 			if tc.ToState == task.State {
@@ -492,13 +516,24 @@ func executeTask(
 	}
 
 	// Report to issue
-	if err := rep.Report(task.Repo, task.IssueNum, task.AgentName, result,
-		sessionID, workerID, retryCount, maxRetries); err != nil {
+	if err := deps.reporter.Report(task.Repo, task.IssueNum, task.AgentName, result,
+		sessionID, deps.workerID, retryCount, maxRetries); err != nil {
 		log.Printf("[worker] report failed: %v", err)
 	}
 
 	// Mark agent completed in state machine
-	sm.MarkAgentCompleted(task.Repo, task.IssueNum, nil)
+	deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, nil)
+}
+
+// addClaimReaction adds an eyes (👀) reaction to the issue to signal an agent claimed it.
+func addClaimReaction(repo string, issueNum int, agentName string) {
+	cmd := exec.Command("gh", "api",
+		fmt.Sprintf("repos/%s/issues/%d/reactions", repo, issueNum),
+		"-f", "content=eyes", "--silent")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		log.Printf("[worker] failed to add claim reaction for %s on %s#%d: %v (output: %s)",
+			agentName, repo, issueNum, err, string(out))
+	}
 }
 
 // recoverTasks marks running tasks as failed and re-routes pending tasks on restart.

@@ -414,6 +414,69 @@ func TestParseMeta(t *testing.T) {
 	}
 }
 
+// Test: extractPrompt detects claude -p commands and extracts the prompt
+func TestExtractPrompt(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantOK    bool
+		wantPrompt string
+	}{
+		{
+			name:       "double quoted",
+			input:      `claude -p "hello world"`,
+			wantOK:     true,
+			wantPrompt: "hello world",
+		},
+		{
+			name:       "single quoted",
+			input:      `claude -p 'hello world'`,
+			wantOK:     true,
+			wantPrompt: "hello world",
+		},
+		{
+			name:       "with inner quotes",
+			input:      `claude -p "say 'hi' to everyone"`,
+			wantOK:     true,
+			wantPrompt: "say 'hi' to everyone",
+		},
+		{
+			name:       "multiline prompt",
+			input:      "claude -p \"line1\nline2\nline3\"",
+			wantOK:     true,
+			wantPrompt: "line1\nline2\nline3",
+		},
+		{
+			name:       "with backticks in prompt",
+			input:      "claude -p \"run `echo hello`\"",
+			wantOK:     true,
+			wantPrompt: "run `echo hello`",
+		},
+		{
+			name:   "not a claude command",
+			input:  `echo "hello world"`,
+			wantOK: false,
+		},
+		{
+			name:   "claude without -p",
+			input:  `claude --help`,
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prompt, ok := extractPrompt(tt.input)
+			if ok != tt.wantOK {
+				t.Fatalf("extractPrompt ok=%v, want %v", ok, tt.wantOK)
+			}
+			if ok && prompt != tt.wantPrompt {
+				t.Errorf("extractPrompt prompt=%q, want %q", prompt, tt.wantPrompt)
+			}
+		})
+	}
+}
+
 // Test: renderCommand unit tests
 func TestRenderCommand(t *testing.T) {
 	task := &TaskContext{
