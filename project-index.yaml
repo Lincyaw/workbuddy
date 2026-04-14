@@ -1,0 +1,270 @@
+# Workbuddy — Requirements Index
+# Single source of truth for all requirements.
+# See CLAUDE.md for maintenance rules.
+
+project:
+  name: workbuddy
+  description: GitHub Issue-driven agent orchestration platform
+  version: v0.1.0
+
+requirements:
+  # === Layer 1: Core Engine ===
+
+  - id: REQ-001
+    title: Config Loader
+    description: >
+      Parse agent definitions and workflow definitions from Markdown files
+      with YAML frontmatter in `.github/workbuddy/agents/` and
+      `.github/workbuddy/workflows/`. Also load environment config from
+      `.github/workbuddy/config.yaml`.
+    priority: P0
+    status: pending
+    code: []
+    tests: []
+    deps: []
+
+  - id: REQ-002
+    title: GitHub Poller
+    description: >
+      Periodically poll GitHub Issues via `gh issue list` to detect new issues,
+      label changes, and status updates. Maintain a local cache of known issue
+      state to detect transitions. Support configurable poll interval.
+    priority: P0
+    status: pending
+    code: []
+    tests: []
+    deps: []
+
+  - id: REQ-003
+    title: State Machine
+    description: >
+      Implement a label-driven state machine for issue lifecycle management.
+      States are defined in workflow config files. Transitions are triggered
+      by label changes, PR events, and check results. The state machine
+      updates GitHub labels via `gh issue edit`.
+    priority: P0
+    status: pending
+    code: []
+    tests: []
+    deps: [REQ-001]
+
+  - id: REQ-004
+    title: Dispatcher
+    description: >
+      When a state transition matches an agent trigger, dispatch the task
+      to the corresponding agent. Select runner type (local/remote) based
+      on agent config. Pass issue context (title, body, labels, comments)
+      to the agent.
+    priority: P0
+    status: pending
+    code: []
+    tests: []
+    deps: [REQ-001, REQ-003]
+
+  - id: REQ-005
+    title: Reporter
+    description: >
+      Write agent execution results back to GitHub Issues as comments.
+      Update issue labels to reflect state transitions. Include execution
+      summary, duration, and outcome (success/failure/timeout).
+    priority: P0
+    status: pending
+    code: []
+    tests: []
+    deps: [REQ-004]
+
+  # === Layer 2: Agent Runtime ===
+
+  - id: REQ-006
+    title: Local Runner
+    description: >
+      Execute agent commands as local subprocesses. Capture stdout/stderr.
+      Support timeout and cancellation. Pass issue context via environment
+      variables and/or stdin. Work directory isolation per agent run.
+    priority: P0
+    status: pending
+    code: []
+    tests: []
+    deps: []
+
+  - id: REQ-007
+    title: Remote Runner
+    description: >
+      Trigger GitHub Actions workflows via `gh workflow run` with issue
+      context as inputs. Poll workflow run status. Collect run output
+      and artifacts.
+    priority: P1
+    status: pending
+    code: []
+    tests: []
+    deps: []
+
+  - id: REQ-008
+    title: Session Manager
+    description: >
+      Track active agent sessions with unique IDs. Support querying session
+      status, cancelling running sessions, and retrying failed sessions.
+      Persist session state to local storage.
+    priority: P1
+    status: pending
+    code: []
+    tests: []
+    deps: [REQ-006]
+
+  # === Layer 3: Observability ===
+
+  - id: REQ-009
+    title: Event Log
+    description: >
+      Append-only JSONL event log in `.workbuddy/logs/`. Log all significant
+      events: poll results, state transitions, agent dispatches, agent
+      completions, errors. Each event has timestamp, event type, issue
+      number, and payload.
+    priority: P0
+    status: pending
+    code: []
+    tests: []
+    deps: []
+
+  - id: REQ-010
+    title: Issue Reporter
+    description: >
+      Post execution summaries as GitHub Issue comments. Include: agent name,
+      duration, outcome, key output lines. Use collapsible sections for
+      verbose output. Link to PR if one was created.
+    priority: P0
+    status: pending
+    code: []
+    tests: []
+    deps: [REQ-005]
+
+  - id: REQ-011
+    title: Audit HTTP Server
+    description: >
+      Each workbuddy instance serves an HTTP endpoint for inspecting agent
+      sessions, viewing logs, and auditing execution history. Read-only.
+      Serves local JSONL logs in a browsable format.
+    priority: P2
+    status: pending
+    code: []
+    tests: []
+    deps: [REQ-009]
+
+  - id: REQ-012
+    title: Dashboard API
+    description: >
+      REST API exposing agent status, execution history, and metrics.
+      Consumed by the audit UI and external monitoring tools.
+    priority: P2
+    status: pending
+    code: []
+    tests: []
+    deps: [REQ-011]
+
+  # === Layer 4: Workflow Orchestration ===
+
+  - id: REQ-013
+    title: Transition Rules Engine
+    description: >
+      Evaluate transition conditions defined in workflow configs. Support
+      conditions: label added/removed, PR opened/merged, checks passed/failed,
+      comment command (e.g., `/approve`). Trigger next agent on match.
+    priority: P0
+    status: pending
+    code: []
+    tests: []
+    deps: [REQ-003]
+
+  - id: REQ-014
+    title: Workflow Engine
+    description: >
+      Orchestrate multi-step workflows defined in workflow config files.
+      Track workflow instance state per issue. Support parallel and
+      sequential step execution.
+    priority: P1
+    status: pending
+    code: []
+    tests: []
+    deps: [REQ-013]
+
+  - id: REQ-015
+    title: Parallel Dispatch
+    description: >
+      Allow a single state transition to trigger multiple agents in parallel
+      (e.g., lint + test simultaneously). Collect all results before
+      evaluating the next transition.
+    priority: P2
+    status: pending
+    code: []
+    tests: []
+    deps: [REQ-014]
+
+  - id: REQ-016
+    title: Issue Dependency Graph
+    description: >
+      Track dependencies between issues (via issue body links or labels).
+      Block downstream issues until dependencies are resolved. Visualize
+      dependency graph.
+    priority: P2
+    status: pending
+    code: []
+    tests: []
+    deps: [REQ-014]
+
+  # === CLI ===
+
+  - id: REQ-017
+    title: CLI - serve command
+    description: >
+      `workbuddy serve` — start the poller, dispatcher, and HTTP audit
+      server. Accept --env, --port, --poll-interval flags. Graceful
+      shutdown on SIGINT/SIGTERM.
+    priority: P0
+    status: pending
+    code: []
+    tests: []
+    deps: [REQ-002, REQ-004, REQ-009]
+
+  - id: REQ-018
+    title: CLI - init command
+    description: >
+      `workbuddy init` — scaffold `.github/workbuddy/` directory with
+      example agent and workflow configs, and config.yaml.
+    priority: P1
+    status: pending
+    code: []
+    tests: []
+    deps: [REQ-001]
+
+  - id: REQ-019
+    title: CLI - status command
+    description: >
+      `workbuddy status` — show current agent run status, active sessions,
+      and any stuck issues. Support --stuck flag to filter.
+    priority: P1
+    status: pending
+    code: []
+    tests: []
+    deps: [REQ-008]
+
+  - id: REQ-020
+    title: CLI - run command
+    description: >
+      `workbuddy run <agent> <issue-number>` — manually trigger an agent
+      for a specific issue. Bypass the poller for ad-hoc execution.
+    priority: P1
+    status: pending
+    code: []
+    tests: []
+    deps: [REQ-004, REQ-006]
+
+  - id: REQ-021
+    title: CLI - validate command
+    description: >
+      `workbuddy validate` — parse and validate all config files in
+      `.github/workbuddy/`. Report errors with file and line number.
+    priority: P1
+    status: pending
+    code: []
+    tests: []
+    deps: [REQ-001]

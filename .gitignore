@@ -1,0 +1,21 @@
+# Build output
+workbuddy
+/dist/
+
+# Local state and logs
+.workbuddy/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Notifications config (contains credentials)
+notify.json
+
+# Test output
+coverage.out
