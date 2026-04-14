@@ -4,12 +4,32 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
 
 	_ "modernc.org/sqlite" // sqlite driver
 )
+
+// parseTimestamp attempts to parse a SQLite timestamp string using common formats.
+// Returns the parsed time and true on success, or zero time and false on failure
+// (with a warning logged including the field name for debugging).
+func parseTimestamp(raw, fieldName string) (time.Time, bool) {
+	// SQLite CURRENT_TIMESTAMP may return different formats depending on driver.
+	for _, layout := range []string{
+		"2006-01-02 15:04:05",
+		time.RFC3339,
+		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05",
+	} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t, true
+		}
+	}
+	log.Printf("[store] warning: failed to parse %s timestamp %q", fieldName, raw)
+	return time.Time{}, false
+}
 
 // Task status constants.
 const (
@@ -165,7 +185,7 @@ func (s *Store) QueryEvents(repo string) ([]Event, error) {
 		if err := rows.Scan(&ev.ID, &ts, &ev.Type, &ev.Repo, &ev.IssueNum, &ev.Payload); err != nil {
 			return nil, fmt.Errorf("store: scan event: %w", err)
 		}
-		ev.TS, _ = time.Parse("2006-01-02 15:04:05", ts)
+		ev.TS, _ = parseTimestamp(ts, "event.ts")
 		out = append(out, ev)
 	}
 	return out, rows.Err()
@@ -208,8 +228,8 @@ func (s *Store) QueryTasks(status string) ([]TaskRecord, error) {
 		if err := rows.Scan(&t.ID, &t.Repo, &t.IssueNum, &t.AgentName, &t.WorkerID, &t.Status, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("store: scan task: %w", err)
 		}
-		t.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
-		t.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAt)
+		t.CreatedAt, _ = parseTimestamp(createdAt, "task.created_at")
+		t.UpdatedAt, _ = parseTimestamp(updatedAt, "task.updated_at")
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -268,8 +288,8 @@ func (s *Store) QueryWorkers(repo string) ([]WorkerRecord, error) {
 		if err := rows.Scan(&w.ID, &w.Repo, &w.Roles, &w.Hostname, &w.Status, &hb, &ra); err != nil {
 			return nil, fmt.Errorf("store: scan worker: %w", err)
 		}
-		w.LastHeartbeat, _ = time.Parse("2006-01-02 15:04:05", hb)
-		w.RegisteredAt, _ = time.Parse("2006-01-02 15:04:05", ra)
+		w.LastHeartbeat, _ = parseTimestamp(hb, "worker.last_heartbeat")
+		w.RegisteredAt, _ = parseTimestamp(ra, "worker.registered_at")
 		out = append(out, w)
 	}
 	return out, rows.Err()
@@ -313,25 +333,20 @@ func (s *Store) UpdateWorkerStatus(workerID, status string) error {
 
 // IncrementTransition increments the counter for a state transition,
 // inserting the row if it does not exist. Returns the new count.
+// The upsert and read are performed in a single statement using RETURNING
+// to avoid a race where another goroutine increments between the two.
 func (s *Store) IncrementTransition(repo string, issueNum int, fromState, toState string) (int, error) {
-	_, err := s.db.Exec(
+	var count int
+	err := s.db.QueryRow(
 		`INSERT INTO transition_counts (repo, issue_num, from_state, to_state, count)
 		 VALUES (?, ?, ?, ?, 1)
 		 ON CONFLICT (repo, issue_num, from_state, to_state)
-		 DO UPDATE SET count = count + 1`,
-		repo, issueNum, fromState, toState,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("store: increment transition: %w", err)
-	}
-
-	var count int
-	err = s.db.QueryRow(
-		`SELECT count FROM transition_counts WHERE repo = ? AND issue_num = ? AND from_state = ? AND to_state = ?`,
+		 DO UPDATE SET count = count + 1
+		 RETURNING count`,
 		repo, issueNum, fromState, toState,
 	).Scan(&count)
 	if err != nil {
-		return 0, fmt.Errorf("store: read transition count: %w", err)
+		return 0, fmt.Errorf("store: increment transition: %w", err)
 	}
 	return count, nil
 }
@@ -377,6 +392,41 @@ func (s *Store) UpsertIssueCache(ic IssueCache) error {
 	return nil
 }
 
+// ListCachedIssueNums returns all issue numbers in the cache for a repo,
+// excluding PR entries (those with state starting with "pr:").
+func (s *Store) ListCachedIssueNums(repo string) ([]int, error) {
+	rows, err := s.db.Query(
+		`SELECT issue_num FROM issue_cache WHERE repo = ? AND (state IS NULL OR state NOT LIKE 'pr:%')`,
+		repo,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: list cached issue nums: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var nums []int
+	for rows.Next() {
+		var n int
+		if err := rows.Scan(&n); err != nil {
+			return nil, fmt.Errorf("store: scan issue num: %w", err)
+		}
+		nums = append(nums, n)
+	}
+	return nums, rows.Err()
+}
+
+// DeleteIssueCache removes a cached issue entry.
+func (s *Store) DeleteIssueCache(repo string, issueNum int) error {
+	_, err := s.db.Exec(
+		`DELETE FROM issue_cache WHERE repo = ? AND issue_num = ?`,
+		repo, issueNum,
+	)
+	if err != nil {
+		return fmt.Errorf("store: delete issue cache: %w", err)
+	}
+	return nil
+}
+
 // QueryIssueCache returns the cached issue, or nil if not found.
 func (s *Store) QueryIssueCache(repo string, issueNum int) (*IssueCache, error) {
 	var ic IssueCache
@@ -391,7 +441,7 @@ func (s *Store) QueryIssueCache(repo string, issueNum int) (*IssueCache, error) 
 	if err != nil {
 		return nil, fmt.Errorf("store: query issue cache: %w", err)
 	}
-	ic.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAt)
+	ic.UpdatedAt, _ = parseTimestamp(updatedAt, "issue_cache.updated_at")
 	return &ic, nil
 }
 
@@ -445,7 +495,7 @@ func (s *Store) QueryAgentSessions(repo string, issueNum int) ([]AgentSession, e
 			&sess.AgentName, &sess.Summary, &sess.RawPath, &createdAt); err != nil {
 			return nil, fmt.Errorf("store: scan agent session: %w", err)
 		}
-		sess.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+		sess.CreatedAt, _ = parseTimestamp(createdAt, "agent_session.created_at")
 		out = append(out, sess)
 	}
 	return out, rows.Err()
@@ -494,7 +544,7 @@ func (s *Store) ListAgentSessions(f SessionFilter) ([]AgentSession, error) {
 			&sess.AgentName, &sess.Summary, &sess.RawPath, &createdAt); err != nil {
 			return nil, fmt.Errorf("store: scan agent session: %w", err)
 		}
-		sess.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+		sess.CreatedAt, _ = parseTimestamp(createdAt, "agent_session.created_at")
 		out = append(out, sess)
 	}
 	return out, rows.Err()
@@ -516,6 +566,6 @@ func (s *Store) GetAgentSession(sessionID string) (*AgentSession, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: get agent session: %w", err)
 	}
-	sess.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+	sess.CreatedAt, _ = parseTimestamp(createdAt, "agent_session.created_at")
 	return &sess, nil
 }

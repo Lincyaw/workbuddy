@@ -416,6 +416,101 @@ func TestLabelsFromJSON_Empty(t *testing.T) {
 	}
 }
 
+func TestIssueClosedDetection(t *testing.T) {
+	st := testStore(t)
+
+	// Seed cache: issue 1 and issue 2 are known open issues.
+	for _, ic := range []store.IssueCache{
+		{Repo: "owner/repo", IssueNum: 1, Labels: `["bug"]`, State: "open"},
+		{Repo: "owner/repo", IssueNum: 2, Labels: `["feature"]`, State: "open"},
+	} {
+		if err := st.UpsertIssueCache(ic); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// GitHub now only returns issue 1 — issue 2 has been closed.
+	gh := &mockGHReader{
+		issues: []Issue{
+			{Number: 1, Title: "Bug report", State: "open", Labels: []string{"bug"}},
+		},
+	}
+	p := NewPoller(gh, st, "owner/repo", time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		_ = p.Run(ctx)
+	}()
+
+	events := drain(p.Events(), 500*time.Millisecond)
+	cancel()
+
+	// Should get exactly one EventIssueClosed for issue 2.
+	var closeEvents []ChangeEvent
+	for _, ev := range events {
+		if ev.Type == EventIssueClosed {
+			closeEvents = append(closeEvents, ev)
+		}
+	}
+	if len(closeEvents) != 1 {
+		t.Fatalf("expected 1 issue_closed event, got %d: %+v", len(closeEvents), events)
+	}
+	if closeEvents[0].IssueNum != 2 {
+		t.Errorf("expected issue_closed for issue 2, got %d", closeEvents[0].IssueNum)
+	}
+
+	// Cache entry for issue 2 should have been deleted.
+	ic, err := st.QueryIssueCache("owner/repo", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ic != nil {
+		t.Errorf("expected cache entry for issue 2 to be deleted, but it still exists")
+	}
+}
+
+func TestIssueClosedDoesNotAffectPRs(t *testing.T) {
+	st := testStore(t)
+
+	// Seed cache: issue 1 (open) and PR 10 (pr:open).
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo: "owner/repo", IssueNum: 1, Labels: `["bug"]`, State: "open",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo: "owner/repo", IssueNum: 10, Labels: "", State: "pr:open",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// GitHub returns issue 1 still open, PR 10 still open.
+	gh := &mockGHReader{
+		issues: []Issue{
+			{Number: 1, Title: "Bug report", State: "open", Labels: []string{"bug"}},
+		},
+		prs: []PR{
+			{Number: 10, URL: "https://github.com/owner/repo/pull/10", Branch: "feature", State: "open"},
+		},
+	}
+	p := NewPoller(gh, st, "owner/repo", time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		_ = p.Run(ctx)
+	}()
+
+	events := drain(p.Events(), 500*time.Millisecond)
+	cancel()
+
+	// Should have no close events — PR should not trigger issue_closed.
+	for _, ev := range events {
+		if ev.Type == EventIssueClosed {
+			t.Errorf("unexpected issue_closed event: %+v", ev)
+		}
+	}
+}
+
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }

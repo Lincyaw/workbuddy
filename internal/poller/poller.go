@@ -24,7 +24,13 @@ const (
 	EventLabelRemoved   = "label_removed"
 	EventPRCreated      = "pr_created"
 	EventPRStateChanged = "pr_state_changed"
+	EventIssueClosed    = "issue_closed"
 )
+
+// ghListLimit is the maximum number of results returned by gh issue/pr list.
+// When a poll returns this many results, the list may be truncated and close
+// detection is skipped to avoid false positives.
+const ghListLimit = 100
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -177,6 +183,50 @@ func (p *Poller) poll(ctx context.Context) {
 			return
 		}
 		p.diffPR(ctx, pr)
+	}
+
+	// --- Detect closed/deleted issues ---
+	// Compare cached issue numbers against what we saw this poll.
+	// Issues in cache but not in current results have been closed/deleted.
+	// Skip this check if the result set may be truncated (gh --limit 100),
+	// since issues beyond the first page would be falsely classified as closed.
+	if len(issues) >= ghListLimit {
+		log.Printf("[poller] issue list may be truncated (%d results), skipping close detection", len(issues))
+		return
+	}
+	openIssueNums := make(map[int]bool, len(issues))
+	for _, iss := range issues {
+		openIssueNums[iss.Number] = true
+	}
+	// Also include PR numbers so we don't treat them as closed issues.
+	openPRNums := make(map[int]bool, len(prs))
+	for _, pr := range prs {
+		openPRNums[pr.Number] = true
+	}
+
+	cachedNums, err := p.store.ListCachedIssueNums(p.repo)
+	if err != nil {
+		log.Printf("[poller] error listing cached issue nums for %s: %v", p.repo, err)
+		return
+	}
+
+	for _, num := range cachedNums {
+		if ctx.Err() != nil {
+			return
+		}
+		if openIssueNums[num] || openPRNums[num] {
+			continue
+		}
+		// This issue was in cache but not in current poll results — it was closed/deleted.
+		p.emit(ctx, ChangeEvent{
+			Type:     EventIssueClosed,
+			Repo:     p.repo,
+			IssueNum: num,
+			Detail:   "issue no longer in open issues list",
+		})
+		if err := p.store.DeleteIssueCache(p.repo, num); err != nil {
+			log.Printf("[poller] error deleting cache for closed issue %s#%d: %v", p.repo, num, err)
+		}
 	}
 }
 

@@ -4,6 +4,7 @@
 package workspace
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -57,9 +58,14 @@ func (m *Manager) Create(issueNum int, taskID string) (string, error) {
 }
 
 // Remove cleans up a worktree and its associated branch.
+// Best-effort: if worktree removal fails but prune succeeds, no error is returned.
+// Returns a combined error only when cleanup truly fails (both remove+prune fail,
+// or branch deletion fails).
 func (m *Manager) Remove(wtPath string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	var errs []error
 
 	// Get the branch name before removing the worktree.
 	branchName := worktreeBranch(m.baseDir, wtPath)
@@ -72,7 +78,13 @@ func (m *Manager) Remove(wtPath string) error {
 		log.Printf("[workspace] worktree remove warning: %s: %v", strings.TrimSpace(string(out)), err)
 		pruneCmd := exec.Command("git", "worktree", "prune")
 		pruneCmd.Dir = m.baseDir
-		_ = pruneCmd.Run()
+		if pruneErr := pruneCmd.Run(); pruneErr != nil {
+			errs = append(errs, fmt.Errorf("workspace: worktree remove %s: %s: %w; prune also failed: %v",
+				wtPath, strings.TrimSpace(string(out)), err, pruneErr))
+		} else {
+			// Prune succeeded, so the worktree is cleaned up; not a hard error.
+			log.Printf("[workspace] worktree pruned successfully after remove failure")
+		}
 	}
 
 	// Delete the temporary branch.
@@ -80,13 +92,18 @@ func (m *Manager) Remove(wtPath string) error {
 		delCmd := exec.Command("git", "branch", "-D", branchName)
 		delCmd.Dir = m.baseDir
 		if out, err := delCmd.CombinedOutput(); err != nil {
-			log.Printf("[workspace] branch delete warning (%s): %s: %v",
-				branchName, strings.TrimSpace(string(out)), err)
+			errs = append(errs, fmt.Errorf("workspace: branch delete %s: %s: %w",
+				branchName, strings.TrimSpace(string(out)), err))
 		}
 	}
 
-	log.Printf("[workspace] removed worktree %s", wtPath)
-	return nil
+	combined := errors.Join(errs...)
+	if combined != nil {
+		log.Printf("[workspace] partial cleanup for worktree %s: %v", wtPath, combined)
+	} else {
+		log.Printf("[workspace] removed worktree %s", wtPath)
+	}
+	return combined
 }
 
 // worktreeBranch returns the branch checked out in the given worktree path.

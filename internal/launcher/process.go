@@ -42,10 +42,20 @@ func launchProcess(
 
 	// If the command is "claude -p '...'" or similar, extract the prompt and
 	// pass it via stdin to avoid shell quoting issues with issue bodies.
+	// Preserve any extra flags (e.g., --print) from the original command.
+	// Use a raw (unescaped) render for the stdin prompt — shell escaping would
+	// corrupt the content when it's not going through sh -c.
 	var cmd *exec.Cmd
-	if prompt, ok := extractPrompt(rendered); ok {
-		cmd = exec.CommandContext(execCtx, "claude", "-p")
-		cmd.Stdin = strings.NewReader(prompt)
+	if _, args, ok := extractPrompt(rendered); ok {
+		// Re-render without shell escaping to get the raw prompt for stdin.
+		rawRendered, rawErr := renderCommandRaw(agent.Command, task)
+		if rawErr != nil {
+			return nil, rawErr
+		}
+		rawPrompt, _, _ := extractPrompt(rawRendered)
+		cmdArgs := append(args, "-p")
+		cmd = exec.CommandContext(execCtx, "claude", cmdArgs...)
+		cmd.Stdin = strings.NewReader(rawPrompt)
 	} else {
 		cmd = exec.CommandContext(execCtx, "sh", "-c", rendered)
 	}
