@@ -30,7 +30,7 @@ requirements:
       with YAML frontmatter. Also load environment config from config.yaml.
     priority: P0
     version: v0.1.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-001-1: 解析 agents/*.md 的 YAML frontmatter，提取 name/description/triggers/role/command/timeout 字段"
       - "AC-001-2: 解析 workflows/*.md 的 YAML frontmatter（含 max_retries 字段，默认值 3）和 Markdown 内嵌 YAML code block 中的 states 定义"
@@ -46,8 +46,10 @@ requirements:
       - "AC-001-12: Workflow trigger 冲突检测——不同 workflow 的 trigger.issue_label 不得重复（例如两个 workflow 都 trigger on 'type:feature'）；重复时返回校验错误，包含冲突的 workflow 名称"
       - "AC-001-13: Agent trigger label 一致性校验——agent 的 triggers[].label 必须在至少一个 workflow 的 states 中作为 enter_label 出现；不匹配时返回 warning（不阻塞启动，但日志中明确提示）"
       - "AC-001-14: 单元测试覆盖：正常解析、缺字段、空目录、格式错误、max_retries 默认值、states schema 验证、重复 edge 校验、无 yaml 代码块、workflow trigger 冲突、agent-label 不一致 10 种场景"
-    code: []
-    tests: []
+    code:
+      - internal/config/loader.go
+    tests:
+      - internal/config/loader_test.go
     deps: []
 
   - id: REQ-002
