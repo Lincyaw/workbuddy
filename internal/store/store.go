@@ -229,7 +229,7 @@ func (s *Store) UpdateTaskStatus(taskID, status string) error {
 // InsertWorker registers a worker.
 func (s *Store) InsertWorker(w WorkerRecord) error {
 	_, err := s.db.Exec(
-		`INSERT INTO workers (id, repo, roles, hostname, status) VALUES (?, ?, ?, ?, ?)`,
+		`INSERT OR REPLACE INTO workers (id, repo, roles, hostname, status) VALUES (?, ?, ?, ?, ?)`,
 		w.ID, w.Repo, w.Roles, w.Hostname, w.Status,
 	)
 	if err != nil {
@@ -440,4 +440,73 @@ func (s *Store) QueryAgentSessions(repo string, issueNum int) ([]AgentSession, e
 		out = append(out, sess)
 	}
 	return out, rows.Err()
+}
+
+// SessionFilter specifies optional query predicates for listing sessions.
+// Zero-value fields are ignored.
+type SessionFilter struct {
+	Repo      string
+	IssueNum  int
+	AgentName string
+}
+
+// ListAgentSessions returns sessions matching the given filter, ordered by
+// creation time descending. Zero-value filter fields are ignored.
+func (s *Store) ListAgentSessions(f SessionFilter) ([]AgentSession, error) {
+	q := `SELECT id, session_id, task_id, repo, issue_num, agent_name, summary, raw_path, created_at
+	      FROM agent_sessions WHERE 1=1`
+	var args []any
+
+	if f.Repo != "" {
+		q += " AND repo = ?"
+		args = append(args, f.Repo)
+	}
+	if f.IssueNum != 0 {
+		q += " AND issue_num = ?"
+		args = append(args, f.IssueNum)
+	}
+	if f.AgentName != "" {
+		q += " AND agent_name = ?"
+		args = append(args, f.AgentName)
+	}
+	q += " ORDER BY id DESC"
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: list agent sessions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []AgentSession
+	for rows.Next() {
+		var sess AgentSession
+		var createdAt string
+		if err := rows.Scan(&sess.ID, &sess.SessionID, &sess.TaskID, &sess.Repo, &sess.IssueNum,
+			&sess.AgentName, &sess.Summary, &sess.RawPath, &createdAt); err != nil {
+			return nil, fmt.Errorf("store: scan agent session: %w", err)
+		}
+		sess.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+		out = append(out, sess)
+	}
+	return out, rows.Err()
+}
+
+// GetAgentSession returns a single session by session_id, or nil if not found.
+func (s *Store) GetAgentSession(sessionID string) (*AgentSession, error) {
+	var sess AgentSession
+	var createdAt string
+	err := s.db.QueryRow(
+		`SELECT id, session_id, task_id, repo, issue_num, agent_name, summary, raw_path, created_at
+		 FROM agent_sessions WHERE session_id = ?`,
+		sessionID,
+	).Scan(&sess.ID, &sess.SessionID, &sess.TaskID, &sess.Repo, &sess.IssueNum,
+		&sess.AgentName, &sess.Summary, &sess.RawPath, &createdAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: get agent session: %w", err)
+	}
+	sess.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+	return &sess, nil
 }

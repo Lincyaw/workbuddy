@@ -25,7 +25,8 @@ func newTestTask(t *testing.T) *TaskContext {
 			URL:    "https://github.com/test/repo/pull/1",
 			Branch: "feat/test",
 		},
-		Repo: dir,
+		Repo:    "test/repo",
+		WorkDir: dir,
 		Session: SessionContext{
 			ID: "session-abc-123",
 		},
@@ -338,7 +339,7 @@ func TestLaunch_WorkingDirectory(t *testing.T) {
 	task := newTestTask(t)
 
 	// Create a marker file in the temp dir
-	markerPath := filepath.Join(task.Repo, "marker.txt")
+	markerPath := filepath.Join(task.WorkDir, "marker.txt")
 	if err := os.WriteFile(markerPath, []byte("found"), 0644); err != nil {
 		t.Fatal(err)
 	}

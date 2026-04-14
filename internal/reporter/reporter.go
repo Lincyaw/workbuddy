@@ -32,12 +32,18 @@ func (g *GHCLIWriter) WriteComment(repo string, issueNum int, body string) error
 
 // Reporter writes execution reports as GitHub Issue comments.
 type Reporter struct {
-	gh GHCommentWriter
+	gh      GHCommentWriter
+	baseURL string // e.g. "http://localhost:8080", empty to omit session links
 }
 
 // NewReporter creates a Reporter with the given GH comment writer.
 func NewReporter(gh GHCommentWriter) *Reporter {
 	return &Reporter{gh: gh}
+}
+
+// SetBaseURL sets the base URL for session detail links in reports.
+func (r *Reporter) SetBaseURL(baseURL string) {
+	r.baseURL = baseURL
 }
 
 // Report formats and posts an agent execution report to the issue.
@@ -74,6 +80,11 @@ func (r *Reporter) Report(repo string, issueNum int, agentName string, result *l
 		output = result.Stderr
 	}
 
+	var sessionURL string
+	if r.baseURL != "" {
+		sessionURL = r.baseURL + "/sessions/" + sessionID
+	}
+
 	data := ReportData{
 		AgentName:   agentName,
 		Status:      status,
@@ -85,6 +96,7 @@ func (r *Reporter) Report(repo string, issueNum int, agentName string, result *l
 		Output:      output,
 		PRLink:      prLink,
 		ErrorDetail: errorDetail,
+		SessionURL:  sessionURL,
 	}
 
 	body := FormatReportAt(data, time.Now())
