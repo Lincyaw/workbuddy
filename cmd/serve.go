@@ -476,7 +476,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 		if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
 			log.Printf("[worker] failed to update task status: %v", err)
 		}
-		deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, nil)
+		deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, fetchCachedLabels(deps.store, task.Repo, task.IssueNum))
 		return
 	}
 
@@ -522,7 +522,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	}
 
 	// Mark agent completed in state machine
-	deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, nil)
+	deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, fetchCachedLabels(deps.store, task.Repo, task.IssueNum))
 }
 
 // addClaimReaction adds an eyes (👀) reaction to the issue to signal an agent claimed it.
@@ -534,6 +534,21 @@ func addClaimReaction(repo string, issueNum int, agentName string) {
 		log.Printf("[worker] failed to add claim reaction for %s on %s#%d: %v (output: %s)",
 			agentName, repo, issueNum, err, string(out))
 	}
+}
+
+// fetchCachedLabels retrieves the current labels for an issue from the store's
+// issue cache. Returns nil if the cache entry is missing or unparseable.
+func fetchCachedLabels(st *store.Store, repo string, issueNum int) []string {
+	cached, err := st.QueryIssueCache(repo, issueNum)
+	if err != nil || cached == nil {
+		return nil
+	}
+	var labels []string
+	if err := json.Unmarshal([]byte(cached.Labels), &labels); err != nil {
+		log.Printf("[worker] failed to parse cached labels for %s#%d: %v", repo, issueNum, err)
+		return nil
+	}
+	return labels
 }
 
 // recoverTasks marks running tasks as failed and re-routes pending tasks on restart.

@@ -166,6 +166,82 @@ func TestCreateAndReadWrite(t *testing.T) {
 	}
 }
 
+// TestIncrementTransitionAtomic verifies that concurrent IncrementTransition
+// calls produce the correct final count (no lost updates).
+func TestIncrementTransitionAtomic(t *testing.T) {
+	s := newTestStore(t)
+
+	const n = 50
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	counts := make(chan int, n)
+
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cnt, err := s.IncrementTransition("org/repo", 1, "dev", "review")
+			if err != nil {
+				errs <- err
+				return
+			}
+			counts <- cnt
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	close(counts)
+
+	for err := range errs {
+		t.Fatalf("concurrent IncrementTransition failed: %v", err)
+	}
+
+	// Final count must be exactly n.
+	tcs, err := s.QueryTransitionCounts("org/repo", 1)
+	if err != nil {
+		t.Fatalf("QueryTransitionCounts: %v", err)
+	}
+	if len(tcs) != 1 || tcs[0].Count != n {
+		t.Fatalf("expected final count %d, got %+v", n, tcs)
+	}
+
+	// Every returned count should be unique (1..n) if truly atomic.
+	seen := make(map[int]bool)
+	for c := range counts {
+		if c < 1 || c > n {
+			t.Errorf("count %d out of range [1, %d]", c, n)
+		}
+		seen[c] = true
+	}
+	if len(seen) != n {
+		t.Errorf("expected %d unique counts, got %d (some increments were not atomic)", n, len(seen))
+	}
+}
+
+// TestParseTimestamp verifies the multi-format timestamp parser.
+func TestParseTimestamp(t *testing.T) {
+	tests := []struct {
+		input string
+		ok    bool
+	}{
+		{"2026-04-14 13:00:05", true},
+		{"2026-04-14T13:00:05Z", true},
+		{"2026-04-14T13:00:05+08:00", true},
+		{"2026-04-14T13:00:05", true},
+		{"not-a-date", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		parsed, ok := parseTimestamp(tt.input, "test")
+		if ok != tt.ok {
+			t.Errorf("parseTimestamp(%q): ok=%v, want %v", tt.input, ok, tt.ok)
+		}
+		if ok && parsed.IsZero() {
+			t.Errorf("parseTimestamp(%q): returned zero time but ok=true", tt.input)
+		}
+	}
+}
+
 // TestConcurrentWrites verifies that concurrent inserts do not fail or corrupt data.
 func TestConcurrentWrites(t *testing.T) {
 	s := newTestStore(t)
