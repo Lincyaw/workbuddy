@@ -580,7 +580,7 @@ requirements:
       Stores repo+roles per Worker, tracks heartbeat and online/offline.
     priority: P0
     version: v0.1.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-023-1: Worker 注册时存储 worker_id, repo, roles ([]string), hostname"
       - "AC-023-2: 每次任务领取/心跳更新 last_heartbeat"
@@ -589,8 +589,8 @@ requirements:
       - "AC-023-5: v0.1.0 内嵌 Worker 自动注册（无需 HTTP）"
       - "AC-023-6: 数据持久化到 SQLite workers 表"
       - "AC-023-7: 单元测试：注册/心跳/离线检测/按 repo+role 查询 4 种场景"
-    code: []
-    tests: []
+    code: [internal/registry/registry.go]
+    tests: [internal/registry/registry_test.go]
     deps: [REQ-024]
 
   - id: REQ-024
