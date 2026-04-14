@@ -98,9 +98,11 @@ func TestLaunch_TemplateRender(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	// Issue.Title is auto-escaped (wrapped in single quotes) for shell safety.
+	// Non-issue fields (Repo, Session.ID, PR.*) are not escaped.
 	expected := []string{
 		"issue=42",
-		"title=test issue",
+		"title='test issue'",
 		"repo=" + task.Repo,
 		"session=session-abc-123",
 		"pr=https://github.com/test/repo/pull/1",
@@ -502,5 +504,147 @@ func TestRenderCommand(t *testing.T) {
 	}
 	if rendered != "echo 7 sess-1" {
 		t.Errorf("unexpected rendered command: %q", rendered)
+	}
+}
+
+// Test: shellEscape correctly wraps values
+func TestShellEscape(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"hello", "'hello'"},
+		{"it's", `'it'\''s'`},
+		{`"; rm -rf / #`, `'"; rm -rf / #'`},
+		{"", "''"},
+		{"a'b'c", `'a'\''b'\''c'`},
+	}
+	for _, tt := range tests {
+		got := shellEscape(tt.input)
+		if got != tt.want {
+			t.Errorf("shellEscape(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+// Test: renderCommand auto-escapes user-controlled issue fields
+func TestRenderCommand_AutoEscapesIssueFields(t *testing.T) {
+	task := &TaskContext{
+		Issue: IssueContext{
+			Number: 1,
+			Title:  `"; rm -rf / #`,
+			Body:   "$(evil command)",
+			Labels: []string{"label; whoami"},
+		},
+		Repo: "owner/repo",
+		Session: SessionContext{ID: "s1"},
+	}
+
+	rendered, err := renderCommand("echo {{.Issue.Title}}", task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The title must be wrapped in single quotes, neutralizing the shell metacharacters
+	if !strings.Contains(rendered, "'") {
+		t.Errorf("expected shell-escaped title with single quotes, got: %q", rendered)
+	}
+	if strings.Contains(rendered, "rm -rf") && !strings.Contains(rendered, "'") {
+		t.Error("shell metacharacters in title are not escaped")
+	}
+}
+
+// Test: shell injection via issue title is neutralized end-to-end
+func TestLaunch_ShellInjectionTitle(t *testing.T) {
+	launcher := NewLauncher()
+	dir := t.TempDir()
+
+	// A malicious title that tries to create a file via command injection
+	markerFile := filepath.Join(dir, "pwned.txt")
+
+	task := &TaskContext{
+		Issue: IssueContext{
+			Number: 99,
+			Title:  `"; touch ` + markerFile + ` #`,
+			Body:   "normal body",
+			Labels: []string{"status:dev"},
+		},
+		Repo:    "test/repo",
+		WorkDir: dir,
+		Session: SessionContext{ID: "sec-test"},
+	}
+
+	agent := &config.AgentConfig{
+		Name:    "injection-test",
+		Runtime: "claude-code",
+		Command: `echo {{.Issue.Title}}`,
+		Timeout: 10 * time.Second,
+	}
+
+	result, err := launcher.Launch(context.Background(), agent, task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The command should have printed the escaped title, not executed injection
+	if result.ExitCode != 0 {
+		t.Logf("stderr: %s", result.Stderr)
+	}
+
+	// The marker file must NOT exist — injection must have been prevented
+	if _, err := os.Stat(markerFile); err == nil {
+		t.Fatal("SECURITY: shell injection succeeded — marker file was created")
+	}
+}
+
+// Test: shell injection via issue body is neutralized end-to-end
+func TestLaunch_ShellInjectionBody(t *testing.T) {
+	launcher := NewLauncher()
+	dir := t.TempDir()
+
+	markerFile := filepath.Join(dir, "pwned_body.txt")
+
+	task := &TaskContext{
+		Issue: IssueContext{
+			Number: 100,
+			Title:  "safe title",
+			Body:   "$(touch " + markerFile + ")",
+			Labels: []string{"status:dev"},
+		},
+		Repo:    "test/repo",
+		WorkDir: dir,
+		Session: SessionContext{ID: "sec-test-2"},
+	}
+
+	agent := &config.AgentConfig{
+		Name:    "injection-body-test",
+		Runtime: "claude-code",
+		Command: `echo {{.Issue.Body}}`,
+		Timeout: 10 * time.Second,
+	}
+
+	_, err := launcher.Launch(context.Background(), agent, task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, err := os.Stat(markerFile); err == nil {
+		t.Fatal("SECURITY: shell injection via body succeeded — marker file was created")
+	}
+}
+
+// Test: shellEscape template function is available for explicit use
+func TestRenderCommand_ShellEscapeFunc(t *testing.T) {
+	task := &TaskContext{
+		Issue:   IssueContext{Number: 1, Title: "test"},
+		Repo:    "owner/repo",
+		Session: SessionContext{ID: "s1"},
+	}
+
+	rendered, err := renderCommand(`echo {{shellEscape .Repo}}`, task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rendered != "echo 'owner/repo'" {
+		t.Errorf("unexpected rendered: %q", rendered)
 	}
 }
