@@ -341,7 +341,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 					Labels:   ev.Labels,
 					Detail:   ev.Detail,
 				}
-				if err := sm.HandleEvent(smEvent); err != nil {
+				if err := sm.HandleEvent(ctx, smEvent); err != nil {
 					log.Printf("[serve] state machine error: %v", err)
 				}
 			}

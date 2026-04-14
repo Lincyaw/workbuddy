@@ -1,6 +1,8 @@
 package statemachine
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -122,7 +124,7 @@ func TestNormalTransition(t *testing.T) {
 		Detail:   "status:reviewing",
 	}
 
-	if err := sm.HandleEvent(event); err != nil {
+	if err := sm.HandleEvent(context.Background(),event); err != nil {
 		t.Fatalf("HandleEvent: %v", err)
 	}
 
@@ -158,7 +160,7 @@ func TestBackEdgeCount(t *testing.T) {
 		Labels:   []string{"workbuddy", "status:developing"},
 		Detail:   "status:reviewing",
 	}
-	if err := sm.HandleEvent(ev1); err != nil {
+	if err := sm.HandleEvent(context.Background(),ev1); err != nil {
 		t.Fatalf("HandleEvent 1: %v", err)
 	}
 	<-dispatch // drain
@@ -175,7 +177,7 @@ func TestBackEdgeCount(t *testing.T) {
 		Labels:   []string{"workbuddy", "status:reviewing"},
 		Detail:   "status:developing",
 	}
-	if err := sm.HandleEvent(ev2); err != nil {
+	if err := sm.HandleEvent(context.Background(),ev2); err != nil {
 		t.Fatalf("HandleEvent 2: %v", err)
 	}
 
@@ -227,7 +229,7 @@ func TestRetryLimitFailed(t *testing.T) {
 	//   This IS a back-edge. developing→reviewing count becomes 2. 2 >= max_retries=2 → FAILED.
 
 	// Step 1: developing → reviewing (not a back-edge)
-	if err := sm.HandleEvent(ChangeEvent{
+	if err := sm.HandleEvent(context.Background(),ChangeEvent{
 		Type: poller.EventLabelAdded, Repo: repo, IssueNum: issueNum,
 		Labels: []string{"workbuddy", "status:developing"}, Detail: "status:reviewing",
 	}); err != nil {
@@ -240,7 +242,7 @@ func TestRetryLimitFailed(t *testing.T) {
 	// Step 2: reviewing → developing (back-edge: "developing" was a source, but
 	// not yet a target. Actually, let's check: is there any prior transition TO developing?
 	// No — step 1 was TO reviewing. So this is NOT a back-edge.)
-	if err := sm.HandleEvent(ChangeEvent{
+	if err := sm.HandleEvent(context.Background(),ChangeEvent{
 		Type: poller.EventLabelAdded, Repo: repo, IssueNum: issueNum,
 		Labels: []string{"workbuddy", "status:reviewing"}, Detail: "status:developing",
 	}); err != nil {
@@ -253,7 +255,7 @@ func TestRetryLimitFailed(t *testing.T) {
 	// Step 3: developing → reviewing. "reviewing" already appeared as target in step 1.
 	// This IS a back-edge. Count for developing→reviewing: was 1, increment to 2.
 	// 2 >= max_retries (2) → cycle_limit_reached → transition to failed.
-	err := sm.HandleEvent(ChangeEvent{
+	err := sm.HandleEvent(context.Background(),ChangeEvent{
 		Type: poller.EventLabelAdded, Repo: repo, IssueNum: issueNum,
 		Labels: []string{"workbuddy", "status:developing"}, Detail: "status:reviewing",
 	})
@@ -282,7 +284,7 @@ func TestRetryLimitFailed(t *testing.T) {
 func TestNoMatchSkip(t *testing.T) {
 	sm, rec, _ := newTestSM(t)
 
-	err := sm.HandleEvent(ChangeEvent{
+	err := sm.HandleEvent(context.Background(),ChangeEvent{
 		Type:     poller.EventLabelAdded,
 		Repo:     "test/repo",
 		IssueNum: 99,
@@ -321,7 +323,7 @@ func TestMultiWorkflowReject(t *testing.T) {
 		rec,
 	)
 
-	err := sm.HandleEvent(ChangeEvent{
+	err := sm.HandleEvent(context.Background(),ChangeEvent{
 		Type:     poller.EventLabelAdded,
 		Repo:     "test/repo",
 		IssueNum: 10,
@@ -349,13 +351,13 @@ func TestIdempotent(t *testing.T) {
 		Detail:   "status:reviewing",
 	}
 
-	if err := sm.HandleEvent(event); err != nil {
+	if err := sm.HandleEvent(context.Background(),event); err != nil {
 		t.Fatalf("HandleEvent 1: %v", err)
 	}
 	<-dispatch // drain first dispatch
 
 	// Same event again.
-	if err := sm.HandleEvent(event); err != nil {
+	if err := sm.HandleEvent(context.Background(),event); err != nil {
 		t.Fatalf("HandleEvent 2: %v", err)
 	}
 
@@ -379,7 +381,7 @@ func TestExecutionMutex(t *testing.T) {
 	sm, rec, dispatch := newTestSM(t)
 
 	// First event triggers dispatch (developing → reviewing, dispatches review-agent).
-	if err := sm.HandleEvent(ChangeEvent{
+	if err := sm.HandleEvent(context.Background(),ChangeEvent{
 		Type: poller.EventLabelAdded, Repo: "r", IssueNum: 7,
 		Labels: []string{"workbuddy", "status:developing"}, Detail: "status:reviewing",
 	}); err != nil {
@@ -391,7 +393,7 @@ func TestExecutionMutex(t *testing.T) {
 	sm.ResetDedup() // simulate new poll cycle
 
 	// Now try reviewing → developing (which would dispatch dev-agent).
-	if err := sm.HandleEvent(ChangeEvent{
+	if err := sm.HandleEvent(context.Background(),ChangeEvent{
 		Type: poller.EventLabelAdded, Repo: "r", IssueNum: 7,
 		Labels: []string{"workbuddy", "status:reviewing"}, Detail: "status:developing",
 	}); err != nil {
@@ -418,7 +420,7 @@ func TestStuckDetection(t *testing.T) {
 	sm.SetStuckTimeout(1 * time.Millisecond)
 
 	// Trigger a transition.
-	if err := sm.HandleEvent(ChangeEvent{
+	if err := sm.HandleEvent(context.Background(),ChangeEvent{
 		Type: poller.EventLabelAdded, Repo: "test/repo", IssueNum: 8,
 		Labels: []string{"workbuddy", "status:developing"}, Detail: "status:reviewing",
 	}); err != nil {
@@ -563,6 +565,69 @@ func TestConditionEmpty(t *testing.T) {
 	if EvaluateCondition("", ctx) {
 		t.Error("empty condition should return false")
 	}
+}
+
+// Test 9: Context cancellation prevents blocking on dispatch channel
+func TestDispatchRespectsContext(t *testing.T) {
+	st := newTestStore(t)
+	rec := &fakeRecorder{}
+	// Unbuffered channel — will block if nobody reads.
+	dispatch := make(chan DispatchRequest)
+	wf := testWorkflow()
+	sm := NewStateMachine(
+		map[string]*config.WorkflowConfig{"dev-flow": wf},
+		st,
+		dispatch,
+		rec,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	err := sm.HandleEvent(ctx, ChangeEvent{
+		Type:     poller.EventLabelAdded,
+		Repo:     "test/repo",
+		IssueNum: 50,
+		Labels:   []string{"workbuddy", "status:developing"},
+		Detail:   "status:reviewing",
+	})
+
+	// The dispatch should fail due to cancelled context.
+	if err == nil {
+		t.Error("expected error from cancelled context, got nil")
+	}
+
+	// The inflight flag should have been cleaned up.
+	if sm.IsInflight("test/repo", 50) {
+		t.Error("inflight flag should be cleared after context cancellation")
+	}
+}
+
+// Test 10: ResetDedup is safe for concurrent access
+func TestResetDedupConcurrent(t *testing.T) {
+	sm, _, _ := newTestSM(t)
+
+	// Populate some entries.
+	for i := 0; i < 100; i++ {
+		sm.processedEvents.Store(fmt.Sprintf("key-%d", i), struct{}{})
+	}
+
+	var wg sync.WaitGroup
+	// Concurrently call ResetDedup and LoadOrStore.
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			sm.ResetDedup()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			sm.processedEvents.LoadOrStore(fmt.Sprintf("concurrent-%d", i), struct{}{})
+		}
+	}()
+	wg.Wait()
 }
 
 func TestMain(m *testing.M) {
