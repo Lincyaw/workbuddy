@@ -701,7 +701,7 @@ requirements:
       All session data is stored in SQLite and linked to the task/issue.
     priority: P0
     version: v0.1.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-030-1: Agent 执行完成后，Worker 从 Result.SessionPath 读取 session 数据"
       - "AC-030-2: claude-code runtime：读取 Claude Code session 文件（JSON 对话记录），提取关键信息（tool calls, 代码修改摘要, token 使用量）"
@@ -712,6 +712,8 @@ requirements:
       - "AC-030-7: Session 数据过大（>1MB）时只存摘要到 SQLite，原始文件保留在磁盘"
       - "AC-030-8: Reporter（REQ-005）在 Issue comment 中包含 session 摘要链接或关键对话片段"
       - "AC-030-9: 单元测试：claude-code session 采集、codex session 采集、大文件截断、查询 4 种场景"
-    code: []
-    tests: []
+    code:
+      - internal/audit/audit.go
+    tests:
+      - internal/audit/audit_test.go
     deps: [REQ-006, REQ-024]
