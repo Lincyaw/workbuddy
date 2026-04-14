@@ -1,0 +1,186 @@
+package reporter
+
+import (
+	"fmt"
+	"strings"
+	"time"
+)
+
+// maxOutputLines is the threshold above which output is collapsed with <details>.
+const maxOutputLines = 200
+
+// ReportData holds the inputs for formatting an execution report.
+type ReportData struct {
+	AgentName   string
+	Status      string // "success", "failure", "timeout", "retry-limit"
+	Duration    time.Duration
+	SessionID   string
+	WorkerID    string
+	RetryCount  int
+	MaxRetries  int
+	Output      string // combined stdout/stderr
+	PRLink      string // optional PR URL
+	ErrorDetail string // optional error message
+}
+
+// statusBadge returns a Markdown status badge string.
+func statusBadge(status string) string {
+	switch status {
+	case "success":
+		return "**Status**: :white_check_mark: Success"
+	case "failure":
+		return "**Status**: :x: Failure"
+	case "timeout":
+		return "**Status**: :hourglass: Timeout"
+	case "retry-limit":
+		return "**Status**: :rotating_light: Retry Limit Reached"
+	default:
+		return fmt.Sprintf("**Status**: %s", status)
+	}
+}
+
+// FormatReport generates a rich Markdown report from the given data.
+func FormatReport(d ReportData) string {
+	var b strings.Builder
+
+	// Header
+	b.WriteString(fmt.Sprintf("## Agent Report: %s\n\n", d.AgentName))
+
+	// Status badge
+	b.WriteString(statusBadge(d.Status))
+	b.WriteString("\n\n")
+
+	// Metadata table
+	b.WriteString("| Field | Value |\n")
+	b.WriteString("|-------|-------|\n")
+	b.WriteString(fmt.Sprintf("| Agent | `%s` |\n", d.AgentName))
+	b.WriteString(fmt.Sprintf("| Duration | %s |\n", formatDuration(d.Duration)))
+	b.WriteString(fmt.Sprintf("| Session ID | `%s` |\n", d.SessionID))
+	b.WriteString(fmt.Sprintf("| Worker | `%s` |\n", d.WorkerID))
+	b.WriteString(fmt.Sprintf("| Retry | %d / %d |\n", d.RetryCount, d.MaxRetries))
+	b.WriteString("\n")
+
+	// PR link if present
+	if d.PRLink != "" {
+		b.WriteString(fmt.Sprintf(":link: **Pull Request**: %s\n\n", d.PRLink))
+	}
+
+	// Error detail for failure/timeout/retry-limit
+	if d.ErrorDetail != "" {
+		b.WriteString("### Error\n\n")
+		b.WriteString("```\n")
+		b.WriteString(d.ErrorDetail)
+		b.WriteString("\n```\n\n")
+	}
+
+	// Retry-limit specific message
+	if d.Status == "retry-limit" {
+		b.WriteString("> :warning: **Retry limit reached, needs human intervention**\n\n")
+	}
+
+	// Output section
+	if d.Output != "" {
+		lines := strings.Split(d.Output, "\n")
+		if len(lines) > maxOutputLines {
+			b.WriteString("<details>\n")
+			b.WriteString(fmt.Sprintf("<summary>Agent output (%d lines, click to expand)</summary>\n\n", len(lines)))
+			b.WriteString("```\n")
+			b.WriteString(d.Output)
+			b.WriteString("\n```\n\n")
+			b.WriteString("</details>\n\n")
+		} else {
+			b.WriteString("### Output\n\n")
+			b.WriteString("```\n")
+			b.WriteString(d.Output)
+			b.WriteString("\n```\n\n")
+		}
+	}
+
+	// Footer with signature and timestamp
+	b.WriteString("---\n")
+	b.WriteString(fmt.Sprintf("*workbuddy coordinator | %s*\n", time.Now().UTC().Format(time.RFC3339)))
+
+	return b.String()
+}
+
+// FormatReportAt is like FormatReport but accepts an explicit timestamp (for testing).
+func FormatReportAt(d ReportData, ts time.Time) string {
+	var b strings.Builder
+
+	// Header
+	b.WriteString(fmt.Sprintf("## Agent Report: %s\n\n", d.AgentName))
+
+	// Status badge
+	b.WriteString(statusBadge(d.Status))
+	b.WriteString("\n\n")
+
+	// Metadata table
+	b.WriteString("| Field | Value |\n")
+	b.WriteString("|-------|-------|\n")
+	b.WriteString(fmt.Sprintf("| Agent | `%s` |\n", d.AgentName))
+	b.WriteString(fmt.Sprintf("| Duration | %s |\n", formatDuration(d.Duration)))
+	b.WriteString(fmt.Sprintf("| Session ID | `%s` |\n", d.SessionID))
+	b.WriteString(fmt.Sprintf("| Worker | `%s` |\n", d.WorkerID))
+	b.WriteString(fmt.Sprintf("| Retry | %d / %d |\n", d.RetryCount, d.MaxRetries))
+	b.WriteString("\n")
+
+	// PR link if present
+	if d.PRLink != "" {
+		b.WriteString(fmt.Sprintf(":link: **Pull Request**: %s\n\n", d.PRLink))
+	}
+
+	// Error detail for failure/timeout/retry-limit
+	if d.ErrorDetail != "" {
+		b.WriteString("### Error\n\n")
+		b.WriteString("```\n")
+		b.WriteString(d.ErrorDetail)
+		b.WriteString("\n```\n\n")
+	}
+
+	// Retry-limit specific message
+	if d.Status == "retry-limit" {
+		b.WriteString("> :warning: **Retry limit reached, needs human intervention**\n\n")
+	}
+
+	// Output section
+	if d.Output != "" {
+		lines := strings.Split(d.Output, "\n")
+		if len(lines) > maxOutputLines {
+			b.WriteString("<details>\n")
+			b.WriteString(fmt.Sprintf("<summary>Agent output (%d lines, click to expand)</summary>\n\n", len(lines)))
+			b.WriteString("```\n")
+			b.WriteString(d.Output)
+			b.WriteString("\n```\n\n")
+			b.WriteString("</details>\n\n")
+		} else {
+			b.WriteString("### Output\n\n")
+			b.WriteString("```\n")
+			b.WriteString(d.Output)
+			b.WriteString("\n```\n\n")
+		}
+	}
+
+	// Footer with signature and timestamp
+	b.WriteString("---\n")
+	b.WriteString(fmt.Sprintf("*workbuddy coordinator | %s*\n", ts.UTC().Format(time.RFC3339)))
+
+	return b.String()
+}
+
+// formatDuration returns a human-readable duration string.
+func formatDuration(d time.Duration) string {
+	if d < time.Second {
+		return d.String()
+	}
+	// Round to seconds for readability
+	d = d.Round(time.Second)
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	minutes := int(d.Minutes())
+	seconds := int(d.Seconds()) % 60
+	if seconds == 0 {
+		return fmt.Sprintf("%dm", minutes)
+	}
+	return fmt.Sprintf("%dm%ds", minutes, seconds)
+}
