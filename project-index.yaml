@@ -310,7 +310,7 @@ requirements:
       Includes Worker info and retry count.
     priority: P0
     version: v0.1.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-010-1: 生成符合 design.md 3.1.6 模板的 Markdown 评论"
       - "AC-010-2: 包含 agent 名称、状态标记、耗时、session ID、Worker 信息、重试计数"
@@ -318,8 +318,11 @@ requirements:
       - "AC-010-4: 评论末尾包含 workbuddy coordinator 签名 + 时间戳"
       - "AC-010-5: 与 REQ-005 Reporter 共用接口，此需求是格式增强"
       - "AC-010-6: 单元测试：验证成功/失败/超时/重试上限 4 种结果的 Markdown 格式"
-    code: []
-    tests: []
+    code:
+      - internal/reporter/format.go
+      - internal/reporter/reporter.go
+    tests:
+      - internal/reporter/format_test.go
     deps: [REQ-005]
 
   - id: REQ-011
@@ -457,7 +460,7 @@ requirements:
       Claude Code via channel communication.
     priority: P0
     version: v0.1.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-017-1: cobra 命令 `workbuddy serve`，支持 --port, --poll-interval, --roles 标志"
       - "AC-017-2: 启动时加载配置 + 初始化 SQLite，失败则打印错误并 exit 1"
@@ -470,8 +473,11 @@ requirements:
       - "AC-017-9: 重启恢复——启动时从 SQLite 读取 task_queue 中 status=running 的任务，标记为 failed（子进程已丢失），status=pending 的任务重新路由"
       - "AC-017-10: 集成测试：启动 serve → 发送 SIGTERM → 验证优雅退出；重启后 pending 任务重新路由"
       - "AC-017-11: E2E 集成测试（mock-based）：使用 mock GHExecutor 模拟完整闭环——创建 Issue → Agent mock 执行 → mock Agent 改 label → 状态机检测 → 下一个 Agent 触发 → 完成或重试上限触发 failed"
-    code: []
-    tests: []
+    code:
+      - cmd/serve.go
+      - internal/router/router.go
+    tests:
+      - cmd/serve_test.go
     deps: [REQ-002, REQ-004, REQ-006, REQ-009, REQ-024]
 
   - id: REQ-018
