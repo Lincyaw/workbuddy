@@ -46,11 +46,11 @@ func TestCreateAndReadWrite(t *testing.T) {
 	}
 
 	// --- Tasks ---
-	err = s.InsertTask(TaskRecord{ID: "task-1", Repo: "org/repo", IssueNum: 1, AgentName: "dev", Status: "pending"})
+	err = s.InsertTask(TaskRecord{ID: "task-1", Repo: "org/repo", IssueNum: 1, AgentName: "dev", Status: TaskStatusPending})
 	if err != nil {
 		t.Fatalf("InsertTask: %v", err)
 	}
-	tasks, err := s.QueryTasks("pending")
+	tasks, err := s.QueryTasks(TaskStatusPending)
 	if err != nil {
 		t.Fatalf("QueryTasks: %v", err)
 	}
@@ -58,14 +58,14 @@ func TestCreateAndReadWrite(t *testing.T) {
 		t.Fatalf("unexpected tasks: %+v", tasks)
 	}
 	// Update status.
-	if err := s.UpdateTaskStatus("task-1", "running"); err != nil {
+	if err := s.UpdateTaskStatus("task-1", TaskStatusRunning); err != nil {
 		t.Fatalf("UpdateTaskStatus: %v", err)
 	}
-	tasks, _ = s.QueryTasks("pending")
+	tasks, _ = s.QueryTasks(TaskStatusPending)
 	if len(tasks) != 0 {
 		t.Fatalf("expected 0 pending tasks after update, got %d", len(tasks))
 	}
-	tasks, _ = s.QueryTasks("running")
+	tasks, _ = s.QueryTasks(TaskStatusRunning)
 	if len(tasks) != 1 {
 		t.Fatalf("expected 1 running task, got %d", len(tasks))
 	}
@@ -213,7 +213,7 @@ func TestRestartRetention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InsertEvent: %v", err)
 	}
-	err = s1.InsertTask(TaskRecord{ID: "t-1", Repo: "org/repo", IssueNum: 1, AgentName: "dev", Status: "pending"})
+	err = s1.InsertTask(TaskRecord{ID: "t-1", Repo: "org/repo", IssueNum: 1, AgentName: "dev", Status: TaskStatusPending})
 	if err != nil {
 		t.Fatalf("InsertTask: %v", err)
 	}

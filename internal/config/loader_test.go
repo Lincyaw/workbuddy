@@ -532,11 +532,11 @@ states:
 		t.Fatalf("unexpected error: %v", err)
 	}
 	wf := cfg.Workflows["retry-wf"]
-	failedState, ok := wf.States["failed"]
+	failedState, ok := wf.States[StateNameFailed]
 	if !ok {
 		t.Fatal("expected auto-added 'failed' state")
 	}
-	if failedState.EnterLabel != "status:failed" {
-		t.Errorf("failed state enter_label = %q, want %q", failedState.EnterLabel, "status:failed")
+	if failedState.EnterLabel != LabelFailed {
+		t.Errorf("failed state enter_label = %q, want %q", failedState.EnterLabel, LabelFailed)
 	}
 }

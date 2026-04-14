@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
+	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
@@ -113,7 +115,7 @@ func TestNormalTransition(t *testing.T) {
 	sm, rec, dispatch := newTestSM(t)
 
 	event := ChangeEvent{
-		Type:     "label_added",
+		Type:     poller.EventLabelAdded,
 		Repo:     "test/repo",
 		IssueNum: 1,
 		Labels:   []string{"workbuddy", "status:developing"},
@@ -125,7 +127,7 @@ func TestNormalTransition(t *testing.T) {
 	}
 
 	// Should have logged a transition.
-	transitions := rec.find("transition")
+	transitions := rec.find(eventlog.TypeTransition)
 	if len(transitions) != 1 {
 		t.Fatalf("expected 1 transition event, got %d", len(transitions))
 	}
@@ -150,7 +152,7 @@ func TestBackEdgeCount(t *testing.T) {
 
 	// First: developing → reviewing (creates history for reviewing).
 	ev1 := ChangeEvent{
-		Type:     "label_added",
+		Type:     poller.EventLabelAdded,
 		Repo:     "test/repo",
 		IssueNum: 2,
 		Labels:   []string{"workbuddy", "status:developing"},
@@ -167,7 +169,7 @@ func TestBackEdgeCount(t *testing.T) {
 
 	// Now: reviewing → developing (this is a back-edge since developing was visited).
 	ev2 := ChangeEvent{
-		Type:     "label_added",
+		Type:     poller.EventLabelAdded,
 		Repo:     "test/repo",
 		IssueNum: 2,
 		Labels:   []string{"workbuddy", "status:reviewing"},
@@ -226,7 +228,7 @@ func TestRetryLimitFailed(t *testing.T) {
 
 	// Step 1: developing → reviewing (not a back-edge)
 	if err := sm.HandleEvent(ChangeEvent{
-		Type: "label_added", Repo: repo, IssueNum: issueNum,
+		Type: poller.EventLabelAdded, Repo: repo, IssueNum: issueNum,
 		Labels: []string{"workbuddy", "status:developing"}, Detail: "status:reviewing",
 	}); err != nil {
 		t.Fatalf("HandleEvent step 1: %v", err)
@@ -239,7 +241,7 @@ func TestRetryLimitFailed(t *testing.T) {
 	// not yet a target. Actually, let's check: is there any prior transition TO developing?
 	// No — step 1 was TO reviewing. So this is NOT a back-edge.)
 	if err := sm.HandleEvent(ChangeEvent{
-		Type: "label_added", Repo: repo, IssueNum: issueNum,
+		Type: poller.EventLabelAdded, Repo: repo, IssueNum: issueNum,
 		Labels: []string{"workbuddy", "status:reviewing"}, Detail: "status:developing",
 	}); err != nil {
 		t.Fatalf("HandleEvent step 2: %v", err)
@@ -252,7 +254,7 @@ func TestRetryLimitFailed(t *testing.T) {
 	// This IS a back-edge. Count for developing→reviewing: was 1, increment to 2.
 	// 2 >= max_retries (2) → cycle_limit_reached → transition to failed.
 	err := sm.HandleEvent(ChangeEvent{
-		Type: "label_added", Repo: repo, IssueNum: issueNum,
+		Type: poller.EventLabelAdded, Repo: repo, IssueNum: issueNum,
 		Labels: []string{"workbuddy", "status:developing"}, Detail: "status:reviewing",
 	})
 	if err != nil {
@@ -268,10 +270,10 @@ func TestRetryLimitFailed(t *testing.T) {
 	}
 
 	// Should have logged cycle_limit_reached and transition_to_failed.
-	if len(rec.find("cycle_limit_reached")) == 0 {
+	if len(rec.find(eventlog.TypeCycleLimitReached)) == 0 {
 		t.Error("expected cycle_limit_reached event")
 	}
-	if len(rec.find("transition_to_failed")) == 0 {
+	if len(rec.find(eventlog.TypeTransitionToFailed)) == 0 {
 		t.Error("expected transition_to_failed event")
 	}
 }
@@ -281,7 +283,7 @@ func TestNoMatchSkip(t *testing.T) {
 	sm, rec, _ := newTestSM(t)
 
 	err := sm.HandleEvent(ChangeEvent{
-		Type:     "label_added",
+		Type:     poller.EventLabelAdded,
 		Repo:     "test/repo",
 		IssueNum: 99,
 		Labels:   []string{"bug", "priority:high"}, // no "workbuddy" trigger label
@@ -320,7 +322,7 @@ func TestMultiWorkflowReject(t *testing.T) {
 	)
 
 	err := sm.HandleEvent(ChangeEvent{
-		Type:     "label_added",
+		Type:     poller.EventLabelAdded,
 		Repo:     "test/repo",
 		IssueNum: 10,
 		Labels:   []string{"workbuddy", "status:developing"},
@@ -330,7 +332,7 @@ func TestMultiWorkflowReject(t *testing.T) {
 		t.Error("expected error for multi-workflow match")
 	}
 
-	if len(rec.find("error_multi_workflow")) == 0 {
+	if len(rec.find(eventlog.TypeErrorMultiWorkflow)) == 0 {
 		t.Error("expected error_multi_workflow event")
 	}
 }
@@ -340,7 +342,7 @@ func TestIdempotent(t *testing.T) {
 	sm, rec, dispatch := newTestSM(t)
 
 	event := ChangeEvent{
-		Type:     "label_added",
+		Type:     poller.EventLabelAdded,
 		Repo:     "test/repo",
 		IssueNum: 5,
 		Labels:   []string{"workbuddy", "status:developing"},
@@ -358,7 +360,7 @@ func TestIdempotent(t *testing.T) {
 	}
 
 	// Should have only 1 transition event.
-	transitions := rec.find("transition")
+	transitions := rec.find(eventlog.TypeTransition)
 	if len(transitions) != 1 {
 		t.Errorf("expected 1 transition (idempotent), got %d", len(transitions))
 	}
@@ -378,7 +380,7 @@ func TestExecutionMutex(t *testing.T) {
 
 	// First event triggers dispatch (developing → reviewing, dispatches review-agent).
 	if err := sm.HandleEvent(ChangeEvent{
-		Type: "label_added", Repo: "r", IssueNum: 7,
+		Type: poller.EventLabelAdded, Repo: "r", IssueNum: 7,
 		Labels: []string{"workbuddy", "status:developing"}, Detail: "status:reviewing",
 	}); err != nil {
 		t.Fatalf("HandleEvent 1: %v", err)
@@ -390,7 +392,7 @@ func TestExecutionMutex(t *testing.T) {
 
 	// Now try reviewing → developing (which would dispatch dev-agent).
 	if err := sm.HandleEvent(ChangeEvent{
-		Type: "label_added", Repo: "r", IssueNum: 7,
+		Type: poller.EventLabelAdded, Repo: "r", IssueNum: 7,
 		Labels: []string{"workbuddy", "status:reviewing"}, Detail: "status:developing",
 	}); err != nil {
 		t.Fatalf("HandleEvent 2: %v", err)
@@ -405,7 +407,7 @@ func TestExecutionMutex(t *testing.T) {
 	}
 
 	// Should have logged the skip.
-	if len(rec.find("dispatch_skipped_inflight")) == 0 {
+	if len(rec.find(eventlog.TypeDispatchSkippedInflight)) == 0 {
 		t.Error("expected dispatch_skipped_inflight event")
 	}
 }
@@ -417,7 +419,7 @@ func TestStuckDetection(t *testing.T) {
 
 	// Trigger a transition.
 	if err := sm.HandleEvent(ChangeEvent{
-		Type: "label_added", Repo: "test/repo", IssueNum: 8,
+		Type: poller.EventLabelAdded, Repo: "test/repo", IssueNum: 8,
 		Labels: []string{"workbuddy", "status:developing"}, Detail: "status:reviewing",
 	}); err != nil {
 		t.Fatalf("HandleEvent: %v", err)
@@ -434,7 +436,7 @@ func TestStuckDetection(t *testing.T) {
 	// Check stuck with same labels (unchanged).
 	sm.CheckStuck("test/repo", 8, labels)
 
-	if len(rec.find("stuck_detected")) == 0 {
+	if len(rec.find(eventlog.TypeStuckDetected)) == 0 {
 		t.Error("expected stuck_detected event")
 	}
 }
@@ -445,7 +447,7 @@ func TestStuckDetection(t *testing.T) {
 
 func TestConditionLabeled_Positive(t *testing.T) {
 	ctx := &EvalContext{
-		EventType:  "label_added",
+		EventType:  poller.EventLabelAdded,
 		LabelAdded: "status:reviewing",
 		Labels:     []string{"status:reviewing"},
 	}
@@ -456,7 +458,7 @@ func TestConditionLabeled_Positive(t *testing.T) {
 
 func TestConditionLabeled_Negative(t *testing.T) {
 	ctx := &EvalContext{
-		EventType:  "label_added",
+		EventType:  poller.EventLabelAdded,
 		LabelAdded: "status:developing",
 		Labels:     []string{"status:developing"},
 	}
@@ -466,70 +468,70 @@ func TestConditionLabeled_Negative(t *testing.T) {
 }
 
 func TestConditionPrOpened_Positive(t *testing.T) {
-	ctx := &EvalContext{EventType: "pr_created"}
+	ctx := &EvalContext{EventType: poller.EventPRCreated}
 	if !EvaluateCondition("pr_opened", ctx) {
 		t.Error("pr_opened should match pr_created event")
 	}
 }
 
 func TestConditionPrOpened_Negative(t *testing.T) {
-	ctx := &EvalContext{EventType: "label_added"}
+	ctx := &EvalContext{EventType: poller.EventLabelAdded}
 	if EvaluateCondition("pr_opened", ctx) {
 		t.Error("pr_opened should not match label_added event")
 	}
 }
 
 func TestConditionChecksPassed_Positive(t *testing.T) {
-	ctx := &EvalContext{ChecksState: "passed"}
+	ctx := &EvalContext{ChecksState: ChecksPassed}
 	if !EvaluateCondition("checks_passed", ctx) {
 		t.Error("checks_passed should match")
 	}
 }
 
 func TestConditionChecksPassed_Negative(t *testing.T) {
-	ctx := &EvalContext{ChecksState: "failed"}
+	ctx := &EvalContext{ChecksState: ChecksFailed}
 	if EvaluateCondition("checks_passed", ctx) {
 		t.Error("checks_passed should not match failed")
 	}
 }
 
 func TestConditionChecksFailed_Positive(t *testing.T) {
-	ctx := &EvalContext{ChecksState: "failed"}
+	ctx := &EvalContext{ChecksState: ChecksFailed}
 	if !EvaluateCondition("checks_failed", ctx) {
 		t.Error("checks_failed should match")
 	}
 }
 
 func TestConditionChecksFailed_Negative(t *testing.T) {
-	ctx := &EvalContext{ChecksState: "passed"}
+	ctx := &EvalContext{ChecksState: ChecksPassed}
 	if EvaluateCondition("checks_failed", ctx) {
 		t.Error("checks_failed should not match passed")
 	}
 }
 
 func TestConditionApproved_Positive(t *testing.T) {
-	ctx := &EvalContext{EventType: "approved"}
+	ctx := &EvalContext{EventType: EventApproved}
 	if !EvaluateCondition("approved", ctx) {
 		t.Error("approved should match")
 	}
 }
 
 func TestConditionApproved_Negative(t *testing.T) {
-	ctx := &EvalContext{EventType: "changes_requested"}
+	ctx := &EvalContext{EventType: EventChangesRequested}
 	if EvaluateCondition("approved", ctx) {
 		t.Error("approved should not match changes_requested")
 	}
 }
 
 func TestConditionChangesRequested_Positive(t *testing.T) {
-	ctx := &EvalContext{EventType: "changes_requested"}
+	ctx := &EvalContext{EventType: EventChangesRequested}
 	if !EvaluateCondition("changes_requested", ctx) {
 		t.Error("changes_requested should match")
 	}
 }
 
 func TestConditionChangesRequested_Negative(t *testing.T) {
-	ctx := &EvalContext{EventType: "approved"}
+	ctx := &EvalContext{EventType: EventApproved}
 	if EvaluateCondition("changes_requested", ctx) {
 		t.Error("changes_requested should not match approved")
 	}

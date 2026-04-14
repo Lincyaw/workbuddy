@@ -113,7 +113,7 @@ func TestNewIssueDetection(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event, got %d: %+v", len(events), events)
 	}
-	if events[0].Type != "issue_created" {
+	if events[0].Type != EventIssueCreated {
 		t.Errorf("expected issue_created, got %s", events[0].Type)
 	}
 	if events[0].IssueNum != 1 {
@@ -158,11 +158,11 @@ func TestLabelAddedRemoved(t *testing.T) {
 	for _, ev := range events {
 		types[ev.Type] = ev.Detail
 	}
-	if types["label_added"] != "enhancement" {
-		t.Errorf("expected label_added=enhancement, got %q", types["label_added"])
+	if types[EventLabelAdded] != "enhancement" {
+		t.Errorf("expected label_added=enhancement, got %q", types[EventLabelAdded])
 	}
-	if types["label_removed"] != "bug" {
-		t.Errorf("expected label_removed=bug, got %q", types["label_removed"])
+	if types[EventLabelRemoved] != "bug" {
+		t.Errorf("expected label_removed=bug, got %q", types[EventLabelRemoved])
 	}
 }
 
@@ -219,7 +219,7 @@ func TestPRCreated(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event, got %d: %+v", len(events), events)
 	}
-	if events[0].Type != "pr_created" {
+	if events[0].Type != EventPRCreated {
 		t.Errorf("expected pr_created, got %s", events[0].Type)
 	}
 }
@@ -255,7 +255,7 @@ func TestPRStateChanged(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event, got %d: %+v", len(events), events)
 	}
-	if events[0].Type != "pr_state_changed" {
+	if events[0].Type != EventPRStateChanged {
 		t.Errorf("expected pr_state_changed, got %s", events[0].Type)
 	}
 }
@@ -379,10 +379,10 @@ func TestCrashRecovery_FullSync(t *testing.T) {
 	for _, ev := range events {
 		types[ev.Type] = true
 	}
-	if !types["label_added"] {
+	if !types[EventLabelAdded] {
 		t.Error("expected label_added event")
 	}
-	if !types["issue_created"] {
+	if !types[EventIssueCreated] {
 		t.Error("expected issue_created event")
 	}
 }

@@ -87,7 +87,7 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 		Repo:      req.Repo,
 		IssueNum:  req.IssueNum,
 		AgentName: req.AgentName,
-		Status:    "pending",
+		Status:    store.TaskStatusPending,
 	}); err != nil {
 		log.Printf("[router] failed to insert task: %v", err)
 		return
@@ -128,7 +128,7 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 
 	select {
 	case r.taskChan <- task:
-		if err := r.store.UpdateTaskStatus(taskID, "running"); err != nil {
+		if err := r.store.UpdateTaskStatus(taskID, store.TaskStatusRunning); err != nil {
 			log.Printf("[router] failed to update task status: %v", err)
 		}
 	case <-ctx.Done():

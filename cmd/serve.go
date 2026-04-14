@@ -448,7 +448,7 @@ func executeTask(
 	result, err := lnch.Launch(ctx, task.Agent, task.Context)
 	if err != nil {
 		log.Printf("[worker] agent %s failed: %v", task.AgentName, err)
-		if err := st.UpdateTaskStatus(task.TaskID, "failed"); err != nil {
+		if err := st.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
 			log.Printf("[worker] failed to update task status: %v", err)
 		}
 		sm.MarkAgentCompleted(task.Repo, task.IssueNum, nil)
@@ -456,12 +456,12 @@ func executeTask(
 	}
 
 	// Determine task status
-	status := "completed"
+	status := store.TaskStatusCompleted
 	if result.ExitCode != 0 {
-		status = "failed"
+		status = store.TaskStatusFailed
 	}
 	if result.Meta != nil && result.Meta["timeout"] == "true" {
-		status = "timeout"
+		status = store.TaskStatusTimeout
 	}
 
 	// Update task status
@@ -504,19 +504,19 @@ func executeTask(
 // recoverTasks marks running tasks as failed and re-routes pending tasks on restart.
 func recoverTasks(st *store.Store) error {
 	// Mark all running tasks as failed (subprocess lost on restart)
-	running, err := st.QueryTasks("running")
+	running, err := st.QueryTasks(store.TaskStatusRunning)
 	if err != nil {
 		return fmt.Errorf("query running tasks: %w", err)
 	}
 	for _, t := range running {
 		log.Printf("[serve] recovery: marking task %s as failed (was running)", t.ID)
-		if err := st.UpdateTaskStatus(t.ID, "failed"); err != nil {
+		if err := st.UpdateTaskStatus(t.ID, store.TaskStatusFailed); err != nil {
 			log.Printf("[serve] recovery: failed to mark task %s: %v", t.ID, err)
 		}
 	}
 
 	// Log pending tasks that will be re-dispatched via normal poller cycle
-	pending, err := st.QueryTasks("pending")
+	pending, err := st.QueryTasks(store.TaskStatusPending)
 	if err != nil {
 		return fmt.Errorf("query pending tasks: %w", err)
 	}

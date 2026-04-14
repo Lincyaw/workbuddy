@@ -14,6 +14,19 @@ import (
 )
 
 // ---------------------------------------------------------------------------
+// Event type constants
+// ---------------------------------------------------------------------------
+
+// Event types emitted by the Poller.
+const (
+	EventIssueCreated   = "issue_created"
+	EventLabelAdded     = "label_added"
+	EventLabelRemoved   = "label_removed"
+	EventPRCreated      = "pr_created"
+	EventPRStateChanged = "pr_state_changed"
+)
+
+// ---------------------------------------------------------------------------
 // Domain types
 // ---------------------------------------------------------------------------
 
@@ -36,7 +49,7 @@ type PR struct {
 
 // ChangeEvent describes a detected change between two polls.
 type ChangeEvent struct {
-	Type     string // "issue_created", "label_added", "label_removed", "pr_created", "pr_checks_changed", "pr_review_changed"
+	Type     string // EventIssueCreated, EventLabelAdded, EventLabelRemoved, EventPRCreated, EventPRStateChanged
 	Repo     string
 	IssueNum int
 	Labels   []string
@@ -180,7 +193,7 @@ func (p *Poller) diffIssue(ctx context.Context, iss Issue) {
 	if cached == nil {
 		// New issue (or first sync after restart).
 		p.emit(ctx, ChangeEvent{
-			Type:     "issue_created",
+			Type:     EventIssueCreated,
 			Repo:     p.repo,
 			IssueNum: iss.Number,
 			Labels:   iss.Labels,
@@ -192,7 +205,7 @@ func (p *Poller) diffIssue(ctx context.Context, iss Issue) {
 		added, removed := diffLabels(oldLabels, iss.Labels)
 		for _, l := range added {
 			p.emit(ctx, ChangeEvent{
-				Type:     "label_added",
+				Type:     EventLabelAdded,
 				Repo:     p.repo,
 				IssueNum: iss.Number,
 				Labels:   iss.Labels,
@@ -201,7 +214,7 @@ func (p *Poller) diffIssue(ctx context.Context, iss Issue) {
 		}
 		for _, l := range removed {
 			p.emit(ctx, ChangeEvent{
-				Type:     "label_removed",
+				Type:     EventLabelRemoved,
 				Repo:     p.repo,
 				IssueNum: iss.Number,
 				Labels:   iss.Labels,
@@ -236,7 +249,7 @@ func (p *Poller) diffPR(ctx context.Context, pr PR) {
 
 	if cached == nil {
 		p.emit(ctx, ChangeEvent{
-			Type:     "pr_created",
+			Type:     EventPRCreated,
 			Repo:     p.repo,
 			IssueNum: pr.Number,
 			Detail:   pr.Branch,
@@ -244,7 +257,7 @@ func (p *Poller) diffPR(ctx context.Context, pr PR) {
 	} else if cached.State != stateVal {
 		// Detect state changes (checks, reviews show as state changes).
 		p.emit(ctx, ChangeEvent{
-			Type:     "pr_state_changed",
+			Type:     EventPRStateChanged,
 			Repo:     p.repo,
 			IssueNum: pr.Number,
 			Detail:   fmt.Sprintf("%s -> %s", cached.State, stateVal),

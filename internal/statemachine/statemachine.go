@@ -8,12 +8,14 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
+	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
 // ChangeEvent represents a state change detected by the Poller.
 type ChangeEvent struct {
-	Type     string // "label_added", "label_removed", "pr_created", etc.
+	Type     string // poller.EventLabelAdded, poller.EventLabelRemoved, poller.EventPRCreated, etc.
 	Repo     string
 	IssueNum int
 	Labels   []string // current labels on the issue
@@ -123,7 +125,7 @@ func (sm *StateMachine) HandleEvent(event ChangeEvent) error {
 			"workflows": names,
 			"labels":    event.Labels,
 		})
-		sm.eventlog.Log("error_multi_workflow", event.Repo, event.IssueNum, string(payload))
+		sm.eventlog.Log(eventlog.TypeErrorMultiWorkflow, event.Repo, event.IssueNum, string(payload))
 		return fmt.Errorf("statemachine: issue %s#%d matches %d workflows", event.Repo, event.IssueNum, len(matched))
 	}
 
@@ -162,12 +164,12 @@ func (sm *StateMachine) processWorkflowEvent(wf *config.WorkflowConfig, event Ch
 	// State-entry detection: dispatch the agent if:
 	// 1. label_added matches the current state's enter_label (label just changed), OR
 	// 2. issue_created and the issue already has a state label with an agent (first seen)
-	stateEntryDetected := (event.Type == "label_added" && event.Detail == currentState.EnterLabel) ||
-		(event.Type == "issue_created")
+	stateEntryDetected := (event.Type == poller.EventLabelAdded && event.Detail == currentState.EnterLabel) ||
+		(event.Type == poller.EventIssueCreated)
 	if stateEntryDetected && currentState.Agent != "" {
 		log.Printf("[statemachine] state entry detected: %s#%d entered %q, dispatching agent %q",
 			event.Repo, event.IssueNum, currentStateName, currentState.Agent)
-		sm.eventlog.Log("state_entry", event.Repo, event.IssueNum,
+		sm.eventlog.Log(eventlog.TypeStateEntry, event.Repo, event.IssueNum,
 			fmt.Sprintf(`{"state":"%s","agent":"%s"}`, currentStateName, currentState.Agent))
 
 		// Clear any stale inflight flag: if the label changed, the previous agent's
@@ -190,9 +192,9 @@ func (sm *StateMachine) processWorkflowEvent(wf *config.WorkflowConfig, event Ch
 		LatestComment: event.Detail,
 	}
 	switch event.Type {
-	case "label_added":
+	case poller.EventLabelAdded:
 		ctx.LabelAdded = event.Detail
-	case "label_removed":
+	case poller.EventLabelRemoved:
 		ctx.LabelRemoved = event.Detail
 	}
 
@@ -225,7 +227,7 @@ func (sm *StateMachine) processWorkflowEvent(wf *config.WorkflowConfig, event Ch
 
 			if count >= maxRetries {
 				// Reject back-edge, transition to failed.
-				sm.eventlog.Log("cycle_limit_reached", event.Repo, event.IssueNum,
+				sm.eventlog.Log(eventlog.TypeCycleLimitReached, event.Repo, event.IssueNum,
 					fmt.Sprintf(`{"from":"%s","to":"%s","count":%d,"max_retries":%d}`,
 						currentStateName, targetStateName, count, maxRetries))
 
@@ -233,7 +235,7 @@ func (sm *StateMachine) processWorkflowEvent(wf *config.WorkflowConfig, event Ch
 				// The "failed" state and "needs-human" label would be applied
 				// by the system. Since Go code doesn't write labels (agents do),
 				// we record the event. In v0.1.0, we still record the intent.
-				sm.eventlog.Log("transition_to_failed", event.Repo, event.IssueNum,
+				sm.eventlog.Log(eventlog.TypeTransitionToFailed, event.Repo, event.IssueNum,
 					fmt.Sprintf(`{"from":"%s","rejected_to":"%s","needs_human":true}`,
 						currentStateName, targetStateName))
 				return nil
@@ -247,7 +249,7 @@ func (sm *StateMachine) processWorkflowEvent(wf *config.WorkflowConfig, event Ch
 		}
 
 		// Log the transition.
-		sm.eventlog.Log("transition", event.Repo, event.IssueNum,
+		sm.eventlog.Log(eventlog.TypeTransition, event.Repo, event.IssueNum,
 			fmt.Sprintf(`{"from":"%s","to":"%s"}`, currentStateName, targetStateName))
 
 		// If the target state has an agent, dispatch it.
@@ -272,7 +274,7 @@ func (sm *StateMachine) dispatchAgent(repo string, issueNum int, agentName, work
 	sm.inflightMu.Lock()
 	if sm.inflight[issueKey] {
 		sm.inflightMu.Unlock()
-		sm.eventlog.Log("dispatch_skipped_inflight", repo, issueNum,
+		sm.eventlog.Log(eventlog.TypeDispatchSkippedInflight, repo, issueNum,
 			fmt.Sprintf(`{"agent":"%s","reason":"agent already running"}`, agentName))
 		return nil
 	}
@@ -362,7 +364,7 @@ func (sm *StateMachine) CheckStuck(repo string, issueNum int, currentLabels []st
 	currentJSON, _ := json.Marshal(currentLabels)
 	if string(currentJSON) == rec.labels {
 		// Labels unchanged after timeout — stuck!
-		sm.eventlog.Log("stuck_detected", repo, issueNum,
+		sm.eventlog.Log(eventlog.TypeStuckDetected, repo, issueNum,
 			fmt.Sprintf(`{"since":"%s","labels":%s}`, rec.at.Format(time.RFC3339), rec.labels))
 
 		// Clear the record so we don't keep firing.
