@@ -589,7 +589,7 @@ requirements:
       create tables, provide typed query methods. Use WAL mode.
     priority: P0
     version: v0.1.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-024-1: 数据库文件位于 .workbuddy/workbuddy.db"
       - "AC-024-2: 启动时自动创建目录和数据库文件"
@@ -599,8 +599,11 @@ requirements:
       - "AC-024-6: 使用纯 Go SQLite 库（modernc.org/sqlite），无 CGO 依赖"
       - "AC-024-7: 提供 Close() 方法用于 graceful shutdown"
       - "AC-024-8: 单元测试：建表/读写/并发/重启后数据保留 4 种场景"
-    code: []
-    tests: []
+    code:
+      - internal/store/store.go
+      - internal/store/types.go
+    tests:
+      - internal/store/store_test.go
     deps: []
 
   - id: REQ-027
