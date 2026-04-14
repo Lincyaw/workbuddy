@@ -50,7 +50,7 @@ func testStore(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatalf("store.NewStore: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -104,7 +104,7 @@ func TestNewIssueDetection(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		p.Run(ctx)
+		_ = p.Run(ctx)
 	}()
 
 	events := drain(p.Events(), 500*time.Millisecond)
@@ -144,7 +144,7 @@ func TestLabelAddedRemoved(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		p.Run(ctx)
+		_ = p.Run(ctx)
 	}()
 
 	events := drain(p.Events(), 500*time.Millisecond)
@@ -188,7 +188,7 @@ func TestNoChangeNoDuplicate(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		p.Run(ctx)
+		_ = p.Run(ctx)
 	}()
 
 	events := drain(p.Events(), 500*time.Millisecond)
@@ -210,7 +210,7 @@ func TestPRCreated(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		p.Run(ctx)
+		_ = p.Run(ctx)
 	}()
 
 	events := drain(p.Events(), 500*time.Millisecond)
@@ -246,7 +246,7 @@ func TestPRStateChanged(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		p.Run(ctx)
+		_ = p.Run(ctx)
 	}()
 
 	events := drain(p.Events(), 500*time.Millisecond)
@@ -364,7 +364,7 @@ func TestCrashRecovery_FullSync(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		p.Run(ctx)
+		_ = p.Run(ctx)
 	}()
 
 	events := drain(p.Events(), 500*time.Millisecond)

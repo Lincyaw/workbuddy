@@ -1,3 +1,4 @@
+// Package registry manages worker registration and health tracking.
 package registry
 
 import (
@@ -58,7 +59,7 @@ func (r *Registry) MarkStaleOffline() error {
 	if err != nil {
 		return fmt.Errorf("registry: query stale workers: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var staleIDs []string
 	for rows.Next() {

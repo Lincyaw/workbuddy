@@ -1,3 +1,4 @@
+// Package poller periodically queries GitHub for issue and PR changes.
 package poller
 
 import (
@@ -35,7 +36,7 @@ type PR struct {
 
 // ChangeEvent describes a detected change between two polls.
 type ChangeEvent struct {
-	Type     string   // "issue_created", "label_added", "label_removed", "pr_created", "pr_checks_changed", "pr_review_changed"
+	Type     string // "issue_created", "label_added", "label_removed", "pr_created", "pr_checks_changed", "pr_review_changed"
 	Repo     string
 	IssueNum int
 	Labels   []string
@@ -240,16 +241,14 @@ func (p *Poller) diffPR(ctx context.Context, pr PR) {
 			IssueNum: pr.Number,
 			Detail:   pr.Branch,
 		})
-	} else {
+	} else if cached.State != stateVal {
 		// Detect state changes (checks, reviews show as state changes).
-		if cached.State != stateVal {
-			p.emit(ctx, ChangeEvent{
-				Type:     "pr_state_changed",
-				Repo:     p.repo,
-				IssueNum: pr.Number,
-				Detail:   fmt.Sprintf("%s -> %s", cached.State, stateVal),
-			})
-		}
+		p.emit(ctx, ChangeEvent{
+			Type:     "pr_state_changed",
+			Repo:     p.repo,
+			IssueNum: pr.Number,
+			Detail:   fmt.Sprintf("%s -> %s", cached.State, stateVal),
+		})
 	}
 
 	// Update cache.
@@ -332,17 +331,17 @@ func labelsFromJSON(s string) []string {
 }
 
 // diffLabels returns labels added and removed between old and new sets.
-func diffLabels(old, new []string) (added, removed []string) {
+func diffLabels(old, newLabels []string) (added, removed []string) {
 	oldSet := make(map[string]bool, len(old))
 	for _, l := range old {
 		oldSet[l] = true
 	}
-	newSet := make(map[string]bool, len(new))
-	for _, l := range new {
+	newSet := make(map[string]bool, len(newLabels))
+	for _, l := range newLabels {
 		newSet[l] = true
 	}
 
-	for _, l := range new {
+	for _, l := range newLabels {
 		if !oldSet[l] {
 			added = append(added, l)
 		}

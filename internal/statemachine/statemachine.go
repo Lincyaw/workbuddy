@@ -13,7 +13,7 @@ import (
 
 // ChangeEvent represents a state change detected by the Poller.
 type ChangeEvent struct {
-	Type     string   // "label_added", "label_removed", "pr_created", etc.
+	Type     string // "label_added", "label_removed", "pr_created", etc.
 	Repo     string
 	IssueNum int
 	Labels   []string // current labels on the issue
@@ -167,9 +167,10 @@ func (sm *StateMachine) processWorkflowEvent(wf *config.WorkflowConfig, event Ch
 		LabelRemoved:  "",
 		LatestComment: event.Detail,
 	}
-	if event.Type == "label_added" {
+	switch event.Type {
+	case "label_added":
 		ctx.LabelAdded = event.Detail
-	} else if event.Type == "label_removed" {
+	case "label_removed":
 		ctx.LabelRemoved = event.Detail
 	}
 

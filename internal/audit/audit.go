@@ -1,3 +1,4 @@
+// Package audit captures and queries agent session artifacts.
 package audit
 
 import (
@@ -16,8 +17,8 @@ import (
 // is stored in SQLite; the full file is kept on disk.
 const maxSummarySize = 1 << 20 // 1 MB
 
-// AuditFilter specifies optional query predicates.  Zero-value fields are ignored.
-type AuditFilter struct {
+// Filter specifies optional query predicates.  Zero-value fields are ignored.
+type Filter struct {
 	SessionID string
 	IssueNum  int
 	AgentName string
@@ -95,7 +96,7 @@ func (a *Auditor) Capture(sessionID, taskID, repo string, issueNum int, agentNam
 }
 
 // Query returns sessions matching the given filter.
-func (a *Auditor) Query(filter AuditFilter) ([]store.AgentSession, error) {
+func (a *Auditor) Query(filter Filter) ([]store.AgentSession, error) {
 	q := `SELECT id, session_id, task_id, repo, issue_num, agent_name, summary, raw_path, created_at
 	      FROM agent_sessions WHERE 1=1`
 	var args []any
@@ -118,7 +119,7 @@ func (a *Auditor) Query(filter AuditFilter) ([]store.AgentSession, error) {
 	if err != nil {
 		return nil, fmt.Errorf("audit: query sessions: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []store.AgentSession
 	for rows.Next() {
@@ -315,13 +316,13 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 
 	out, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() { _ = out.Close() }()
 
 	if _, err := io.Copy(out, in); err != nil {
 		return err

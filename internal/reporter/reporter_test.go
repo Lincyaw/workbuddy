@@ -15,7 +15,7 @@ type mockGHWriter struct {
 	calls    int
 }
 
-func (m *mockGHWriter) WriteComment(repo string, issueNum int, body string) error {
+func (m *mockGHWriter) WriteComment(_ string, _ int, body string) error {
 	m.calls++
 	if m.calls <= m.failN {
 		return fmt.Errorf("mock gh error")

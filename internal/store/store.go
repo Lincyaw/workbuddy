@@ -1,3 +1,4 @@
+// Package store provides SQLite-backed persistence for workbuddy state.
 package store
 
 import (
@@ -7,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "modernc.org/sqlite" // sqlite driver
 )
 
 // Store provides typed CRUD access to the workbuddy SQLite database.
@@ -31,13 +32,13 @@ func NewStore(dbPath string) (*Store, error) {
 
 	// Enable WAL mode.
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("store: enable WAL: %w", err)
 	}
 
 	s := &Store{db: db}
 	if err := s.createTables(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("store: create tables: %w", err)
 	}
 	return s, nil
@@ -146,7 +147,7 @@ func (s *Store) QueryEvents(repo string) ([]Event, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: query events: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []Event
 	for rows.Next() {
@@ -189,7 +190,7 @@ func (s *Store) QueryTasks(status string) ([]TaskRecord, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: query tasks: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []TaskRecord
 	for rows.Next() {
@@ -249,7 +250,7 @@ func (s *Store) QueryWorkers(repo string) ([]WorkerRecord, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: query workers: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []WorkerRecord
 	for rows.Next() {
@@ -335,7 +336,7 @@ func (s *Store) QueryTransitionCounts(repo string, issueNum int) ([]TransitionCo
 	if err != nil {
 		return nil, fmt.Errorf("store: query transition counts: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []TransitionCount
 	for rows.Next() {
@@ -425,7 +426,7 @@ func (s *Store) QueryAgentSessions(repo string, issueNum int) ([]AgentSession, e
 	if err != nil {
 		return nil, fmt.Errorf("store: query agent sessions: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []AgentSession
 	for rows.Next() {

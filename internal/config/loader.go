@@ -1,3 +1,4 @@
+// Package config loads and validates workbuddy configuration files.
 package config
 
 import (

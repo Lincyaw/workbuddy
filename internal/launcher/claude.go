@@ -1,3 +1,4 @@
+// Package launcher provides multi-runtime agent execution backends.
 package launcher
 
 import (
@@ -17,8 +18,10 @@ import (
 // ClaudeRuntime implements Runtime for claude-code (claude -p mode).
 type ClaudeRuntime struct{}
 
+// Name returns the runtime identifier.
 func (r *ClaudeRuntime) Name() string { return "claude-code" }
 
+// Launch executes an agent using the claude-code runtime.
 func (r *ClaudeRuntime) Launch(ctx context.Context, agent *config.AgentConfig, task *TaskContext) (*Result, error) {
 	rendered, err := renderCommand(agent.Command, task)
 	if err != nil {

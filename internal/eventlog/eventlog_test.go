@@ -16,7 +16,7 @@ func newTestLogger(t *testing.T) *EventLogger {
 	if err != nil {
 		t.Fatalf("store.NewStore: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return NewEventLogger(s)
 }
 

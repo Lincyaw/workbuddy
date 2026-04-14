@@ -1,3 +1,4 @@
+// Package main is the entry point for the workbuddy CLI.
 package main
 
 import (

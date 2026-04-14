@@ -13,7 +13,7 @@ func newTestStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -221,14 +221,16 @@ func TestRestartRetention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IncrementTransition: %v", err)
 	}
-	s1.Close()
+	if err := s1.Close(); err != nil {
+		t.Fatalf("s1.Close: %v", err)
+	}
 
 	// Phase 2: reopen and verify.
 	s2, err := NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("NewStore phase 2: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 
 	events, _ := s2.QueryEvents("org/repo")
 	if len(events) != 1 || events[0].Type != "start" {

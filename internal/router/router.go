@@ -1,3 +1,4 @@
+// Package router dispatches agent tasks to available workers.
 package router
 
 import (

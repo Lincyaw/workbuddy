@@ -43,7 +43,9 @@ timeout: 30s
 ---
 # Dev Agent
 `
-	os.MkdirAll(filepath.Join(dir, "agents"), 0o755)
+	if err := os.MkdirAll(filepath.Join(dir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	writeFile(t, filepath.Join(dir, "agents", "dev-agent.md"), agentMD)
 
 	// Workflow
@@ -58,7 +60,9 @@ max_retries: 3
 
 ` + "```yaml\nstates:\n  triage:\n    enter_label: \"status:triage\"\n    transitions:\n      - to: developing\n        when: 'labeled \"status:developing\"'\n  developing:\n    enter_label: \"status:developing\"\n    agent: dev-agent\n    transitions:\n      - to: done\n        when: 'labeled \"status:done\"'\n  done:\n    enter_label: \"status:done\"\n```\n"
 
-	os.MkdirAll(filepath.Join(dir, "workflows"), 0o755)
+	if err := os.MkdirAll(filepath.Join(dir, "workflows"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	writeFile(t, filepath.Join(dir, "workflows", "dev-workflow.md"), workflowMD)
 
 	return dir
@@ -76,11 +80,11 @@ func writeFile(t *testing.T, path, content string) {
 
 // mockGHReader provides controllable GitHub data for tests.
 type mockGHReader struct {
-	mu      sync.Mutex
-	issues  []poller.Issue
-	prs     []poller.PR
-	calls   int
-	onPoll  func(call int) // callback on each ListIssues call
+	mu     sync.Mutex
+	issues []poller.Issue
+	prs    []poller.PR
+	calls  int
+	onPoll func(call int) // callback on each ListIssues call
 }
 
 func (m *mockGHReader) ListIssues(_ string) ([]poller.Issue, error) {
@@ -216,14 +220,16 @@ func TestServe_RecoverTasks(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	st.Close()
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	// Reopen store and run recovery
 	st2, err := store.NewStore(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st2.Close()
+	defer func() { _ = st2.Close() }()
 
 	if err := recoverTasks(st2); err != nil {
 		t.Fatalf("recoverTasks: %v", err)
@@ -286,7 +292,7 @@ func TestServe_HealthEndpoint(t *testing.T) {
 		cancel()
 		t.Fatalf("GET /health: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)

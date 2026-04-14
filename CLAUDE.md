@@ -112,7 +112,7 @@ Simpler code that maps clearly to requirements > clever abstractions.
 | Build | `go build ./...` | Must compile cleanly |
 | Test | `go test ./... -count=1` | Run after every change |
 | Vet | `go vet ./...` | Run after every change |
-| Lint | `staticcheck ./...` | If installed |
+| Lint | `golangci-lint run ./...` | Config: .golangci.yml |
 | Measure | `python3 ~/.autoharness/domains/softdev/scripts/validate_index.py project-index.yaml` | Compare to baseline |
 
 ## Iteration tracking

@@ -1,3 +1,4 @@
+// Package cmd implements the workbuddy CLI commands.
 package cmd
 
 import (
@@ -10,6 +11,7 @@ var rootCmd = &cobra.Command{
 	Long:  "Hub-Spoke architecture: Coordinator polls GitHub Issues and manages label-based state machine; Workers execute agent instances.",
 }
 
+// Execute runs the root command.
 func Execute() error {
 	return rootCmd.Execute()
 }

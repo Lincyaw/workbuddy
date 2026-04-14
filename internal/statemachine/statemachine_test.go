@@ -89,7 +89,7 @@ func newTestStore(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -225,10 +225,12 @@ func TestRetryLimitFailed(t *testing.T) {
 	//   This IS a back-edge. developing→reviewing count becomes 2. 2 >= max_retries=2 → FAILED.
 
 	// Step 1: developing → reviewing (not a back-edge)
-	sm.HandleEvent(ChangeEvent{
+	if err := sm.HandleEvent(ChangeEvent{
 		Type: "label_added", Repo: repo, IssueNum: issueNum,
 		Labels: []string{"workbuddy", "status:developing"}, Detail: "status:reviewing",
-	})
+	}); err != nil {
+		t.Fatalf("HandleEvent step 1: %v", err)
+	}
 	<-dispatch
 	sm.MarkAgentCompleted(repo, issueNum, []string{"workbuddy", "status:reviewing"})
 	sm.ResetDedup()
@@ -236,10 +238,12 @@ func TestRetryLimitFailed(t *testing.T) {
 	// Step 2: reviewing → developing (back-edge: "developing" was a source, but
 	// not yet a target. Actually, let's check: is there any prior transition TO developing?
 	// No — step 1 was TO reviewing. So this is NOT a back-edge.)
-	sm.HandleEvent(ChangeEvent{
+	if err := sm.HandleEvent(ChangeEvent{
 		Type: "label_added", Repo: repo, IssueNum: issueNum,
 		Labels: []string{"workbuddy", "status:reviewing"}, Detail: "status:developing",
-	})
+	}); err != nil {
+		t.Fatalf("HandleEvent step 2: %v", err)
+	}
 	<-dispatch
 	sm.MarkAgentCompleted(repo, issueNum, []string{"workbuddy", "status:developing"})
 	sm.ResetDedup()
@@ -373,20 +377,24 @@ func TestExecutionMutex(t *testing.T) {
 	sm, rec, dispatch := newTestSM(t)
 
 	// First event triggers dispatch (developing → reviewing, dispatches review-agent).
-	sm.HandleEvent(ChangeEvent{
+	if err := sm.HandleEvent(ChangeEvent{
 		Type: "label_added", Repo: "r", IssueNum: 7,
 		Labels: []string{"workbuddy", "status:developing"}, Detail: "status:reviewing",
-	})
+	}); err != nil {
+		t.Fatalf("HandleEvent 1: %v", err)
+	}
 	<-dispatch // drain; agent is now inflight
 
 	// Don't mark complete — agent still running.
 	sm.ResetDedup() // simulate new poll cycle
 
 	// Now try reviewing → developing (which would dispatch dev-agent).
-	sm.HandleEvent(ChangeEvent{
+	if err := sm.HandleEvent(ChangeEvent{
 		Type: "label_added", Repo: "r", IssueNum: 7,
 		Labels: []string{"workbuddy", "status:reviewing"}, Detail: "status:developing",
-	})
+	}); err != nil {
+		t.Fatalf("HandleEvent 2: %v", err)
+	}
 
 	// Should not get a second dispatch.
 	select {
@@ -408,10 +416,12 @@ func TestStuckDetection(t *testing.T) {
 	sm.SetStuckTimeout(1 * time.Millisecond)
 
 	// Trigger a transition.
-	sm.HandleEvent(ChangeEvent{
+	if err := sm.HandleEvent(ChangeEvent{
 		Type: "label_added", Repo: "test/repo", IssueNum: 8,
 		Labels: []string{"workbuddy", "status:developing"}, Detail: "status:reviewing",
-	})
+	}); err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
 	<-dispatch
 
 	// Mark agent completed.

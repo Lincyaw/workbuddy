@@ -80,9 +80,9 @@ port: 8080
 // Test 1: Normal parse — agents, workflows, and global config all load correctly.
 func TestLoadConfig_NormalParse(t *testing.T) {
 	dir := setupConfigDir(t, map[string]string{
-		"config.yaml":               validGlobalConfig,
-		"agents/dev-agent.md":       validAgent,
-		"workflows/feature-dev.md":  validWorkflow,
+		"config.yaml":              validGlobalConfig,
+		"agents/dev-agent.md":      validAgent,
+		"workflows/feature-dev.md": validWorkflow,
 	})
 
 	cfg, warnings, err := LoadConfig(dir)

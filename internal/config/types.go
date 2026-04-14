@@ -12,13 +12,13 @@ type GlobalConfig struct {
 
 // AgentConfig defines an agent loaded from .github/workbuddy/agents/*.md.
 type AgentConfig struct {
-	Name        string         `yaml:"name"`
-	Description string         `yaml:"description"`
-	Triggers    []TriggerRule  `yaml:"triggers"`
-	Role        string         `yaml:"role"`
-	Runtime     string         `yaml:"runtime"` // "claude-code" (default) or "codex"
-	Command     string         `yaml:"command"`
-	Timeout     time.Duration  `yaml:"timeout"`
+	Name        string        `yaml:"name"`
+	Description string        `yaml:"description"`
+	Triggers    []TriggerRule `yaml:"triggers"`
+	Role        string        `yaml:"role"`
+	Runtime     string        `yaml:"runtime"` // "claude-code" (default) or "codex"
+	Command     string        `yaml:"command"`
+	Timeout     time.Duration `yaml:"timeout"`
 }
 
 // TriggerRule defines when an agent is activated.

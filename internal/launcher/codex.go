@@ -16,8 +16,10 @@ import (
 // CodexRuntime implements Runtime for codex (codex exec mode).
 type CodexRuntime struct{}
 
+// Name returns the runtime identifier.
 func (r *CodexRuntime) Name() string { return "codex" }
 
+// Launch executes an agent using the codex runtime.
 func (r *CodexRuntime) Launch(ctx context.Context, agent *config.AgentConfig, task *TaskContext) (*Result, error) {
 	rendered, err := renderCommand(agent.Command, task)
 	if err != nil {

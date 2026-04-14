@@ -21,7 +21,7 @@ func setup(t *testing.T) (*Auditor, string) {
 	if err != nil {
 		t.Fatalf("store.NewStore: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 
 	sessionsDir := filepath.Join(tmpDir, "sessions")
 	aud := NewAuditor(s, sessionsDir)
@@ -72,7 +72,7 @@ func TestCapture_ClaudeCode(t *testing.T) {
 	}
 
 	// Verify: session stored in SQLite.
-	sessions, err := aud.Query(AuditFilter{SessionID: "sess-001"})
+	sessions, err := aud.Query(Filter{SessionID: "sess-001"})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -134,7 +134,7 @@ Result: 3 files modified.
 		t.Fatalf("Capture: %v", err)
 	}
 
-	sessions, err := aud.Query(AuditFilter{SessionID: "sess-002"})
+	sessions, err := aud.Query(Filter{SessionID: "sess-002"})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestCapture_LargeFileTruncation(t *testing.T) {
 		t.Fatalf("Capture: %v", err)
 	}
 
-	sessions, err := aud.Query(AuditFilter{SessionID: "sess-003"})
+	sessions, err := aud.Query(Filter{SessionID: "sess-003"})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -231,7 +231,9 @@ func TestQuery_Filters(t *testing.T) {
 		result := &launcher.Result{ExitCode: 0, Duration: time.Second}
 		// Create a dummy session file so we exercise the path.
 		f := filepath.Join(tmpDir, e.sessionID+".txt")
-		os.WriteFile(f, []byte("log line\n"), 0o644)
+		if err := os.WriteFile(f, []byte("log line\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 		result.SessionPath = f
 		if err := aud.Capture(e.sessionID, e.taskID, "owner/repo", e.issueNum, e.agentName, result); err != nil {
 			t.Fatalf("Capture %s: %v", e.sessionID, err)
@@ -239,7 +241,7 @@ func TestQuery_Filters(t *testing.T) {
 	}
 
 	// Query by session_id.
-	res, err := aud.Query(AuditFilter{SessionID: "s2"})
+	res, err := aud.Query(Filter{SessionID: "s2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +250,7 @@ func TestQuery_Filters(t *testing.T) {
 	}
 
 	// Query by issue_num.
-	res, err = aud.Query(AuditFilter{IssueNum: 10})
+	res, err = aud.Query(Filter{IssueNum: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +259,7 @@ func TestQuery_Filters(t *testing.T) {
 	}
 
 	// Query by agent_name.
-	res, err = aud.Query(AuditFilter{AgentName: "dev-claude"})
+	res, err = aud.Query(Filter{AgentName: "dev-claude"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +268,7 @@ func TestQuery_Filters(t *testing.T) {
 	}
 
 	// Combined filter.
-	res, err = aud.Query(AuditFilter{IssueNum: 20, AgentName: "fix-codex"})
+	res, err = aud.Query(Filter{IssueNum: 20, AgentName: "fix-codex"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +293,7 @@ func TestCapture_NoSessionFile(t *testing.T) {
 		t.Fatalf("Capture: %v", err)
 	}
 
-	sessions, err := aud.Query(AuditFilter{SessionID: "sess-none"})
+	sessions, err := aud.Query(Filter{SessionID: "sess-none"})
 	if err != nil {
 		t.Fatal(err)
 	}

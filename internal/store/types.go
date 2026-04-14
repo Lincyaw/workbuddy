@@ -37,11 +37,11 @@ type WorkerRecord struct {
 
 // TransitionCount tracks retry counts for back-edges.
 type TransitionCount struct {
-	Repo     string
-	IssueNum int
+	Repo      string
+	IssueNum  int
 	FromState string
 	ToState   string
-	Count    int
+	Count     int
 }
 
 // IssueCache stores the last known state of an issue for change detection.

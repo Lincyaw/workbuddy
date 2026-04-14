@@ -1,3 +1,4 @@
+// Package reporter formats and posts agent execution reports to GitHub issues.
 package reporter
 
 import (
@@ -44,7 +45,7 @@ func FormatReport(d ReportData) string {
 	var b strings.Builder
 
 	// Header
-	b.WriteString(fmt.Sprintf("## Agent Report: %s\n\n", d.AgentName))
+	fmt.Fprintf(&b, "## Agent Report: %s\n\n", d.AgentName)
 
 	// Status badge
 	b.WriteString(statusBadge(d.Status))
@@ -53,16 +54,16 @@ func FormatReport(d ReportData) string {
 	// Metadata table
 	b.WriteString("| Field | Value |\n")
 	b.WriteString("|-------|-------|\n")
-	b.WriteString(fmt.Sprintf("| Agent | `%s` |\n", d.AgentName))
-	b.WriteString(fmt.Sprintf("| Duration | %s |\n", formatDuration(d.Duration)))
-	b.WriteString(fmt.Sprintf("| Session ID | `%s` |\n", d.SessionID))
-	b.WriteString(fmt.Sprintf("| Worker | `%s` |\n", d.WorkerID))
-	b.WriteString(fmt.Sprintf("| Retry | %d / %d |\n", d.RetryCount, d.MaxRetries))
+	fmt.Fprintf(&b, "| Agent | `%s` |\n", d.AgentName)
+	fmt.Fprintf(&b, "| Duration | %s |\n", formatDuration(d.Duration))
+	fmt.Fprintf(&b, "| Session ID | `%s` |\n", d.SessionID)
+	fmt.Fprintf(&b, "| Worker | `%s` |\n", d.WorkerID)
+	fmt.Fprintf(&b, "| Retry | %d / %d |\n", d.RetryCount, d.MaxRetries)
 	b.WriteString("\n")
 
 	// PR link if present
 	if d.PRLink != "" {
-		b.WriteString(fmt.Sprintf(":link: **Pull Request**: %s\n\n", d.PRLink))
+		fmt.Fprintf(&b, ":link: **Pull Request**: %s\n\n", d.PRLink)
 	}
 
 	// Error detail for failure/timeout/retry-limit
@@ -83,7 +84,7 @@ func FormatReport(d ReportData) string {
 		lines := strings.Split(d.Output, "\n")
 		if len(lines) > maxOutputLines {
 			b.WriteString("<details>\n")
-			b.WriteString(fmt.Sprintf("<summary>Agent output (%d lines, click to expand)</summary>\n\n", len(lines)))
+			fmt.Fprintf(&b, "<summary>Agent output (%d lines, click to expand)</summary>\n\n", len(lines))
 			b.WriteString("```\n")
 			b.WriteString(d.Output)
 			b.WriteString("\n```\n\n")
@@ -98,7 +99,7 @@ func FormatReport(d ReportData) string {
 
 	// Footer with signature and timestamp
 	b.WriteString("---\n")
-	b.WriteString(fmt.Sprintf("*workbuddy coordinator | %s*\n", time.Now().UTC().Format(time.RFC3339)))
+	fmt.Fprintf(&b, "*workbuddy coordinator | %s*\n", time.Now().UTC().Format(time.RFC3339))
 
 	return b.String()
 }
@@ -108,7 +109,7 @@ func FormatReportAt(d ReportData, ts time.Time) string {
 	var b strings.Builder
 
 	// Header
-	b.WriteString(fmt.Sprintf("## Agent Report: %s\n\n", d.AgentName))
+	fmt.Fprintf(&b, "## Agent Report: %s\n\n", d.AgentName)
 
 	// Status badge
 	b.WriteString(statusBadge(d.Status))
@@ -117,16 +118,16 @@ func FormatReportAt(d ReportData, ts time.Time) string {
 	// Metadata table
 	b.WriteString("| Field | Value |\n")
 	b.WriteString("|-------|-------|\n")
-	b.WriteString(fmt.Sprintf("| Agent | `%s` |\n", d.AgentName))
-	b.WriteString(fmt.Sprintf("| Duration | %s |\n", formatDuration(d.Duration)))
-	b.WriteString(fmt.Sprintf("| Session ID | `%s` |\n", d.SessionID))
-	b.WriteString(fmt.Sprintf("| Worker | `%s` |\n", d.WorkerID))
-	b.WriteString(fmt.Sprintf("| Retry | %d / %d |\n", d.RetryCount, d.MaxRetries))
+	fmt.Fprintf(&b, "| Agent | `%s` |\n", d.AgentName)
+	fmt.Fprintf(&b, "| Duration | %s |\n", formatDuration(d.Duration))
+	fmt.Fprintf(&b, "| Session ID | `%s` |\n", d.SessionID)
+	fmt.Fprintf(&b, "| Worker | `%s` |\n", d.WorkerID)
+	fmt.Fprintf(&b, "| Retry | %d / %d |\n", d.RetryCount, d.MaxRetries)
 	b.WriteString("\n")
 
 	// PR link if present
 	if d.PRLink != "" {
-		b.WriteString(fmt.Sprintf(":link: **Pull Request**: %s\n\n", d.PRLink))
+		fmt.Fprintf(&b, ":link: **Pull Request**: %s\n\n", d.PRLink)
 	}
 
 	// Error detail for failure/timeout/retry-limit
@@ -147,7 +148,7 @@ func FormatReportAt(d ReportData, ts time.Time) string {
 		lines := strings.Split(d.Output, "\n")
 		if len(lines) > maxOutputLines {
 			b.WriteString("<details>\n")
-			b.WriteString(fmt.Sprintf("<summary>Agent output (%d lines, click to expand)</summary>\n\n", len(lines)))
+			fmt.Fprintf(&b, "<summary>Agent output (%d lines, click to expand)</summary>\n\n", len(lines))
 			b.WriteString("```\n")
 			b.WriteString(d.Output)
 			b.WriteString("\n```\n\n")
@@ -162,7 +163,7 @@ func FormatReportAt(d ReportData, ts time.Time) string {
 
 	// Footer with signature and timestamp
 	b.WriteString("---\n")
-	b.WriteString(fmt.Sprintf("*workbuddy coordinator | %s*\n", ts.UTC().Format(time.RFC3339)))
+	fmt.Fprintf(&b, "*workbuddy coordinator | %s*\n", ts.UTC().Format(time.RFC3339))
 
 	return b.String()
 }

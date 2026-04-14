@@ -45,15 +45,18 @@ type serveOpts struct {
 // GHCLIReader implements poller.GHReader using the gh CLI.
 type GHCLIReader struct{}
 
-func (g *GHCLIReader) ListIssues(repo string) ([]poller.Issue, error) {
+// ListIssues returns issues for the given repo via gh CLI.
+func (g *GHCLIReader) ListIssues(_ string) ([]poller.Issue, error) {
 	return nil, fmt.Errorf("gh CLI not available in test mode")
 }
 
-func (g *GHCLIReader) ListPRs(repo string) ([]poller.PR, error) {
+// ListPRs returns pull requests for the given repo via gh CLI.
+func (g *GHCLIReader) ListPRs(_ string) ([]poller.PR, error) {
 	return nil, fmt.Errorf("gh CLI not available in test mode")
 }
 
-func (g *GHCLIReader) CheckRepoAccess(repo string) error {
+// CheckRepoAccess verifies gh CLI access to the given repo.
+func (g *GHCLIReader) CheckRepoAccess(_ string) error {
 	return nil
 }
 
@@ -76,7 +79,7 @@ func init() {
 	rootCmd.AddCommand(serveCmd)
 }
 
-func runServe(cmd *cobra.Command, args []string) error {
+func runServe(cmd *cobra.Command, _ []string) error {
 	opts, err := parseServeFlags(cmd)
 	if err != nil {
 		return err
@@ -137,7 +140,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	if err != nil {
 		return fmt.Errorf("serve: init store: %w", err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	// 3. Recovery: mark running tasks as failed, re-route pending
 	if err := recoverTasks(st); err != nil {
@@ -200,10 +203,10 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 
 	// 5. Start HTTP server (/health only)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"status":"ok","repo":%q}`, cfg.Global.Repo)
+		_, _ = fmt.Fprintf(w, `{"status":"ok","repo":%q}`, cfg.Global.Repo)
 	})
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Global.Port),

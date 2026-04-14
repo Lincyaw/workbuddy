@@ -1,3 +1,4 @@
+// Package eventlog provides structured event logging backed by SQLite.
 package eventlog
 
 import (
@@ -115,7 +116,7 @@ func (l *EventLogger) Query(filter EventFilter) ([]store.Event, error) {
 	if err != nil {
 		return nil, fmt.Errorf("eventlog: query: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []store.Event
 	for rows.Next() {

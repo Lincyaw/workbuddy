@@ -1,3 +1,4 @@
+// Package statemachine evaluates workflow transitions and manages issue state.
 package statemachine
 
 import (

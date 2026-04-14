@@ -17,7 +17,7 @@ func newTestStore(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
-	t.Cleanup(func() { st.Close() })
+	t.Cleanup(func() { _ = st.Close() })
 	return st
 }
 
@@ -60,7 +60,7 @@ func TestRouter_MatchingWorker(t *testing.T) {
 		cancel()
 	}()
 
-	r.Run(ctx, dispatchCh)
+	_ = r.Run(ctx, dispatchCh)
 
 	select {
 	case task := <-taskCh:
@@ -99,7 +99,7 @@ func TestRouter_AgentNotFound(t *testing.T) {
 		cancel()
 	}()
 
-	r.Run(ctx, dispatchCh)
+	_ = r.Run(ctx, dispatchCh)
 
 	select {
 	case <-taskCh:
@@ -141,7 +141,7 @@ func TestRouter_NoMatchingWorker(t *testing.T) {
 		cancel()
 	}()
 
-	r.Run(ctx, dispatchCh)
+	_ = r.Run(ctx, dispatchCh)
 
 	// Task should still be created in store as pending, but not dispatched to channel
 	// (since no worker available and the router just inserts + tries to dispatch)
