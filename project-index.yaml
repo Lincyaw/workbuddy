@@ -283,7 +283,7 @@ requirements:
       Replaces the original JSONL file approach.
     priority: P0
     version: v0.1.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-009-1: 事件存入 SQLite events 表，含 id/ts/type/repo/issue_num/payload 字段"
       - "AC-009-2: 支持的事件类型：poll, transition, dispatch, completed, error, report, retry_limit, worker_registered, worker_offline"
@@ -292,8 +292,10 @@ requirements:
       - "AC-009-5: 并发安全（SQLite WAL 模式）"
       - "AC-009-6: 支持按时间范围 + 事件类型 + repo + issue 查询"
       - "AC-009-7: 单元测试：写入/查询/并发写入 3 种场景"
-    code: []
-    tests: []
+    code:
+      - internal/eventlog/eventlog.go
+    tests:
+      - internal/eventlog/eventlog_test.go
     deps: [REQ-024]
 
   - id: REQ-010
