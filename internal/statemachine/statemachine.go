@@ -169,6 +169,15 @@ func (sm *StateMachine) processWorkflowEvent(wf *config.WorkflowConfig, event Ch
 			event.Repo, event.IssueNum, currentStateName, currentState.Agent)
 		sm.eventlog.Log("state_entry", event.Repo, event.IssueNum,
 			fmt.Sprintf(`{"state":"%s","agent":"%s"}`, currentStateName, currentState.Agent))
+
+		// Clear any stale inflight flag: if the label changed, the previous agent's
+		// work is done (it was the one that changed the label). The worker goroutine
+		// may not have called MarkAgentCompleted yet due to a race condition.
+		issueKey := fmt.Sprintf("%s#%d", event.Repo, event.IssueNum)
+		sm.inflightMu.Lock()
+		delete(sm.inflight, issueKey)
+		sm.inflightMu.Unlock()
+
 		return sm.dispatchAgent(event.Repo, event.IssueNum, currentState.Agent, wf.Name, currentStateName)
 	}
 
