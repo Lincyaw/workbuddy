@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go:*)",
+      "Bash(gh:*)",
+      "Bash(git:*)",
+      "Read",
+      "Glob",
+      "Grep"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.autoharness/core/skill-evolve/scripts/hook_skill_trigger.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
