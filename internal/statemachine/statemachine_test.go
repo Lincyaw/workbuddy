@@ -124,7 +124,7 @@ func TestNormalTransition(t *testing.T) {
 		Detail:   "status:reviewing",
 	}
 
-	if err := sm.HandleEvent(context.Background(),event); err != nil {
+	if err := sm.HandleEvent(context.Background(), event); err != nil {
 		t.Fatalf("HandleEvent: %v", err)
 	}
 
@@ -160,7 +160,7 @@ func TestBackEdgeCount(t *testing.T) {
 		Labels:   []string{"workbuddy", "status:developing"},
 		Detail:   "status:reviewing",
 	}
-	if err := sm.HandleEvent(context.Background(),ev1); err != nil {
+	if err := sm.HandleEvent(context.Background(), ev1); err != nil {
 		t.Fatalf("HandleEvent 1: %v", err)
 	}
 	<-dispatch // drain
@@ -177,7 +177,7 @@ func TestBackEdgeCount(t *testing.T) {
 		Labels:   []string{"workbuddy", "status:reviewing"},
 		Detail:   "status:developing",
 	}
-	if err := sm.HandleEvent(context.Background(),ev2); err != nil {
+	if err := sm.HandleEvent(context.Background(), ev2); err != nil {
 		t.Fatalf("HandleEvent 2: %v", err)
 	}
 
@@ -229,7 +229,7 @@ func TestRetryLimitFailed(t *testing.T) {
 	//   This IS a back-edge. developing→reviewing count becomes 2. 2 >= max_retries=2 → FAILED.
 
 	// Step 1: developing → reviewing (not a back-edge)
-	if err := sm.HandleEvent(context.Background(),ChangeEvent{
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
 		Type: poller.EventLabelAdded, Repo: repo, IssueNum: issueNum,
 		Labels: []string{"workbuddy", "status:developing"}, Detail: "status:reviewing",
 	}); err != nil {
@@ -242,7 +242,7 @@ func TestRetryLimitFailed(t *testing.T) {
 	// Step 2: reviewing → developing (back-edge: "developing" was a source, but
 	// not yet a target. Actually, let's check: is there any prior transition TO developing?
 	// No — step 1 was TO reviewing. So this is NOT a back-edge.)
-	if err := sm.HandleEvent(context.Background(),ChangeEvent{
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
 		Type: poller.EventLabelAdded, Repo: repo, IssueNum: issueNum,
 		Labels: []string{"workbuddy", "status:reviewing"}, Detail: "status:developing",
 	}); err != nil {
@@ -255,7 +255,7 @@ func TestRetryLimitFailed(t *testing.T) {
 	// Step 3: developing → reviewing. "reviewing" already appeared as target in step 1.
 	// This IS a back-edge. Count for developing→reviewing: was 1, increment to 2.
 	// 2 >= max_retries (2) → cycle_limit_reached → transition to failed.
-	err := sm.HandleEvent(context.Background(),ChangeEvent{
+	err := sm.HandleEvent(context.Background(), ChangeEvent{
 		Type: poller.EventLabelAdded, Repo: repo, IssueNum: issueNum,
 		Labels: []string{"workbuddy", "status:developing"}, Detail: "status:reviewing",
 	})
@@ -284,7 +284,7 @@ func TestRetryLimitFailed(t *testing.T) {
 func TestNoMatchSkip(t *testing.T) {
 	sm, rec, _ := newTestSM(t)
 
-	err := sm.HandleEvent(context.Background(),ChangeEvent{
+	err := sm.HandleEvent(context.Background(), ChangeEvent{
 		Type:     poller.EventLabelAdded,
 		Repo:     "test/repo",
 		IssueNum: 99,
@@ -323,7 +323,7 @@ func TestMultiWorkflowReject(t *testing.T) {
 		rec,
 	)
 
-	err := sm.HandleEvent(context.Background(),ChangeEvent{
+	err := sm.HandleEvent(context.Background(), ChangeEvent{
 		Type:     poller.EventLabelAdded,
 		Repo:     "test/repo",
 		IssueNum: 10,
@@ -351,13 +351,13 @@ func TestIdempotent(t *testing.T) {
 		Detail:   "status:reviewing",
 	}
 
-	if err := sm.HandleEvent(context.Background(),event); err != nil {
+	if err := sm.HandleEvent(context.Background(), event); err != nil {
 		t.Fatalf("HandleEvent 1: %v", err)
 	}
 	<-dispatch // drain first dispatch
 
 	// Same event again.
-	if err := sm.HandleEvent(context.Background(),event); err != nil {
+	if err := sm.HandleEvent(context.Background(), event); err != nil {
 		t.Fatalf("HandleEvent 2: %v", err)
 	}
 
@@ -381,7 +381,7 @@ func TestExecutionMutex(t *testing.T) {
 	sm, rec, dispatch := newTestSM(t)
 
 	// First event triggers dispatch (developing → reviewing, dispatches review-agent).
-	if err := sm.HandleEvent(context.Background(),ChangeEvent{
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
 		Type: poller.EventLabelAdded, Repo: "r", IssueNum: 7,
 		Labels: []string{"workbuddy", "status:developing"}, Detail: "status:reviewing",
 	}); err != nil {
@@ -393,7 +393,7 @@ func TestExecutionMutex(t *testing.T) {
 	sm.ResetDedup() // simulate new poll cycle
 
 	// Now try reviewing → developing (which would dispatch dev-agent).
-	if err := sm.HandleEvent(context.Background(),ChangeEvent{
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
 		Type: poller.EventLabelAdded, Repo: "r", IssueNum: 7,
 		Labels: []string{"workbuddy", "status:reviewing"}, Detail: "status:developing",
 	}); err != nil {
@@ -420,7 +420,7 @@ func TestStuckDetection(t *testing.T) {
 	sm.SetStuckTimeout(1 * time.Millisecond)
 
 	// Trigger a transition.
-	if err := sm.HandleEvent(context.Background(),ChangeEvent{
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
 		Type: poller.EventLabelAdded, Repo: "test/repo", IssueNum: 8,
 		Labels: []string{"workbuddy", "status:developing"}, Detail: "status:reviewing",
 	}); err != nil {

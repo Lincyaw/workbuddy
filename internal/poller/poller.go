@@ -27,6 +27,11 @@ const (
 	EventIssueClosed    = "issue_closed"
 )
 
+// ghListLimit is the maximum number of results returned by gh issue/pr list.
+// When a poll returns this many results, the list may be truncated and close
+// detection is skipped to avoid false positives.
+const ghListLimit = 100
+
 // ---------------------------------------------------------------------------
 // Domain types
 // ---------------------------------------------------------------------------
@@ -183,6 +188,12 @@ func (p *Poller) poll(ctx context.Context) {
 	// --- Detect closed/deleted issues ---
 	// Compare cached issue numbers against what we saw this poll.
 	// Issues in cache but not in current results have been closed/deleted.
+	// Skip this check if the result set may be truncated (gh --limit 100),
+	// since issues beyond the first page would be falsely classified as closed.
+	if len(issues) >= ghListLimit {
+		log.Printf("[poller] issue list may be truncated (%d results), skipping close detection", len(issues))
+		return
+	}
 	openIssueNums := make(map[int]bool, len(issues))
 	for _, iss := range issues {
 		openIssueNums[iss.Number] = true

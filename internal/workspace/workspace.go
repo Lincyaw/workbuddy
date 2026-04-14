@@ -58,7 +58,9 @@ func (m *Manager) Create(issueNum int, taskID string) (string, error) {
 }
 
 // Remove cleans up a worktree and its associated branch.
-// Returns a combined error if worktree removal or branch deletion fails.
+// Best-effort: if worktree removal fails but prune succeeds, no error is returned.
+// Returns a combined error only when cleanup truly fails (both remove+prune fail,
+// or branch deletion fails).
 func (m *Manager) Remove(wtPath string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -95,8 +97,13 @@ func (m *Manager) Remove(wtPath string) error {
 		}
 	}
 
-	log.Printf("[workspace] removed worktree %s", wtPath)
-	return errors.Join(errs...)
+	combined := errors.Join(errs...)
+	if combined != nil {
+		log.Printf("[workspace] partial cleanup for worktree %s: %v", wtPath, combined)
+	} else {
+		log.Printf("[workspace] removed worktree %s", wtPath)
+	}
+	return combined
 }
 
 // worktreeBranch returns the branch checked out in the given worktree path.

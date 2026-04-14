@@ -58,6 +58,23 @@ func renderCommand(cmdTemplate string, task *TaskContext) (string, error) {
 	return buf.String(), nil
 }
 
+// renderCommandRaw renders the command template without shell-escaping.
+// Used when the output will be passed via stdin (not sh -c), so escaping
+// would corrupt the content.
+func renderCommandRaw(cmdTemplate string, task *TaskContext) (string, error) {
+	tmpl, err := template.New("command").Funcs(templateFuncMap).Parse(cmdTemplate)
+	if err != nil {
+		return "", fmt.Errorf("launcher: parse command template: %w", err)
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, task); err != nil {
+		return "", fmt.Errorf("launcher: render command template: %w", err)
+	}
+
+	return buf.String(), nil
+}
+
 // promptPattern matches "claude -p ..." or "claude --print -p ..." command prefixes.
 var promptPattern = regexp.MustCompile(`^claude\s+(?:--print\s+)?-p\s+["']`)
 
