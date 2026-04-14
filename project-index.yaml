@@ -116,7 +116,7 @@ requirements:
       In v0.2.0, places tasks in SQLite queue for Worker long-polling.
     priority: P0
     version: v0.1.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-004-1: 收到 State Machine 的派发请求后，从 Config 查找对应 agent 定义获取 role"
       - "AC-004-2: 在 Worker Registry 查找匹配 repo + role + status=online 的 Worker"
@@ -126,8 +126,10 @@ requirements:
       - "AC-004-6: agent 定义不存在时记录错误并跳过，不崩溃"
       - "AC-004-7: 任务记录到 SQLite task_queue 表（含 status/worker_id/timestamps）"
       - "AC-004-8: 单元测试：有匹配 Worker、无匹配 Worker、agent 不存在 3 种场景"
-    code: []
-    tests: []
+    code:
+      - internal/router/router.go
+    tests:
+      - internal/router/router_test.go
     deps: [REQ-001, REQ-003, REQ-023, REQ-024]
 
   - id: REQ-005
@@ -139,7 +141,7 @@ requirements:
       not by Reporter. Reporter only writes comments and reads PR info.
     priority: P0
     version: v0.1.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-005-1: Agent 执行完成后，通过 `gh issue comment` 写入执行摘要"
       - "AC-005-2: 摘要包含：agent 名称、执行状态、耗时、session ID、Worker 信息、重试计数 (N/max)"
@@ -148,8 +150,10 @@ requirements:
       - "AC-005-5: 重试上限触发时，评论中明确说明 'Retry limit reached, needs human intervention'"
       - "AC-005-6: gh 命令失败时重试 1 次，仍失败则记录错误日志"
       - "AC-005-7: 单元测试：验证成功/失败/超时/重试上限 4 种场景的 Markdown 格式"
-    code: []
-    tests: []
+    code:
+      - internal/reporter/reporter.go
+    tests:
+      - internal/reporter/reporter_test.go
     deps: [REQ-004]
 
   # ============================================================
