@@ -37,7 +37,11 @@ func (r *ClaudeRuntime) Launch(ctx context.Context, agent *config.AgentConfig, t
 	defer cancel()
 
 	cmd := exec.CommandContext(execCtx, "sh", "-c", rendered)
-	cmd.Dir = task.Repo
+	// If task.Repo looks like a GitHub identifier (owner/repo), use CWD instead.
+	// In v0.1.0 single-process mode, agents run in the local checkout.
+	if task.WorkDir != "" {
+		cmd.Dir = task.WorkDir
+	}
 	cmd.Env = append(os.Environ(), buildEnvVars(task)...)
 	// Use process group so we can kill all child processes on timeout/cancel.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

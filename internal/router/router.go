@@ -3,8 +3,11 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"os/exec"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/launcher"
@@ -90,11 +93,23 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 		return
 	}
 
+	// Fetch issue details via gh CLI for template rendering.
+	issueCtx := launcher.IssueContext{Number: req.IssueNum}
+	if title, body, labels, err := fetchIssueDetails(req.Repo, req.IssueNum); err != nil {
+		log.Printf("[router] warning: could not fetch issue details: %v", err)
+	} else {
+		issueCtx.Title = title
+		issueCtx.Body = body
+		issueCtx.Labels = labels
+	}
+
+	// Use CWD as WorkDir for v0.1.0 single-process mode.
+	workDir, _ := os.Getwd()
+
 	taskCtx := &launcher.TaskContext{
-		Issue: launcher.IssueContext{
-			Number: req.IssueNum,
-		},
-		Repo: req.Repo,
+		Issue:   issueCtx,
+		Repo:    req.Repo,
+		WorkDir: workDir,
 		Session: launcher.SessionContext{
 			ID: fmt.Sprintf("session-%s", taskID),
 		},
@@ -119,4 +134,37 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 	case <-ctx.Done():
 		return
 	}
+}
+
+// ghIssueDetail matches the JSON output of gh issue view --json.
+type ghIssueDetail struct {
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+	Labels []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+}
+
+// fetchIssueDetails calls gh issue view to get issue title, body, and labels.
+func fetchIssueDetails(repo string, issueNum int) (title, body string, labels []string, err error) {
+	cmd := exec.Command("gh", "issue", "view",
+		fmt.Sprintf("%d", issueNum),
+		"--repo", repo,
+		"--json", "title,body,labels",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", "", nil, fmt.Errorf("gh issue view: %w", err)
+	}
+
+	var detail ghIssueDetail
+	if err := json.Unmarshal(out, &detail); err != nil {
+		return "", "", nil, fmt.Errorf("gh issue view: parse: %w", err)
+	}
+
+	labels = make([]string, len(detail.Labels))
+	for i, l := range detail.Labels {
+		labels[i] = l.Name
+	}
+	return detail.Title, detail.Body, labels, nil
 }

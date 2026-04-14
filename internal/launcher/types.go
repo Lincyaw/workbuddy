@@ -20,6 +20,7 @@ type TaskContext struct {
 	Issue   IssueContext
 	PR      PRContext
 	Repo    string
+	WorkDir string // filesystem path for agent execution; empty = inherit CWD
 	Session SessionContext
 }
 

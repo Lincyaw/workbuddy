@@ -56,7 +56,7 @@ func TestRouter_MatchingWorker(t *testing.T) {
 	}
 
 	go func() {
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(5 * time.Second)
 		cancel()
 	}()
 

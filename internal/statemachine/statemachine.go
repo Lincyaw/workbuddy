@@ -159,6 +159,19 @@ func (sm *StateMachine) processWorkflowEvent(wf *config.WorkflowConfig, event Ch
 		return nil
 	}
 
+	// State-entry detection: dispatch the agent if:
+	// 1. label_added matches the current state's enter_label (label just changed), OR
+	// 2. issue_created and the issue already has a state label with an agent (first seen)
+	stateEntryDetected := (event.Type == "label_added" && event.Detail == currentState.EnterLabel) ||
+		(event.Type == "issue_created")
+	if stateEntryDetected && currentState.Agent != "" {
+		log.Printf("[statemachine] state entry detected: %s#%d entered %q, dispatching agent %q",
+			event.Repo, event.IssueNum, currentStateName, currentState.Agent)
+		sm.eventlog.Log("state_entry", event.Repo, event.IssueNum,
+			fmt.Sprintf(`{"state":"%s","agent":"%s"}`, currentStateName, currentState.Agent))
+		return sm.dispatchAgent(event.Repo, event.IssueNum, currentState.Agent, wf.Name, currentStateName)
+	}
+
 	// Build evaluation context.
 	ctx := &EvalContext{
 		EventType:     event.Type,
@@ -230,25 +243,8 @@ func (sm *StateMachine) processWorkflowEvent(wf *config.WorkflowConfig, event Ch
 
 		// If the target state has an agent, dispatch it.
 		if targetState.Agent != "" {
-			issueKey := fmt.Sprintf("%s#%d", event.Repo, event.IssueNum)
-
-			// Execution mutex: don't dispatch if agent is already running.
-			sm.inflightMu.Lock()
-			if sm.inflight[issueKey] {
-				sm.inflightMu.Unlock()
-				sm.eventlog.Log("dispatch_skipped_inflight", event.Repo, event.IssueNum,
-					fmt.Sprintf(`{"agent":"%s","reason":"agent already running"}`, targetState.Agent))
-				return nil
-			}
-			sm.inflight[issueKey] = true
-			sm.inflightMu.Unlock()
-
-			sm.dispatch <- DispatchRequest{
-				Repo:      event.Repo,
-				IssueNum:  event.IssueNum,
-				AgentName: targetState.Agent,
-				Workflow:  wf.Name,
-				State:     targetStateName,
+			if err := sm.dispatchAgent(event.Repo, event.IssueNum, targetState.Agent, wf.Name, targetStateName); err != nil {
+				return err
 			}
 		}
 
@@ -256,6 +252,31 @@ func (sm *StateMachine) processWorkflowEvent(wf *config.WorkflowConfig, event Ch
 		return nil
 	}
 
+	return nil
+}
+
+// dispatchAgent sends a dispatch request for the given agent, respecting the inflight mutex.
+func (sm *StateMachine) dispatchAgent(repo string, issueNum int, agentName, workflow, state string) error {
+	issueKey := fmt.Sprintf("%s#%d", repo, issueNum)
+
+	// Execution mutex: don't dispatch if agent is already running.
+	sm.inflightMu.Lock()
+	if sm.inflight[issueKey] {
+		sm.inflightMu.Unlock()
+		sm.eventlog.Log("dispatch_skipped_inflight", repo, issueNum,
+			fmt.Sprintf(`{"agent":"%s","reason":"agent already running"}`, agentName))
+		return nil
+	}
+	sm.inflight[issueKey] = true
+	sm.inflightMu.Unlock()
+
+	sm.dispatch <- DispatchRequest{
+		Repo:      repo,
+		IssueNum:  issueNum,
+		AgentName: agentName,
+		Workflow:  workflow,
+		State:     state,
+	}
 	return nil
 }
 

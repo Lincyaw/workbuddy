@@ -22,6 +22,7 @@ type ReportData struct {
 	Output      string // combined stdout/stderr
 	PRLink      string // optional PR URL
 	ErrorDetail string // optional error message
+	SessionURL  string // optional URL to session detail page
 }
 
 // statusBadge returns a Markdown status badge string.
@@ -64,6 +65,11 @@ func FormatReport(d ReportData) string {
 	// PR link if present
 	if d.PRLink != "" {
 		fmt.Fprintf(&b, ":link: **Pull Request**: %s\n\n", d.PRLink)
+	}
+
+	// Session detail link if present
+	if d.SessionURL != "" {
+		fmt.Fprintf(&b, ":mag: **[View Session Details](%s)**\n\n", d.SessionURL)
 	}
 
 	// Error detail for failure/timeout/retry-limit
@@ -128,6 +134,11 @@ func FormatReportAt(d ReportData, ts time.Time) string {
 	// PR link if present
 	if d.PRLink != "" {
 		fmt.Fprintf(&b, ":link: **Pull Request**: %s\n\n", d.PRLink)
+	}
+
+	// Session detail link if present
+	if d.SessionURL != "" {
+		fmt.Fprintf(&b, ":mag: **[View Session Details](%s)**\n\n", d.SessionURL)
 	}
 
 	// Error detail for failure/timeout/retry-limit

@@ -2,10 +2,12 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"sync"
@@ -22,6 +24,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/router"
 	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
+	"github.com/Lincyaw/workbuddy/internal/webui"
 	"github.com/spf13/cobra"
 )
 
@@ -45,18 +48,96 @@ type serveOpts struct {
 // GHCLIReader implements poller.GHReader using the gh CLI.
 type GHCLIReader struct{}
 
+// ghIssueJSON matches the JSON output of gh issue list --json.
+type ghIssueJSON struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	State  string `json:"state"`
+	Body   string `json:"body"`
+	Labels []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+}
+
+// ghPRJSON matches the JSON output of gh pr list --json.
+type ghPRJSON struct {
+	Number      int    `json:"number"`
+	URL         string `json:"url"`
+	HeadRefName string `json:"headRefName"`
+	State       string `json:"state"`
+}
+
 // ListIssues returns issues for the given repo via gh CLI.
-func (g *GHCLIReader) ListIssues(_ string) ([]poller.Issue, error) {
-	return nil, fmt.Errorf("gh CLI not available in test mode")
+func (g *GHCLIReader) ListIssues(repo string) ([]poller.Issue, error) {
+	cmd := exec.Command("gh", "issue", "list",
+		"--repo", repo,
+		"--state", "open",
+		"--limit", "100",
+		"--json", "number,title,state,body,labels",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("gh issue list: %w", err)
+	}
+
+	var raw []ghIssueJSON
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("gh issue list: parse JSON: %w", err)
+	}
+
+	issues := make([]poller.Issue, len(raw))
+	for i, r := range raw {
+		labels := make([]string, len(r.Labels))
+		for j, l := range r.Labels {
+			labels[j] = l.Name
+		}
+		issues[i] = poller.Issue{
+			Number: r.Number,
+			Title:  r.Title,
+			State:  r.State,
+			Labels: labels,
+			Body:   r.Body,
+		}
+	}
+	return issues, nil
 }
 
 // ListPRs returns pull requests for the given repo via gh CLI.
-func (g *GHCLIReader) ListPRs(_ string) ([]poller.PR, error) {
-	return nil, fmt.Errorf("gh CLI not available in test mode")
+func (g *GHCLIReader) ListPRs(repo string) ([]poller.PR, error) {
+	cmd := exec.Command("gh", "pr", "list",
+		"--repo", repo,
+		"--state", "open",
+		"--limit", "100",
+		"--json", "number,url,headRefName,state",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("gh pr list: %w", err)
+	}
+
+	var raw []ghPRJSON
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("gh pr list: parse JSON: %w", err)
+	}
+
+	prs := make([]poller.PR, len(raw))
+	for i, r := range raw {
+		prs[i] = poller.PR{
+			Number: r.Number,
+			URL:    r.URL,
+			Branch: r.HeadRefName,
+			State:  r.State,
+		}
+	}
+	return prs, nil
 }
 
 // CheckRepoAccess verifies gh CLI access to the given repo.
-func (g *GHCLIReader) CheckRepoAccess(_ string) error {
+func (g *GHCLIReader) CheckRepoAccess(repo string) error {
+	cmd := exec.Command("gh", "repo", "view", repo, "--json", "name")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("gh repo view %s: %s: %w", repo, string(out), err)
+	}
 	return nil
 }
 
@@ -176,6 +257,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 
 	// Reporter
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
+	rep.SetBaseURL(fmt.Sprintf("http://localhost:%d", cfg.Global.Port))
 
 	// GH Reader
 	if ghReader == nil {
@@ -201,13 +283,17 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 
 	var wg sync.WaitGroup
 
-	// 5. Start HTTP server (/health only)
+	// 5. Start HTTP server
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = fmt.Fprintf(w, `{"status":"ok","repo":%q}`, cfg.Global.Repo)
 	})
+
+	// Session viewer web UI
+	sessionUI := webui.NewHandler(st)
+	sessionUI.Register(mux)
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Global.Port),
 		Handler: mux,
