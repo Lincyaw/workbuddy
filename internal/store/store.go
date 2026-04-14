@@ -11,6 +11,15 @@ import (
 	_ "modernc.org/sqlite" // sqlite driver
 )
 
+// Task status constants.
+const (
+	TaskStatusPending   = "pending"
+	TaskStatusRunning   = "running"
+	TaskStatusCompleted = "completed"
+	TaskStatusFailed    = "failed"
+	TaskStatusTimeout   = "timeout"
+)
+
 // Store provides typed CRUD access to the workbuddy SQLite database.
 type Store struct {
 	db *sql.DB

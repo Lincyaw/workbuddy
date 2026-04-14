@@ -219,7 +219,7 @@ func validateStates(fname string, wf *WorkflowConfig) error {
 // (a transition where To references a state that appears earlier or the same
 // state, indicating a cycle/retry) but no explicit "failed" state.
 func autoAddFailedState(wf *WorkflowConfig) {
-	if _, exists := wf.States["failed"]; exists {
+	if _, exists := wf.States[StateNameFailed]; exists {
 		return
 	}
 	// Check for back-edges: any transition whose To target is a state that
@@ -240,8 +240,8 @@ func autoAddFailedState(wf *WorkflowConfig) {
 	}
 
 	if hasBackEdge {
-		wf.States["failed"] = &State{
-			EnterLabel: "status:failed",
+		wf.States[StateNameFailed] = &State{
+			EnterLabel: LabelFailed,
 		}
 	}
 }

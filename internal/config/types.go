@@ -2,6 +2,12 @@ package config
 
 import "time"
 
+// Well-known state names.
+const (
+	StateNameFailed  = "failed"
+	LabelFailed      = "status:failed"
+)
+
 // GlobalConfig is the top-level configuration loaded from config.yaml.
 type GlobalConfig struct {
 	Repo         string        `yaml:"repo"`

@@ -205,7 +205,7 @@ func TestServe_RecoverTasks(t *testing.T) {
 		IssueNum:  1,
 		AgentName: "dev-agent",
 		WorkerID:  "worker-1",
-		Status:    "running",
+		Status:    store.TaskStatusRunning,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestServe_RecoverTasks(t *testing.T) {
 		Repo:      "owner/repo",
 		IssueNum:  2,
 		AgentName: "dev-agent",
-		Status:    "pending",
+		Status:    store.TaskStatusPending,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +236,7 @@ func TestServe_RecoverTasks(t *testing.T) {
 	}
 
 	// Verify running task is now failed
-	tasks, err := st2.QueryTasks("failed")
+	tasks, err := st2.QueryTasks(store.TaskStatusFailed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestServe_RecoverTasks(t *testing.T) {
 	}
 
 	// Verify pending task is still pending
-	pending, err := st2.QueryTasks("pending")
+	pending, err := st2.QueryTasks(store.TaskStatusPending)
 	if err != nil {
 		t.Fatal(err)
 	}

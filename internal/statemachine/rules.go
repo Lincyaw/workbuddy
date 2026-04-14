@@ -4,16 +4,30 @@ package statemachine
 import (
 	"log"
 	"strings"
+
+	"github.com/Lincyaw/workbuddy/internal/poller"
+)
+
+// Checks state constants.
+const (
+	ChecksPassed = "passed"
+	ChecksFailed = "failed"
+)
+
+// Event type constants used in condition evaluation.
+const (
+	EventApproved         = "approved"
+	EventChangesRequested = "changes_requested"
 )
 
 // EvalContext holds the data needed to evaluate a transition condition.
 type EvalContext struct {
-	EventType     string   // "label_added", "label_removed", "pr_created", etc.
+	EventType     string   // poller.EventLabelAdded, poller.EventLabelRemoved, poller.EventPRCreated, etc.
 	Labels        []string // current labels on the issue
 	LabelAdded    string   // label that was just added (if event is label_added)
 	LabelRemoved  string   // label that was just removed (if event is label_removed)
 	PRState       string   // "open", "closed", "merged", "" if no PR
-	ChecksState   string   // "passed", "failed", "" if unknown
+	ChecksState   string   // ChecksPassed, ChecksFailed, or "" if unknown
 	LatestComment string   // body of the most recent comment
 }
 
@@ -58,15 +72,15 @@ func EvaluateCondition(when string, ctx *EvalContext) bool {
 	// Simple keyword conditions.
 	switch when {
 	case "pr_opened":
-		return ctx.EventType == "pr_created"
+		return ctx.EventType == poller.EventPRCreated
 	case "checks_passed":
-		return ctx.ChecksState == "passed"
+		return ctx.ChecksState == ChecksPassed
 	case "checks_failed":
-		return ctx.ChecksState == "failed"
+		return ctx.ChecksState == ChecksFailed
 	case "approved":
-		return ctx.EventType == "approved"
+		return ctx.EventType == EventApproved
 	case "changes_requested":
-		return ctx.EventType == "changes_requested"
+		return ctx.EventType == EventChangesRequested
 	default:
 		log.Printf("[statemachine] warning: unknown condition type: %q", when)
 		return false

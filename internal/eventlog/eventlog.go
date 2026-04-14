@@ -12,15 +12,21 @@ import (
 
 // Supported event types.
 const (
-	TypePoll             = "poll"
-	TypeTransition       = "transition"
-	TypeDispatch         = "dispatch"
-	TypeCompleted        = "completed"
-	TypeError            = "error"
-	TypeReport           = "report"
-	TypeRetryLimit       = "retry_limit"
-	TypeWorkerRegistered = "worker_registered"
-	TypeWorkerOffline    = "worker_offline"
+	TypePoll                   = "poll"
+	TypeTransition             = "transition"
+	TypeDispatch               = "dispatch"
+	TypeCompleted              = "completed"
+	TypeError                  = "error"
+	TypeReport                 = "report"
+	TypeRetryLimit             = "retry_limit"
+	TypeWorkerRegistered       = "worker_registered"
+	TypeWorkerOffline          = "worker_offline"
+	TypeStateEntry             = "state_entry"
+	TypeErrorMultiWorkflow     = "error_multi_workflow"
+	TypeCycleLimitReached      = "cycle_limit_reached"
+	TypeTransitionToFailed     = "transition_to_failed"
+	TypeStuckDetected          = "stuck_detected"
+	TypeDispatchSkippedInflight = "dispatch_skipped_inflight"
 )
 
 // AllEventTypes lists every recognised event type.
@@ -34,6 +40,12 @@ var AllEventTypes = []string{
 	TypeRetryLimit,
 	TypeWorkerRegistered,
 	TypeWorkerOffline,
+	TypeStateEntry,
+	TypeErrorMultiWorkflow,
+	TypeCycleLimitReached,
+	TypeTransitionToFailed,
+	TypeStuckDetected,
+	TypeDispatchSkippedInflight,
 }
 
 // EventFilter specifies optional criteria for querying events.
