@@ -131,6 +131,7 @@ Simpler code that maps clearly to requirements > clever abstractions.
 - No global state — pass dependencies explicitly
 - Commit messages: imperative mood, reference issue number when applicable
 - Branch strategy: `main` is protected, feature branches for all work
+- Merge strategy: **squash + rebase only** — keep `main` linear. No merge commits. Merge PRs with `gh pr merge --squash --rebase` (or GitHub UI "Squash and merge"). When updating a feature branch from `main`, use `git rebase main`, not `git merge`.
 - Testing strategy: unit tests use mock/fake for `gh` CLI calls; integration tests use real `gh` against a test repo
 - File naming: Go standard — lowercase, underscore separated, `_test.go` suffix for tests
 - Agent config: `command` field MUST include routing instructions (gh issue edit for label changes)
