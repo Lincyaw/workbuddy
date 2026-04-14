@@ -113,7 +113,9 @@ func TestMultipleWorktrees(t *testing.T) {
 	}
 
 	// Changes in one worktree should not affect the other.
-	os.WriteFile(filepath.Join(wt1, "file1.txt"), []byte("hello"), 0644)
+	if err := os.WriteFile(filepath.Join(wt1, "file1.txt"), []byte("hello"), 0644); err != nil {
+		t.Fatalf("write file in wt1: %v", err)
+	}
 	if _, err := os.Stat(filepath.Join(wt2, "file1.txt")); !os.IsNotExist(err) {
 		t.Error("file created in wt1 should not appear in wt2")
 	}

@@ -61,24 +61,44 @@ func renderCommand(cmdTemplate string, task *TaskContext) (string, error) {
 // promptPattern matches "claude -p ..." or "claude --print -p ..." command prefixes.
 var promptPattern = regexp.MustCompile(`^claude\s+(?:--print\s+)?-p\s+["']`)
 
-// extractPrompt detects a "claude -p '...'" or 'claude -p "..."' command and
-// extracts the prompt text. This allows passing the prompt via stdin instead of
-// sh -c, avoiding shell quoting issues with issue bodies that contain quotes,
-// backticks, or code blocks.
-func extractPrompt(rendered string) (string, bool) {
+// extractPrompt detects a "claude [flags] -p '...'" command and extracts the
+// prompt text along with any extra flags before -p (e.g., --print). This allows
+// passing the prompt via stdin instead of sh -c, avoiding shell quoting issues
+// with issue bodies that contain quotes, backticks, or code blocks.
+func extractPrompt(rendered string) (prompt string, extraArgs []string, ok bool) {
 	rendered = strings.TrimSpace(rendered)
 	if !promptPattern.MatchString(rendered) {
-		return "", false
+		return "", nil, false
 	}
-	idx := strings.IndexAny(rendered, `"'`)
-	if idx < 0 {
-		return "", false
+
+	// Parse flags between "claude" and the quoted prompt.
+	// The regex guarantees the string starts with "claude" followed by
+	// optional flags and then -p <quote>.
+	afterClaude := strings.TrimSpace(rendered[len("claude"):])
+	var args []string
+	for {
+		if strings.HasPrefix(afterClaude, "-p ") || strings.HasPrefix(afterClaude, "-p\t") {
+			afterClaude = strings.TrimSpace(afterClaude[2:])
+			break
+		}
+		// Consume the next whitespace-delimited token as an extra arg.
+		spaceIdx := strings.IndexAny(afterClaude, " \t")
+		if spaceIdx < 0 {
+			return "", nil, false
+		}
+		args = append(args, afterClaude[:spaceIdx])
+		afterClaude = strings.TrimSpace(afterClaude[spaceIdx:])
 	}
-	quote := rendered[idx]
-	rest := rendered[idx+1:]
+
+	// afterClaude now starts with the opening quote.
+	if len(afterClaude) == 0 {
+		return "", nil, false
+	}
+	quote := afterClaude[0]
+	rest := afterClaude[1:]
 	lastIdx := strings.LastIndexByte(rest, quote)
 	if lastIdx < 0 {
-		return "", false
+		return "", nil, false
 	}
-	return rest[:lastIdx], true
+	return rest[:lastIdx], args, true
 }

@@ -528,7 +528,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 		task.TaskID, task.AgentName, task.Repo, task.IssueNum)
 
 	// Add claim reaction (eyes) to signal this issue is being worked on.
-	addClaimReaction(task.Repo, task.IssueNum, task.AgentName)
+	addClaimReaction(taskCtx, task.Repo, task.IssueNum, task.AgentName)
 
 	// Post "Agent Started" comment with session link.
 	sessionID := task.Context.Session.ID
@@ -591,12 +591,15 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, fetchCachedLabels(deps.store, task.Repo, task.IssueNum))
 }
 
-// addClaimReaction adds an eyes (👀) reaction to the issue to signal an agent claimed it.
-func addClaimReaction(repo string, issueNum int, agentName string) {
-	cmd := exec.Command("gh", "api",
+// addClaimReaction adds an eyes reaction to the issue to signal an agent claimed it.
+func addClaimReaction(ctx context.Context, repo string, issueNum int, agentName string) {
+	cmd := exec.CommandContext(ctx, "gh", "api",
 		fmt.Sprintf("repos/%s/issues/%d/reactions", repo, issueNum),
 		"-f", "content=eyes", "--silent")
 	if out, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() != nil {
+			return // cancelled, don't log
+		}
 		log.Printf("[worker] failed to add claim reaction for %s on %s#%d: %v (output: %s)",
 			agentName, repo, issueNum, err, string(out))
 	}

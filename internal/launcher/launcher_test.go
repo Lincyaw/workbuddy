@@ -419,10 +419,11 @@ func TestParseMeta(t *testing.T) {
 // Test: extractPrompt detects claude -p commands and extracts the prompt
 func TestExtractPrompt(t *testing.T) {
 	tests := []struct {
-		name      string
-		input     string
-		wantOK    bool
+		name       string
+		input      string
+		wantOK     bool
 		wantPrompt string
+		wantArgs   []string
 	}{
 		{
 			name:       "double quoted",
@@ -455,6 +456,13 @@ func TestExtractPrompt(t *testing.T) {
 			wantPrompt: "run `echo hello`",
 		},
 		{
+			name:       "with --print flag preserved",
+			input:      `claude --print -p "hello world"`,
+			wantOK:     true,
+			wantPrompt: "hello world",
+			wantArgs:   []string{"--print"},
+		},
+		{
 			name:   "not a claude command",
 			input:  `echo "hello world"`,
 			wantOK: false,
@@ -468,12 +476,22 @@ func TestExtractPrompt(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			prompt, ok := extractPrompt(tt.input)
+			prompt, args, ok := extractPrompt(tt.input)
 			if ok != tt.wantOK {
 				t.Fatalf("extractPrompt ok=%v, want %v", ok, tt.wantOK)
 			}
 			if ok && prompt != tt.wantPrompt {
 				t.Errorf("extractPrompt prompt=%q, want %q", prompt, tt.wantPrompt)
+			}
+			if ok && len(tt.wantArgs) > 0 {
+				if len(args) != len(tt.wantArgs) {
+					t.Fatalf("extractPrompt args=%v, want %v", args, tt.wantArgs)
+				}
+				for i, a := range args {
+					if a != tt.wantArgs[i] {
+						t.Errorf("extractPrompt args[%d]=%q, want %q", i, a, tt.wantArgs[i])
+					}
+				}
 			}
 		})
 	}

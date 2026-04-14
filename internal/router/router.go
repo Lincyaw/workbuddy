@@ -153,6 +153,12 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 			log.Printf("[router] failed to update task status: %v", err)
 		}
 	case <-ctx.Done():
+		// Clean up worktree that was created but never dispatched.
+		if worktreePath != "" && r.wsMgr != nil {
+			if err := r.wsMgr.Remove(worktreePath); err != nil {
+				log.Printf("[router] failed to clean up worktree on cancellation: %v", err)
+			}
+		}
 		return
 	}
 }

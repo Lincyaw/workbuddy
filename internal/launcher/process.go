@@ -42,9 +42,11 @@ func launchProcess(
 
 	// If the command is "claude -p '...'" or similar, extract the prompt and
 	// pass it via stdin to avoid shell quoting issues with issue bodies.
+	// Preserve any extra flags (e.g., --print) from the original command.
 	var cmd *exec.Cmd
-	if prompt, ok := extractPrompt(rendered); ok {
-		cmd = exec.CommandContext(execCtx, "claude", "-p")
+	if prompt, args, ok := extractPrompt(rendered); ok {
+		cmdArgs := append(args, "-p")
+		cmd = exec.CommandContext(execCtx, "claude", cmdArgs...)
 		cmd.Stdin = strings.NewReader(prompt)
 	} else {
 		cmd = exec.CommandContext(execCtx, "sh", "-c", rendered)
