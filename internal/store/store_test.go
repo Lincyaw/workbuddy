@@ -322,6 +322,72 @@ func TestRestartRetention(t *testing.T) {
 	}
 }
 
+// TestListCachedIssueNums verifies filtering of issues vs PRs.
+func TestListCachedIssueNums(t *testing.T) {
+	s := newTestStore(t)
+
+	// Insert issues and PRs into cache.
+	for _, ic := range []IssueCache{
+		{Repo: "org/repo", IssueNum: 1, Labels: `["bug"]`, State: "open"},
+		{Repo: "org/repo", IssueNum: 2, Labels: `["feature"]`, State: "open"},
+		{Repo: "org/repo", IssueNum: 10, Labels: "", State: "pr:open"},   // PR — should be excluded
+		{Repo: "org/repo", IssueNum: 11, Labels: "", State: "pr:merged"}, // PR — should be excluded
+		{Repo: "other/repo", IssueNum: 3, Labels: `[]`, State: "open"},   // different repo
+	} {
+		if err := s.UpsertIssueCache(ic); err != nil {
+			t.Fatalf("UpsertIssueCache: %v", err)
+		}
+	}
+
+	nums, err := s.ListCachedIssueNums("org/repo")
+	if err != nil {
+		t.Fatalf("ListCachedIssueNums: %v", err)
+	}
+	if len(nums) != 2 {
+		t.Fatalf("expected 2 issue nums, got %d: %v", len(nums), nums)
+	}
+	numSet := map[int]bool{}
+	for _, n := range nums {
+		numSet[n] = true
+	}
+	if !numSet[1] || !numSet[2] {
+		t.Errorf("expected issues 1 and 2, got %v", nums)
+	}
+}
+
+// TestDeleteIssueCache verifies cache deletion.
+func TestDeleteIssueCache(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.UpsertIssueCache(IssueCache{Repo: "org/repo", IssueNum: 5, Labels: `["bug"]`, State: "open"}); err != nil {
+		t.Fatal(err)
+	}
+	// Verify it exists.
+	ic, _ := s.QueryIssueCache("org/repo", 5)
+	if ic == nil {
+		t.Fatal("expected cached issue to exist")
+	}
+
+	// Delete it.
+	if err := s.DeleteIssueCache("org/repo", 5); err != nil {
+		t.Fatalf("DeleteIssueCache: %v", err)
+	}
+
+	// Verify it's gone.
+	ic, err := s.QueryIssueCache("org/repo", 5)
+	if err != nil {
+		t.Fatalf("QueryIssueCache after delete: %v", err)
+	}
+	if ic != nil {
+		t.Fatalf("expected nil after delete, got %+v", ic)
+	}
+
+	// Deleting a non-existent entry should not error.
+	if err := s.DeleteIssueCache("org/repo", 999); err != nil {
+		t.Fatalf("DeleteIssueCache non-existent: %v", err)
+	}
+}
+
 // TestWALMode verifies that WAL mode is enabled.
 func TestWALMode(t *testing.T) {
 	s := newTestStore(t)

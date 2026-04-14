@@ -37,6 +37,50 @@ const (
 	agentShutdownWait   = 60 * time.Second
 )
 
+// RunningTasks is a thread-safe registry of cancel functions for running agent tasks.
+type RunningTasks struct {
+	mu    sync.Mutex
+	tasks map[string]context.CancelFunc // key: "repo#issueNum"
+}
+
+// NewRunningTasks creates a new RunningTasks registry.
+func NewRunningTasks() *RunningTasks {
+	return &RunningTasks{tasks: make(map[string]context.CancelFunc)}
+}
+
+func runningTaskKey(repo string, issue int) string {
+	return fmt.Sprintf("%s#%d", repo, issue)
+}
+
+// Register stores a cancel function for a running task.
+func (rt *RunningTasks) Register(repo string, issue int, cancel context.CancelFunc) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	rt.tasks[runningTaskKey(repo, issue)] = cancel
+}
+
+// Cancel cancels the running task for the given repo+issue and returns true,
+// or returns false if no such task is running.
+func (rt *RunningTasks) Cancel(repo string, issue int) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	key := runningTaskKey(repo, issue)
+	cancel, ok := rt.tasks[key]
+	if !ok {
+		return false
+	}
+	cancel()
+	delete(rt.tasks, key)
+	return true
+}
+
+// Remove removes the entry for a completed task (without cancelling).
+func (rt *RunningTasks) Remove(repo string, issue int) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	delete(rt.tasks, runningTaskKey(repo, issue))
+}
+
 // serveOpts holds parsed CLI flags for the serve command.
 type serveOpts struct {
 	port         int
@@ -322,6 +366,9 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 		}
 	}()
 
+	// Running tasks registry for cancellation on issue close.
+	runningTasks := NewRunningTasks()
+
 	// 7. Start StateMachine event processor (reads from poller events)
 	wg.Add(1)
 	go func() {
@@ -333,6 +380,13 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 			case ev, ok := <-p.Events():
 				if !ok {
 					return
+				}
+				// Handle issue closure: cancel running agent and skip state machine.
+				if ev.Type == poller.EventIssueClosed {
+					if cancelled := runningTasks.Cancel(ev.Repo, ev.IssueNum); cancelled {
+						log.Printf("[serve] cancelled agent for closed issue %s#%d", ev.Repo, ev.IssueNum)
+					}
+					continue // don't pass to state machine
 				}
 				smEvent := statemachine.ChangeEvent{
 					Type:     ev.Type,
@@ -359,14 +413,15 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 
 	// 9. Start embedded Worker goroutine
 	deps := &workerDeps{
-		launcher: lnch,
-		auditor:  auditor,
-		reporter: rep,
-		store:    st,
-		sm:       sm,
-		workerID: workerID,
-		cfg:      cfg,
-		wsMgr:    wsMgr,
+		launcher:     lnch,
+		auditor:      auditor,
+		reporter:     rep,
+		store:        st,
+		sm:           sm,
+		workerID:     workerID,
+		cfg:          cfg,
+		wsMgr:        wsMgr,
+		runningTasks: runningTasks,
 	}
 	workerDone := make(chan struct{})
 	wg.Add(1)
@@ -423,14 +478,15 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 
 // workerDeps bundles the dependencies for the embedded worker, avoiding parameter sprawl.
 type workerDeps struct {
-	launcher *launcher.Launcher
-	auditor  *audit.Auditor
-	reporter *reporter.Reporter
-	store    *store.Store
-	sm       *statemachine.StateMachine
-	workerID string
-	cfg      *config.FullConfig
-	wsMgr    *workspace.Manager
+	launcher     *launcher.Launcher
+	auditor      *audit.Auditor
+	reporter     *reporter.Reporter
+	store        *store.Store
+	sm           *statemachine.StateMachine
+	workerID     string
+	cfg          *config.FullConfig
+	wsMgr        *workspace.Manager
+	runningTasks *RunningTasks
 }
 
 // runEmbeddedWorker runs the embedded worker loop.
@@ -450,6 +506,16 @@ func runEmbeddedWorker(ctx context.Context, taskCh <-chan router.WorkerTask, dep
 
 // executeTask runs a single agent task and handles reporting/auditing.
 func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) {
+	// Create a per-task context that can be cancelled independently (e.g., on issue close).
+	taskCtx, taskCancel := context.WithCancel(ctx)
+	defer taskCancel()
+
+	// Register for cancellation on issue close.
+	if deps.runningTasks != nil {
+		deps.runningTasks.Register(task.Repo, task.IssueNum, taskCancel)
+		defer deps.runningTasks.Remove(task.Repo, task.IssueNum)
+	}
+
 	// Clean up worktree after task completes.
 	if task.WorktreePath != "" && deps.wsMgr != nil {
 		defer func() {
@@ -470,7 +536,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 		log.Printf("[worker] report started failed: %v", err)
 	}
 
-	result, err := deps.launcher.Launch(ctx, task.Agent, task.Context)
+	result, err := deps.launcher.Launch(taskCtx, task.Agent, task.Context)
 	if err != nil {
 		log.Printf("[worker] agent %s failed: %v", task.AgentName, err)
 		if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
