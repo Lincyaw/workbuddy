@@ -95,16 +95,51 @@ type serveOpts struct {
 	dbPath           string
 }
 
-// issueTaskLocks provides reusable per-issue mutexes so only one task per
-// repo+issue can execute at a time.
+// issueTaskLocks serializes tasks for the same repo+issue. Entries are
+// ref-counted and evicted once no goroutine holds or waits on them so the
+// map cannot grow without bound over a long-running serve process.
 type issueTaskLocks struct {
-	locks sync.Map // key: "repo#issueNum" -> *sync.Mutex
+	mu    sync.Mutex
+	locks map[string]*issueTaskLock
 }
 
-func (l *issueTaskLocks) For(repo string, issue int) *sync.Mutex {
+type issueTaskLock struct {
+	mu     sync.Mutex
+	parent *issueTaskLocks
+	key    string
+	refs   int
+}
+
+func (l *issueTaskLocks) Acquire(repo string, issue int) *issueTaskLock {
 	key := runningTaskKey(repo, issue)
-	lock, _ := l.locks.LoadOrStore(key, &sync.Mutex{})
-	return lock.(*sync.Mutex)
+
+	l.mu.Lock()
+	if l.locks == nil {
+		l.locks = make(map[string]*issueTaskLock)
+	}
+	lk, ok := l.locks[key]
+	if !ok {
+		lk = &issueTaskLock{parent: l, key: key}
+		l.locks[key] = lk
+	}
+	lk.refs++
+	l.mu.Unlock()
+
+	lk.mu.Lock()
+	return lk
+}
+
+func (l *issueTaskLock) Release() {
+	l.mu.Unlock()
+
+	l.parent.mu.Lock()
+	l.refs--
+	if l.refs == 0 {
+		if current, ok := l.parent.locks[l.key]; ok && current == l {
+			delete(l.parent.locks, l.key)
+		}
+	}
+	l.parent.mu.Unlock()
 }
 
 // closedIssues tracks issues that were closed while same-issue work was still
@@ -235,7 +270,7 @@ Worker in the same process. Communication is via Go channels.`,
 func init() {
 	serveCmd.Flags().IntP("port", "p", defaultPort, "HTTP server port")
 	serveCmd.Flags().Duration("poll-interval", defaultPollInterval, "GitHub poll interval")
-	serveCmd.Flags().Int("max-parallel-tasks", defaultMaxParallelTasks, "Maximum number of embedded worker tasks to run in parallel across issues")
+	serveCmd.Flags().Int("max-parallel-tasks", 0, "Maximum number of embedded worker tasks to run in parallel across issues (0 = auto, min(NumCPU, 4))")
 	serveCmd.Flags().StringSlice("roles", []string{"dev", "test", "review"}, "Worker roles")
 	serveCmd.Flags().String("config-dir", ".github/workbuddy", "Configuration directory")
 	serveCmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "SQLite database path")
@@ -422,7 +457,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 
 	// Running tasks registry for cancellation on issue close.
 	runningTasks := NewRunningTasks()
-	closedIssues := &closedIssues{}
+	closedTracker := &closedIssues{}
 
 	// 7. Start StateMachine event processor (reads from poller events)
 	wg.Add(1)
@@ -438,13 +473,13 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 				}
 				// Handle issue closure: cancel running agent and skip state machine.
 				if ev.Type == poller.EventIssueClosed {
-					closedIssues.MarkClosed(ev.Repo, ev.IssueNum)
+					closedTracker.MarkClosed(ev.Repo, ev.IssueNum)
 					if cancelled := runningTasks.Cancel(ev.Repo, ev.IssueNum); cancelled {
 						log.Printf("[serve] cancelled agent for closed issue %s#%d", ev.Repo, ev.IssueNum)
 					}
 					continue // don't pass to state machine
 				}
-				closedIssues.MarkOpen(ev.Repo, ev.IssueNum)
+				closedTracker.MarkOpen(ev.Repo, ev.IssueNum)
 				smEvent := statemachine.ChangeEvent{
 					Type:     ev.Type,
 					Repo:     ev.Repo,
@@ -479,7 +514,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 		cfg:          cfg,
 		wsMgr:        wsMgr,
 		runningTasks: runningTasks,
-		closedIssues: closedIssues,
+		closedIssues: closedTracker,
 		sessionsDir:  sessionsDir,
 	}
 	workerDone := make(chan struct{})
@@ -578,22 +613,21 @@ func runEmbeddedWorker(ctx context.Context, taskCh <-chan router.WorkerTask, dep
 				wg.Wait()
 				return
 			}
+			// Acquire the global slot before spawning so taskCh provides natural
+			// backpressure and in-flight goroutines are capped at maxParallelTasks.
+			select {
+			case parallelLimiter <- struct{}{}:
+			case <-ctx.Done():
+				wg.Wait()
+				return
+			}
 			wg.Add(1)
 			go func(task router.WorkerTask) {
 				defer wg.Done()
-
-				issueLock := issueLocks.For(task.Repo, task.IssueNum)
-				issueLock.Lock()
-				defer issueLock.Unlock()
-
-				// Take the global slot after the per-issue lock so queued work for
-				// one issue does not consume the shared parallelism budget.
-				select {
-				case parallelLimiter <- struct{}{}:
-				case <-ctx.Done():
-					return
-				}
 				defer func() { <-parallelLimiter }()
+
+				issueLock := issueLocks.Acquire(task.Repo, task.IssueNum)
+				defer issueLock.Release()
 
 				if deps.closedIssues != nil && deps.closedIssues.IsClosed(task.Repo, task.IssueNum) {
 					skipTaskForClosedIssue(task, deps)
@@ -615,7 +649,7 @@ func skipTaskForClosedIssue(task router.WorkerTask, deps *workerDeps) {
 			log.Printf("[worker] failed to update skipped task status: %v", err)
 		}
 	}
-	if deps.sm != nil {
+	if deps.sm != nil && deps.store != nil {
 		deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, fetchCachedLabels(deps.store, task.Repo, task.IssueNum))
 	}
 }

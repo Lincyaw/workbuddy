@@ -56,7 +56,9 @@ prompt: |
      go build ./...
      go vet ./...
      go test ./... -count=1
-     If any fail, request-changes. Otherwise proceed.
+     If any fail, treat it as a BLOCKING finding and go to the "If build/vet/tests fail
+     OR BLOCKING finding" branch under "When done" — do NOT attempt a formal
+     request-changes review (GitHub refuses it on self-authored PRs). Otherwise proceed.
   3. Read the PR diff against project conventions.
   4. Classify every finding as BLOCKING or non-blocking:
      - BLOCKING: correctness bugs, security issues, data loss risks,
