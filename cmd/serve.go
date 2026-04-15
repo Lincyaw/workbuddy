@@ -473,6 +473,15 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	dispatchCh := make(chan statemachine.DispatchRequest, dispatchChanSize)
 	taskCh := make(chan router.WorkerTask, taskChanSize)
 
+	// GH Reader (must be initialized before components that use it)
+	if ghReader == nil {
+		ghReader = &GHCLIReader{}
+	}
+	var labelReader issueLabelReader
+	if reader, ok := ghReader.(issueLabelReader); ok {
+		labelReader = reader
+	}
+
 	// State machine
 	sm := statemachine.NewStateMachine(cfg.Workflows, st, dispatchCh, evlog)
 	depResolver := dependency.NewResolver(st, ghReader, evlog)
@@ -493,15 +502,6 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	// Reporter
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
 	rep.SetBaseURL(fmt.Sprintf("http://localhost:%d", cfg.Global.Port))
-
-	// GH Reader
-	if ghReader == nil {
-		ghReader = &GHCLIReader{}
-	}
-	var labelReader issueLabelReader
-	if reader, ok := ghReader.(issueLabelReader); ok {
-		labelReader = reader
-	}
 
 	// Poller
 	p := poller.NewPoller(ghReader, st, cfg.Global.Repo, cfg.Global.PollInterval)
@@ -841,6 +841,13 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	log.Printf("[worker] executing task %s: agent=%s issue=%s#%d",
 		task.TaskID, task.AgentName, task.Repo, task.IssueNum)
 
+	// Mark task as running now that the worker has actually started it.
+	if deps.store != nil {
+		if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusRunning); err != nil {
+			log.Printf("[worker] failed to update task status to running: %v", err)
+		}
+	}
+
 	// Add claim reaction (eyes) to signal this issue is being worked on.
 	addClaimReaction(taskCtx, task.Repo, task.IssueNum, task.AgentName)
 
@@ -868,6 +875,15 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 			log.Printf("[worker] failed to update task status: %v", err)
 		}
 		deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, fetchCachedLabels(deps.store, task.Repo, task.IssueNum))
+		go func() {
+			time.Sleep(60 * time.Second)
+			if deps.closedIssues != nil && deps.closedIssues.IsClosed(task.Repo, task.IssueNum) {
+				return
+			}
+			if err := deps.sm.DispatchAgent(context.Background(), task.Repo, task.IssueNum, task.AgentName, task.Workflow, task.State); err != nil {
+				log.Printf("[worker] redispatch after start failure for %s#%d: %v", task.Repo, task.IssueNum, err)
+			}
+		}()
 		return
 	}
 	defer func() { _ = session.Close() }()
@@ -943,6 +959,15 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 				log.Printf("[worker] failed to update task status: %v", err)
 			}
 			deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, completionLabels)
+			go func() {
+				time.Sleep(60 * time.Second)
+				if deps.closedIssues != nil && deps.closedIssues.IsClosed(task.Repo, task.IssueNum) {
+					return
+				}
+				if err := deps.sm.DispatchAgent(context.Background(), task.Repo, task.IssueNum, task.AgentName, task.Workflow, task.State); err != nil {
+					log.Printf("[worker] redispatch after run failure for %s#%d: %v", task.Repo, task.IssueNum, err)
+				}
+			}()
 			return
 		}
 	}

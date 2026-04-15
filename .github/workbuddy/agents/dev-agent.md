@@ -9,7 +9,7 @@ runtime: codex
 policy:
   sandbox: danger-full-access
   approval: never
-  timeout: 30m
+  timeout: 60m
 prompt: |
   You are the dev agent for repo {{.Repo}}, working on issue #{{.Issue.Number}}.
 

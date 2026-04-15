@@ -175,9 +175,9 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 
 	select {
 	case r.taskChan <- task:
-		if err := r.store.UpdateTaskStatus(taskID, store.TaskStatusRunning); err != nil {
-			log.Printf("[router] failed to update task status: %v", err)
-		}
+		// Task status is updated to running by the worker when it actually
+		// starts executing, so pending tasks queued in the channel buffer
+		// don't appear as running.
 	case <-ctx.Done():
 		// Clean up worktree that was created but never dispatched.
 		if worktreePath != "" && r.wsMgr != nil {

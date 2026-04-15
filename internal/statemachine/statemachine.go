@@ -184,7 +184,7 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 		delete(sm.inflight, issueKey)
 		sm.inflightMu.Unlock()
 
-		return sm.dispatchAgent(ctx, event.Repo, event.IssueNum, currentState.Agent, wf.Name, currentStateName)
+		return sm.DispatchAgent(ctx, event.Repo, event.IssueNum, currentState.Agent, wf.Name, currentStateName)
 	}
 
 	// Build evaluation context.
@@ -256,7 +256,7 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 
 		// If the target state has an agent, dispatch it.
 		if targetState.Agent != "" {
-			if err := sm.dispatchAgent(ctx, event.Repo, event.IssueNum, targetState.Agent, wf.Name, targetStateName); err != nil {
+			if err := sm.DispatchAgent(ctx, event.Repo, event.IssueNum, targetState.Agent, wf.Name, targetStateName); err != nil {
 				return err
 			}
 		}
@@ -268,8 +268,8 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 	return nil
 }
 
-// dispatchAgent sends a dispatch request for the given agent, respecting the inflight mutex.
-func (sm *StateMachine) dispatchAgent(ctx context.Context, repo string, issueNum int, agentName, workflow, state string) error {
+// DispatchAgent sends a dispatch request for the given agent, respecting the inflight mutex.
+func (sm *StateMachine) DispatchAgent(ctx context.Context, repo string, issueNum int, agentName, workflow, state string) error {
 	issueKey := fmt.Sprintf("%s#%d", repo, issueNum)
 
 	depState, err := sm.store.QueryIssueDependencyState(repo, issueNum)

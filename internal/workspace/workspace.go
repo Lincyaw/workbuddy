@@ -200,6 +200,7 @@ func worktreeBranch(repoDir, wtPath string) string {
 }
 
 // Prune cleans up orphaned worktrees left behind by crashes or unclean shutdowns.
+// It only removes directories that are NOT still registered as valid git worktrees.
 func (m *Manager) Prune() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -209,7 +210,10 @@ func (m *Manager) Prune() {
 	cmd.Dir = m.baseDir
 	_ = cmd.Run()
 
-	// Remove any leftover directories under worktreeDir.
+	// Build a set of valid worktree paths.
+	validWorktrees := m.listWorktreePaths()
+
+	// Remove any leftover directories under worktreeDir that are no longer valid worktrees.
 	wtDir := filepath.Join(m.baseDir, worktreeDir)
 	entries, err := os.ReadDir(wtDir)
 	if err != nil {
@@ -218,10 +222,36 @@ func (m *Manager) Prune() {
 	for _, entry := range entries {
 		if entry.IsDir() {
 			path := filepath.Join(wtDir, entry.Name())
+			if validWorktrees[path] {
+				log.Printf("[workspace] prune: keeping active worktree directory %s", path)
+				continue
+			}
 			log.Printf("[workspace] prune: removing orphaned worktree directory %s", path)
 			_ = os.RemoveAll(path)
 		}
 	}
+}
+
+// listWorktreePaths returns the set of filesystem paths currently registered
+// as git worktrees (including the main repo directory).
+func (m *Manager) listWorktreePaths() map[string]bool {
+	paths := make(map[string]bool)
+	cmd := exec.Command("git", "worktree", "list", "--porcelain")
+	cmd.Dir = m.baseDir
+	out, err := cmd.Output()
+	if err != nil {
+		return paths
+	}
+
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "worktree ") {
+			path := strings.TrimPrefix(line, "worktree ")
+			absPath, _ := filepath.Abs(path)
+			paths[absPath] = true
+		}
+	}
+	return paths
 }
 
 // shortID returns first 8 chars of a UUID/task ID for readable directory names.

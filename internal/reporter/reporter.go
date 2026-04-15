@@ -26,12 +26,14 @@ type GHCommentWriter interface {
 type GHCLIWriter struct{}
 
 // WriteComment posts a comment to the given issue via gh issue comment.
+// The body is passed via stdin using --body-file - to avoid "argument list too long".
 func (g *GHCLIWriter) WriteComment(repo string, issueNum int, body string) error {
 	cmd := exec.Command("gh", "issue", "comment",
 		fmt.Sprintf("%d", issueNum),
 		"--repo", repo,
-		"--body", body,
+		"--body-file", "-",
 	)
+	cmd.Stdin = strings.NewReader(body)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("reporter: gh issue comment: %s: %w", string(output), err)

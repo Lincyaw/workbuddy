@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -83,6 +84,7 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 	defer cancel()
 
 	cmd := exec.CommandContext(execCtx, "codex", s.buildArgs()...)
+	cmd.Stdin = strings.NewReader(s.prompt)
 	if s.task.WorkDir != "" {
 		cmd.Dir = s.task.WorkDir
 	}
@@ -104,6 +106,17 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 		return nil, fmt.Errorf("launcher: codex-exec: create stdout artifact: %w", err)
 	}
 	defer func() { _ = stdoutFile.Close() }()
+
+	// Debug: log arg/env sizes to diagnose E2BIG
+	argSize := 0
+	for _, a := range cmd.Args {
+		argSize += len(a)
+	}
+	envSize := 0
+	for _, e := range cmd.Env {
+		envSize += len(e)
+	}
+	log.Printf("[codex-debug] args=%d env=%d prompt=%d", argSize, envSize, len(s.prompt))
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("launcher: codex-exec: start: %w", err)
@@ -254,7 +267,7 @@ func (s *codexSession) buildArgs() []string {
 	if model := strings.TrimSpace(s.agent.Policy.Model); model != "" {
 		args = append(args, "--model", model)
 	}
-	args = append(args, s.prompt)
+	args = append(args, "-")
 	return args
 }
 
