@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,11 +33,12 @@ import (
 )
 
 const (
-	defaultPort         = 8080
-	defaultPollInterval = 30 * time.Second
-	taskChanSize        = 64
-	dispatchChanSize    = 64
-	agentShutdownWait   = 60 * time.Second
+	defaultPort             = 8080
+	defaultPollInterval     = 30 * time.Second
+	defaultMaxParallelTasks = 4
+	taskChanSize            = 64
+	dispatchChanSize        = 64
+	agentShutdownWait       = 60 * time.Second
 )
 
 // RunningTasks is a thread-safe registry of cancel functions for running agent tasks.
@@ -85,11 +87,43 @@ func (rt *RunningTasks) Remove(repo string, issue int) {
 
 // serveOpts holds parsed CLI flags for the serve command.
 type serveOpts struct {
-	port         int
-	pollInterval time.Duration
-	roles        []string
-	configDir    string
-	dbPath       string
+	port             int
+	pollInterval     time.Duration
+	maxParallelTasks int
+	roles            []string
+	configDir        string
+	dbPath           string
+}
+
+// issueTaskLocks provides reusable per-issue mutexes so only one task per
+// repo+issue can execute at a time.
+type issueTaskLocks struct {
+	locks sync.Map // key: "repo#issueNum" -> *sync.Mutex
+}
+
+func (l *issueTaskLocks) For(repo string, issue int) *sync.Mutex {
+	key := runningTaskKey(repo, issue)
+	lock, _ := l.locks.LoadOrStore(key, &sync.Mutex{})
+	return lock.(*sync.Mutex)
+}
+
+// closedIssues tracks issues that were closed while same-issue work was still
+// queued so deferred tasks can be dropped before they start.
+type closedIssues struct {
+	issues sync.Map // key: "repo#issueNum" -> struct{}
+}
+
+func (c *closedIssues) MarkClosed(repo string, issue int) {
+	c.issues.Store(runningTaskKey(repo, issue), struct{}{})
+}
+
+func (c *closedIssues) MarkOpen(repo string, issue int) {
+	c.issues.Delete(runningTaskKey(repo, issue))
+}
+
+func (c *closedIssues) IsClosed(repo string, issue int) bool {
+	_, ok := c.issues.Load(runningTaskKey(repo, issue))
+	return ok
 }
 
 // GHCLIReader implements poller.GHReader using the gh CLI.
@@ -201,6 +235,7 @@ Worker in the same process. Communication is via Go channels.`,
 func init() {
 	serveCmd.Flags().IntP("port", "p", defaultPort, "HTTP server port")
 	serveCmd.Flags().Duration("poll-interval", defaultPollInterval, "GitHub poll interval")
+	serveCmd.Flags().Int("max-parallel-tasks", defaultMaxParallelTasks, "Maximum number of embedded worker tasks to run in parallel across issues")
 	serveCmd.Flags().StringSlice("roles", []string{"dev", "test", "review"}, "Worker roles")
 	serveCmd.Flags().String("config-dir", ".github/workbuddy", "Configuration directory")
 	serveCmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "SQLite database path")
@@ -220,16 +255,21 @@ func runServe(cmd *cobra.Command, _ []string) error {
 func parseServeFlags(cmd *cobra.Command) (*serveOpts, error) {
 	port, _ := cmd.Flags().GetInt("port")
 	pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
+	maxParallelTasks, _ := cmd.Flags().GetInt("max-parallel-tasks")
 	roles, _ := cmd.Flags().GetStringSlice("roles")
 	configDir, _ := cmd.Flags().GetString("config-dir")
 	dbPath, _ := cmd.Flags().GetString("db-path")
+	if maxParallelTasks <= 0 {
+		return nil, fmt.Errorf("serve: --max-parallel-tasks must be > 0")
+	}
 
 	return &serveOpts{
-		port:         port,
-		pollInterval: pollInterval,
-		roles:        roles,
-		configDir:    configDir,
-		dbPath:       dbPath,
+		port:             port,
+		pollInterval:     pollInterval,
+		maxParallelTasks: maxParallelTasks,
+		roles:            roles,
+		configDir:        configDir,
+		dbPath:           dbPath,
 	}, nil
 }
 
@@ -237,6 +277,10 @@ func parseServeFlags(cmd *cobra.Command) (*serveOpts, error) {
 // ghReader and launcherOverride allow tests to inject mocks.
 // If parentCtx is non-nil, it is used instead of signal handling (for tests).
 func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverride *launcher.Launcher, parentCtx ...context.Context) error {
+	if opts.maxParallelTasks <= 0 {
+		opts.maxParallelTasks = defaultEmbeddedWorkerParallelism()
+	}
+
 	// 1. Load config
 	cfg, warnings, err := config.LoadConfig(opts.configDir)
 	if err != nil {
@@ -378,6 +422,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 
 	// Running tasks registry for cancellation on issue close.
 	runningTasks := NewRunningTasks()
+	closedIssues := &closedIssues{}
 
 	// 7. Start StateMachine event processor (reads from poller events)
 	wg.Add(1)
@@ -393,11 +438,13 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 				}
 				// Handle issue closure: cancel running agent and skip state machine.
 				if ev.Type == poller.EventIssueClosed {
+					closedIssues.MarkClosed(ev.Repo, ev.IssueNum)
 					if cancelled := runningTasks.Cancel(ev.Repo, ev.IssueNum); cancelled {
 						log.Printf("[serve] cancelled agent for closed issue %s#%d", ev.Repo, ev.IssueNum)
 					}
 					continue // don't pass to state machine
 				}
+				closedIssues.MarkOpen(ev.Repo, ev.IssueNum)
 				smEvent := statemachine.ChangeEvent{
 					Type:     ev.Type,
 					Repo:     ev.Repo,
@@ -432,6 +479,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 		cfg:          cfg,
 		wsMgr:        wsMgr,
 		runningTasks: runningTasks,
+		closedIssues: closedIssues,
 		sessionsDir:  sessionsDir,
 	}
 	workerDone := make(chan struct{})
@@ -439,7 +487,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	go func() {
 		defer wg.Done()
 		defer close(workerDone)
-		runEmbeddedWorker(ctx, taskCh, deps)
+		runEmbeddedWorker(ctx, taskCh, deps, opts.maxParallelTasks)
 	}()
 
 	// Print startup message
@@ -498,21 +546,77 @@ type workerDeps struct {
 	cfg          *config.FullConfig
 	wsMgr        *workspace.Manager
 	runningTasks *RunningTasks
+	closedIssues *closedIssues
 	sessionsDir  string
 }
 
-// runEmbeddedWorker runs the embedded worker loop.
-func runEmbeddedWorker(ctx context.Context, taskCh <-chan router.WorkerTask, deps *workerDeps) {
+func defaultEmbeddedWorkerParallelism() int {
+	if runtime.NumCPU() < defaultMaxParallelTasks {
+		return runtime.NumCPU()
+	}
+	return defaultMaxParallelTasks
+}
+
+// runEmbeddedWorker runs the embedded worker loop with bounded cross-issue
+// parallelism while serializing tasks for the same repo+issue.
+func runEmbeddedWorker(ctx context.Context, taskCh <-chan router.WorkerTask, deps *workerDeps, maxParallelTasks int) {
+	if maxParallelTasks <= 0 {
+		maxParallelTasks = defaultEmbeddedWorkerParallelism()
+	}
+
+	issueLocks := &issueTaskLocks{}
+	parallelLimiter := make(chan struct{}, maxParallelTasks)
+	var wg sync.WaitGroup
+
 	for {
 		select {
 		case <-ctx.Done():
+			wg.Wait()
 			return
 		case task, ok := <-taskCh:
 			if !ok {
+				wg.Wait()
 				return
 			}
-			executeTask(ctx, task, deps)
+			wg.Add(1)
+			go func(task router.WorkerTask) {
+				defer wg.Done()
+
+				issueLock := issueLocks.For(task.Repo, task.IssueNum)
+				issueLock.Lock()
+				defer issueLock.Unlock()
+
+				// Take the global slot after the per-issue lock so queued work for
+				// one issue does not consume the shared parallelism budget.
+				select {
+				case parallelLimiter <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
+				defer func() { <-parallelLimiter }()
+
+				if deps.closedIssues != nil && deps.closedIssues.IsClosed(task.Repo, task.IssueNum) {
+					skipTaskForClosedIssue(task, deps)
+					return
+				}
+
+				executeTask(ctx, task, deps)
+			}(task)
 		}
+	}
+}
+
+func skipTaskForClosedIssue(task router.WorkerTask, deps *workerDeps) {
+	log.Printf("[worker] skipping queued task %s for closed issue %s#%d",
+		task.TaskID, task.Repo, task.IssueNum)
+
+	if deps.store != nil {
+		if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
+			log.Printf("[worker] failed to update skipped task status: %v", err)
+		}
+	}
+	if deps.sm != nil {
+		deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, fetchCachedLabels(deps.store, task.Repo, task.IssueNum))
 	}
 }
 

@@ -660,7 +660,8 @@ requirements:
       `workbuddy serve` — v0.1.0 single-process mode running both
       Coordinator and Worker in the same binary. Coordinator polls
       GitHub and manages state machine; embedded Worker executes
-      Claude Code via channel communication.
+      Claude Code via channel communication with bounded cross-issue
+      parallelism and per-issue serialization.
     priority: P0
     version: v0.1.0
     status: tested
@@ -676,6 +677,8 @@ requirements:
       - "AC-017-9: 重启恢复——启动时从 SQLite 读取 task_queue 中 status=running 的任务，标记为 failed（子进程已丢失），status=pending 的任务重新路由"
       - "AC-017-10: 集成测试：启动 serve → 发送 SIGTERM → 验证优雅退出；重启后 pending 任务重新路由"
       - "AC-017-11: E2E 集成测试（mock-based）：使用 mock GHExecutor 模拟完整闭环——创建 Issue → Agent mock 执行 → mock Agent 改 label → 状态机检测 → 下一个 Agent 触发 → 完成或重试上限触发 failed"
+      - "AC-017-12: 内嵌 Worker 支持 `--max-parallel-tasks` 限制跨 issue 的并发执行；不同 issue 的任务可并行推进"
+      - "AC-017-13: 同一 repo#issue 的任务必须串行执行；Issue 关闭时仅取消该 issue 当前运行中的任务，不影响其他 issue"
     code:
       - cmd/serve.go
       - internal/router/router.go
