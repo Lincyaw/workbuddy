@@ -34,6 +34,8 @@ type Options struct {
 	RepoRoot            string
 	CommonRoot          string
 	DBPath              string
+	CurrentPID          int
+	ShellPID            int
 	KillZombies         bool
 	ResetDB             bool
 	PruneWorktrees      bool
@@ -128,10 +130,19 @@ func killZombies(ctx context.Context, commonRoot string, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("recover: list processes: %w", err)
 	}
+	currentPID := opts.CurrentPID
+	if currentPID == 0 {
+		currentPID = os.Getpid()
+	}
+	shellPID := opts.ShellPID
+	if shellPID == 0 {
+		shellPID = os.Getppid()
+	}
+	shellAge, hasShellAge := processElapsedSeconds(processes, shellPID)
+
 	var victims []Process
-	self := os.Getpid()
 	for _, proc := range processes {
-		if proc.PID == self || !proc.matchesTarget() {
+		if !isRecoverableProcess(processes, proc, currentPID, shellPID, shellAge, hasShellAge) {
 			continue
 		}
 		cwd, cwdErr := processCWD(proc.PID)
@@ -155,6 +166,61 @@ func killZombies(ctx context.Context, commonRoot string, opts Options) error {
 		}
 	}
 	return nil
+}
+
+func processElapsedSeconds(processes []Process, pid int) (int, bool) {
+	for _, proc := range processes {
+		if proc.PID == pid {
+			return proc.ElapsedSeconds, true
+		}
+	}
+	return 0, false
+}
+
+func isRecoverableProcess(processes []Process, proc Process, currentPID int, shellPID int, shellAge int, hasShellAge bool) bool {
+	if proc.PID == currentPID || !proc.matchesTarget() {
+		return false
+	}
+	if proc.PPID == 1 {
+		return true
+	}
+	if shellPID > 0 && !isDescendantOf(processes, proc.PID, shellPID) {
+		return true
+	}
+	return hasShellAge && proc.ElapsedSeconds > shellAge
+}
+
+func isDescendantOf(processes []Process, pid int, ancestorPID int) bool {
+	if pid <= 0 || ancestorPID <= 0 {
+		return false
+	}
+	current := pid
+	seen := map[int]struct{}{}
+	for current > 0 {
+		if current == ancestorPID {
+			return true
+		}
+		if _, ok := seen[current]; ok {
+			return false
+		}
+		seen[current] = struct{}{}
+
+		parent, ok := processParentPID(processes, current)
+		if !ok || parent <= 0 || parent == current {
+			return false
+		}
+		current = parent
+	}
+	return false
+}
+
+func processParentPID(processes []Process, pid int) (int, bool) {
+	for _, proc := range processes {
+		if proc.PID == pid {
+			return proc.PPID, true
+		}
+	}
+	return 0, false
 }
 
 func pruneWorktrees(ctx context.Context, commonRoot string, opts Options) error {

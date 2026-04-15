@@ -69,6 +69,46 @@ func TestParseProcessList(t *testing.T) {
 	}
 }
 
+func TestIsRecoverableProcess(t *testing.T) {
+	t.Run("skips current session child", func(t *testing.T) {
+		processes := []Process{
+			{PID: 7, PPID: 1000, ElapsedSeconds: 10, Args: []string{"bash"}},
+			{PID: 42, PPID: 7, ElapsedSeconds: 3, Args: []string{"codex", "exec"}},
+		}
+		if isRecoverableProcess(processes, processes[1], 100, 7, 10, true) {
+			t.Fatalf("expected current-session child to be skipped")
+		}
+	})
+
+	t.Run("matches orphaned target", func(t *testing.T) {
+		proc := Process{PID: 42, PPID: 1, ElapsedSeconds: 1, Args: []string{"codex", "exec"}}
+		if !isRecoverableProcess([]Process{proc}, proc, 100, 7, 10, true) {
+			t.Fatalf("expected orphaned target to be recoverable")
+		}
+	})
+
+	t.Run("matches process outside current shell session", func(t *testing.T) {
+		processes := []Process{
+			{PID: 7, PPID: 1000, ElapsedSeconds: 10, Args: []string{"bash"}},
+			{PID: 42, PPID: 88, ElapsedSeconds: 3, Args: []string{"codex", "exec"}},
+			{PID: 88, PPID: 2000, ElapsedSeconds: 4, Args: []string{"sh"}},
+		}
+		if !isRecoverableProcess(processes, processes[1], 100, 7, 10, true) {
+			t.Fatalf("expected process outside current shell session to be recoverable")
+		}
+	})
+
+	t.Run("matches process older than shell session", func(t *testing.T) {
+		processes := []Process{
+			{PID: 7, PPID: 1000, ElapsedSeconds: 10, Args: []string{"bash"}},
+			{PID: 8, PPID: 7, ElapsedSeconds: 25, Args: []string{"workbuddy", "serve"}},
+		}
+		if !isRecoverableProcess(processes, processes[1], 100, 7, 10, true) {
+			t.Fatalf("expected older target to be recoverable")
+		}
+	})
+}
+
 func TestResetDBClearsRuntimeTablesAndKeepsTransitionCounts(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "workbuddy.db")
 	st, err := store.NewStore(dbPath)
@@ -176,7 +216,50 @@ func TestRunDryRunPrintsActions(t *testing.T) {
 	}
 }
 
-func TestRunKillZombiesTerminatesDummyProcess(t *testing.T) {
+func TestRunKillZombiesTerminatesProcessOutsideCurrentSession(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("kill-zombies test requires /proc cwd lookup on linux")
+	}
+
+	repo := initGitRepo(t)
+	codexPath := filepath.Join(t.TempDir(), "codex")
+	if err := os.Symlink("/bin/sleep", codexPath); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	cmd := exec.Command(codexPath, "30")
+	cmd.Dir = repo
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start dummy codex: %v", err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		}
+	})
+
+	time.Sleep(150 * time.Millisecond)
+
+	var out bytes.Buffer
+	if err := Run(context.Background(), Options{
+		RepoRoot:    repo,
+		CommonRoot:  repo,
+		KillZombies: true,
+		CurrentPID:  os.Getpid(),
+		ShellPID:    999999,
+		Stdout:      &out,
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(out.String(), "Terminating process") {
+		t.Fatalf("kill-zombies output missing termination message: %s", out.String())
+	}
+	waitForProcessExit(t, pid)
+}
+
+func TestRunKillZombiesSkipsActiveCurrentSessionProcess(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("kill-zombies test requires /proc cwd lookup on linux")
 	}
@@ -206,32 +289,17 @@ func TestRunKillZombiesTerminatesDummyProcess(t *testing.T) {
 		RepoRoot:    repo,
 		CommonRoot:  repo,
 		KillZombies: true,
+		CurrentPID:  os.Getpid(),
+		ShellPID:    os.Getpid(),
 		Stdout:      &out,
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !strings.Contains(out.String(), "Terminating process") {
-		t.Fatalf("kill-zombies output missing termination message: %s", out.String())
+	if !strings.Contains(out.String(), "No matching zombie processes found.") {
+		t.Fatalf("expected active process to be skipped, got: %s", out.String())
 	}
-
-	done := make(chan error, 1)
-	go func() {
-		done <- cmd.Wait()
-	}()
-
-	select {
-	case <-time.After(5 * time.Second):
-		t.Fatal("dummy codex process was not terminated")
-	case err := <-done:
-		if err == nil {
-			return
-		}
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			if exitErr.ExitCode() == -1 || exitErr.ExitCode() == 143 || exitErr.ExitCode() == 137 {
-				return
-			}
-		}
-		t.Fatalf("unexpected wait error after termination: %v", err)
+	if !processExists(cmd.Process.Pid) {
+		t.Fatalf("active current-session process was terminated")
 	}
 }
 
@@ -257,4 +325,16 @@ func TestPruneWorktreesRemovesEntries(t *testing.T) {
 	if !strings.Contains(out.String(), "Running git worktree prune") {
 		t.Fatalf("output missing git worktree prune: %s", out.String())
 	}
+}
+
+func waitForProcessExit(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !processExists(pid) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("process %d was not terminated", pid)
 }
