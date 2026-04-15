@@ -278,7 +278,14 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	// 4. Init components
 	evlog := eventlog.NewEventLogger(st)
 	reg := registry.NewRegistry(st, cfg.Global.PollInterval)
-	sessionsDir := ".workbuddy/sessions"
+	// Resolve sessionsDir to an absolute path up front so auditor, event writer,
+	// and web UI all read/write the same location even if something later
+	// changes the process working directory.
+	repoDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("serve: get working directory: %w", err)
+	}
+	sessionsDir := filepath.Join(repoDir, ".workbuddy", "sessions")
 	auditor := audit.NewAuditor(st, sessionsDir)
 
 	// Register embedded worker
@@ -295,7 +302,6 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	sm := statemachine.NewStateMachine(cfg.Workflows, st, dispatchCh, evlog)
 
 	// Workspace isolation via git worktrees
-	repoDir, _ := os.Getwd()
 	wsMgr := workspace.NewManager(repoDir)
 	wsMgr.Prune() // clean up orphaned worktrees from prior crashes
 
