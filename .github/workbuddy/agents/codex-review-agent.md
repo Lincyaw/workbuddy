@@ -78,7 +78,11 @@ prompt: |
   - If build/vet/tests pass AND no blocking findings:
     (Optional) post a PR comment listing any non-blocking suggestions.
     Run: gh issue edit {{.Issue.Number}} --repo {{.Repo}} --remove-label status:reviewing --add-label status:done
-    Then close the issue: gh issue close {{.Issue.Number}} --repo {{.Repo}}
+    DO NOT run `gh issue close` yourself. Label transition is the authoritative
+    signal; the issue is closed when the linked PR merges (PR body should
+    contain `Closes #{{.Issue.Number}}`). Closing the issue here races with
+    the poller's "cancel running agent on close" hook and will kill this
+    codex process before it exits cleanly, causing a spurious Failure report.
   - If build/vet/tests fail OR there is at least one BLOCKING finding:
     Post a PR comment with failing output and concrete fix guidance, then:
     Run: gh issue edit {{.Issue.Number}} --repo {{.Repo}} --remove-label status:reviewing --add-label status:developing
