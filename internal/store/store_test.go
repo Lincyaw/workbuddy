@@ -1,9 +1,11 @@
 package store
 
 import (
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -305,6 +307,92 @@ func TestIncrementTransitionAtomic(t *testing.T) {
 	}
 	if len(seen) != n {
 		t.Errorf("expected %d unique counts, got %d (some increments were not atomic)", n, len(seen))
+	}
+}
+
+func TestTaskClaimLifecycle(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.InsertTask(TaskRecord{
+		ID:        "task-claim",
+		Repo:      "org/repo",
+		IssueNum:  7,
+		AgentName: "dev-agent",
+		Role:      "dev",
+		Runtime:   "codex-exec",
+		Workflow:  "default",
+		State:     "developing",
+		Status:    TaskStatusPending,
+	}); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+
+	task, err := s.ClaimNextTask("worker-a", []string{"dev"}, "claim-1", 30*time.Second)
+	if err != nil {
+		t.Fatalf("ClaimNextTask: %v", err)
+	}
+	if task == nil || task.ID != "task-claim" {
+		t.Fatalf("unexpected claimed task: %+v", task)
+	}
+
+	sameTask, err := s.ClaimNextTask("worker-a", []string{"dev"}, "claim-1", 30*time.Second)
+	if err != nil {
+		t.Fatalf("ClaimNextTask idempotent: %v", err)
+	}
+	if sameTask == nil || sameTask.ID != task.ID {
+		t.Fatalf("idempotent claim returned %+v, want %q", sameTask, task.ID)
+	}
+
+	none, err := s.ClaimNextTask("worker-b", []string{"dev"}, "", 30*time.Second)
+	if err != nil {
+		t.Fatalf("ClaimNextTask other worker: %v", err)
+	}
+	if none != nil {
+		t.Fatalf("expected no task for second worker, got %+v", none)
+	}
+
+	if err := s.AckTask(task.ID, "worker-a", 30*time.Second); err != nil {
+		t.Fatalf("AckTask: %v", err)
+	}
+	if err := s.HeartbeatTask(task.ID, "worker-a", 30*time.Second); err != nil {
+		t.Fatalf("HeartbeatTask: %v", err)
+	}
+	if err := s.CompleteTask(task.ID, "worker-a", 0, `["session-1"]`); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got == nil || got.Status != TaskStatusCompleted || got.ExitCode != 0 || got.SessionRefs != `["session-1"]` {
+		t.Fatalf("unexpected completed task: %+v", got)
+	}
+}
+
+func TestTaskOwnershipConflicts(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.InsertTask(TaskRecord{
+		ID:        "task-conflict",
+		Repo:      "org/repo",
+		IssueNum:  8,
+		AgentName: "review-agent",
+		Role:      "review",
+		Runtime:   "codex-exec",
+		Status:    TaskStatusPending,
+	}); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+
+	task, err := s.ClaimNextTask("worker-a", []string{"review"}, "claim-review", 30*time.Second)
+	if err != nil {
+		t.Fatalf("ClaimNextTask: %v", err)
+	}
+	if task == nil {
+		t.Fatal("expected claimed task")
+	}
+
+	if err := s.AckTask(task.ID, "worker-b", 30*time.Second); !errors.Is(err, ErrTaskNotClaimedByWorker) {
+		t.Fatalf("AckTask wrong worker err = %v, want %v", err, ErrTaskNotClaimedByWorker)
 	}
 }
 

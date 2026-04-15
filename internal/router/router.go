@@ -35,13 +35,14 @@ type WorkerTask struct {
 // Router receives DispatchRequests from the StateMachine and routes them
 // to Workers. In v0.1.0 it sends tasks over a Go channel to the embedded Worker.
 type Router struct {
-	agents   map[string]*config.AgentConfig
-	registry *registry.Registry
-	store    *store.Store
-	repo     string
-	repoRoot string
-	taskChan chan<- WorkerTask
-	wsMgr    *workspace.Manager // nil = no workspace isolation
+	agents             map[string]*config.AgentConfig
+	registry           *registry.Registry
+	store              *store.Store
+	repo               string
+	repoRoot           string
+	taskChan           chan<- WorkerTask
+	wsMgr              *workspace.Manager // nil = no workspace isolation
+	dispatchToEmbedded bool
 }
 
 // NewRouter creates a Router for v0.1.0 channel-based dispatch.
@@ -54,15 +55,17 @@ func NewRouter(
 	repoRoot string,
 	taskChan chan<- WorkerTask,
 	wsMgr *workspace.Manager,
+	dispatchToEmbedded bool,
 ) *Router {
 	return &Router{
-		agents:   agents,
-		registry: reg,
-		store:    st,
-		repo:     repo,
-		repoRoot: repoRoot,
-		taskChan: taskChan,
-		wsMgr:    wsMgr,
+		agents:             agents,
+		registry:           reg,
+		store:              st,
+		repo:               repo,
+		repoRoot:           repoRoot,
+		taskChan:           taskChan,
+		wsMgr:              wsMgr,
+		dispatchToEmbedded: dispatchToEmbedded,
 	}
 }
 
@@ -106,6 +109,10 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 		Repo:      req.Repo,
 		IssueNum:  req.IssueNum,
 		AgentName: req.AgentName,
+		Role:      agent.Role,
+		Runtime:   agent.Runtime,
+		Workflow:  req.Workflow,
+		State:     req.State,
 		Status:    store.TaskStatusPending,
 	}); err != nil {
 		log.Printf("[router] failed to insert task: %v", err)
@@ -177,6 +184,10 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 		Workflow:     req.Workflow,
 		State:        req.State,
 		WorktreePath: worktreePath,
+	}
+
+	if !r.dispatchToEmbedded || r.taskChan == nil {
+		return
 	}
 
 	select {

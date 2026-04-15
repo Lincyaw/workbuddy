@@ -3,6 +3,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -39,6 +40,13 @@ const (
 	TaskStatusCompleted = "completed"
 	TaskStatusFailed    = "failed"
 	TaskStatusTimeout   = "timeout"
+)
+
+var (
+	ErrTaskNotFound           = errors.New("task not found")
+	ErrTaskClaimConflict      = errors.New("task claim conflict")
+	ErrTaskAlreadyCompleted   = errors.New("task already completed")
+	ErrTaskNotClaimedByWorker = errors.New("task not claimed by worker")
 )
 
 // Store provides typed CRUD access to the workbuddy SQLite database.
@@ -99,8 +107,19 @@ func (s *Store) createTables() error {
 			repo TEXT NOT NULL,
 			issue_num INTEGER NOT NULL,
 			agent_name TEXT NOT NULL,
+			role TEXT NOT NULL DEFAULT '',
+			runtime TEXT NOT NULL DEFAULT '',
+			workflow TEXT NOT NULL DEFAULT '',
+			state TEXT NOT NULL DEFAULT '',
 			worker_id TEXT,
+			claim_token TEXT,
 			status TEXT NOT NULL DEFAULT 'pending',
+			lease_expires_at DATETIME,
+			acked_at DATETIME,
+			heartbeat_at DATETIME,
+			completed_at DATETIME,
+			exit_code INTEGER NOT NULL DEFAULT 0,
+			session_refs TEXT NOT NULL DEFAULT '[]',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -183,6 +202,24 @@ func (s *Store) createTables() error {
 	if _, err := s.db.Exec(`ALTER TABLE workers ADD COLUMN token_revoked_at DATETIME`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("store: alter workers add token_revoked_at: %w", err)
 	}
+	taskQueueMigrations := []string{
+		`ALTER TABLE task_queue ADD COLUMN role TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE task_queue ADD COLUMN runtime TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE task_queue ADD COLUMN workflow TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE task_queue ADD COLUMN state TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE task_queue ADD COLUMN claim_token TEXT`,
+		`ALTER TABLE task_queue ADD COLUMN lease_expires_at DATETIME`,
+		`ALTER TABLE task_queue ADD COLUMN acked_at DATETIME`,
+		`ALTER TABLE task_queue ADD COLUMN heartbeat_at DATETIME`,
+		`ALTER TABLE task_queue ADD COLUMN completed_at DATETIME`,
+		`ALTER TABLE task_queue ADD COLUMN exit_code INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE task_queue ADD COLUMN session_refs TEXT NOT NULL DEFAULT '[]'`,
+	}
+	for _, stmt := range taskQueueMigrations {
+		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("store: migrate task_queue: %w", err)
+		}
+	}
 	// Forward-migrate any pre-existing issue_dependency_state rows: drop the
 	// old managed-comment anchor columns by adding the new reaction column if
 	// the table was created by an earlier schema. SQLite has no DROP COLUMN
@@ -241,11 +278,73 @@ func (s *Store) QueryEvents(repo string) ([]Event, error) {
 // Task Queue
 // ---------------------------------------------------------------------------
 
+func taskLeaseOffset(lease time.Duration) string {
+	seconds := int(lease.Seconds())
+	if seconds <= 0 {
+		seconds = 1
+	}
+	return fmt.Sprintf("+%d seconds", seconds)
+}
+
+func scanTaskRecord(scan func(dest ...any) error) (TaskRecord, error) {
+	var t TaskRecord
+	var createdAt, updatedAt string
+	var leaseExpiresAt, ackedAt, heartbeatAt, completedAt sql.NullString
+	if err := scan(
+		&t.ID,
+		&t.Repo,
+		&t.IssueNum,
+		&t.AgentName,
+		&t.Role,
+		&t.Runtime,
+		&t.Workflow,
+		&t.State,
+		&t.WorkerID,
+		&t.ClaimToken,
+		&t.Status,
+		&leaseExpiresAt,
+		&ackedAt,
+		&heartbeatAt,
+		&completedAt,
+		&t.ExitCode,
+		&t.SessionRefs,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return TaskRecord{}, err
+	}
+	t.CreatedAt, _ = parseTimestamp(createdAt, "task.created_at")
+	t.UpdatedAt, _ = parseTimestamp(updatedAt, "task.updated_at")
+	if leaseExpiresAt.Valid {
+		t.LeaseExpiresAt, _ = parseTimestamp(leaseExpiresAt.String, "task.lease_expires_at")
+	}
+	if ackedAt.Valid {
+		t.AckedAt, _ = parseTimestamp(ackedAt.String, "task.acked_at")
+	}
+	if heartbeatAt.Valid {
+		t.HeartbeatAt, _ = parseTimestamp(heartbeatAt.String, "task.heartbeat_at")
+	}
+	if completedAt.Valid {
+		t.CompletedAt, _ = parseTimestamp(completedAt.String, "task.completed_at")
+	}
+	return t, nil
+}
+
 // InsertTask inserts a new task into the task_queue.
 func (s *Store) InsertTask(t TaskRecord) error {
+	if t.Status == "" {
+		t.Status = TaskStatusPending
+	}
+	if t.SessionRefs == "" {
+		t.SessionRefs = "[]"
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO task_queue (id, repo, issue_num, agent_name, worker_id, status) VALUES (?, ?, ?, ?, ?, ?)`,
-		t.ID, t.Repo, t.IssueNum, t.AgentName, t.WorkerID, t.Status,
+		`INSERT INTO task_queue (
+			id, repo, issue_num, agent_name, role, runtime, workflow, state,
+			worker_id, claim_token, status, exit_code, session_refs
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.ID, t.Repo, t.IssueNum, t.AgentName, t.Role, t.Runtime, t.Workflow, t.State,
+		t.WorkerID, t.ClaimToken, t.Status, t.ExitCode, t.SessionRefs,
 	)
 	if err != nil {
 		return fmt.Errorf("store: insert task: %w", err)
@@ -255,12 +354,17 @@ func (s *Store) InsertTask(t TaskRecord) error {
 
 // QueryTasks returns tasks filtered by status (empty string = all).
 func (s *Store) QueryTasks(status string) ([]TaskRecord, error) {
+	const selectTasks = `SELECT
+		id, repo, issue_num, agent_name, role, runtime, workflow, state,
+		worker_id, claim_token, status, lease_expires_at, acked_at, heartbeat_at,
+		completed_at, exit_code, session_refs, created_at, updated_at
+		FROM task_queue`
 	var rows *sql.Rows
 	var err error
 	if status == "" {
-		rows, err = s.db.Query(`SELECT id, repo, issue_num, agent_name, worker_id, status, created_at, updated_at FROM task_queue ORDER BY created_at`)
+		rows, err = s.db.Query(selectTasks + ` ORDER BY created_at`)
 	} else {
-		rows, err = s.db.Query(`SELECT id, repo, issue_num, agent_name, worker_id, status, created_at, updated_at FROM task_queue WHERE status = ? ORDER BY created_at`, status)
+		rows, err = s.db.Query(selectTasks+` WHERE status = ? ORDER BY created_at`, status)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: query tasks: %w", err)
@@ -269,41 +373,30 @@ func (s *Store) QueryTasks(status string) ([]TaskRecord, error) {
 
 	var out []TaskRecord
 	for rows.Next() {
-		var t TaskRecord
-		var workerID sql.NullString
-		var createdAt, updatedAt string
-		if err := rows.Scan(&t.ID, &t.Repo, &t.IssueNum, &t.AgentName, &workerID, &t.Status, &createdAt, &updatedAt); err != nil {
+		t, err := scanTaskRecord(rows.Scan)
+		if err != nil {
 			return nil, fmt.Errorf("store: scan task: %w", err)
 		}
-		t.WorkerID = workerID.String
-		t.CreatedAt, _ = parseTimestamp(createdAt, "task.created_at")
-		t.UpdatedAt, _ = parseTimestamp(updatedAt, "task.updated_at")
 		out = append(out, t)
 	}
 	return out, rows.Err()
 }
 
-// GetTask returns a task by ID, or nil if not found.
+// GetTask loads a task by ID.
 func (s *Store) GetTask(taskID string) (*TaskRecord, error) {
-	var task TaskRecord
-	var workerID sql.NullString
-	var createdAt, updatedAt string
-	err := s.db.QueryRow(
-		`SELECT id, repo, issue_num, agent_name, worker_id, status, created_at, updated_at
-		 FROM task_queue
-		 WHERE id = ?`,
-		taskID,
-	).Scan(&task.ID, &task.Repo, &task.IssueNum, &task.AgentName, &workerID, &task.Status, &createdAt, &updatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
+	row := s.db.QueryRow(`SELECT
+		id, repo, issue_num, agent_name, role, runtime, workflow, state,
+		worker_id, claim_token, status, lease_expires_at, acked_at, heartbeat_at,
+		completed_at, exit_code, session_refs, created_at, updated_at
+		FROM task_queue WHERE id = ?`, taskID)
+	t, err := scanTaskRecord(row.Scan)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("store: get task: %w", err)
 	}
-	task.WorkerID = workerID.String
-	task.CreatedAt, _ = parseTimestamp(createdAt, "task.created_at")
-	task.UpdatedAt, _ = parseTimestamp(updatedAt, "task.updated_at")
-	return &task, nil
+	return &t, nil
 }
 
 // UpdateTaskStatus updates the status and updated_at of a task.
@@ -358,6 +451,214 @@ func (s *Store) ReleaseTask(taskID, workerID string) (bool, error) {
 		return false, fmt.Errorf("store: release task rows affected: %w", err)
 	}
 	return rows > 0, nil
+}
+
+// ClaimNextTask assigns the next dispatchable task to workerID. If the same
+// worker repeats the request with the same non-empty claimToken before the
+// lease expires, the previously claimed task is returned.
+func (s *Store) ClaimNextTask(workerID string, roles []string, claimToken string, lease time.Duration) (*TaskRecord, error) {
+	if lease <= 0 {
+		lease = 30 * time.Second
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("store: begin claim tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if claimToken != "" {
+		row := tx.QueryRow(`SELECT
+			id, repo, issue_num, agent_name, role, runtime, workflow, state,
+			worker_id, claim_token, status, lease_expires_at, acked_at, heartbeat_at,
+			completed_at, exit_code, session_refs, created_at, updated_at
+			FROM task_queue
+			WHERE worker_id = ? AND claim_token = ? AND status = ?
+			  AND lease_expires_at IS NOT NULL AND lease_expires_at >= CURRENT_TIMESTAMP
+			ORDER BY updated_at DESC LIMIT 1`, workerID, claimToken, TaskStatusRunning)
+		existing, err := scanTaskRecord(row.Scan)
+		switch {
+		case err == nil:
+			if err := tx.Commit(); err != nil {
+				return nil, fmt.Errorf("store: commit idempotent claim: %w", err)
+			}
+			return &existing, nil
+		case !errors.Is(err, sql.ErrNoRows):
+			return nil, fmt.Errorf("store: idempotent claim lookup: %w", err)
+		}
+	}
+
+	conds := make([]string, 0, len(roles))
+	roleArgs := make([]any, 0, len(roles))
+	for _, role := range roles {
+		conds = append(conds, "role = ?")
+		roleArgs = append(roleArgs, role)
+	}
+	query := `SELECT
+		id, repo, issue_num, agent_name, role, runtime, workflow, state,
+		worker_id, claim_token, status, lease_expires_at, acked_at, heartbeat_at,
+		completed_at, exit_code, session_refs, created_at, updated_at
+		FROM task_queue
+		WHERE status IN (?, ?)
+		  AND (lease_expires_at IS NULL OR lease_expires_at < CURRENT_TIMESTAMP)`
+	args := []any{TaskStatusPending, TaskStatusRunning}
+	if len(conds) > 0 {
+		query += ` AND (` + strings.Join(conds, " OR ") + `)`
+		args = append(args, roleArgs...)
+	}
+	query += ` ORDER BY created_at, id LIMIT 1`
+
+	row := tx.QueryRow(query, args...)
+	task, err := scanTaskRecord(row.Scan)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			if err := tx.Commit(); err != nil {
+				return nil, fmt.Errorf("store: commit empty claim: %w", err)
+			}
+			return nil, nil
+		}
+		return nil, fmt.Errorf("store: select task for claim: %w", err)
+	}
+
+	res, err := tx.Exec(
+		`UPDATE task_queue
+		 SET worker_id = ?, claim_token = ?, status = ?, lease_expires_at = datetime('now', ?),
+		     heartbeat_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ?
+		   AND status IN (?, ?)
+		   AND (lease_expires_at IS NULL OR lease_expires_at < CURRENT_TIMESTAMP)`,
+		workerID, claimToken, TaskStatusRunning, taskLeaseOffset(lease), task.ID,
+		TaskStatusPending, TaskStatusRunning,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: claim task update: %w", err)
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return nil, ErrTaskClaimConflict
+	}
+
+	task.WorkerID = workerID
+	task.ClaimToken = claimToken
+	task.Status = TaskStatusRunning
+	task.HeartbeatAt = time.Now().UTC()
+	task.LeaseExpiresAt = task.HeartbeatAt.Add(lease)
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: commit claim: %w", err)
+	}
+	return &task, nil
+}
+
+func (s *Store) ensureTaskOwnership(tx *sql.Tx, taskID, workerID string) (*TaskRecord, error) {
+	row := tx.QueryRow(`SELECT
+		id, repo, issue_num, agent_name, role, runtime, workflow, state,
+		worker_id, claim_token, status, lease_expires_at, acked_at, heartbeat_at,
+		completed_at, exit_code, session_refs, created_at, updated_at
+		FROM task_queue WHERE id = ?`, taskID)
+	task, err := scanTaskRecord(row.Scan)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrTaskNotFound
+		}
+		return nil, fmt.Errorf("store: load task %s: %w", taskID, err)
+	}
+	if task.Status == TaskStatusCompleted || task.Status == TaskStatusFailed || task.Status == TaskStatusTimeout {
+		return nil, ErrTaskAlreadyCompleted
+	}
+	if task.WorkerID != workerID {
+		return nil, ErrTaskNotClaimedByWorker
+	}
+	return &task, nil
+}
+
+// AckTask records that a claimed task has started.
+func (s *Store) AckTask(taskID, workerID string, lease time.Duration) error {
+	if lease <= 0 {
+		lease = 30 * time.Second
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: begin ack tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := s.ensureTaskOwnership(tx, taskID, workerID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`UPDATE task_queue
+		 SET acked_at = COALESCE(acked_at, CURRENT_TIMESTAMP),
+		     heartbeat_at = CURRENT_TIMESTAMP,
+		     lease_expires_at = datetime('now', ?),
+		     updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ?`,
+		taskLeaseOffset(lease), taskID,
+	); err != nil {
+		return fmt.Errorf("store: ack task: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit ack: %w", err)
+	}
+	return nil
+}
+
+// HeartbeatTask updates liveness for a claimed task.
+func (s *Store) HeartbeatTask(taskID, workerID string, lease time.Duration) error {
+	if lease <= 0 {
+		lease = 30 * time.Second
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: begin heartbeat tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := s.ensureTaskOwnership(tx, taskID, workerID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`UPDATE task_queue
+		 SET heartbeat_at = CURRENT_TIMESTAMP,
+		     lease_expires_at = datetime('now', ?),
+		     updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ?`,
+		taskLeaseOffset(lease), taskID,
+	); err != nil {
+		return fmt.Errorf("store: heartbeat task: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit heartbeat: %w", err)
+	}
+	return nil
+}
+
+// CompleteTask finalizes a claimed task and stores result metadata.
+func (s *Store) CompleteTask(taskID, workerID string, exitCode int, sessionRefs string) error {
+	if sessionRefs == "" {
+		sessionRefs = "[]"
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: begin complete tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := s.ensureTaskOwnership(tx, taskID, workerID); err != nil {
+		return err
+	}
+	status := TaskStatusCompleted
+	if exitCode != 0 {
+		status = TaskStatusFailed
+	}
+	if _, err := tx.Exec(
+		`UPDATE task_queue
+		 SET status = ?, exit_code = ?, session_refs = ?, completed_at = CURRENT_TIMESTAMP,
+		     heartbeat_at = CURRENT_TIMESTAMP, lease_expires_at = NULL, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ?`,
+		status, exitCode, sessionRefs, taskID,
+	); err != nil {
+		return fmt.Errorf("store: complete task: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit complete: %w", err)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

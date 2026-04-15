@@ -41,7 +41,7 @@ func TestRouter_MatchingWorker(t *testing.T) {
 	}
 
 	taskCh := make(chan WorkerTask, 10)
-	r := NewRouter(agents, reg, st, "test/repo", t.TempDir(), taskCh, nil)
+	r := NewRouter(agents, reg, st, "test/repo", t.TempDir(), taskCh, nil, true)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -82,7 +82,7 @@ func TestRouter_AgentNotFound(t *testing.T) {
 	agents := map[string]*config.AgentConfig{} // empty
 
 	taskCh := make(chan WorkerTask, 10)
-	r := NewRouter(agents, reg, st, "test/repo", t.TempDir(), taskCh, nil)
+	r := NewRouter(agents, reg, st, "test/repo", t.TempDir(), taskCh, nil, true)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -124,7 +124,7 @@ func TestRouter_NoMatchingWorker(t *testing.T) {
 	}
 
 	taskCh := make(chan WorkerTask, 10)
-	r := NewRouter(agents, reg, st, "test/repo", t.TempDir(), taskCh, nil)
+	r := NewRouter(agents, reg, st, "test/repo", t.TempDir(), taskCh, nil, true)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -145,4 +145,50 @@ func TestRouter_NoMatchingWorker(t *testing.T) {
 
 	// Task should still be created in store as pending, but not dispatched to channel
 	// (since no worker available and the router just inserts + tries to dispatch)
+}
+
+func TestRouter_PersistOnlyModeLeavesTaskPending(t *testing.T) {
+	st := newTestStore(t)
+	reg := registry.NewRegistry(st, 30*time.Second)
+
+	agents := map[string]*config.AgentConfig{
+		"dev-agent": {
+			Name:    "dev-agent",
+			Role:    "dev",
+			Runtime: "codex-exec",
+			Command: "echo hello",
+		},
+	}
+
+	r := NewRouter(agents, reg, st, "test/repo", t.TempDir(), nil, nil, false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	dispatchCh := make(chan statemachine.DispatchRequest, 1)
+	dispatchCh <- statemachine.DispatchRequest{
+		Repo:      "test/repo",
+		IssueNum:  2,
+		AgentName: "dev-agent",
+		Workflow:  "default",
+		State:     "developing",
+	}
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	_ = r.Run(ctx, dispatchCh)
+
+	tasks, err := st.QueryTasks(store.TaskStatusPending)
+	if err != nil {
+		t.Fatalf("QueryTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("pending tasks = %d, want 1", len(tasks))
+	}
+	if tasks[0].Role != "dev" || tasks[0].Runtime != "codex-exec" || tasks[0].Workflow != "default" || tasks[0].State != "developing" {
+		t.Fatalf("unexpected persisted task: %+v", tasks[0])
+	}
 }
