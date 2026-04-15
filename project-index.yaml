@@ -713,19 +713,26 @@ requirements:
   - id: REQ-018
     title: CLI - init command
     description: >
-      `workbuddy init` — scaffold config directory with examples.
+      `workbuddy init` — scaffold the repository config and runtime directories
+      needed for a new workbuddy setup.
     priority: P1
     version: v0.2.0
-    status: pending
+    status: tested
     acceptance_criteria:
-      - "AC-018-1: 创建 .github/workbuddy/{agents,workflows} 目录"
-      - "AC-018-2: 生成示例 config.yaml（含 repo 字段）、agent 定义（含 role 字段）、workflow（含 max_retries 和 failed 状态）"
-      - "AC-018-3: 如果 .workbuddy 不在 .gitignore 中，追加"
-      - "AC-018-4: 目录已存在时报错，除非 --force"
-      - "AC-018-5: 单元测试：正常创建、已存在报错、--force 覆盖"
-    code: []
-    tests: []
-    deps: [REQ-001]
+      - "AC-018-1: `workbuddy init [--repo OWNER/NAME] [--force]` scaffolds `.github/workbuddy/{config.yaml,agents/,workflows/}`"
+      - "AC-018-2: init writes the canonical `dev-agent.md`, `review-agent.md`, and default workflow, and renders `config.yaml` with the target repo"
+      - "AC-018-3: init creates `.workbuddy/{logs,sessions,worktrees}` plus `.workbuddy/.gitignore` for local runtime state"
+      - "AC-018-4: existing target files fail with a non-zero error unless `--force` is set, in which case scaffold files are overwritten"
+      - "AC-018-5: unit tests cover clean initialization, conflict failure, and `--force` overwrite using a temporary filesystem"
+    code:
+      - cmd/init.go
+      - cmd/initdata/agents/dev-agent.md
+      - cmd/initdata/agents/review-agent.md
+      - cmd/initdata/workflows/default.md
+      - cmd/initdata/workbuddy.gitignore
+    tests:
+      - cmd/init_test.go
+    deps: []
 
   - id: REQ-019
     title: CLI - status command
