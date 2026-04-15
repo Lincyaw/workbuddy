@@ -129,7 +129,13 @@ func newClaudePromptCommand(execCtx context.Context, prompt string, extraArgs []
 }
 
 func claudePolicyArgs(policy config.PolicyConfig) []string {
-	args := []string{"--dangerously-skip-permissions"}
+	var args []string
+	// Only bypass Claude's permission prompts when the policy explicitly opts
+	// into unsandboxed execution. read-only / workspace-write keep the default
+	// permission gating so the runtime cannot write or execute without prompts.
+	if policy.Sandbox == "danger-full-access" {
+		args = append(args, "--dangerously-skip-permissions")
+	}
 	if policy.Model != "" {
 		args = append(args, "--model", policy.Model)
 	}

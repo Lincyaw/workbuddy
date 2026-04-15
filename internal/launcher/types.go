@@ -100,8 +100,15 @@ type Result struct {
 	Stderr      string
 	Duration    time.Duration
 	Meta        map[string]string
-	SessionPath string
-	LastMessage string
-	TokenUsage  *launcherevents.TokenUsagePayload
-	SessionRef  SessionRef
+	// SessionPath is the canonical session artifact path handed to audit
+	// and reporter. When Event Schema v1 capture succeeds this points at
+	// the normalized events-v1.jsonl; otherwise it falls back to whatever
+	// the runtime produced natively (e.g. codex-exec.jsonl).
+	SessionPath    string
+	// RawSessionPath preserves the runtime-native artifact path (if any)
+	// when SessionPath has been overridden with the normalized v1 stream.
+	RawSessionPath string
+	LastMessage    string
+	TokenUsage     *launcherevents.TokenUsagePayload
+	SessionRef     SessionRef
 }

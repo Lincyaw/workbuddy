@@ -553,10 +553,18 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	eventsPath, waitEvents := streamSessionEvents(task.Context, eventsCh)
 	result, err := session.Run(taskCtx, eventsCh)
 	close(eventsCh)
-	if waitErr := waitEvents(); waitErr != nil {
+	waitErr := waitEvents()
+	if waitErr != nil {
 		log.Printf("[worker] event capture failed: %v", waitErr)
 	}
-	if result != nil && result.SessionPath == "" && eventsPath != "" {
+	if result != nil && eventsPath != "" && waitErr == nil {
+		// Prefer the normalized Event Schema v1 artifact as the session's
+		// canonical path so audit/reporter work off the unified stream.
+		// The runtime-native artifact (e.g. codex-exec.jsonl) stays on disk
+		// but is no longer the handle handed downstream.
+		if result.RawSessionPath == "" {
+			result.RawSessionPath = result.SessionPath
+		}
 		result.SessionPath = eventsPath
 	}
 	if err != nil {
@@ -628,24 +636,38 @@ func streamSessionEvents(taskCtx *launcher.TaskContext, eventsCh <-chan launcher
 	path := filepath.Join(baseDir, ".workbuddy", "sessions", taskCtx.Session.ID, "events-v1.jsonl")
 	errCh := make(chan error, 1)
 	go func() {
+		// Always drain eventsCh to completion so the runtime is never blocked
+		// on a full send buffer, even if we can't persist the artifact.
+		var initErr, encodeErr error
+		var f *os.File
+		var enc *json.Encoder
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			errCh <- err
-			return
+			initErr = err
+		} else if created, err := os.Create(path); err != nil {
+			initErr = err
+		} else {
+			f = created
+			enc = json.NewEncoder(f)
 		}
-		f, err := os.Create(path)
-		if err != nil {
-			errCh <- err
-			return
-		}
-		defer func() { _ = f.Close() }()
-		enc := json.NewEncoder(f)
 		for evt := range eventsCh {
+			if enc == nil || encodeErr != nil {
+				continue
+			}
 			if err := enc.Encode(evt); err != nil {
-				errCh <- err
-				return
+				encodeErr = err
 			}
 		}
-		errCh <- nil
+		if f != nil {
+			_ = f.Close()
+		}
+		switch {
+		case initErr != nil:
+			errCh <- initErr
+		case encodeErr != nil:
+			errCh <- encodeErr
+		default:
+			errCh <- nil
+		}
 	}()
 	return path, func() error { return <-errCh }
 }

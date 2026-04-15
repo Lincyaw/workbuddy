@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -142,7 +143,9 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 	wg.Wait()
 	duration := time.Since(start)
 
-	if scanErr != nil && !strings.Contains(scanErr.Error(), "file already closed") {
+	// The stdout pipe may be closed when the child process exits; that is the
+	// expected termination for the scanner, not a real read error.
+	if scanErr != nil && !errors.Is(scanErr, os.ErrClosed) {
 		return nil, fmt.Errorf("launcher: codex-exec: read stdout: %w", scanErr)
 	}
 
@@ -150,6 +153,7 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 		if events != nil {
 			emitEvent(events, &seq, s.task.Session.ID, mapper.effectiveTurnID(), launcherevents.KindError, launcherevents.ErrorPayload{Code: "timeout", Message: execCtx.Err().Error(), Recoverable: false}, nil)
 			emitEvent(events, &seq, s.task.Session.ID, mapper.effectiveTurnID(), launcherevents.KindTurnCompleted, launcherevents.TurnCompletedPayload{TurnID: mapper.effectiveTurnID(), Status: "error"}, nil)
+			mapper.turnCompleteSaw = true
 		}
 		return &Result{
 			ExitCode:    -1,
@@ -167,6 +171,7 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 		if events != nil {
 			emitEvent(events, &seq, s.task.Session.ID, mapper.effectiveTurnID(), launcherevents.KindError, launcherevents.ErrorPayload{Code: "cancelled", Message: ctx.Err().Error(), Recoverable: false}, nil)
 			emitEvent(events, &seq, s.task.Session.ID, mapper.effectiveTurnID(), launcherevents.KindTurnCompleted, launcherevents.TurnCompletedPayload{TurnID: mapper.effectiveTurnID(), Status: "interrupted"}, nil)
+			mapper.turnCompleteSaw = true
 		}
 		return &Result{
 			ExitCode:    -1,
@@ -186,6 +191,20 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 			return nil, fmt.Errorf("launcher: codex-exec: wait: %w", runErr)
 		}
 		exitCode = exitErr.ExitCode()
+	}
+
+	// Codex is supposed to print a `task_complete` JSONL line before exiting.
+	// If it crashed or exited early without one, consumers of the event stream
+	// would otherwise never see a terminal event. Synthesize one so audit/UI
+	// always has a turn-completion signal.
+	if events != nil && !mapper.turnCompleteSaw {
+		status := "ok"
+		if exitCode != 0 {
+			status = "error"
+			emitEvent(events, &seq, s.task.Session.ID, mapper.effectiveTurnID(), launcherevents.KindError, launcherevents.ErrorPayload{Code: "codex_exit", Message: fmt.Sprintf("codex exec exited %d without task_complete", exitCode), Recoverable: false}, nil)
+		}
+		emitEvent(events, &seq, s.task.Session.ID, mapper.effectiveTurnID(), launcherevents.KindTurnCompleted, launcherevents.TurnCompletedPayload{TurnID: mapper.effectiveTurnID(), Status: status}, nil)
+		mapper.turnCompleteSaw = true
 	}
 
 	lastMessage := readOptionalFile(s.lastMsgPath)
@@ -268,10 +287,11 @@ func readOptionalFile(path string) string {
 }
 
 type codexEventMapper struct {
-	sessionID  string
-	sessionRef SessionRef
-	turnID     string
-	tokenUsage *launcherevents.TokenUsagePayload
+	sessionID       string
+	sessionRef      SessionRef
+	turnID          string
+	tokenUsage      *launcherevents.TokenUsagePayload
+	turnCompleteSaw bool
 }
 
 func newCodexEventMapper(sessionID string) *codexEventMapper {
@@ -394,6 +414,7 @@ func (m *codexEventMapper) Map(line []byte, seq *uint64) []launcherevents.Event 
 		} else if rawBool(raw, "error") {
 			status = "error"
 		}
+		m.turnCompleteSaw = true
 		return []launcherevents.Event{m.makeEvent(seq, launcherevents.KindTurnCompleted, launcherevents.TurnCompletedPayload{TurnID: m.effectiveTurnID(), Status: status}, line)}
 
 	case "error":

@@ -208,6 +208,9 @@ func TestNormalizeAgentConfig_ClaudeWorkspaceWriteWarns(t *testing.T) {
 	if !strings.Contains(warnings[0].Message, "workspace-write") {
 		t.Fatalf("warning = %q", warnings[0].Message)
 	}
+	if agent.Policy.Sandbox != "read-only" {
+		t.Fatalf("expected sandbox to be normalized to read-only, got %q", agent.Policy.Sandbox)
+	}
 }
 
 func TestNormalizeAgentConfig_CodexAppServerAllowsViaApprover(t *testing.T) {
