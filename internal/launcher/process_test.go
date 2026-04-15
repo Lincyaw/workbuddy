@@ -33,7 +33,7 @@ func TestProcessSessionBuildCommand_UsesPromptForClaude(t *testing.T) {
 		t.Fatalf("command path = %q", got)
 	}
 	joined := strings.Join(cmd.Args[1:], " ")
-	for _, want := range []string{"--dangerously-skip-permissions", "--model sonnet", "--print"} {
+	for _, want := range []string{"--dangerously-skip-permissions", "--model sonnet", "--output-format stream-json"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("args %q missing %q", joined, want)
 		}
