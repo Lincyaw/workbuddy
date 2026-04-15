@@ -973,3 +973,26 @@ requirements:
       - cmd/serve_test.go
       - docs_consistency_test.go
     deps: [REQ-002, REQ-003, REQ-004, REQ-024]
+
+  - id: REQ-032
+    title: CLI - recover command
+    description: >
+      Add a built-in `workbuddy recover` CLI command that automates the manual
+      "restore scene" procedure when restarting workbuddy on a new machine or
+      after an unclean shutdown. Encapsulates zombie-process cleanup, worktree
+      pruning, SQLite runtime-table soft-reset, and optional orphaned remote
+      branch pruning.
+    priority: P1
+    version: v0.2.0
+    status: open
+    acceptance_criteria:
+      - "AC-032-1: `workbuddy recover --dry-run` prints all actions it would take"
+      - "AC-032-2: `workbuddy recover --kill-zombies` finds and terminates stale codex / workbuddy processes"
+      - "AC-032-3: `workbuddy recover --reset-db` clears events/task_queue/issue_cache/issue_dependency_state but leaves schema and transition_counts intact"
+      - "AC-032-4: `workbuddy recover --prune-worktrees` removes .workbuddy/worktrees/* and runs git worktree prune"
+      - "AC-032-5: Default invocation executes --kill-zombies --prune-worktrees --reset-db safely"
+      - "AC-032-6: go build && go vet && go test -count=1 green after the change"
+      - "AC-032-7: project-index.yaml REQ-032: status=tested"
+    code: []
+    tests: []
+    deps: []
