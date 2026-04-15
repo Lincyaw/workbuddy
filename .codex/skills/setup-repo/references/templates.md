@@ -10,8 +10,7 @@ type:bug          #D73A4A  Bug report
 type:task         #0075CA  Generic task
 status:triage     #FBCA04  Awaiting triage
 status:developing #1D76DB  Under development
-status:testing    #5319E7  Under testing
-status:reviewing  #D93F0B  Under review
+status:reviewing  #D93F0B  Under review (reviewer runs tests + review)
 status:done       #0E8A16  Completed
 status:failed     #B60205  Failed, needs human intervention
 needs-human       #E99695  Requires human intervention
@@ -47,44 +46,10 @@ command: >
 
   ## When done
   - If implementation is complete and PR is opened:
-    Run: gh issue edit {{.Issue.Number}} --repo {{.Repo}} --remove-label status:developing --add-label status:testing
+    Run: gh issue edit {{.Issue.Number}} --repo {{.Repo}} --remove-label status:developing --add-label status:reviewing
   - If the task is ambiguous or blocked:
     Comment on the issue asking for clarification. Do NOT change labels."
 timeout: 30m
----
-```
-
-### test-agent.md
-
-```yaml
----
-name: test-agent
-description: Testing agent - runs tests and validates implementation
-triggers:
-  - label: "status:testing"
-    event: labeled
-role: test
-runtime: claude-code
-command: >
-  claude -p "You are a testing agent for repo {{.Repo}}.
-
-  ## Task
-  Review the code changes related to issue #{{.Issue.Number}} and run tests.
-
-  ## Issue
-  Title: {{.Issue.Title}}
-  Number: #{{.Issue.Number}}
-
-  ## Steps
-  1. Find the PR associated with issue #{{.Issue.Number}}
-  2. Review the code changes
-  3. Run the project's test suite
-  4. If tests pass and code looks correct:
-     Run: gh issue edit {{.Issue.Number}} --repo {{.Repo}} --remove-label status:testing --add-label status:reviewing
-  5. If tests fail or code has issues:
-     Comment on the PR with specific feedback, then:
-     Run: gh issue edit {{.Issue.Number}} --repo {{.Repo}} --remove-label status:testing --add-label status:developing"
-timeout: 15m
 ---
 ```
 
@@ -93,7 +58,7 @@ timeout: 15m
 ```yaml
 ---
 name: review-agent
-description: Review agent - performs code review
+description: Review agent - runs tests then reviews the PR
 triggers:
   - label: "status:reviewing"
     event: labeled
@@ -103,27 +68,31 @@ command: >
   claude -p "You are a code review agent for repo {{.Repo}}.
 
   ## Task
-  Review the PR associated with issue #{{.Issue.Number}}.
+  Review the PR associated with issue #{{.Issue.Number}}. Reviewer owns
+  testing — run the project's test suite as a blocking gate before approving.
 
   ## Issue
   Title: {{.Issue.Title}}
   Number: #{{.Issue.Number}}
 
   ## Steps
-  1. Find the PR for this issue
-  2. Review code quality, tests, and adherence to project conventions
-  3. If approved:
+  1. Find and check out the PR for this issue (gh pr checkout <N>)
+  2. Run build + test + vet (substitute the repo's stack):
+     go build ./... && go vet ./... && go test ./... -count=1
+     If any of these fail, do NOT approve.
+  3. Review code quality, tests, and adherence to project conventions
+  4. If all checks pass AND code is approved:
      Run: gh issue edit {{.Issue.Number}} --repo {{.Repo}} --remove-label status:reviewing --add-label status:done
-  4. If changes needed:
-     Comment on the PR with review feedback, then:
+  5. If tests fail OR changes needed:
+     Comment on the PR with failing output and review feedback, then:
      Run: gh issue edit {{.Issue.Number}} --repo {{.Repo}} --remove-label status:reviewing --add-label status:developing"
-timeout: 15m
+timeout: 30m
 ---
 ```
 
 ## Stack-specific test hints
 
-Adjust the test agent command to match the repo:
+Adjust the review agent's test command to match the repo:
 - Go: include `go test ./...` and usually `go vet ./...`
 - Node.js: include `npm test` and optionally `npm run lint`
 - Python: include `pytest` and optionally `ruff check`
@@ -158,17 +127,8 @@ states:
     enter_label: "status:developing"
     agent: dev-agent
     transitions:
-      - to: testing
-        when: labeled "status:testing"
-
-  testing:
-    enter_label: "status:testing"
-    agent: test-agent
-    transitions:
       - to: reviewing
         when: labeled "status:reviewing"
-      - to: developing
-        when: labeled "status:developing"
 
   reviewing:
     enter_label: "status:reviewing"
@@ -206,7 +166,8 @@ server:
 ## State machine summary
 
 ```text
-triage -> developing <-> testing <-> reviewing -> done
-              ^_________________________|
+triage -> developing <-> reviewing -> done
+              ^_____________|
 (back-edges are retries; exceed max_retries -> failed -> needs-human)
+(reviewer runs the test suite itself; no separate testing state)
 ```

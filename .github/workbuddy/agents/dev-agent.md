@@ -57,7 +57,7 @@ command: >
 
   ## When done
   - If implementation is complete and PR is opened:
-    Run: gh issue edit {{.Issue.Number}} --repo {{.Repo}} --remove-label status:developing --add-label status:testing
+    Run: gh issue edit {{.Issue.Number}} --repo {{.Repo}} --remove-label status:developing --add-label status:reviewing
   - If the task is ambiguous or blocked:
     Comment on the issue asking for clarification. Do NOT change labels."
 timeout: 30m
@@ -84,7 +84,7 @@ The agent decides the next state by modifying labels:
 
 | Outcome | Label action | Next state |
 |---------|-------------|------------|
-| PR opened, ready for test | `--remove-label status:developing --add-label status:testing` | testing |
+| PR opened, ready for review | `--remove-label status:developing --add-label status:reviewing` | reviewing |
 | Blocked / ambiguous | No label change, comment instead | stays in developing |
 
 ### Guardrails

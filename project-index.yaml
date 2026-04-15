@@ -54,9 +54,9 @@ documentation:
         - internal/poller/poller.go
         - internal/statemachine/statemachine.go
         - .github/workbuddy/agents/dev-agent.md
-        - .github/workbuddy/agents/test-agent.md
         - .github/workbuddy/agents/review-agent.md
         - .github/workbuddy/agents/codex-dev-agent.md
+        - .github/workbuddy/agents/codex-review-agent.md
         - .github/workbuddy/workflows/feature-dev.md
         - .github/workbuddy/workflows/bugfix.md
       notes: Current config, agent, workflow, and label-driven trigger behavior.
