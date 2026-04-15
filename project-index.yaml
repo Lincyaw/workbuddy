@@ -463,7 +463,7 @@ requirements:
       In v0.1.0 only /health endpoint is active. Full API in v0.2.0.
     priority: P1
     version: v0.2.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-025-1: POST /api/v1/workers/register 接受 Worker 注册（worker_id, repo, roles）"
       - "AC-025-2: GET /api/v1/tasks/poll 支持长轮询——有任务立即返回，无任务挂起最多 timeout 秒后返回 204"
@@ -472,8 +472,12 @@ requirements:
       - "AC-025-5: GET /health 返回 200 + JSON 健康状态"
       - "AC-025-6: 请求参数校验，无效请求返回 400"
       - "AC-025-7: 集成测试：模拟完整 register → poll → result 流程"
-    code: []
-    tests: []
+    code:
+      - cmd/coordinator.go
+      - internal/router/router.go
+      - internal/store/store.go
+    tests:
+      - cmd/coordinator_test.go
     deps: [REQ-023, REQ-024]
 
   - id: REQ-026
@@ -861,15 +865,19 @@ requirements:
       For v0.2.0 distributed deployment.
     priority: P1
     version: v0.2.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-027-1: cobra 命令 `workbuddy coordinator`，支持 --port, --poll-interval"
       - "AC-027-2: 启动 Poller + State Machine + Task Router + HTTP API"
       - "AC-027-3: 不启动 Worker，任务通过 HTTP API 长轮询分发"
       - "AC-027-4: 支持多仓库注册"
       - "AC-027-5: graceful shutdown"
-    code: []
-    tests: []
+    code:
+      - cmd/coordinator.go
+      - internal/router/router.go
+      - internal/store/store.go
+    tests:
+      - cmd/coordinator_test.go
     deps: [REQ-025]
 
   - id: REQ-028

@@ -2,3 +2,4 @@ date	commit	status	key_indicators	description
 2026-04-16	working	tree-green	REQ-026 tested; go build/vet/test green	Implemented worker HTTP client loop with launcher execution, heartbeat, lifecycle contract test, and reconnect test
 2026-04-16	working	keep	go_test=pass; req_007=tested; docs=updated	Implemented GitHub Actions remote runner adapter, mocked API integration test, and example workflow/docs for REQ-007.
 2026-04-16	working	keep	go_test=pass; go_build=pass; go_vet=pass; req_007=tested	Hardened REQ-007 by binding to the exact dispatched Actions run ID, requiring a downloaded session artifact, and extending mocked GHA integration coverage for both behaviors.
+2026-04-16	uncommitted	keep	go build=pass; go vet=pass; go test=pass; index-validate=missing-script	REQ-027 standalone coordinator command with worker HTTP API, bearer auth, and smoke coverage
