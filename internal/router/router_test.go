@@ -51,7 +51,7 @@ func TestRouter_MatchingWorker(t *testing.T) {
 		Repo:      "test/repo",
 		IssueNum:  1,
 		AgentName: "dev-agent",
-		Workflow:  "feature-dev",
+		Workflow:  "default",
 		State:     "developing",
 	}
 

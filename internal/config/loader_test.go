@@ -41,12 +41,12 @@ timeout: 30m
 `
 
 const validCodexAgent = `---
-name: codex-dev-agent
-description: Codex dev agent
+name: review-agent
+description: Review agent (codex runtime)
 triggers:
-  - label: "status:developing"
+  - label: "status:reviewing"
     event: labeled
-role: dev
+role: review
 runtime: codex
 policy:
   sandbox: danger-full-access
@@ -54,10 +54,10 @@ policy:
   model: gpt-5.4
   timeout: 25m
 prompt: |
-  solve issue {{.Issue.Number}}
+  verify issue {{.Issue.Number}}
 command: "codex exec legacy"
 ---
-## Codex Agent
+## Review Agent
 `
 
 const validWorkflow = `---
@@ -71,24 +71,27 @@ max_retries: 5
 
 ` + "```yaml" + `
 states:
-  triage:
-    enter_label: "status:triage"
-    agent: triage-agent
-    transitions:
-      - to: developing
-        when: "labeled:status:developing"
   developing:
     enter_label: "status:developing"
     agent: dev-agent
     transitions:
-      - to: testing
-        when: "labeled:status:testing"
-  testing:
-    enter_label: "status:testing"
-    agent: test-agent
+      - to: reviewing
+        when: "labeled:status:reviewing"
+      - to: blocked
+        when: "labeled:status:blocked"
+  reviewing:
+    enter_label: "status:reviewing"
+    agent: review-agent
     transitions:
       - to: done
         when: "labeled:status:done"
+      - to: developing
+        when: "labeled:status:developing"
+  blocked:
+    enter_label: "status:blocked"
+    transitions:
+      - to: developing
+        when: "labeled:status:developing"
   done:
     enter_label: "status:done"
 ` + "```" + `
@@ -151,7 +154,7 @@ func TestRepositorySampleConfig_MatchesGlobalConfigSchema(t *testing.T) {
 	}
 }
 
-func TestRepositorySampleConfig_LoadsExpandedAgentCatalog(t *testing.T) {
+func TestRepositorySampleConfig_LoadsMinimalAgentCatalog(t *testing.T) {
 	configDir := filepath.Join("..", "..", ".github", "workbuddy")
 
 	cfg, warnings, err := LoadConfig(configDir)
@@ -162,45 +165,65 @@ func TestRepositorySampleConfig_LoadsExpandedAgentCatalog(t *testing.T) {
 	expectedAgents := []string{
 		"dev-agent",
 		"review-agent",
-		"codex-dev-agent",
-		"codex-review-agent",
-		"triage-agent",
-		"docs-agent",
-		"security-audit-agent",
-		"dependency-bump-agent",
-		"release-agent",
 	}
 	for _, name := range expectedAgents {
 		if _, ok := cfg.Agents[name]; !ok {
 			t.Fatalf("repository sample config missing agent %q", name)
 		}
 	}
-
-	if got := cfg.Agents["triage-agent"].Runtime; got != RuntimeClaudeShot {
-		t.Fatalf("triage-agent runtime = %q, want %q", got, RuntimeClaudeShot)
-	}
-	if got := cfg.Agents["security-audit-agent"].Runtime; got != RuntimeCodexServer {
-		t.Fatalf("security-audit-agent runtime = %q, want %q", got, RuntimeCodexServer)
-	}
-	if got := cfg.Agents["dependency-bump-agent"].Runtime; got != RuntimeCodexExec {
-		t.Fatalf("dependency-bump-agent runtime = %q, want %q", got, RuntimeCodexExec)
-	}
-	if got := cfg.Agents["release-agent"].Runtime; got != RuntimeCodexServer {
-		t.Fatalf("release-agent runtime = %q, want %q", got, RuntimeCodexServer)
+	if got := len(cfg.Agents); got != len(expectedAgents) {
+		t.Fatalf("repository sample config agent count = %d, want %d; catalog is now minimal (dev + review only)", got, len(expectedAgents))
 	}
 
-	if len(warnings) == 0 {
-		t.Fatal("expected repository sample config to surface at least one trigger-label warning for non-workflow catalog agents")
+	if got := cfg.Agents["dev-agent"].Runtime; got != RuntimeClaudeCode {
+		t.Fatalf("dev-agent runtime = %q, want %q", got, RuntimeClaudeCode)
+	}
+	if got := cfg.Agents["review-agent"].Runtime; got != RuntimeClaudeCode {
+		t.Fatalf("review-agent runtime = %q, want %q", got, RuntimeClaudeCode)
+	}
+
+	// Both agents' trigger labels (status:developing, status:reviewing) should be
+	// covered by the workflow state machine, so no trigger-label warnings expected.
+	for _, w := range warnings {
+		if strings.Contains(w.Message, "status:") {
+			t.Fatalf("unexpected trigger-label warning in minimal 2-agent catalog: %q", w.Message)
+		}
+	}
+}
+
+// Enforces the 2-agent catalog at the filesystem level so the len() check in
+// TestRepositorySampleConfig_LoadsMinimalAgentCatalog cannot be silently
+// defeated by someone adding a 3rd agent file and bumping the expected list.
+func TestRepositoryAgentsDirectoryIsMinimal(t *testing.T) {
+	entries, err := filepath.Glob(filepath.Join("..", "..", ".github", "workbuddy", "agents", "*.md"))
+	if err != nil {
+		t.Fatalf("glob agents dir: %v", err)
+	}
+	got := make(map[string]struct{}, len(entries))
+	for _, e := range entries {
+		got[filepath.Base(e)] = struct{}{}
+	}
+	want := map[string]struct{}{
+		"dev-agent.md":    {},
+		"review-agent.md": {},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("agents dir has %d .md files, want %d (%v)", len(got), len(want), entries)
+	}
+	for name := range want {
+		if _, ok := got[name]; !ok {
+			t.Fatalf("agents dir missing %s", name)
+		}
 	}
 }
 
 // Test 1: Normal parse — agents, workflows, and global config all load correctly.
 func TestLoadConfig_NormalParse(t *testing.T) {
 	dir := setupConfigDir(t, map[string]string{
-		"config.yaml":               validGlobalConfig,
-		"agents/dev-agent.md":       validAgent,
-		"agents/codex-dev-agent.md": validCodexAgent,
-		"workflows/feature-dev.md":  validWorkflow,
+		"config.yaml":              validGlobalConfig,
+		"agents/dev-agent.md":      validAgent,
+		"agents/review-agent.md":   validCodexAgent,
+		"workflows/feature-dev.md": validWorkflow,
 	})
 
 	cfg, warnings, err := LoadConfig(dir)
@@ -228,9 +251,9 @@ func TestLoadConfig_NormalParse(t *testing.T) {
 		t.Errorf("agent runtime = %q, want %q", agent.Runtime, "claude-code")
 	}
 
-	codexAgent, ok := cfg.Agents["codex-dev-agent"]
+	codexAgent, ok := cfg.Agents["review-agent"]
 	if !ok {
-		t.Fatal("agent 'codex-dev-agent' not found")
+		t.Fatal("agent 'review-agent' not found")
 	}
 	if codexAgent.Runtime != RuntimeCodexExec {
 		t.Errorf("codex runtime = %q, want %q", codexAgent.Runtime, RuntimeCodexExec)
@@ -433,22 +456,28 @@ func TestLoadConfig_StatesValidation(t *testing.T) {
 	}
 	wf := cfg.Workflows["feature-dev"]
 
-	// Check triage state.
-	triage, ok := wf.States["triage"]
+	// Check developing state (entry point after humans open an issue).
+	developing, ok := wf.States["developing"]
 	if !ok {
-		t.Fatal("missing 'triage' state")
+		t.Fatal("missing 'developing' state")
 	}
-	if triage.EnterLabel != "status:triage" {
-		t.Errorf("triage enter_label = %q, want %q", triage.EnterLabel, "status:triage")
+	if developing.EnterLabel != "status:developing" {
+		t.Errorf("developing enter_label = %q, want %q", developing.EnterLabel, "status:developing")
 	}
-	if triage.Agent != "triage-agent" {
-		t.Errorf("triage agent = %q, want %q", triage.Agent, "triage-agent")
+	if developing.Agent != "dev-agent" {
+		t.Errorf("developing agent = %q, want %q", developing.Agent, "dev-agent")
 	}
-	if len(triage.Transitions) != 1 {
-		t.Fatalf("triage transitions count = %d, want 1", len(triage.Transitions))
+	if len(developing.Transitions) < 2 {
+		t.Fatalf("developing transitions count = %d, want >= 2 (reviewing + blocked)", len(developing.Transitions))
 	}
-	if triage.Transitions[0].To != "developing" {
-		t.Errorf("triage transition to = %q, want %q", triage.Transitions[0].To, "developing")
+
+	// Check reviewing state uses review-agent.
+	reviewing, ok := wf.States["reviewing"]
+	if !ok {
+		t.Fatal("missing 'reviewing' state")
+	}
+	if reviewing.Agent != "review-agent" {
+		t.Errorf("reviewing agent = %q, want %q", reviewing.Agent, "review-agent")
 	}
 }
 

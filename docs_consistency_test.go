@@ -84,8 +84,7 @@ func TestRetryFailureDocsMigratedToImplemented(t *testing.T) {
 	})
 
 	for _, workflowPath := range []string{
-		".github/workbuddy/workflows/feature-dev.md",
-		".github/workbuddy/workflows/bugfix.md",
+		".github/workbuddy/workflows/default.md",
 	} {
 		workflow := readRepoFile(t, workflowPath)
 		if strings.Contains(workflow, `action: add_label "needs-human"`) {
@@ -238,13 +237,23 @@ func TestAgentCatalogMigratedToImplemented(t *testing.T) {
 	assertContainsAll(t, newPath, doc, []string{
 		"# Agent Catalog",
 		"状态：implemented",
-		"triage-agent",
-		"docs-agent",
-		"security-audit-agent",
-		"dependency-bump-agent",
-		"release-agent",
+		"dev-agent",
+		"review-agent",
 		"output_contract",
 	})
+	// At least one retired agent name must survive so the historical trail is
+	// traceable; don't hard-code all 5 — that creates a ratchet where future
+	// cleanup of the retirement list silently breaks this test.
+	retiredMentioned := false
+	for _, name := range []string{"triage-agent", "docs-agent", "security-audit-agent", "dependency-bump-agent", "release-agent"} {
+		if strings.Contains(doc, name) {
+			retiredMentioned = true
+			break
+		}
+	}
+	if !retiredMentioned {
+		t.Fatalf("%s should mention at least one retired agent for historical traceability", newPath)
+	}
 
 	for _, path := range []string{
 		"docs/index.md",
@@ -267,14 +276,14 @@ func TestAgentCatalogMigratedToImplemented(t *testing.T) {
 			continue
 		}
 		foundNew = true
-		if !containsString(doc.RelatedCode, ".github/workbuddy/agents/triage-agent.md") {
-			t.Fatal("agent-catalog project-index entry should include triage-agent.md")
+		if !containsString(doc.RelatedCode, ".github/workbuddy/agents/dev-agent.md") {
+			t.Fatal("agent-catalog project-index entry should include dev-agent.md")
 		}
-		if !containsString(doc.RelatedCode, ".github/workbuddy/agents/release-agent.md") {
-			t.Fatal("agent-catalog project-index entry should include release-agent.md")
+		if !containsString(doc.RelatedCode, ".github/workbuddy/agents/review-agent.md") {
+			t.Fatal("agent-catalog project-index entry should include review-agent.md")
 		}
-		if !strings.Contains(doc.Notes, "materializes the catalog agents") {
-			t.Fatal("agent-catalog project-index notes should describe the implemented catalog materialization")
+		if !strings.Contains(doc.Notes, "materializes the 2-agent catalog") {
+			t.Fatal("agent-catalog project-index notes should describe the 2-agent catalog materialization")
 		}
 	}
 

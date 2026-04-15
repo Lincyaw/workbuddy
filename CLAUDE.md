@@ -2,6 +2,8 @@
 
 GitHub Issue-driven agent orchestration platform. Hub-Spoke architecture: a Coordinator polls GitHub Issues and manages the label-based state machine; Workers execute agent instances (Claude Code, Codex, etc.). Agents follow the **Agent-as-Router** pattern (LangGraph-style) — each agent decides the next state by modifying issue labels via `gh issue edit`.
 
+The catalog is deliberately minimal: only two roles exist, `role:dev` and `role:review`. No `test-agent`. Tests are covered by acceptance criteria in the issue; dev-agent produces tests as part of its artifact; review-agent verifies them. See `docs/decisions/2026-04-15-agent-role-consolidation.md`.
+
 ## Architecture
 
 ```
@@ -13,14 +15,15 @@ GitHub Issue-driven agent orchestration platform. Hub-Spoke architecture: a Coor
                     ├── SQLite persistence
                     └── HTTP API
                          │
-              ┌──────────┼──────────┐
-              │          │          │
-           Worker A   Worker B   Worker C
-           repo:X     repo:X     repo:Y
-           role:dev   role:test  role:dev
-           runtime:   role:review runtime:
-           claude     runtime:    codex
-                      claude
+                    ┌────┴────┐
+                    │         │
+                 Worker A  Worker B
+                 repo:X    repo:Y
+                 role:dev  role:dev
+                 role:     role:
+                 review    review
+                 runtime:  runtime:
+                 claude    codex
 ```
 
 v0.1.0: `workbuddy serve` runs Coordinator + Worker in a single process (channel communication).

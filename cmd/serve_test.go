@@ -921,7 +921,7 @@ func TestExecuteTask_PersistsPartialResultOnRunError(t *testing.T) {
 		ID:        "task-1",
 		Repo:      "owner/repo",
 		IssueNum:  8,
-		AgentName: "codex-dev-agent",
+		AgentName: "dev-agent",
 		Status:    store.TaskStatusRunning,
 	}); err != nil {
 		t.Fatal(err)
@@ -963,8 +963,8 @@ func TestExecuteTask_PersistsPartialResultOnRunError(t *testing.T) {
 		TaskID:    "task-1",
 		Repo:      "owner/repo",
 		IssueNum:  8,
-		AgentName: "codex-dev-agent",
-		Agent:     &config.AgentConfig{Name: "codex-dev-agent", Runtime: config.RuntimeCodexExec, Prompt: "test prompt"},
+		AgentName: "dev-agent",
+		Agent:     &config.AgentConfig{Name: "dev-agent", Runtime: config.RuntimeCodexExec, Prompt: "test prompt"},
 		Workflow:  "dev-workflow",
 		State:     "developing",
 		Context:   &launcher.TaskContext{Repo: "owner/repo", RepoRoot: repoRoot, WorkDir: workdir, Session: launcher.SessionContext{ID: sessionID}},

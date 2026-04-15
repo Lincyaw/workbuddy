@@ -56,16 +56,8 @@ documentation:
         - internal/statemachine/statemachine.go
         - .github/workbuddy/agents/dev-agent.md
         - .github/workbuddy/agents/review-agent.md
-        - .github/workbuddy/agents/codex-dev-agent.md
-        - .github/workbuddy/agents/codex-review-agent.md
-        - .github/workbuddy/agents/triage-agent.md
-        - .github/workbuddy/agents/docs-agent.md
-        - .github/workbuddy/agents/security-audit-agent.md
-        - .github/workbuddy/agents/dependency-bump-agent.md
-        - .github/workbuddy/agents/release-agent.md
-        - .github/workbuddy/workflows/feature-dev.md
-        - .github/workbuddy/workflows/bugfix.md
-      notes: Current config, agent, workflow, and label-driven trigger behavior.
+        - .github/workbuddy/workflows/default.md
+      notes: Current config, agent, workflow, and label-driven trigger behavior. Agent catalog is now the 2-agent set (dev-agent, review-agent); runtime selection is an agent-config field, not a separate agent kind.
 
     - path: docs/implemented/current-runtime-reporting-and-audit.md
       bucket: implemented
@@ -155,14 +147,7 @@ documentation:
         - internal/launcher/output_contract.go
         - .github/workbuddy/agents/dev-agent.md
         - .github/workbuddy/agents/review-agent.md
-        - .github/workbuddy/agents/codex-dev-agent.md
-        - .github/workbuddy/agents/codex-review-agent.md
-        - .github/workbuddy/agents/triage-agent.md
-        - .github/workbuddy/agents/docs-agent.md
-        - .github/workbuddy/agents/security-audit-agent.md
-        - .github/workbuddy/agents/dependency-bump-agent.md
-        - .github/workbuddy/agents/release-agent.md
-      notes: policy, prompt, and output_contract are implemented; launcher now validates final JSON output against agent-declared JSON Schema files.
+      notes: policy, prompt, and output_contract are implemented; launcher now validates final JSON output against agent-declared JSON Schema files. Catalog reduced to the 2-agent set (dev-agent, review-agent).
 
     - path: docs/implemented/agent-catalog.md
       bucket: implemented
@@ -170,17 +155,9 @@ documentation:
       related_code:
         - .github/workbuddy/agents/dev-agent.md
         - .github/workbuddy/agents/review-agent.md
-        - .github/workbuddy/agents/codex-dev-agent.md
-        - .github/workbuddy/agents/codex-review-agent.md
-        - .github/workbuddy/agents/triage-agent.md
-        - .github/workbuddy/agents/docs-agent.md
-        - .github/workbuddy/agents/security-audit-agent.md
-        - .github/workbuddy/agents/dependency-bump-agent.md
-        - .github/workbuddy/agents/release-agent.md
-        - .github/workbuddy/agents/schemas/
         - internal/config/loader.go
         - internal/config/types.go
-      notes: Repository sample config now materializes the catalog agents as concrete vNext agent definitions with prompt, policy, and output_contract metadata.
+      notes: Repository sample config materializes the 2-agent catalog (dev-agent, review-agent) as concrete vNext agent definitions with prompt, policy, and output_contract metadata. Runtime (claude-code | codex) is an agent-config field, not a separate agent variant.
 
     - path: docs/planned/distributed-topology-and-cli.md
       bucket: planned
@@ -229,12 +206,11 @@ documentation:
       bucket: mismatch
       status: archived
       related_code:
-        - .github/workbuddy/agents/codex-dev-agent.md
         - internal/launcher/codex.go
         - internal/launcher/process.go
         - internal/reporter/reporter.go
         - internal/audit/audit.go
-      notes: Historical drift resolved by the Runtime/Session and Event Schema v1 codex-exec implementation; keep only as archive context.
+      notes: Historical drift resolved by the Runtime/Session and Event Schema v1 codex-exec implementation; keep only as archive context. Codex is now a runtime option on the 2-agent catalog rather than a separate agent.
 
 requirements:
   # ============================================================
