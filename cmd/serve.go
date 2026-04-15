@@ -278,7 +278,8 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	// 4. Init components
 	evlog := eventlog.NewEventLogger(st)
 	reg := registry.NewRegistry(st, cfg.Global.PollInterval)
-	auditor := audit.NewAuditor(st, ".workbuddy/sessions")
+	sessionsDir := ".workbuddy/sessions"
+	auditor := audit.NewAuditor(st, sessionsDir)
 
 	// Register embedded worker
 	workerID, err := reg.RegisterEmbedded(cfg.Global.Repo, opts.roles)
@@ -345,6 +346,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 
 	// Session viewer web UI
 	sessionUI := webui.NewHandler(st)
+	sessionUI.SetSessionsDir(sessionsDir)
 	sessionUI.Register(mux)
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Global.Port),
@@ -424,6 +426,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 		cfg:          cfg,
 		wsMgr:        wsMgr,
 		runningTasks: runningTasks,
+		sessionsDir:  sessionsDir,
 	}
 	workerDone := make(chan struct{})
 	wg.Add(1)
@@ -489,6 +492,7 @@ type workerDeps struct {
 	cfg          *config.FullConfig
 	wsMgr        *workspace.Manager
 	runningTasks *RunningTasks
+	sessionsDir  string
 }
 
 // runEmbeddedWorker runs the embedded worker loop.
@@ -550,7 +554,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	defer func() { _ = session.Close() }()
 
 	eventsCh := make(chan launcherevents.Event, 64)
-	eventsPath, waitEvents := streamSessionEvents(task.Context, eventsCh)
+	eventsPath, waitEvents := streamSessionEvents(deps.sessionsDir, task.Context, eventsCh)
 	result, err := session.Run(taskCtx, eventsCh)
 	close(eventsCh)
 	waitErr := waitEvents()
@@ -623,17 +627,11 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, fetchCachedLabels(deps.store, task.Repo, task.IssueNum))
 }
 
-func streamSessionEvents(taskCtx *launcher.TaskContext, eventsCh <-chan launcherevents.Event) (string, func() error) {
-	baseDir := taskCtx.WorkDir
-	if baseDir == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			baseDir = "."
-		} else {
-			baseDir = cwd
-		}
+func streamSessionEvents(sessionsDir string, taskCtx *launcher.TaskContext, eventsCh <-chan launcherevents.Event) (string, func() error) {
+	if sessionsDir == "" {
+		sessionsDir = ".workbuddy/sessions"
 	}
-	path := filepath.Join(baseDir, ".workbuddy", "sessions", taskCtx.Session.ID, "events-v1.jsonl")
+	path := filepath.Join(sessionsDir, taskCtx.Session.ID, "events-v1.jsonl")
 	errCh := make(chan error, 1)
 	go func() {
 		// Always drain eventsCh to completion so the runtime is never blocked
