@@ -556,22 +556,23 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	if waitErr := waitEvents(); waitErr != nil {
 		log.Printf("[worker] event capture failed: %v", waitErr)
 	}
+	if result != nil && result.SessionPath == "" && eventsPath != "" {
+		result.SessionPath = eventsPath
+	}
 	if err != nil {
 		log.Printf("[worker] agent %s failed: %v", task.AgentName, err)
-		if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
-			log.Printf("[worker] failed to update task status: %v", err)
+		if result == nil {
+			if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
+				log.Printf("[worker] failed to update task status: %v", err)
+			}
+			deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, fetchCachedLabels(deps.store, task.Repo, task.IssueNum))
+			return
 		}
-		deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, fetchCachedLabels(deps.store, task.Repo, task.IssueNum))
-		return
-	}
-
-	if result != nil && eventsPath != "" {
-		result.SessionPath = eventsPath
 	}
 
 	// Determine task status
 	status := store.TaskStatusCompleted
-	if result.ExitCode != 0 {
+	if err != nil || result.ExitCode != 0 {
 		status = store.TaskStatusFailed
 	}
 	if result.Meta != nil && result.Meta["timeout"] == "true" {

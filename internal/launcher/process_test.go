@@ -47,11 +47,11 @@ func TestProcessSessionBuildCommand_UsesPromptForClaude(t *testing.T) {
 	}
 }
 
-func TestProcessSessionSessionLookupPathPrefersWorkDir(t *testing.T) {
+func TestProcessSessionSessionLookupPathPrefersRepo(t *testing.T) {
 	task := newTestTask(t)
 	task.Repo = "owner/repo"
 	sess := &processSession{task: task}
-	if got := sess.sessionLookupPath(); got != task.WorkDir {
-		t.Fatalf("lookup path = %q, want %q", got, task.WorkDir)
+	if got := sess.sessionLookupPath(); got != task.Repo {
+		t.Fatalf("lookup path = %q, want %q", got, task.Repo)
 	}
 }

@@ -8,14 +8,20 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/audit"
 	"github.com/Lincyaw/workbuddy/internal/config"
+	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/launcher"
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 	"github.com/Lincyaw/workbuddy/internal/poller"
+	"github.com/Lincyaw/workbuddy/internal/reporter"
+	"github.com/Lincyaw/workbuddy/internal/router"
+	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
@@ -161,6 +167,24 @@ func (m *mockRuntime) CallCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.calls
+}
+
+type mockCommentWriter struct {
+	mu       sync.Mutex
+	comments []string
+}
+
+func (m *mockCommentWriter) WriteComment(_ string, _ int, body string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.comments = append(m.comments, body)
+	return nil
+}
+
+func (m *mockCommentWriter) Comments() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.comments...)
 }
 
 // ---------------------------------------------------------------------------
@@ -405,4 +429,111 @@ func TestRunningTasks_Concurrent(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+func TestExecuteTask_PersistsPartialResultOnRunError(t *testing.T) {
+	fakeBin := t.TempDir()
+	ghPath := filepath.Join(fakeBin, "gh")
+	writeFile(t, ghPath, "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(ghPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	workdir := t.TempDir()
+	sessionID := "session-partial"
+	artifactDir := filepath.Join(workdir, ".workbuddy", "sessions", sessionID)
+	artifactPath := filepath.Join(artifactDir, "codex-exec.jsonl")
+	writeFile(t, artifactPath, "{\"type\":\"task_started\"}\n")
+
+	st, err := store.NewStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+
+	if err := st.InsertTask(store.TaskRecord{
+		ID:        "task-1",
+		Repo:      "owner/repo",
+		IssueNum:  8,
+		AgentName: "codex-dev-agent",
+		Status:    store.TaskStatusRunning,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     "owner/repo",
+		IssueNum: 8,
+		Labels:   `["workbuddy","status:developing"]`,
+		State:    "open",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	gh := &mockCommentWriter{}
+	mockRT := &mockRuntime{name: config.RuntimeCodexExec, resultFn: func(ctx context.Context, agent *config.AgentConfig, task *launcher.TaskContext) (*launcher.Result, error) {
+		return &launcher.Result{
+			ExitCode:    -1,
+			LastMessage: "partial failure report",
+			Stderr:      "runtime failed after writing artifacts",
+			Duration:    time.Second,
+			SessionPath: artifactPath,
+		}, fmt.Errorf("runtime failed")
+	}}
+	lnch := launcher.NewLauncher()
+	lnch.Register(mockRT, config.RuntimeCodex, config.RuntimeCodexExec)
+
+	sm := statemachine.NewStateMachine(nil, st, nil, eventlog.NewEventLogger(st))
+	deps := &workerDeps{
+		launcher: lnch,
+		auditor:  audit.NewAuditor(st, filepath.Join(t.TempDir(), "archive")),
+		reporter: reporter.NewReporter(gh),
+		store:    st,
+		sm:       sm,
+		workerID: "worker-1",
+		cfg:      &config.FullConfig{},
+	}
+
+	task := router.WorkerTask{
+		TaskID:    "task-1",
+		Repo:      "owner/repo",
+		IssueNum:  8,
+		AgentName: "codex-dev-agent",
+		Agent:     &config.AgentConfig{Name: "codex-dev-agent", Runtime: config.RuntimeCodexExec, Prompt: "test prompt"},
+		Workflow:  "dev-workflow",
+		State:     "developing",
+		Context:   &launcher.TaskContext{Repo: "owner/repo", WorkDir: workdir, Session: launcher.SessionContext{ID: sessionID}},
+	}
+
+	executeTask(context.Background(), task, deps)
+
+	tasks, err := st.QueryTasks("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || tasks[0].Status != store.TaskStatusFailed {
+		t.Fatalf("task status = %+v", tasks)
+	}
+
+	sessions, err := deps.auditor.Query(audit.Filter{SessionID: sessionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 archived session, got %d", len(sessions))
+	}
+	if sessions[0].RawPath == "" {
+		t.Fatalf("expected archived raw path, got %+v", sessions[0])
+	}
+	if _, err := os.Stat(sessions[0].RawPath); err != nil {
+		t.Fatalf("archived raw path missing: %v", err)
+	}
+
+	comments := gh.Comments()
+	if len(comments) != 2 {
+		t.Fatalf("expected started + final report comments, got %d", len(comments))
+	}
+	if !strings.Contains(comments[1], "partial failure report") {
+		t.Fatalf("final report missing partial result: %s", comments[1])
+	}
 }

@@ -141,10 +141,10 @@ func isClaudeRuntime(runtimeName string) bool {
 }
 
 func (s *processSession) sessionLookupPath() string {
-	if s.task.WorkDir != "" {
-		return s.task.WorkDir
+	if strings.TrimSpace(s.task.Repo) != "" {
+		return s.task.Repo
 	}
-	return s.task.Repo
+	return s.task.WorkDir
 }
 
 func (s *processSession) SetApprover(Approver) error { return ErrNotSupported }
