@@ -173,8 +173,8 @@ func TestRetryFailureDocIndexesStaySynced(t *testing.T) {
 	}
 }
 
-func TestIssueDependenciesPlannedDocIndexed(t *testing.T) {
-	docPath := "docs/planned/issue-dependencies.md"
+func TestIssueDependenciesImplementedDocIndexed(t *testing.T) {
+	docPath := "docs/implemented/issue-dependencies.md"
 	docContent := readRepoFile(t, docPath)
 	assertContainsAll(t, docPath, docContent, []string{
 		"# Issue Dependency Mechanism",
@@ -196,7 +196,7 @@ func TestIssueDependenciesPlannedDocIndexed(t *testing.T) {
 
 	for _, path := range []string{
 		"docs/index.md",
-		"docs/planned/index.md",
+		"docs/implemented/index.md",
 	} {
 		if !strings.Contains(readRepoFile(t, path), docPath) {
 			t.Fatalf("%s missing %s", path, docPath)

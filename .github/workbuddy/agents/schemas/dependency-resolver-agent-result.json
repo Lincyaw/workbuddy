@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "generation",
+    "status",
+    "comment_hash",
+    "comment_id"
+  ],
+  "properties": {
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "applied",
+        "failed"
+      ]
+    },
+    "comment_hash": {
+      "type": "string"
+    },
+    "comment_id": {
+      "type": "string"
+    },
+    "error": {
+      "type": "string"
+    }
+  }
+}

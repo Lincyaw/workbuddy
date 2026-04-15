@@ -603,6 +603,34 @@ func TestDispatchRespectsContext(t *testing.T) {
 	}
 }
 
+func TestDispatchBlockedByDependencyVerdict(t *testing.T) {
+	sm, _, dispatch := newTestSM(t)
+	if err := sm.store.UpsertIssueDependencyState(store.IssueDependencyState{
+		Repo:     "test/repo",
+		IssueNum: 77,
+		Verdict:  store.DependencyVerdictBlocked,
+	}); err != nil {
+		t.Fatalf("UpsertIssueDependencyState: %v", err)
+	}
+
+	err := sm.HandleEvent(context.Background(), ChangeEvent{
+		Type:     poller.EventLabelAdded,
+		Repo:     "test/repo",
+		IssueNum: 77,
+		Labels:   []string{"workbuddy", "status:developing"},
+		Detail:   "status:developing",
+	})
+	if err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+
+	select {
+	case req := <-dispatch:
+		t.Fatalf("unexpected dispatch: %+v", req)
+	default:
+	}
+}
+
 // Test 10: ResetDedup is safe for concurrent access
 func TestResetDedupConcurrent(t *testing.T) {
 	sm, _, _ := newTestSM(t)

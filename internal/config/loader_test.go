@@ -168,6 +168,7 @@ func TestRepositorySampleConfig_LoadsExpandedAgentCatalog(t *testing.T) {
 		"docs-agent",
 		"security-audit-agent",
 		"dependency-bump-agent",
+		"dependency-resolver-agent",
 		"release-agent",
 	}
 	for _, name := range expectedAgents {

@@ -88,6 +88,17 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 		log.Printf("[router] agent %q not found, skipping dispatch for %s#%d", req.AgentName, req.Repo, req.IssueNum)
 		return
 	}
+	if req.AgentName != "dependency-resolver-agent" {
+		depState, err := r.store.QueryIssueDependencyState(req.Repo, req.IssueNum)
+		if err != nil {
+			log.Printf("[router] failed to query dependency state for %s#%d: %v", req.Repo, req.IssueNum, err)
+			return
+		}
+		if depState != nil && (depState.Verdict == store.DependencyVerdictBlocked || depState.Verdict == store.DependencyVerdictNeedsHuman) {
+			log.Printf("[router] blocked dispatch for %s#%d due to dependency verdict %q", req.Repo, req.IssueNum, depState.Verdict)
+			return
+		}
+	}
 
 	taskID := uuid.New().String()
 

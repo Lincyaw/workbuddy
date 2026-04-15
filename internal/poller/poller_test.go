@@ -39,6 +39,10 @@ func (m *mockGHReader) CheckRepoAccess(_ string) error {
 	return m.accessErr
 }
 
+func (m *mockGHReader) ReadIssue(_ string, issueNum int) (IssueDetails, error) {
+	return IssueDetails{Number: issueNum, State: "open"}, nil
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

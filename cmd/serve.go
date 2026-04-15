@@ -19,6 +19,7 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/audit"
 	"github.com/Lincyaw/workbuddy/internal/config"
+	"github.com/Lincyaw/workbuddy/internal/dependency"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/labelcheck"
 	"github.com/Lincyaw/workbuddy/internal/launcher"
@@ -187,6 +188,25 @@ type ghIssueLabelsJSON struct {
 	} `json:"labels"`
 }
 
+type ghIssueDetailJSON struct {
+	Number      int    `json:"number"`
+	State       string `json:"state"`
+	StateReason string `json:"stateReason"`
+	Body        string `json:"body"`
+	Labels      struct {
+		Nodes []struct {
+			Name string `json:"name"`
+		} `json:"nodes"`
+	} `json:"labels"`
+	ClosedByPullRequestsReferences struct {
+		Nodes []struct {
+			Number int    `json:"number"`
+			State  string `json:"state"`
+			URL    string `json:"url"`
+		} `json:"nodes"`
+	} `json:"closedByPullRequestsReferences"`
+}
+
 // ghPRJSON matches the JSON output of gh pr list --json.
 type ghPRJSON struct {
 	Number      int    `json:"number"`
@@ -290,6 +310,47 @@ func (g *GHCLIReader) ReadIssueLabels(repo string, issueNum int) ([]string, erro
 		labels[i] = label.Name
 	}
 	return labels, nil
+}
+
+func (g *GHCLIReader) ReadIssue(repo string, issueNum int) (poller.IssueDetails, error) {
+	parts := strings.SplitN(repo, "/", 2)
+	if len(parts) != 2 {
+		return poller.IssueDetails{}, fmt.Errorf("invalid repo %q", repo)
+	}
+	query := `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){number state stateReason body labels(first:100){nodes{name}} closedByPullRequestsReferences(first:10){nodes{number state url}}}}}`
+	cmd := exec.Command("gh", "api", "graphql",
+		"-f", "query="+query,
+		"-F", "owner="+parts[0],
+		"-F", "name="+parts[1],
+		"-F", fmt.Sprintf("number=%d", issueNum),
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return poller.IssueDetails{}, fmt.Errorf("gh api graphql issue detail: %w", err)
+	}
+	var response struct {
+		Data struct {
+			Repository struct {
+				Issue ghIssueDetailJSON `json:"issue"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(out, &response); err != nil {
+		return poller.IssueDetails{}, fmt.Errorf("gh api graphql issue detail parse: %w", err)
+	}
+	issue := response.Data.Repository.Issue
+	labels := make([]string, len(issue.Labels.Nodes))
+	for i, label := range issue.Labels.Nodes {
+		labels[i] = label.Name
+	}
+	return poller.IssueDetails{
+		Number:           issue.Number,
+		State:            strings.ToLower(issue.State),
+		StateReason:      strings.ToLower(issue.StateReason),
+		Body:             issue.Body,
+		Labels:           labels,
+		ClosedByLinkedPR: len(issue.ClosedByPullRequestsReferences.Nodes) > 0,
+	}, nil
 }
 
 var serveCmd = &cobra.Command{
@@ -414,6 +475,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 
 	// State machine
 	sm := statemachine.NewStateMachine(cfg.Workflows, st, dispatchCh, evlog)
+	depResolver := dependency.NewResolver(st, ghReader, evlog)
 
 	// Workspace isolation via git worktrees
 	wsMgr := workspace.NewManager(repoDir)
@@ -502,6 +564,41 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		var depsResolvedThisCycle bool
+		var depGraphVersion int64
+		runDependencyMaintenance := func(ctx context.Context) {
+			depGraphVersion++
+			if err := depResolver.EvaluateOpenIssues(ctx, cfg.Global.Repo, depGraphVersion); err != nil {
+				log.Printf("[serve] dependency resolver error: %v", err)
+				return
+			}
+			items, err := st.ListQueuedDependencyReconciles(cfg.Global.Repo, 100)
+			if err != nil {
+				log.Printf("[serve] dependency queue list error: %v", err)
+				return
+			}
+			for _, item := range items {
+				active, err := st.HasActiveTask(item.Repo, item.IssueNum, dependency.ResolverAgentName)
+				if err != nil {
+					log.Printf("[serve] dependency queue active-task check failed: %v", err)
+					continue
+				}
+				if active {
+					continue
+				}
+				select {
+				case dispatchCh <- statemachine.DispatchRequest{
+					Repo:      item.Repo,
+					IssueNum:  item.IssueNum,
+					AgentName: dependency.ResolverAgentName,
+					Workflow:  dependency.DependencySchedulerReason,
+					State:     dependency.DependencySchedulerReason,
+				}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
 		for {
 			select {
 			case <-ctx.Done():
@@ -515,8 +612,16 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 				// state. Without this, a label like status:developing that is
 				// re-added after a review bounce-back would be silently dropped.
 				if ev.Type == poller.EventPollCycleDone {
+					if !depsResolvedThisCycle {
+						runDependencyMaintenance(ctx)
+					}
+					depsResolvedThisCycle = false
 					sm.ResetDedup()
 					continue
+				}
+				if !depsResolvedThisCycle {
+					runDependencyMaintenance(ctx)
+					depsResolvedThisCycle = true
 				}
 				// Handle issue closure: cancel running agent and skip state machine.
 				if ev.Type == poller.EventIssueClosed {
@@ -727,14 +832,19 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	}
 	log.Printf("[worker] executing task %s: agent=%s issue=%s#%d",
 		task.TaskID, task.AgentName, task.Repo, task.IssueNum)
+	isDependencyResolver := task.AgentName == dependency.ResolverAgentName
 
 	// Add claim reaction (eyes) to signal this issue is being worked on.
-	addClaimReaction(taskCtx, task.Repo, task.IssueNum, task.AgentName)
+	if !isDependencyResolver {
+		addClaimReaction(taskCtx, task.Repo, task.IssueNum, task.AgentName)
+	}
 
 	// Post "Agent Started" comment with session link.
 	sessionID := task.Context.Session.ID
-	if err := deps.reporter.ReportStarted(task.Repo, task.IssueNum, task.AgentName, sessionID, deps.workerID); err != nil {
-		log.Printf("[worker] report started failed: %v", err)
+	if !isDependencyResolver {
+		if err := deps.reporter.ReportStarted(task.Repo, task.IssueNum, task.AgentName, sessionID, deps.workerID); err != nil {
+			log.Printf("[worker] report started failed: %v", err)
+		}
 	}
 
 	session, err := deps.launcher.Start(taskCtx, task.Agent, task.Context)
@@ -841,6 +951,11 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	if err := deps.auditor.Capture(sessionID, task.TaskID, task.Repo, task.IssueNum, task.AgentName, result); err != nil {
 		log.Printf("[worker] audit capture failed: %v", err)
 	}
+	if isDependencyResolver {
+		if err := handleDependencyResolverResult(task, deps, result, status); err != nil {
+			log.Printf("[worker] dependency resolver result handling failed: %v", err)
+		}
+	}
 
 	// Get retry count for reporting
 	retryCount := 0
@@ -859,9 +974,11 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	}
 
 	// Report to issue
-	if err := deps.reporter.Report(task.Repo, task.IssueNum, task.AgentName, result,
-		sessionID, deps.workerID, retryCount, maxRetries, labelSummary); err != nil {
-		log.Printf("[worker] report failed: %v", err)
+	if !isDependencyResolver {
+		if err := deps.reporter.Report(task.Repo, task.IssueNum, task.AgentName, result,
+			sessionID, deps.workerID, retryCount, maxRetries, labelSummary); err != nil {
+			log.Printf("[worker] report failed: %v", err)
+		}
 	}
 
 	// Mark agent completed in state machine
@@ -1053,6 +1170,46 @@ func exitCodeForValidation(result *launcher.Result) int {
 		return -1
 	}
 	return result.ExitCode
+}
+
+type dependencyResolverResult struct {
+	Generation  int64  `json:"generation"`
+	Status      string `json:"status"`
+	CommentHash string `json:"comment_hash"`
+	CommentID   string `json:"comment_id"`
+	Error       string `json:"error"`
+}
+
+func handleDependencyResolverResult(task router.WorkerTask, deps *workerDeps, result *launcher.Result, taskStatus string) error {
+	latest, err := deps.store.LatestDependencyReconcile(task.Repo, task.IssueNum)
+	if err != nil {
+		return err
+	}
+	if latest == nil {
+		return nil
+	}
+	if result == nil {
+		return deps.store.MarkDependencyReconcileFailed(task.Repo, task.IssueNum, latest.Generation, "missing_result")
+	}
+
+	var payload dependencyResolverResult
+	if err := json.Unmarshal([]byte(strings.TrimSpace(result.Stdout)), &payload); err != nil {
+		return deps.store.MarkDependencyReconcileFailed(task.Repo, task.IssueNum, latest.Generation, "invalid_json_output")
+	}
+	if payload.Generation == 0 {
+		payload.Generation = latest.Generation
+	}
+	if taskStatus == store.TaskStatusCompleted && payload.Status == store.DependencyQueueStatusApplied {
+		return deps.store.MarkDependencyReconcileApplied(task.Repo, task.IssueNum, payload.Generation, payload.CommentHash, payload.CommentID)
+	}
+	reason := strings.TrimSpace(payload.Error)
+	if reason == "" {
+		reason = strings.TrimSpace(payload.Status)
+	}
+	if reason == "" {
+		reason = "unknown"
+	}
+	return deps.store.MarkDependencyReconcileFailed(task.Repo, task.IssueNum, payload.Generation, reason)
 }
 
 func cloneLabels(labels []string) []string {

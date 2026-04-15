@@ -49,6 +49,61 @@ type IssueCache struct {
 	Repo      string
 	IssueNum  int
 	Labels    string // JSON array
+	Body      string
 	State     string
 	UpdatedAt time.Time
+}
+
+const (
+	DependencyStatusActive               = "active"
+	DependencyStatusUnsupportedCrossRepo = "unsupported_cross_repo"
+	DependencyStatusInvalid              = "invalid"
+	DependencyStatusRemoved              = "removed"
+
+	DependencyVerdictReady      = "ready"
+	DependencyVerdictBlocked    = "blocked"
+	DependencyVerdictOverride   = "override"
+	DependencyVerdictNeedsHuman = "needs_human"
+
+	DependencyQueueStatusQueued     = "queued"
+	DependencyQueueStatusApplied    = "applied"
+	DependencyQueueStatusSuperseded = "superseded"
+	DependencyQueueStatusFailed     = "failed"
+)
+
+type IssueDependency struct {
+	Repo              string
+	IssueNum          int
+	DependsOnRepo     string
+	DependsOnIssueNum int
+	SourceHash        string
+	Status            string
+}
+
+type IssueDependencyState struct {
+	Repo              string
+	IssueNum          int
+	Verdict           string
+	ResumeLabel       string
+	BlockedReasonHash string
+	OverrideActive    bool
+	GraphVersion      int64
+	LastCommentHash   string
+	LastCommentID     string
+	LastEvaluatedAt   time.Time
+}
+
+type DependencyReconcileQueueItem struct {
+	Repo               string
+	IssueNum           int
+	Generation         int64
+	DesiredBlocked     bool
+	DesiredResumeLabel string
+	DesiredNeedsHuman  bool
+	DesiredCommentBody string
+	DesiredCommentHash string
+	Status             string
+	RequestedAt        time.Time
+	AppliedAt          time.Time
+	LastError          string
 }
