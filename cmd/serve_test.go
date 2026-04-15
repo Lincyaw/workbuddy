@@ -1143,6 +1143,83 @@ func TestExecuteTask_LabelValidationAudit(t *testing.T) {
 	}
 }
 
+func TestExecuteTask_LabelValidationUsesPreRunStateTransitions(t *testing.T) {
+	rt := &mockRuntime{name: config.RuntimeClaudeCode, resultFn: func(_ context.Context, _ *config.AgentConfig, _ *launcher.TaskContext) (*launcher.Result, error) {
+		return &launcher.Result{
+			ExitCode: 0,
+			Stdout:   "task output",
+			Duration: 50 * time.Millisecond,
+			Meta:     map[string]string{},
+		}, nil
+	}}
+	gh := &mockGHReader{
+		labelSnapshots: [][]string{
+			{"workbuddy", "status:reviewing"},
+			{"workbuddy", "status:done"},
+		},
+	}
+	deps, st, comments := newWorkerTestDepsWithComments(t, rt, gh)
+
+	deps.cfg.Workflows["dev-workflow"] = &config.WorkflowConfig{
+		Name:       "dev-workflow",
+		MaxRetries: 3,
+		States: map[string]*config.State{
+			"developing": {
+				EnterLabel: "status:developing",
+				Agent:      "dev-agent",
+				Transitions: []config.Transition{
+					{To: "reviewing", When: `labeled "status:reviewing"`},
+				},
+			},
+			"reviewing": {
+				EnterLabel: "status:reviewing",
+				Agent:      "review-agent",
+				Transitions: []config.Transition{
+					{To: "done", When: `labeled "status:done"`},
+				},
+			},
+			"done":   {EnterLabel: "status:done"},
+			"failed": {EnterLabel: "status:failed"},
+		},
+	}
+
+	task := newWorkerTestTask(t, st, "owner/repo", 12, "task-stale-state")
+	task.State = "developing"
+
+	executeTask(context.Background(), task, deps)
+
+	events, err := st.QueryEvents("owner/repo")
+	if err != nil {
+		t.Fatalf("QueryEvents: %v", err)
+	}
+
+	var validationEvents []store.Event
+	for _, event := range events {
+		if event.Type == string(audit.EventKindLabelValidation) {
+			validationEvents = append(validationEvents, event)
+		}
+	}
+	if len(validationEvents) != 1 {
+		t.Fatalf("expected 1 label validation event, got %d", len(validationEvents))
+	}
+
+	var payload audit.LabelValidationPayload
+	if err := json.Unmarshal([]byte(validationEvents[0].Payload), &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.Classification != "ok" {
+		t.Fatalf("Classification = %q, want %q", payload.Classification, "ok")
+	}
+
+	allComments := comments.Comments()
+	if len(allComments) != 2 {
+		t.Fatalf("expected started + final comments, got %d", len(allComments))
+	}
+	if !strings.Contains(allComments[1], "Label transition: reviewing -> done (OK)") {
+		t.Fatalf("final report missing resolved transition summary: %s", allComments[1])
+	}
+}
+
 func TestStreamSessionEventsUsesRepoRoot(t *testing.T) {
 	repoRoot := t.TempDir()
 	workDir := t.TempDir()

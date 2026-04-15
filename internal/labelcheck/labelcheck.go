@@ -35,11 +35,15 @@ type Result struct {
 	To             State
 }
 
-func Classify(input Input) Result {
-	current := input.Current
-	if preState := selectPrimaryState(matchStates(input.Pre, input.KnownStates), State{}); preState.Label != "" {
-		current = preState
+func ResolveCurrent(pre []string, fallback State, known []State) State {
+	if preState := selectPrimaryState(matchStates(pre, known), fallback); preState.Label != "" {
+		return preState
 	}
+	return fallback
+}
+
+func Classify(input Input) Result {
+	current := ResolveCurrent(input.Pre, input.Current, input.KnownStates)
 
 	postStates := matchStates(input.Post, input.KnownStates)
 	if failed, ok := stateNamed(postStates, "failed"); ok {

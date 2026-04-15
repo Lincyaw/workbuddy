@@ -967,8 +967,8 @@ func validateLabelTransition(task router.WorkerTask, deps *workerDeps, preLabels
 	if !ok || wf == nil {
 		return labelcheck.Result{}, false, fmt.Errorf("workflow %q not found", task.Workflow)
 	}
-	currentState, ok := wf.States[task.State]
-	if !ok || currentState == nil {
+	queuedState, ok := wf.States[task.State]
+	if !ok || queuedState == nil {
 		return labelcheck.Result{}, false, fmt.Errorf("state %q not found in workflow %q", task.State, task.Workflow)
 	}
 
@@ -976,7 +976,7 @@ func validateLabelTransition(task router.WorkerTask, deps *workerDeps, preLabels
 		Pre:      cloneLabels(preLabels),
 		Post:     cloneLabels(postLabels),
 		ExitCode: exitCodeForValidation(result),
-		Current:  labelcheck.State{Name: task.State, Label: currentState.EnterLabel},
+		Current:  labelcheck.State{Name: task.State, Label: queuedState.EnterLabel},
 	}
 
 	stateNames := make([]string, 0, len(wf.States))
@@ -995,6 +995,13 @@ func validateLabelTransition(task router.WorkerTask, deps *workerDeps, preLabels
 		input.KnownStates = append(input.KnownStates, labelcheck.State{Name: name, Label: state.EnterLabel})
 	}
 
+	input.Current = labelcheck.ResolveCurrent(input.Pre, input.Current, input.KnownStates)
+
+	currentState, err := resolveWorkflowLabelState(wf, input.Current)
+	if err != nil {
+		return labelcheck.Result{}, false, err
+	}
+
 	allowedSeen := make(map[string]bool)
 	for _, transition := range currentState.Transitions {
 		target, ok := wf.States[transition.To]
@@ -1006,6 +1013,31 @@ func validateLabelTransition(task router.WorkerTask, deps *workerDeps, preLabels
 	}
 
 	return labelcheck.Classify(input), true, nil
+}
+
+func resolveWorkflowLabelState(wf *config.WorkflowConfig, current labelcheck.State) (*config.State, error) {
+	if wf == nil {
+		return nil, fmt.Errorf("missing workflow")
+	}
+	if current.Name != "" {
+		if state, ok := wf.States[current.Name]; ok && state != nil {
+			return state, nil
+		}
+	}
+	if current.Label != "" {
+		stateNames := make([]string, 0, len(wf.States))
+		for name := range wf.States {
+			stateNames = append(stateNames, name)
+		}
+		sort.Strings(stateNames)
+		for _, name := range stateNames {
+			state := wf.States[name]
+			if state != nil && state.EnterLabel == current.Label {
+				return state, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("resolved state %q (%q) not found in workflow %q", current.Name, current.Label, wf.Name)
 }
 
 func exitCodeForValidation(result *launcher.Result) int {
