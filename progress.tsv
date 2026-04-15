@@ -1,0 +1,2 @@
+date	commit	status	key_indicators	description
+2026-04-16	uncommitted	keep	go build=pass; go vet=pass; go test=pass; index-validate=missing-script	REQ-027 standalone coordinator command with worker HTTP API, bearer auth, and smoke coverage
