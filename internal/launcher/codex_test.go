@@ -244,6 +244,62 @@ func TestCodexExecE2E(t *testing.T) {
 	}
 }
 
+func TestCodexSessionRunSynthesizesTurnCompletedOnCrash(t *testing.T) {
+	restore := installFakeCodexScript(t, "#!/bin/sh\nprintf 'boom\\n' >&2\nexit 3\n")
+	defer restore()
+
+	launcher := NewLauncher()
+	task := newTestTask(t)
+	agent := &config.AgentConfig{
+		Name:    "codex-agent",
+		Runtime: config.RuntimeCodexExec,
+		Prompt:  "irrelevant",
+		Policy:  config.PolicyConfig{Sandbox: "danger-full-access", Approval: "on-request"},
+		Timeout: 5 * time.Second,
+	}
+	session, err := launcher.Start(context.Background(), agent, task)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = session.Close() }()
+
+	ch := make(chan launcherevents.Event, 16)
+	var collected []launcherevents.Event
+	done := make(chan struct{})
+	go func() {
+		for evt := range ch {
+			collected = append(collected, evt)
+		}
+		close(done)
+	}()
+
+	result, err := session.Run(context.Background(), ch)
+	close(ch)
+	<-done
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if result.ExitCode != 3 {
+		t.Fatalf("exit code = %d, want 3", result.ExitCode)
+	}
+
+	var sawError, sawTurnCompleted bool
+	for _, evt := range collected {
+		switch evt.Kind {
+		case launcherevents.KindError:
+			sawError = true
+		case launcherevents.KindTurnCompleted:
+			sawTurnCompleted = true
+		}
+	}
+	if !sawError {
+		t.Fatalf("expected synthetic error event on non-zero exit without task_complete, got %v", collected)
+	}
+	if !sawTurnCompleted {
+		t.Fatalf("expected synthetic turn.completed event when codex crashed without task_complete, got %v", collected)
+	}
+}
+
 func installFakeCodex(t *testing.T) func() {
 	t.Helper()
 
@@ -277,6 +333,24 @@ func installFakeCodex(t *testing.T) func() {
 		"fi\n" +
 		"cat \"" + fixturePath + "\"\n" +
 		"printf 'codex stderr for testing\\n' >&2\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	if err := os.Setenv("PATH", binDir+string(os.PathListSeparator)+oldPath); err != nil {
+		t.Fatalf("set PATH: %v", err)
+	}
+	return func() {
+		_ = os.Setenv("PATH", oldPath)
+	}
+}
+
+func installFakeCodexScript(t *testing.T, script string) func() {
+	t.Helper()
+
+	binDir := t.TempDir()
+	scriptPath := filepath.Join(binDir, "codex")
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake codex: %v", err)
 	}
