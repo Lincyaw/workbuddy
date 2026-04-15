@@ -530,6 +530,8 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 		_, _ = fmt.Fprintf(w, `{"status":"ok","repo":%q}`, cfg.Global.Repo)
 	})
 
+	audit.NewHTTPHandler(st).Register(mux)
+
 	// Session viewer web UI
 	sessionUI := webui.NewHandler(st)
 	sessionUI.SetSessionsDir(sessionsDir)
