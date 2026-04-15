@@ -148,11 +148,30 @@ func parseCoordinatorFlags(cmd *cobra.Command) (*coordinatorOpts, error) {
 	if strings.TrimSpace(listenAddr) == "" {
 		return nil, fmt.Errorf("coordinator: --listen is required")
 	}
+	if loopbackOnly && !isLoopbackListenAddr(listenAddr) {
+		return nil, fmt.Errorf("coordinator: --loopback-only requires a loopback --listen address, got %q", listenAddr)
+	}
 	return &coordinatorOpts{
 		dbPath:       dbPath,
 		listenAddr:   listenAddr,
 		loopbackOnly: loopbackOnly,
 	}, nil
+}
+
+func isLoopbackListenAddr(listenAddr string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(listenAddr))
+	if err != nil {
+		return false
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func runCoordinatorTokenCreateCmd(cmd *cobra.Command, _ []string) error {
