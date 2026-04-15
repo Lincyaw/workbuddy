@@ -39,6 +39,7 @@
 - `docs/planned/agent-schema-vnext.md`
 - `docs/planned/event-schema-v1.md`
 - `docs/planned/agent-catalog.md`
+- `docs/planned/issue-dependencies.md`
 - `docs/planned/distributed-topology-and-cli.md`
 - `docs/planned/runtime-migration-plan.md`
 

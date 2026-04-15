@@ -172,3 +172,51 @@ func TestRetryFailureDocIndexesStaySynced(t *testing.T) {
 		t.Fatal("project-index.yaml is missing REQ-003")
 	}
 }
+
+func TestIssueDependenciesPlannedDocIndexed(t *testing.T) {
+	docPath := "docs/planned/issue-dependencies.md"
+	doc := readRepoFile(t, docPath)
+	assertContainsAll(t, docPath, doc, []string{
+		"# Issue Dependency Mechanism",
+		"## Goal",
+		"## 当前状态",
+		"## 目标状态",
+		"## Concrete Code Touch Points",
+		"## Rejected Alternatives",
+		"## Distance From Current Code",
+		"## Migration Path",
+		"`status:blocked`",
+		"`override:force-unblock`",
+	})
+
+	for _, path := range []string{
+		"docs/index.md",
+		"docs/planned/index.md",
+	} {
+		if !strings.Contains(readRepoFile(t, path), docPath) {
+			t.Fatalf("%s missing %s", path, docPath)
+		}
+	}
+
+	idx := loadProjectIndex(t)
+	found := false
+	for _, doc := range idx.Documentation.Documents {
+		if doc.Path != docPath {
+			continue
+		}
+		found = true
+		if !containsString(doc.RelatedCode, "internal/poller/poller.go") {
+			t.Fatal("issue-dependencies project-index entry should include internal/poller/poller.go")
+		}
+		if !containsString(doc.RelatedCode, "internal/statemachine/statemachine.go") {
+			t.Fatal("issue-dependencies project-index entry should include internal/statemachine/statemachine.go")
+		}
+		if !strings.Contains(doc.Notes, "cycle detection") {
+			t.Fatal("issue-dependencies project-index notes should mention cycle detection")
+		}
+	}
+
+	if !found {
+		t.Fatalf("project-index.yaml is missing %s", docPath)
+	}
+}
