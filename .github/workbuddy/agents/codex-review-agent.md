@@ -56,7 +56,9 @@ prompt: |
      go build ./...
      go vet ./...
      go test ./... -count=1
-     If any fail, request-changes. Otherwise proceed.
+     If any fail, treat it as a BLOCKING finding and go to the "If build/vet/tests fail
+     OR BLOCKING finding" branch under "When done" — do NOT attempt a formal
+     request-changes review (GitHub refuses it on self-authored PRs). Otherwise proceed.
   3. Read the PR diff against project conventions.
   4. Classify every finding as BLOCKING or non-blocking:
      - BLOCKING: correctness bugs, security issues, data loss risks,
@@ -76,7 +78,11 @@ prompt: |
   - If build/vet/tests pass AND no blocking findings:
     (Optional) post a PR comment listing any non-blocking suggestions.
     Run: gh issue edit {{.Issue.Number}} --repo {{.Repo}} --remove-label status:reviewing --add-label status:done
-    Then close the issue: gh issue close {{.Issue.Number}} --repo {{.Repo}}
+    DO NOT run `gh issue close` yourself. Label transition is the authoritative
+    signal; the issue is closed when the linked PR merges (PR body should
+    contain `Closes #{{.Issue.Number}}`). Closing the issue here races with
+    the poller's "cancel running agent on close" hook and will kill this
+    codex process before it exits cleanly, causing a spurious Failure report.
   - If build/vet/tests fail OR there is at least one BLOCKING finding:
     Post a PR comment with failing output and concrete fix guidance, then:
     Run: gh issue edit {{.Issue.Number}} --repo {{.Repo}} --remove-label status:reviewing --add-label status:developing

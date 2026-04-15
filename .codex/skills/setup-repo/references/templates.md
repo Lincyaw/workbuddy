@@ -104,7 +104,7 @@ If the repo already has a preferred validation command, use that instead of forc
 
 ### feature-dev.md
 
-```yaml
+````markdown
 ---
 name: feature-dev
 description: Full feature development lifecycle
@@ -147,7 +147,7 @@ states:
     enter_label: "status:failed"
     action: add_label "needs-human"
 ```
-```
+````
 
 Create a similar workflow for bugs with `trigger.issue_label: "type:bug"`.
 

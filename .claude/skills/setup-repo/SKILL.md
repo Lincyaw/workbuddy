@@ -132,7 +132,7 @@ timeout: 30m
 Create `.github/workbuddy/workflows/` directory and workflow markdown files.
 
 #### feature-dev.md (standard feature workflow)
-```yaml
+````markdown
 ---
 name: feature-dev
 description: Full feature development lifecycle
@@ -175,7 +175,7 @@ states:
     enter_label: "status:failed"
     action: add_label "needs-human"
 ```
-```
+````
 
 #### bugfix.md (similar but for bugs)
 Create a similar workflow with `trigger.issue_label: "type:bug"`.
@@ -212,10 +212,11 @@ After creating all files:
 
 2. Show the state machine diagram:
    ```
-   triage -> developing <-> testing <-> reviewing -> done
-                 ^_________________________|
+   triage -> developing <-> reviewing -> done
+                 ^_______________|
                  (back-edges: retry tracked, max 3)
    Any back-edge exceeding max_retries -> failed -> needs-human
+   (Reviewer owns testing — runs build/vet/tests as the blocking gate.)
    ```
 
 3. Explain how to use:
