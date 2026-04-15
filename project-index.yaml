@@ -888,7 +888,7 @@ requirements:
       Coordinator via long-polling.
     priority: P1
     version: v0.2.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-028-1: cobra 命令 `workbuddy worker`，支持 --coordinator, --token, --role, --runtime, --repo"
       - "AC-028-2: 启动时向 Coordinator 注册，并上报 roles/runtime/repos capabilities"
