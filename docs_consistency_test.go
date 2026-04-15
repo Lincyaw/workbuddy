@@ -220,3 +220,60 @@ func TestIssueDependenciesPlannedDocIndexed(t *testing.T) {
 		t.Fatalf("project-index.yaml is missing %s", docPath)
 	}
 }
+
+func TestAgentCatalogMigratedToImplemented(t *testing.T) {
+	oldPath := "docs/planned/agent-catalog.md"
+	newPath := "docs/implemented/agent-catalog.md"
+
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("%s should be removed, stat err=%v", oldPath, err)
+	}
+
+	doc := readRepoFile(t, newPath)
+	assertContainsAll(t, newPath, doc, []string{
+		"# Agent Catalog",
+		"状态：implemented",
+		"triage-agent",
+		"docs-agent",
+		"security-audit-agent",
+		"dependency-bump-agent",
+		"release-agent",
+		"output_contract",
+	})
+
+	for _, path := range []string{
+		"docs/index.md",
+		"docs/implemented/index.md",
+		"docs/planned/index.md",
+	} {
+		content := readRepoFile(t, path)
+		if strings.Contains(content, oldPath) {
+			t.Fatalf("%s still references %s", path, oldPath)
+		}
+	}
+
+	idx := loadProjectIndex(t)
+	foundNew := false
+	for _, doc := range idx.Documentation.Documents {
+		if doc.Path == oldPath {
+			t.Fatalf("project-index.yaml still lists %s", oldPath)
+		}
+		if doc.Path != newPath {
+			continue
+		}
+		foundNew = true
+		if !containsString(doc.RelatedCode, ".github/workbuddy/agents/triage-agent.md") {
+			t.Fatal("agent-catalog project-index entry should include triage-agent.md")
+		}
+		if !containsString(doc.RelatedCode, ".github/workbuddy/agents/release-agent.md") {
+			t.Fatal("agent-catalog project-index entry should include release-agent.md")
+		}
+		if !strings.Contains(doc.Notes, "materializes the catalog agents") {
+			t.Fatal("agent-catalog project-index notes should describe the implemented catalog materialization")
+		}
+	}
+
+	if !foundNew {
+		t.Fatalf("project-index.yaml is missing %s", newPath)
+	}
+}

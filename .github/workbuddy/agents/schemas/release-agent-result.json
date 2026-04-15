@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "changelog_md",
+    "breaking_changes"
+  ],
+  "properties": {
+    "version": {
+      "type": "string"
+    },
+    "changelog_md": {
+      "type": "string"
+    },
+    "breaking_changes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

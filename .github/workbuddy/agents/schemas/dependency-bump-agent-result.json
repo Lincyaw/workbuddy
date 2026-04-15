@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "updated_dependencies",
+    "validation",
+    "pr_ready"
+  ],
+  "properties": {
+    "updated_dependencies": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "validation": {
+      "type": "string"
+    },
+    "pr_ready": {
+      "type": "boolean"
+    }
+  }
+}
