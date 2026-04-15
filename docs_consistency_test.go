@@ -175,16 +175,21 @@ func TestRetryFailureDocIndexesStaySynced(t *testing.T) {
 
 func TestIssueDependenciesPlannedDocIndexed(t *testing.T) {
 	docPath := "docs/planned/issue-dependencies.md"
-	doc := readRepoFile(t, docPath)
-	assertContainsAll(t, docPath, doc, []string{
+	docContent := readRepoFile(t, docPath)
+	assertContainsAll(t, docPath, docContent, []string{
 		"# Issue Dependency Mechanism",
 		"## Goal",
 		"## 当前状态",
+		"## Convention Compliance",
 		"## 目标状态",
 		"## Concrete Code Touch Points",
 		"## Rejected Alternatives",
 		"## Distance From Current Code",
+		"## Migration from Prior Draft",
 		"## Migration Path",
+		"Option A",
+		"dependency-resolver-agent",
+		"不是字面量 dotted key",
 		"`status:blocked`",
 		"`override:force-unblock`",
 	})
@@ -200,18 +205,18 @@ func TestIssueDependenciesPlannedDocIndexed(t *testing.T) {
 
 	idx := loadProjectIndex(t)
 	found := false
-	for _, doc := range idx.Documentation.Documents {
-		if doc.Path != docPath {
+	for _, docEntry := range idx.Documentation.Documents {
+		if docEntry.Path != docPath {
 			continue
 		}
 		found = true
-		if !containsString(doc.RelatedCode, "internal/poller/poller.go") {
+		if !containsString(docEntry.RelatedCode, "internal/poller/poller.go") {
 			t.Fatal("issue-dependencies project-index entry should include internal/poller/poller.go")
 		}
-		if !containsString(doc.RelatedCode, "internal/statemachine/statemachine.go") {
+		if !containsString(docEntry.RelatedCode, "internal/statemachine/statemachine.go") {
 			t.Fatal("issue-dependencies project-index entry should include internal/statemachine/statemachine.go")
 		}
-		if !strings.Contains(doc.Notes, "cycle detection") {
+		if !strings.Contains(docEntry.Notes, "cycle detection") {
 			t.Fatal("issue-dependencies project-index notes should mention cycle detection")
 		}
 	}
