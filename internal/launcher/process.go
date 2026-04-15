@@ -130,10 +130,22 @@ func (s *processSession) buildCommand(execCtx context.Context) (*exec.Cmd, error
 func newClaudePromptCommand(execCtx context.Context, prompt string, extraArgs []string, policy config.PolicyConfig) *exec.Cmd {
 	args := append([]string{}, extraArgs...)
 	args = append(args, claudePolicyArgs(policy)...)
+	if !hasPrintFlag(args) {
+		args = append(args, "--print")
+	}
 	args = append(args, "--output-format", "stream-json")
 	cmd := exec.CommandContext(execCtx, "claude", args...)
 	cmd.Stdin = strings.NewReader(prompt)
 	return cmd
+}
+
+func hasPrintFlag(args []string) bool {
+	for _, a := range args {
+		if a == "-p" || a == "--print" {
+			return true
+		}
+	}
+	return false
 }
 
 func claudePolicyArgs(policy config.PolicyConfig) []string {

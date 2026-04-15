@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"strings"
@@ -237,7 +238,7 @@ func (s *processSession) runClaudeStream(ctx context.Context, timeout time.Durat
 		for {
 			var raw json.RawMessage
 			if err := dec.Decode(&raw); err != nil {
-				if !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) && !errors.Is(err, io.ErrUnexpectedEOF) {
+				if !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, fs.ErrClosed) {
 					stdoutErr = err
 				}
 				return
@@ -258,8 +259,8 @@ func (s *processSession) runClaudeStream(ctx context.Context, timeout time.Durat
 		_, _ = stderr.ReadFrom(stderrPipe)
 	}()
 
-	runErr := cmd.Wait()
 	wg.Wait()
+	runErr := cmd.Wait()
 	duration := time.Since(start)
 
 	if stdoutErr != nil {
