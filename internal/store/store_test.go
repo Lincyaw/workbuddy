@@ -57,17 +57,41 @@ func TestCreateAndReadWrite(t *testing.T) {
 	if len(tasks) != 1 || tasks[0].AgentName != "dev" {
 		t.Fatalf("unexpected tasks: %+v", tasks)
 	}
-	// Update status.
-	if err := s.UpdateTaskStatus("task-1", TaskStatusRunning); err != nil {
-		t.Fatalf("UpdateTaskStatus: %v", err)
+	released, err := s.ReleaseTask("task-1", "")
+	if err != nil {
+		t.Fatalf("ReleaseTask: %v", err)
+	}
+	if released {
+		t.Fatal("release should require matching worker id")
+	}
+	claimed, err := s.ClaimTask("task-1", "worker-1")
+	if err != nil {
+		t.Fatalf("ClaimTask: %v", err)
+	}
+	if !claimed {
+		t.Fatal("expected claim to succeed")
 	}
 	tasks, _ = s.QueryTasks(TaskStatusPending)
 	if len(tasks) != 0 {
-		t.Fatalf("expected 0 pending tasks after update, got %d", len(tasks))
+		t.Fatalf("expected 0 pending tasks after claim, got %d", len(tasks))
 	}
 	tasks, _ = s.QueryTasks(TaskStatusRunning)
 	if len(tasks) != 1 {
 		t.Fatalf("expected 1 running task, got %d", len(tasks))
+	}
+	released, err = s.ReleaseTask("task-1", "worker-1")
+	if err != nil {
+		t.Fatalf("ReleaseTask after claim: %v", err)
+	}
+	if !released {
+		t.Fatal("expected release to succeed")
+	}
+	requeued, err := s.GetTask("task-1")
+	if err != nil {
+		t.Fatalf("GetTask after release: %v", err)
+	}
+	if requeued == nil || requeued.Status != TaskStatusPending {
+		t.Fatalf("expected pending task after release, got %+v", requeued)
 	}
 
 	// --- Workers ---
