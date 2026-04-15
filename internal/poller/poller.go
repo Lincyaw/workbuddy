@@ -302,7 +302,7 @@ func (p *Poller) diffIssue(iss Issue) []ChangeEvent {
 		IssueNum: iss.Number,
 		Labels:   labelsJSON,
 		Body:     iss.Body,
-		State:    iss.State,
+		State:    strings.ToLower(iss.State),
 	}); err != nil {
 		log.Printf("[poller] error upserting cache for %s#%d: %v", p.repo, iss.Number, err)
 	}
@@ -314,7 +314,7 @@ func (p *Poller) diffPR(pr PR) []ChangeEvent {
 	// PRs are cached with negative number to avoid collision with issues.
 	// Actually, PR numbers are distinct from issue numbers on GitHub, but
 	// to be safe we use a "pr:" prefix in the state field.
-	stateVal := "pr:" + pr.State
+	stateVal := "pr:" + strings.ToLower(pr.State)
 
 	cached, err := p.store.QueryIssueCache(p.repo, pr.Number)
 	if err != nil {

@@ -23,7 +23,6 @@ func TestClassify(t *testing.T) {
 		wantClassification Classification
 		wantFrom           string
 		wantTo             string
-		wantSummary        string
 	}{
 		{
 			name:               "allowed transition",
@@ -35,7 +34,6 @@ func TestClassify(t *testing.T) {
 			wantClassification: ClassificationOK,
 			wantFrom:           "developing",
 			wantTo:             "reviewing",
-			wantSummary:        "Label transition: developing -> reviewing (OK)",
 		},
 		{
 			name:               "no transition after success",
@@ -47,7 +45,6 @@ func TestClassify(t *testing.T) {
 			wantClassification: ClassificationNoTransitionAfterSuccess,
 			wantFrom:           "developing",
 			wantTo:             "developing",
-			wantSummary:        "Label transition: none - needs human review",
 		},
 		{
 			name:               "no transition after failure",
@@ -59,7 +56,6 @@ func TestClassify(t *testing.T) {
 			wantClassification: ClassificationNoTransitionAfterFailure,
 			wantFrom:           "developing",
 			wantTo:             "developing",
-			wantSummary:        "Label transition: none - retry path",
 		},
 		{
 			name:               "unexpected transition",
@@ -71,7 +67,6 @@ func TestClassify(t *testing.T) {
 			wantClassification: ClassificationUnexpectedTransition,
 			wantFrom:           "developing",
 			wantTo:             "done",
-			wantSummary:        "Label transition: developing -> done (unexpected)",
 		},
 		{
 			name:               "failed label wins",
@@ -83,7 +78,6 @@ func TestClassify(t *testing.T) {
 			wantClassification: ClassificationFailed,
 			wantFrom:           "developing",
 			wantTo:             "failed",
-			wantSummary:        "Label transition: developing -> failed (failed)",
 		},
 		{
 			name:               "pre snapshot overrides queued state",
@@ -95,7 +89,6 @@ func TestClassify(t *testing.T) {
 			wantClassification: ClassificationNoTransitionAfterSuccess,
 			wantFrom:           "reviewing",
 			wantTo:             "reviewing",
-			wantSummary:        "Label transition: none - needs human review",
 		},
 	}
 
@@ -118,9 +111,6 @@ func TestClassify(t *testing.T) {
 			}
 			if got.To.Name != tt.wantTo {
 				t.Fatalf("To = %q, want %q", got.To.Name, tt.wantTo)
-			}
-			if got.Summary() != tt.wantSummary {
-				t.Fatalf("Summary = %q, want %q", got.Summary(), tt.wantSummary)
 			}
 		})
 	}

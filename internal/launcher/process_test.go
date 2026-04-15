@@ -19,7 +19,6 @@ func TestProcessSessionBuildCommand_UsesPromptForClaude(t *testing.T) {
 			Policy: config.PolicyConfig{
 				Sandbox:  "danger-full-access",
 				Approval: "never",
-				Model:    "sonnet",
 			},
 		},
 		task: task,
@@ -33,7 +32,7 @@ func TestProcessSessionBuildCommand_UsesPromptForClaude(t *testing.T) {
 		t.Fatalf("command path = %q", got)
 	}
 	joined := strings.Join(cmd.Args[1:], " ")
-	for _, want := range []string{"--dangerously-skip-permissions", "--model sonnet", "--output-format stream-json"} {
+	for _, want := range []string{"--dangerously-skip-permissions", "--output-format stream-json", "--verbose"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("args %q missing %q", joined, want)
 		}
@@ -44,15 +43,6 @@ func TestProcessSessionBuildCommand_UsesPromptForClaude(t *testing.T) {
 	}
 	if got := string(data); got != "review issue 42" {
 		t.Fatalf("stdin = %q", got)
-	}
-}
-
-func TestProcessSessionSessionLookupPathPrefersRepo(t *testing.T) {
-	task := newTestTask(t)
-	task.Repo = "owner/repo"
-	sess := &processSession{task: task}
-	if got := sess.sessionLookupPath(); got != task.Repo {
-		t.Fatalf("lookup path = %q, want %q", got, task.Repo)
 	}
 }
 

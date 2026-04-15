@@ -5,7 +5,7 @@ triggers:
   - label: "status:reviewing"
     event: labeled
 role: review
-runtime: claude-code
+runtime: codex
 policy:
   sandbox: danger-full-access
   approval: never

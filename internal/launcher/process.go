@@ -134,6 +134,9 @@ func newClaudePromptCommand(execCtx context.Context, prompt string, extraArgs []
 		args = append(args, "--print")
 	}
 	args = append(args, "--output-format", "stream-json")
+	if !hasVerboseFlag(args) {
+		args = append(args, "--verbose")
+	}
 	cmd := exec.CommandContext(execCtx, "claude", args...)
 	cmd.Stdin = strings.NewReader(prompt)
 	return cmd
@@ -148,6 +151,15 @@ func hasPrintFlag(args []string) bool {
 	return false
 }
 
+func hasVerboseFlag(args []string) bool {
+	for _, a := range args {
+		if a == "--verbose" {
+			return true
+		}
+	}
+	return false
+}
+
 func claudePolicyArgs(policy config.PolicyConfig) []string {
 	var args []string
 	// Only bypass Claude's permission prompts when the policy explicitly opts
@@ -155,9 +167,6 @@ func claudePolicyArgs(policy config.PolicyConfig) []string {
 	// permission gating so the runtime cannot write or execute without prompts.
 	if policy.Sandbox == "danger-full-access" {
 		args = append(args, "--dangerously-skip-permissions")
-	}
-	if policy.Model != "" {
-		args = append(args, "--model", policy.Model)
 	}
 	return args
 }

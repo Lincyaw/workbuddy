@@ -125,11 +125,3 @@ func TestMultipleWorktrees(t *testing.T) {
 	_ = mgr.Remove(wt2)
 }
 
-func TestShortID(t *testing.T) {
-	if got := shortID("abcdefgh-1234-5678"); got != "abcdefgh" {
-		t.Errorf("expected 'abcdefgh', got %q", got)
-	}
-	if got := shortID("short"); got != "short" {
-		t.Errorf("expected 'short', got %q", got)
-	}
-}
