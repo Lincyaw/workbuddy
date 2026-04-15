@@ -131,18 +131,20 @@ documentation:
         - cmd/root.go
       notes: Future-state design map.
 
-    - path: docs/planned/runtime-session-architecture.md
-      bucket: planned
-      status: implemented
+    - path: docs/implemented/runtime-session-architecture.md
+      bucket: implemented
+      status: maintained
       related_code:
+        - cmd/serve.go
         - internal/launcher/types.go
         - internal/launcher/launcher.go
         - internal/launcher/events/
         - internal/launcher/codex.go
+        - internal/labelcheck/labelcheck.go
         - internal/audit/audit.go
         - internal/reporter/reporter.go
         - internal/webui/handler.go
-      notes: Runtime/Session abstraction, one-shot codex-exec session execution, and Result evolution are now implemented; long-lived runtime pooling remains planned.
+      notes: Runtime/Session abstraction, serve-side Session.Run wrapper, and post-Run label validation are current implemented behavior.
 
     - path: docs/implemented/agent-schema-vnext.md
       bucket: implemented

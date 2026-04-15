@@ -54,4 +54,4 @@
 
 这样能保持当前 Agent-as-Router 语义连续性。
 
-具体的校验规则表（合法转移 / 无变化 / 非法转移 / failed）见 `docs/planned/runtime-session-architecture.md` 的 "Agent 退出后的 label 校验" 一节。
+当前已经落地的校验规则与 Go-side GH read/write boundary，见 `docs/implemented/runtime-session-architecture.md` 的 "Agent 退出后的 label 校验" 一节。

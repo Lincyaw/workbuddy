@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/audit"
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/labelcheck"
 	"github.com/Lincyaw/workbuddy/internal/launcher"
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 	"github.com/Lincyaw/workbuddy/internal/poller"
@@ -164,12 +166,22 @@ func (c *closedIssues) IsClosed(repo string, issue int) bool {
 // GHCLIReader implements poller.GHReader using the gh CLI.
 type GHCLIReader struct{}
 
+type issueLabelReader interface {
+	ReadIssueLabels(repo string, issueNum int) ([]string, error)
+}
+
 // ghIssueJSON matches the JSON output of gh issue list --json.
 type ghIssueJSON struct {
 	Number int    `json:"number"`
 	Title  string `json:"title"`
 	State  string `json:"state"`
 	Body   string `json:"body"`
+	Labels []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+}
+
+type ghIssueLabelsJSON struct {
 	Labels []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
@@ -255,6 +267,29 @@ func (g *GHCLIReader) CheckRepoAccess(repo string) error {
 		return fmt.Errorf("gh repo view %s: %s: %w", repo, string(out), err)
 	}
 	return nil
+}
+
+func (g *GHCLIReader) ReadIssueLabels(repo string, issueNum int) ([]string, error) {
+	cmd := exec.Command("gh", "issue", "view",
+		fmt.Sprintf("%d", issueNum),
+		"--repo", repo,
+		"--json", "labels",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("gh issue view labels: %w", err)
+	}
+
+	var raw ghIssueLabelsJSON
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("gh issue view labels: parse JSON: %w", err)
+	}
+
+	labels := make([]string, len(raw.Labels))
+	for i, label := range raw.Labels {
+		labels[i] = label.Name
+	}
+	return labels, nil
 }
 
 var serveCmd = &cobra.Command{
@@ -401,6 +436,10 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	if ghReader == nil {
 		ghReader = &GHCLIReader{}
 	}
+	var labelReader issueLabelReader
+	if reader, ok := ghReader.(issueLabelReader); ok {
+		labelReader = reader
+	}
 
 	// Poller
 	p := poller.NewPoller(ghReader, st, cfg.Global.Repo, cfg.Global.PollInterval)
@@ -524,6 +563,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 		runningTasks: runningTasks,
 		closedIssues: closedTracker,
 		sessionsDir:  sessionsDir,
+		issueReader:  labelReader,
 	}
 	workerDone := make(chan struct{})
 	wg.Add(1)
@@ -591,6 +631,7 @@ type workerDeps struct {
 	runningTasks *RunningTasks
 	closedIssues *closedIssues
 	sessionsDir  string
+	issueReader  issueLabelReader
 }
 
 func defaultEmbeddedWorkerParallelism() int {
@@ -707,6 +748,13 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	}
 	defer func() { _ = session.Close() }()
 
+	preLabels, preSnapshotErr := snapshotIssueLabels(task.Repo, task.IssueNum, deps.issueReader)
+	if preSnapshotErr != nil {
+		log.Printf("[worker] label pre-snapshot failed: %v", preSnapshotErr)
+	} else if task.Context != nil {
+		task.Context.Session.PreLabels = cloneLabels(preLabels)
+	}
+
 	eventsCh := make(chan launcherevents.Event, 64)
 	eventsPath, waitEvents := streamSessionEvents(deps.sessionsDir, task.Context, eventsCh)
 	result, err := session.Run(taskCtx, eventsCh)
@@ -725,13 +773,52 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 		}
 		result.SessionPath = eventsPath
 	}
+
+	postLabels, postSnapshotErr := snapshotIssueLabels(task.Repo, task.IssueNum, deps.issueReader)
+	if postSnapshotErr != nil {
+		log.Printf("[worker] label post-snapshot failed: %v", postSnapshotErr)
+	} else if task.Context != nil {
+		task.Context.Session.PostLabels = cloneLabels(postLabels)
+	}
+
+	completionLabels := postLabels
+	if postSnapshotErr != nil {
+		completionLabels = fetchCachedLabels(deps.store, task.Repo, task.IssueNum)
+	}
+
+	labelSummary := ""
+	if preSnapshotErr == nil && postSnapshotErr == nil {
+		if validation, ok, validationErr := validateLabelTransition(task, deps, preLabels, postLabels, result); validationErr != nil {
+			log.Printf("[worker] label validation skipped: %v", validationErr)
+		} else if ok {
+			labelSummary = validation.Summary()
+			payload := audit.LabelValidationPayload{
+				Pre:            cloneLabels(preLabels),
+				Post:           cloneLabels(postLabels),
+				ExitCode:       exitCodeForValidation(result),
+				Classification: string(validation.Classification),
+			}
+			if err := deps.auditor.RecordLabelValidation(task.Repo, task.IssueNum, payload); err != nil {
+				log.Printf("[worker] label validation audit failed: %v", err)
+			}
+			if validation.NeedsHumanRecommendation() {
+				if err := deps.reporter.ReportNeedsHuman(task.Repo, task.IssueNum, labelSummary); err != nil {
+					log.Printf("[worker] needs-human recommendation failed: %v", err)
+				}
+			}
+		}
+	} else if preSnapshotErr == nil || postSnapshotErr == nil {
+		log.Printf("[worker] label validation skipped: incomplete label snapshots for %s#%d", task.Repo, task.IssueNum)
+	} else {
+		log.Printf("[worker] label validation skipped: label snapshots unavailable for %s#%d", task.Repo, task.IssueNum)
+	}
 	if err != nil {
 		log.Printf("[worker] agent %s failed: %v", task.AgentName, err)
 		if result == nil {
 			if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
 				log.Printf("[worker] failed to update task status: %v", err)
 			}
-			deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, fetchCachedLabels(deps.store, task.Repo, task.IssueNum))
+			deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, completionLabels)
 			return
 		}
 	}
@@ -773,12 +860,12 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 
 	// Report to issue
 	if err := deps.reporter.Report(task.Repo, task.IssueNum, task.AgentName, result,
-		sessionID, deps.workerID, retryCount, maxRetries); err != nil {
+		sessionID, deps.workerID, retryCount, maxRetries, labelSummary); err != nil {
 		log.Printf("[worker] report failed: %v", err)
 	}
 
 	// Mark agent completed in state machine
-	deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, fetchCachedLabels(deps.store, task.Repo, task.IssueNum))
+	deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, completionLabels)
 }
 
 func streamSessionEvents(sessionsDir string, taskCtx *launcher.TaskContext, eventsCh <-chan launcherevents.Event) (string, func() error) {
@@ -863,6 +950,116 @@ func fetchCachedLabels(st *store.Store, repo string, issueNum int) []string {
 		return nil
 	}
 	return labels
+}
+
+func snapshotIssueLabels(repo string, issueNum int, reader issueLabelReader) ([]string, error) {
+	if reader == nil {
+		return nil, fmt.Errorf("no issue label reader configured")
+	}
+	labels, err := reader.ReadIssueLabels(repo, issueNum)
+	if err != nil {
+		return nil, err
+	}
+	return cloneLabels(labels), nil
+}
+
+func validateLabelTransition(task router.WorkerTask, deps *workerDeps, preLabels, postLabels []string, result *launcher.Result) (labelcheck.Result, bool, error) {
+	if deps == nil || deps.cfg == nil {
+		return labelcheck.Result{}, false, fmt.Errorf("missing worker config")
+	}
+	if deps.issueReader == nil {
+		return labelcheck.Result{}, false, fmt.Errorf("no issue label reader configured")
+	}
+
+	wf, ok := deps.cfg.Workflows[task.Workflow]
+	if !ok || wf == nil {
+		return labelcheck.Result{}, false, fmt.Errorf("workflow %q not found", task.Workflow)
+	}
+	queuedState, ok := wf.States[task.State]
+	if !ok || queuedState == nil {
+		return labelcheck.Result{}, false, fmt.Errorf("state %q not found in workflow %q", task.State, task.Workflow)
+	}
+
+	input := labelcheck.Input{
+		Pre:      cloneLabels(preLabels),
+		Post:     cloneLabels(postLabels),
+		ExitCode: exitCodeForValidation(result),
+		Current:  labelcheck.State{Name: task.State, Label: queuedState.EnterLabel},
+	}
+
+	stateNames := make([]string, 0, len(wf.States))
+	for name := range wf.States {
+		stateNames = append(stateNames, name)
+	}
+	sort.Strings(stateNames)
+
+	knownSeen := make(map[string]bool)
+	for _, name := range stateNames {
+		state := wf.States[name]
+		if state == nil || state.EnterLabel == "" || knownSeen[state.EnterLabel] {
+			continue
+		}
+		knownSeen[state.EnterLabel] = true
+		input.KnownStates = append(input.KnownStates, labelcheck.State{Name: name, Label: state.EnterLabel})
+	}
+
+	input.Current = labelcheck.ResolveCurrent(input.Pre, input.Current, input.KnownStates)
+
+	currentState, err := resolveWorkflowLabelState(wf, input.Current)
+	if err != nil {
+		return labelcheck.Result{}, false, err
+	}
+
+	allowedSeen := make(map[string]bool)
+	for _, transition := range currentState.Transitions {
+		target, ok := wf.States[transition.To]
+		if !ok || target == nil || target.EnterLabel == "" || allowedSeen[target.EnterLabel] {
+			continue
+		}
+		allowedSeen[target.EnterLabel] = true
+		input.AllowedTransitions = append(input.AllowedTransitions, labelcheck.State{Name: transition.To, Label: target.EnterLabel})
+	}
+
+	return labelcheck.Classify(input), true, nil
+}
+
+func resolveWorkflowLabelState(wf *config.WorkflowConfig, current labelcheck.State) (*config.State, error) {
+	if wf == nil {
+		return nil, fmt.Errorf("missing workflow")
+	}
+	if current.Name != "" {
+		if state, ok := wf.States[current.Name]; ok && state != nil {
+			return state, nil
+		}
+	}
+	if current.Label != "" {
+		stateNames := make([]string, 0, len(wf.States))
+		for name := range wf.States {
+			stateNames = append(stateNames, name)
+		}
+		sort.Strings(stateNames)
+		for _, name := range stateNames {
+			state := wf.States[name]
+			if state != nil && state.EnterLabel == current.Label {
+				return state, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("resolved state %q (%q) not found in workflow %q", current.Name, current.Label, wf.Name)
+}
+
+func exitCodeForValidation(result *launcher.Result) int {
+	if result == nil {
+		return -1
+	}
+	return result.ExitCode
+}
+
+func cloneLabels(labels []string) []string {
+	if len(labels) == 0 {
+		return nil
+	}
+	return append([]string(nil), labels...)
 }
 
 // recoverTasks marks running tasks as failed and re-routes pending tasks on restart.

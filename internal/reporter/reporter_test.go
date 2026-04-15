@@ -35,7 +35,7 @@ func TestReport_Success(t *testing.T) {
 		Meta:     map[string]string{"pr_url": "https://github.com/test/repo/pull/1"},
 	}
 
-	err := r.Report("test/repo", 42, "dev-agent", result, "sess-123", "worker-1", 1, 3)
+	err := r.Report("test/repo", 42, "dev-agent", result, "sess-123", "worker-1", 1, 3, "Label transition: developing -> reviewing (OK)")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -58,6 +58,9 @@ func TestReport_Success(t *testing.T) {
 	if !strings.Contains(body, "https://github.com/test/repo/pull/1") {
 		t.Error("comment should contain PR link")
 	}
+	if !strings.Contains(body, "Label transition: developing -> reviewing (OK)") {
+		t.Error("comment should contain label transition summary")
+	}
 }
 
 func TestReport_Failure(t *testing.T) {
@@ -70,7 +73,7 @@ func TestReport_Failure(t *testing.T) {
 		Duration: 2 * time.Second,
 	}
 
-	err := r.Report("test/repo", 42, "dev-agent", result, "sess-456", "worker-1", 0, 3)
+	err := r.Report("test/repo", 42, "dev-agent", result, "sess-456", "worker-1", 0, 3, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -91,7 +94,7 @@ func TestReport_PrefersLastMessage(t *testing.T) {
 		Duration:    time.Second,
 	}
 
-	if err := r.Report("test/repo", 42, "dev-agent", result, "sess-last", "worker-1", 0, 3); err != nil {
+	if err := r.Report("test/repo", 42, "dev-agent", result, "sess-last", "worker-1", 0, 3, ""); err != nil {
 		t.Fatalf("Report: %v", err)
 	}
 	body := gh.comments[0]
@@ -115,12 +118,27 @@ func TestReport_RetryOnGHFailure(t *testing.T) {
 
 	// The current reporter.go doesn't retry - it just returns the error.
 	// But let's test the happy path after first failure.
-	err := r.Report("test/repo", 42, "dev-agent", result, "sess-789", "worker-1", 0, 3)
+	err := r.Report("test/repo", 42, "dev-agent", result, "sess-789", "worker-1", 0, 3, "")
 	// First call to gh.WriteComment fails, so Report should return error
 	if err == nil {
 		// If reporter implements retry internally, this is fine
 		if len(gh.comments) != 1 {
 			t.Errorf("expected 1 comment after retry, got %d", len(gh.comments))
 		}
+	}
+}
+
+func TestReportNeedsHuman(t *testing.T) {
+	gh := &mockGHWriter{}
+	r := NewReporter(gh)
+
+	if err := r.ReportNeedsHuman("test/repo", 42, "Label transition: none - needs human review"); err != nil {
+		t.Fatalf("ReportNeedsHuman: %v", err)
+	}
+	if len(gh.comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(gh.comments))
+	}
+	if !strings.Contains(gh.comments[0], "needs-human") {
+		t.Fatalf("expected needs-human recommendation in comment: %s", gh.comments[0])
 	}
 }

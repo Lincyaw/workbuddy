@@ -207,6 +207,40 @@ func TestFormatReport_PRLink(t *testing.T) {
 	}
 }
 
+func TestFormatReport_LabelLine(t *testing.T) {
+	d := ReportData{
+		AgentName:  "code-dev",
+		Status:     "success",
+		Duration:   1 * time.Minute,
+		SessionID:  "sess-label-001",
+		WorkerID:   "embedded-host1",
+		RetryCount: 0,
+		MaxRetries: 3,
+		LabelLine:  "Label transition: developing -> reviewing (OK)",
+	}
+
+	md := FormatReportAt(d, fixedTime)
+
+	if !strings.Contains(md, d.LabelLine) {
+		t.Fatal("missing label transition line")
+	}
+}
+
+func TestFormatNeedsHumanReport(t *testing.T) {
+	labelLine := "Label transition: none - needs human review"
+	md := FormatNeedsHumanReport(labelLine, fixedTime)
+
+	if !strings.Contains(md, "Managed Follow-up") {
+		t.Fatal("missing header")
+	}
+	if !strings.Contains(md, labelLine) {
+		t.Fatal("missing label line")
+	}
+	if !strings.Contains(md, "needs-human") {
+		t.Fatal("missing needs-human recommendation")
+	}
+}
+
 func TestFormatDuration(t *testing.T) {
 	tests := []struct {
 		d    time.Duration

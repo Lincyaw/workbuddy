@@ -87,11 +87,13 @@ func writeFile(t *testing.T, path, content string) {
 
 // mockGHReader provides controllable GitHub data for tests.
 type mockGHReader struct {
-	mu     sync.Mutex
-	issues []poller.Issue
-	prs    []poller.PR
-	calls  int
-	onPoll func(call int) // callback on each ListIssues call
+	mu             sync.Mutex
+	issues         []poller.Issue
+	prs            []poller.PR
+	calls          int
+	onPoll         func(call int) // callback on each ListIssues call
+	labelSnapshots [][]string
+	labelCalls     int
 }
 
 func (m *mockGHReader) ListIssues(_ string) ([]poller.Issue, error) {
@@ -112,6 +114,20 @@ func (m *mockGHReader) ListPRs(_ string) ([]poller.PR, error) {
 
 func (m *mockGHReader) CheckRepoAccess(_ string) error {
 	return nil
+}
+
+func (m *mockGHReader) ReadIssueLabels(_ string, _ int) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.labelSnapshots) == 0 {
+		return nil, fmt.Errorf("no label snapshots configured")
+	}
+	idx := m.labelCalls
+	if idx >= len(m.labelSnapshots) {
+		idx = len(m.labelSnapshots) - 1
+	}
+	m.labelCalls++
+	return append([]string(nil), m.labelSnapshots[idx]...), nil
 }
 
 func (m *mockGHReader) SetIssues(issues []poller.Issue) {
@@ -198,7 +214,7 @@ func setupFakeGHCLI(t *testing.T) {
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-func newWorkerTestDeps(t *testing.T, rt *mockRuntime) (*workerDeps, *store.Store) {
+func newWorkerTestDeps(t *testing.T, rt *mockRuntime, readers ...issueLabelReader) (*workerDeps, *store.Store) {
 	t.Helper()
 	setupFakeGHCLI(t)
 
@@ -211,6 +227,11 @@ func newWorkerTestDeps(t *testing.T, rt *mockRuntime) (*workerDeps, *store.Store
 	lnch := launcher.NewLauncher()
 	lnch.Register(rt, config.RuntimeClaudeCode, config.RuntimeClaudeShot)
 
+	var issueReader issueLabelReader
+	if len(readers) > 0 {
+		issueReader = readers[0]
+	}
+
 	return &workerDeps{
 		launcher:     lnch,
 		auditor:      audit.NewAuditor(st, filepath.Join(t.TempDir(), "archive")),
@@ -222,7 +243,42 @@ func newWorkerTestDeps(t *testing.T, rt *mockRuntime) (*workerDeps, *store.Store
 		runningTasks: NewRunningTasks(),
 		closedIssues: &closedIssues{},
 		sessionsDir:  filepath.Join(t.TempDir(), ".workbuddy", "sessions"),
+		issueReader:  issueReader,
 	}, st
+}
+
+func newWorkerTestDepsWithComments(t *testing.T, rt *mockRuntime, readers ...issueLabelReader) (*workerDeps, *store.Store, *mockCommentWriter) {
+	t.Helper()
+	setupFakeGHCLI(t)
+
+	st, err := store.NewStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	lnch := launcher.NewLauncher()
+	lnch.Register(rt, config.RuntimeClaudeCode, config.RuntimeClaudeShot)
+
+	var issueReader issueLabelReader
+	if len(readers) > 0 {
+		issueReader = readers[0]
+	}
+	comments := &mockCommentWriter{}
+
+	return &workerDeps{
+		launcher:     lnch,
+		auditor:      audit.NewAuditor(st, filepath.Join(t.TempDir(), "archive")),
+		reporter:     reporter.NewReporter(comments),
+		store:        st,
+		sm:           statemachine.NewStateMachine(nil, st, nil, eventlog.NewEventLogger(st)),
+		workerID:     "worker-1",
+		cfg:          &config.FullConfig{Workflows: map[string]*config.WorkflowConfig{"dev-workflow": {MaxRetries: 3}}},
+		runningTasks: NewRunningTasks(),
+		closedIssues: &closedIssues{},
+		sessionsDir:  filepath.Join(t.TempDir(), ".workbuddy", "sessions"),
+		issueReader:  issueReader,
+	}, st, comments
 }
 
 func newWorkerTestTask(t *testing.T, st *store.Store, repo string, issueNum int, taskID string) router.WorkerTask {
@@ -950,6 +1006,217 @@ func TestExecuteTask_PersistsPartialResultOnRunError(t *testing.T) {
 	}
 	if !strings.Contains(comments[1], "partial failure report") {
 		t.Fatalf("final report missing partial result: %s", comments[1])
+	}
+}
+
+func TestExecuteTask_LabelValidationAudit(t *testing.T) {
+	tests := []struct {
+		name               string
+		pre                []string
+		post               []string
+		exitCode           int
+		wantClassification string
+		wantSummary        string
+		wantNeedsHuman     bool
+	}{
+		{
+			name:               "allowed transition",
+			pre:                []string{"workbuddy", "status:developing"},
+			post:               []string{"workbuddy", "status:reviewing"},
+			exitCode:           0,
+			wantClassification: "ok",
+			wantSummary:        "Label transition: developing -> reviewing (OK)",
+		},
+		{
+			name:               "no transition after success",
+			pre:                []string{"workbuddy", "status:developing"},
+			post:               []string{"workbuddy", "status:developing"},
+			exitCode:           0,
+			wantClassification: "no_transition_after_success",
+			wantSummary:        "Label transition: none - needs human review",
+			wantNeedsHuman:     true,
+		},
+		{
+			name:               "no transition after failure",
+			pre:                []string{"workbuddy", "status:developing"},
+			post:               []string{"workbuddy", "status:developing"},
+			exitCode:           1,
+			wantClassification: "no_transition_after_failure",
+			wantSummary:        "Label transition: none - retry path",
+		},
+		{
+			name:               "unexpected transition",
+			pre:                []string{"workbuddy", "status:developing"},
+			post:               []string{"workbuddy", "status:done"},
+			exitCode:           0,
+			wantClassification: "unexpected_transition",
+			wantSummary:        "Label transition: developing -> done (unexpected)",
+		},
+		{
+			name:               "failed label",
+			pre:                []string{"workbuddy", "status:developing"},
+			post:               []string{"workbuddy", "status:failed"},
+			exitCode:           1,
+			wantClassification: "failed",
+			wantSummary:        "Label transition: developing -> failed (failed)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rt := &mockRuntime{name: config.RuntimeClaudeCode, resultFn: func(_ context.Context, _ *config.AgentConfig, _ *launcher.TaskContext) (*launcher.Result, error) {
+				return &launcher.Result{
+					ExitCode: tt.exitCode,
+					Stdout:   "task output",
+					Duration: 50 * time.Millisecond,
+					Meta:     map[string]string{},
+				}, nil
+			}}
+			gh := &mockGHReader{
+				labelSnapshots: [][]string{tt.pre, tt.post},
+			}
+			deps, st, comments := newWorkerTestDepsWithComments(t, rt, gh)
+
+			deps.cfg.Workflows["dev-workflow"] = &config.WorkflowConfig{
+				Name:       "dev-workflow",
+				MaxRetries: 3,
+				States: map[string]*config.State{
+					"developing": {
+						EnterLabel: "status:developing",
+						Agent:      "dev-agent",
+						Transitions: []config.Transition{
+							{To: "reviewing", When: `labeled "status:reviewing"`},
+						},
+					},
+					"reviewing": {EnterLabel: "status:reviewing", Agent: "review-agent"},
+					"done":      {EnterLabel: "status:done"},
+					"failed":    {EnterLabel: "status:failed"},
+				},
+			}
+
+			task := newWorkerTestTask(t, st, "owner/repo", 11, "task-label-check")
+			executeTask(context.Background(), task, deps)
+
+			events, err := st.QueryEvents("owner/repo")
+			if err != nil {
+				t.Fatalf("QueryEvents: %v", err)
+			}
+
+			var validationEvents []store.Event
+			for _, event := range events {
+				if event.Type == string(audit.EventKindLabelValidation) {
+					validationEvents = append(validationEvents, event)
+				}
+			}
+			if len(validationEvents) != 1 {
+				t.Fatalf("expected 1 label validation event, got %d", len(validationEvents))
+			}
+
+			var payload audit.LabelValidationPayload
+			if err := json.Unmarshal([]byte(validationEvents[0].Payload), &payload); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+			if payload.Classification != tt.wantClassification {
+				t.Fatalf("Classification = %q, want %q", payload.Classification, tt.wantClassification)
+			}
+
+			allComments := comments.Comments()
+			if len(allComments) == 0 {
+				t.Fatal("expected issue comments to be posted")
+			}
+			lastComment := allComments[len(allComments)-1]
+			if !strings.Contains(lastComment, tt.wantSummary) {
+				t.Fatalf("final report missing label summary %q: %s", tt.wantSummary, lastComment)
+			}
+
+			if tt.wantNeedsHuman {
+				if len(allComments) != 3 {
+					t.Fatalf("expected started + managed + final comments, got %d", len(allComments))
+				}
+				if !strings.Contains(allComments[1], "needs-human") {
+					t.Fatalf("managed comment missing needs-human recommendation: %s", allComments[1])
+				}
+			} else if len(allComments) != 2 {
+				t.Fatalf("expected started + final comments, got %d", len(allComments))
+			}
+		})
+	}
+}
+
+func TestExecuteTask_LabelValidationUsesPreRunStateTransitions(t *testing.T) {
+	rt := &mockRuntime{name: config.RuntimeClaudeCode, resultFn: func(_ context.Context, _ *config.AgentConfig, _ *launcher.TaskContext) (*launcher.Result, error) {
+		return &launcher.Result{
+			ExitCode: 0,
+			Stdout:   "task output",
+			Duration: 50 * time.Millisecond,
+			Meta:     map[string]string{},
+		}, nil
+	}}
+	gh := &mockGHReader{
+		labelSnapshots: [][]string{
+			{"workbuddy", "status:reviewing"},
+			{"workbuddy", "status:done"},
+		},
+	}
+	deps, st, comments := newWorkerTestDepsWithComments(t, rt, gh)
+
+	deps.cfg.Workflows["dev-workflow"] = &config.WorkflowConfig{
+		Name:       "dev-workflow",
+		MaxRetries: 3,
+		States: map[string]*config.State{
+			"developing": {
+				EnterLabel: "status:developing",
+				Agent:      "dev-agent",
+				Transitions: []config.Transition{
+					{To: "reviewing", When: `labeled "status:reviewing"`},
+				},
+			},
+			"reviewing": {
+				EnterLabel: "status:reviewing",
+				Agent:      "review-agent",
+				Transitions: []config.Transition{
+					{To: "done", When: `labeled "status:done"`},
+				},
+			},
+			"done":   {EnterLabel: "status:done"},
+			"failed": {EnterLabel: "status:failed"},
+		},
+	}
+
+	task := newWorkerTestTask(t, st, "owner/repo", 12, "task-stale-state")
+	task.State = "developing"
+
+	executeTask(context.Background(), task, deps)
+
+	events, err := st.QueryEvents("owner/repo")
+	if err != nil {
+		t.Fatalf("QueryEvents: %v", err)
+	}
+
+	var validationEvents []store.Event
+	for _, event := range events {
+		if event.Type == string(audit.EventKindLabelValidation) {
+			validationEvents = append(validationEvents, event)
+		}
+	}
+	if len(validationEvents) != 1 {
+		t.Fatalf("expected 1 label validation event, got %d", len(validationEvents))
+	}
+
+	var payload audit.LabelValidationPayload
+	if err := json.Unmarshal([]byte(validationEvents[0].Payload), &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.Classification != "ok" {
+		t.Fatalf("Classification = %q, want %q", payload.Classification, "ok")
+	}
+
+	allComments := comments.Comments()
+	if len(allComments) != 2 {
+		t.Fatalf("expected started + final comments, got %d", len(allComments))
+	}
+	if !strings.Contains(allComments[1], "Label transition: reviewing -> done (OK)") {
+		t.Fatalf("final report missing resolved transition summary: %s", allComments[1])
 	}
 }
 

@@ -14,6 +14,17 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
+type EventKind string
+
+const EventKindLabelValidation EventKind = "label.validation"
+
+type LabelValidationPayload struct {
+	Pre            []string `json:"pre"`
+	Post           []string `json:"post"`
+	ExitCode       int      `json:"exit_code"`
+	Classification string   `json:"classification"`
+}
+
 // maxSummarySize is the threshold (1 MB) above which only a truncated summary
 // is stored in SQLite; the full file is kept on disk.
 const maxSummarySize = 1 << 20 // 1 MB
@@ -94,6 +105,26 @@ func (a *Auditor) Capture(sessionID, taskID, repo string, issueNum int, agentNam
 		return fmt.Errorf("audit: insert session: %w", err)
 	}
 	return nil
+}
+
+func (a *Auditor) RecordEvent(kind EventKind, repo string, issueNum int, payload any) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("audit: marshal %s payload: %w", kind, err)
+	}
+	if _, err := a.store.InsertEvent(store.Event{
+		Type:     string(kind),
+		Repo:     repo,
+		IssueNum: issueNum,
+		Payload:  string(data),
+	}); err != nil {
+		return fmt.Errorf("audit: insert %s event: %w", kind, err)
+	}
+	return nil
+}
+
+func (a *Auditor) RecordLabelValidation(repo string, issueNum int, payload LabelValidationPayload) error {
+	return a.RecordEvent(EventKindLabelValidation, repo, issueNum, payload)
 }
 
 // Query returns sessions matching the given filter.

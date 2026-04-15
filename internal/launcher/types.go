@@ -107,7 +107,9 @@ type PRContext struct {
 }
 
 type SessionContext struct {
-	ID string
+	ID         string
+	PreLabels  []string
+	PostLabels []string
 }
 
 type SessionRef struct {
