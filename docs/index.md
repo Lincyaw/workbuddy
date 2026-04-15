@@ -36,6 +36,7 @@
 - `docs/implemented/current-persistence-and-workspace.md`
 - `docs/implemented/artifact-layout.md`
 - `docs/implemented/issue-dependencies.md`
+- `docs/implemented/audit-http-server.md`
 
 ### Planned
 

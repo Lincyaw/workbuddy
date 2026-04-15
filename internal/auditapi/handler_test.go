@@ -162,7 +162,7 @@ func TestHandleSession(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 	}
-	var resp sessionResponse
+	var resp SessionResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestDecodeJSONOrString(t *testing.T) {
 }
 
 func TestSessionResponseJSONTime(t *testing.T) {
-	resp := sessionResponse{CreatedAt: time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)}
+	resp := SessionResponse{CreatedAt: time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)}
 	data, err := json.Marshal(resp)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)

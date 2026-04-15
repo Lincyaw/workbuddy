@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/auditapi"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
@@ -128,9 +129,18 @@ func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request, sessionID
 		return
 	}
 	if sess == nil {
+		if prefersJSON(r) {
+			writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+			return
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusNotFound)
 		_ = h.notFoundTmpl.Execute(w, sessionID)
+		return
+	}
+
+	if prefersJSON(r) {
+		writeJSONStatus(w, http.StatusOK, auditapi.BuildSessionResponse(sess, h.sessionsDir))
 		return
 	}
 
@@ -426,9 +436,20 @@ func isValidSessionID(sessionID string) bool {
 	return true
 }
 
+func prefersJSON(r *http.Request) bool {
+	if r.URL.Query().Get("format") == "json" {
+		return true
+	}
+	return strings.Contains(r.Header.Get("Accept"), "application/json")
+}
 
 func writeJSON(w http.ResponseWriter, v any) {
+	writeJSONStatus(w, http.StatusOK, v)
+}
+
+func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
 

@@ -37,14 +37,27 @@ func (h *Handler) SetSessionsDir(dir string) {
 
 // Register mounts the audit API routes.
 func (h *Handler) Register(mux *http.ServeMux) {
+	h.RegisterCore(mux)
+	mux.HandleFunc("/sessions/", h.handleSession)
+}
+
+// RegisterCore mounts the audit routes that do not conflict with the existing
+// session HTML UI.
+func (h *Handler) RegisterCore(mux *http.ServeMux) {
 	mux.HandleFunc("/events", h.handleEvents)
 	mux.HandleFunc("/issues/", h.handleIssueState)
+}
+
+// RegisterSessionsOnly mounts only the /sessions/ JSON endpoint without the
+// core /events and /issues/ routes (use when those are already registered by
+// another handler such as audit.HTTPHandler).
+func (h *Handler) RegisterSessionsOnly(mux *http.ServeMux) {
 	mux.HandleFunc("/sessions/", h.handleSession)
 }
 
 type eventsResponse struct {
-	Events  []eventResponse  `json:"events"`
-	Filters eventFilterEcho  `json:"filters"`
+	Events  []eventResponse `json:"events"`
+	Filters eventFilterEcho `json:"filters"`
 }
 
 type eventResponse struct {
@@ -64,14 +77,14 @@ type eventFilterEcho struct {
 }
 
 type issueStateResponse struct {
-	Repo              string                      `json:"repo"`
-	IssueNum          int                         `json:"issue_num"`
-	State             string                      `json:"state,omitempty"`
-	Labels            []string                    `json:"labels"`
-	CycleCount        int                         `json:"cycle_count"`
-	DependencyVerdict string                      `json:"dependency_verdict,omitempty"`
-	DependencyState   *dependencyStateResponse    `json:"dependency_state,omitempty"`
-	TransitionCounts  []transitionCountResponse   `json:"transition_counts,omitempty"`
+	Repo              string                    `json:"repo"`
+	IssueNum          int                       `json:"issue_num"`
+	State             string                    `json:"state,omitempty"`
+	Labels            []string                  `json:"labels"`
+	CycleCount        int                       `json:"cycle_count"`
+	DependencyVerdict string                    `json:"dependency_verdict,omitempty"`
+	DependencyState   *dependencyStateResponse  `json:"dependency_state,omitempty"`
+	TransitionCounts  []transitionCountResponse `json:"transition_counts,omitempty"`
 }
 
 type dependencyStateResponse struct {
@@ -90,18 +103,20 @@ type transitionCountResponse struct {
 	Count     int    `json:"count"`
 }
 
-type sessionResponse struct {
-	SessionID     string                `json:"session_id"`
-	TaskID        string                `json:"task_id,omitempty"`
-	Repo          string                `json:"repo"`
-	IssueNum      int                   `json:"issue_num"`
-	AgentName     string                `json:"agent_name"`
-	CreatedAt     time.Time             `json:"created_at"`
-	Summary       string                `json:"summary,omitempty"`
-	ArtifactPaths sessionArtifactPaths  `json:"artifact_paths"`
+// SessionResponse is the read-only JSON shape served for /sessions/:id.
+type SessionResponse struct {
+	SessionID     string               `json:"session_id"`
+	TaskID        string               `json:"task_id,omitempty"`
+	Repo          string               `json:"repo"`
+	IssueNum      int                  `json:"issue_num"`
+	AgentName     string               `json:"agent_name"`
+	CreatedAt     time.Time            `json:"created_at"`
+	Summary       string               `json:"summary,omitempty"`
+	ArtifactPaths SessionArtifactPaths `json:"artifact_paths"`
 }
 
-type sessionArtifactPaths struct {
+// SessionArtifactPaths points callers to persisted session artifacts.
+type SessionArtifactPaths struct {
 	SessionDir string `json:"session_dir,omitempty"`
 	EventsV1   string `json:"events_v1,omitempty"`
 	Raw        string `json:"raw,omitempty"`
@@ -235,7 +250,14 @@ func (h *Handler) handleSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := sessionResponse{
+	resp := BuildSessionResponse(session, h.sessionsDir)
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// BuildSessionResponse constructs the JSON payload shared by the audit route
+// and the existing /sessions/{id} HTML endpoint when callers request JSON.
+func BuildSessionResponse(session *store.AgentSession, sessionsDir string) SessionResponse {
+	resp := SessionResponse{
 		SessionID: session.SessionID,
 		TaskID:    session.TaskID,
 		Repo:      session.Repo,
@@ -243,19 +265,18 @@ func (h *Handler) handleSession(w http.ResponseWriter, r *http.Request) {
 		AgentName: session.AgentName,
 		CreatedAt: session.CreatedAt,
 		Summary:   session.Summary,
-		ArtifactPaths: sessionArtifactPaths{
+		ArtifactPaths: SessionArtifactPaths{
 			Raw: session.RawPath,
 		},
 	}
-	if h.sessionsDir != "" {
-		resp.ArtifactPaths.SessionDir = filepath.Join(h.sessionsDir, sessionID)
-		resp.ArtifactPaths.EventsV1 = filepath.Join(h.sessionsDir, sessionID, "events-v1.jsonl")
+	if sessionsDir != "" {
+		resp.ArtifactPaths.SessionDir = filepath.Join(sessionsDir, session.SessionID)
+		resp.ArtifactPaths.EventsV1 = filepath.Join(sessionsDir, session.SessionID, "events-v1.jsonl")
 	}
 	if resp.ArtifactPaths.SessionDir == "" && session.RawPath != "" {
 		resp.ArtifactPaths.SessionDir = filepath.Dir(session.RawPath)
 	}
-
-	writeJSON(w, http.StatusOK, resp)
+	return resp
 }
 
 func parseIssueStatePath(path string) (string, int, bool) {

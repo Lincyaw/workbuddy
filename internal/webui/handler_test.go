@@ -214,6 +214,43 @@ func TestHandleDetail_Found(t *testing.T) {
 	}
 }
 
+func TestHandleDetail_JSON(t *testing.T) {
+	st := newTestStore(t)
+	seedSessions(t, st)
+	h := NewHandler(st)
+	dir := t.TempDir()
+	h.SetSessionsDir(dir)
+
+	if err := os.MkdirAll(filepath.Join(dir, "session-aaa"), 0o755); err != nil {
+		t.Fatalf("mkdir session dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "session-aaa", "events-v1.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write events file: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest("GET", "/sessions/session-aaa?format=json", nil)
+	req.Header.Set("Accept", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Content-Type"); !strings.Contains(got, "application/json") {
+		t.Fatalf("content-type = %q", got)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["session_id"] != "session-aaa" {
+		t.Fatalf("session_id = %#v", body["session_id"])
+	}
+}
+
 func TestHandleDetail_NotFound(t *testing.T) {
 	st := newTestStore(t)
 	h := NewHandler(st)
