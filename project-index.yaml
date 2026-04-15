@@ -178,15 +178,6 @@ documentation:
         - cmd/serve.go
       notes: Active documentation and implementation drift queue.
 
-    - path: docs/mismatch/poller-and-state-machine-drift.md
-      bucket: mismatch
-      status: maintained
-      related_code:
-        - internal/poller/poller.go
-        - internal/statemachine/statemachine.go
-        - .github/workbuddy/agents/dev-agent.md
-      notes: Drift in event scope and label-routing ownership.
-
     - path: docs/mismatch/codex-runtime-drift.md
       bucket: mismatch
       status: archived
@@ -197,18 +188,6 @@ documentation:
         - internal/reporter/reporter.go
         - internal/audit/audit.go
       notes: Historical drift resolved by the Runtime/Session and Event Schema v1 codex-exec implementation; keep only as archive context.
-
-    - path: docs/mismatch/roadmap-structure-drift.md
-      bucket: mismatch
-      status: maintained
-      related_code:
-        - cmd/root.go
-        - cmd/serve.go
-        - internal/launcher/
-        - internal/audit/
-        - internal/webui/
-        - internal/workspace/
-      notes: Old roadmap structure and deliverable naming no longer match the repository layout.
 
 requirements:
   # ============================================================
