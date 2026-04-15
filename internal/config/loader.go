@@ -202,6 +202,7 @@ func normalizeAgentConfig(agent *AgentConfig) ([]Warning, error) {
 		case "read-only", "danger-full-access":
 		case "workspace-write":
 			warnings = append(warnings, Warning{Message: fmt.Sprintf("agent %q: runtime %q does not support workspace-write sandbox; degrading to read-only semantics", agent.Name, agent.Runtime)})
+			agent.Policy.Sandbox = "read-only"
 		default:
 			return warnings, fmt.Errorf("unsupported policy.sandbox %q for runtime %q", agent.Policy.Sandbox, agent.Runtime)
 		}
