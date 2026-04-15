@@ -228,3 +228,37 @@ func TestParseStatusFlags_UsesConfigDefaults(t *testing.T) {
 		t.Fatalf("baseURL = %q", opts.baseURL)
 	}
 }
+
+func TestParseStatusFlags_UsesExplicitRepoWithoutConfig(t *testing.T) {
+	dir := t.TempDir()
+
+	prevWD, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatalf("Abs(.): %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(prevWD)
+	})
+
+	cmd := &cobra.Command{Use: "status"}
+	cmd.Flags().String("repo", "", "")
+	cmd.Flags().Bool("stuck", false, "")
+	cmd.Flags().Bool("json", false, "")
+	if err := cmd.Flags().Set("repo", "explicit/repo"); err != nil {
+		t.Fatalf("Set(repo): %v", err)
+	}
+
+	opts, err := parseStatusFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseStatusFlags: %v", err)
+	}
+	if opts.repo != "explicit/repo" {
+		t.Fatalf("repo = %q, want explicit/repo", opts.repo)
+	}
+	if opts.baseURL != "http://127.0.0.1:8080" {
+		t.Fatalf("baseURL = %q", opts.baseURL)
+	}
+}

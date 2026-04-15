@@ -76,12 +76,11 @@ func parseStatusFlags(cmd *cobra.Command) (*statusOpts, error) {
 	stuck, _ := cmd.Flags().GetBool("stuck")
 	jsonOut, _ := cmd.Flags().GetBool("json")
 
-	cfg, _, err := config.LoadConfig(".github/workbuddy")
-	if err != nil {
-		return nil, fmt.Errorf("status: load config: %w", err)
-	}
-
 	repo = strings.TrimSpace(repo)
+	cfg, err := loadStatusConfig(repo)
+	if err != nil {
+		return nil, err
+	}
 	if repo == "" {
 		repo = cfg.Global.Repo
 	}
@@ -100,6 +99,22 @@ func parseStatusFlags(cmd *cobra.Command) (*statusOpts, error) {
 		jsonOut: jsonOut,
 		baseURL: fmt.Sprintf("http://127.0.0.1:%d", port),
 	}, nil
+}
+
+func loadStatusConfig(explicitRepo string) (*config.FullConfig, error) {
+	if strings.TrimSpace(explicitRepo) != "" {
+		if _, err := os.Stat(".github/workbuddy"); err != nil {
+			if os.IsNotExist(err) {
+				return &config.FullConfig{}, nil
+			}
+			return nil, fmt.Errorf("status: stat config dir: %w", err)
+		}
+	}
+	cfg, _, err := config.LoadConfig(".github/workbuddy")
+	if err == nil {
+		return cfg, nil
+	}
+	return nil, fmt.Errorf("status: load config: %w", err)
 }
 
 func runStatusWithOpts(ctx context.Context, opts *statusOpts, client *statusClient, stdout io.Writer) error {
