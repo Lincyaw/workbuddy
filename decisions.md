@@ -8,3 +8,8 @@
 - `[L2]` Claude prompt executions now use a dedicated `stream-json` mapping path for Event Schema v1, while generic shell-backed `claude-code` commands remain on the minimal compatibility path so existing launcher tests and workflows do not regress.
 - `[L2]` Issue dependency resolution now reads the settled per-cycle issue cache snapshot before dispatch, so dependency verdicts are computed from one coherent poll image instead of racing event emission order.
 - `[L4]` Closed dependency satisfaction uses GitHub GraphQL `closedByPullRequestsReferences` through `gh api graphql`; this keeps the reader on the gh CLI boundary while giving deterministic “closed via linked PR” semantics without adding raw HTTP clients.
+
+## 2026-04-16
+
+- `[L2]` REQ-026 models the worker/coordinator payload around serialized `config.AgentConfig` plus `launcher.TaskContext`, so the remote worker executes through the existing launcher boundary instead of creating a second task schema just for HTTP mode.
+- `[L2]` Task `ack` and `result` submission are retried with capped exponential backoff and treated as idempotent coordinator operations, which lets the worker survive coordinator restarts without re-running a completed launcher session.
