@@ -44,7 +44,6 @@
 ### Mismatch
 
 - `docs/mismatch/index.md`
-- `docs/mismatch/config-schema-drift.md`
 - `docs/mismatch/poller-and-state-machine-drift.md`
 - `docs/mismatch/retry-and-failure-drift.md`
 - `docs/mismatch/codex-runtime-drift.md`

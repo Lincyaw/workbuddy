@@ -4,15 +4,4 @@
 environment: dev          # dev | staging | prod
 repo: Lincyaw/workbuddy
 poll_interval: 30s
-
-server:
-  port: 8080              # HTTP audit server port
-  host: 127.0.0.1
-
-agents_dir: .github/workbuddy/agents
-workflows_dir: .github/workbuddy/workflows
-
-log:
-  dir: .workbuddy/logs
-  format: jsonl
-  max_size_mb: 100
+port: 8080                # HTTP audit server port
