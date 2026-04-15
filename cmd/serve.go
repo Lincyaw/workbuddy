@@ -107,6 +107,25 @@ func (l *issueTaskLocks) For(repo string, issue int) *sync.Mutex {
 	return lock.(*sync.Mutex)
 }
 
+// closedIssues tracks issues that were closed while same-issue work was still
+// queued so deferred tasks can be dropped before they start.
+type closedIssues struct {
+	issues sync.Map // key: "repo#issueNum" -> struct{}
+}
+
+func (c *closedIssues) MarkClosed(repo string, issue int) {
+	c.issues.Store(runningTaskKey(repo, issue), struct{}{})
+}
+
+func (c *closedIssues) MarkOpen(repo string, issue int) {
+	c.issues.Delete(runningTaskKey(repo, issue))
+}
+
+func (c *closedIssues) IsClosed(repo string, issue int) bool {
+	_, ok := c.issues.Load(runningTaskKey(repo, issue))
+	return ok
+}
+
 // GHCLIReader implements poller.GHReader using the gh CLI.
 type GHCLIReader struct{}
 
@@ -403,6 +422,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 
 	// Running tasks registry for cancellation on issue close.
 	runningTasks := NewRunningTasks()
+	closedIssues := &closedIssues{}
 
 	// 7. Start StateMachine event processor (reads from poller events)
 	wg.Add(1)
@@ -418,11 +438,13 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 				}
 				// Handle issue closure: cancel running agent and skip state machine.
 				if ev.Type == poller.EventIssueClosed {
+					closedIssues.MarkClosed(ev.Repo, ev.IssueNum)
 					if cancelled := runningTasks.Cancel(ev.Repo, ev.IssueNum); cancelled {
 						log.Printf("[serve] cancelled agent for closed issue %s#%d", ev.Repo, ev.IssueNum)
 					}
 					continue // don't pass to state machine
 				}
+				closedIssues.MarkOpen(ev.Repo, ev.IssueNum)
 				smEvent := statemachine.ChangeEvent{
 					Type:     ev.Type,
 					Repo:     ev.Repo,
@@ -457,6 +479,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 		cfg:          cfg,
 		wsMgr:        wsMgr,
 		runningTasks: runningTasks,
+		closedIssues: closedIssues,
 		sessionsDir:  sessionsDir,
 	}
 	workerDone := make(chan struct{})
@@ -523,6 +546,7 @@ type workerDeps struct {
 	cfg          *config.FullConfig
 	wsMgr        *workspace.Manager
 	runningTasks *RunningTasks
+	closedIssues *closedIssues
 	sessionsDir  string
 }
 
@@ -571,9 +595,28 @@ func runEmbeddedWorker(ctx context.Context, taskCh <-chan router.WorkerTask, dep
 				}
 				defer func() { <-parallelLimiter }()
 
+				if deps.closedIssues != nil && deps.closedIssues.IsClosed(task.Repo, task.IssueNum) {
+					skipTaskForClosedIssue(task, deps)
+					return
+				}
+
 				executeTask(ctx, task, deps)
 			}(task)
 		}
+	}
+}
+
+func skipTaskForClosedIssue(task router.WorkerTask, deps *workerDeps) {
+	log.Printf("[worker] skipping queued task %s for closed issue %s#%d",
+		task.TaskID, task.Repo, task.IssueNum)
+
+	if deps.store != nil {
+		if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
+			log.Printf("[worker] failed to update skipped task status: %v", err)
+		}
+	}
+	if deps.sm != nil {
+		deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, fetchCachedLabels(deps.store, task.Repo, task.IssueNum))
 	}
 }
 

@@ -220,6 +220,7 @@ func newWorkerTestDeps(t *testing.T, rt *mockRuntime) (*workerDeps, *store.Store
 		workerID:     "worker-1",
 		cfg:          &config.FullConfig{Workflows: map[string]*config.WorkflowConfig{"dev-workflow": {MaxRetries: 3}}},
 		runningTasks: NewRunningTasks(),
+		closedIssues: &closedIssues{},
 		sessionsDir:  filepath.Join(t.TempDir(), ".workbuddy", "sessions"),
 	}, st
 }
@@ -750,6 +751,89 @@ func TestRunEmbeddedWorker_CancelOnlyStopsMatchingIssue(t *testing.T) {
 	}
 	if statuses["task-2"] != store.TaskStatusCompleted {
 		t.Fatalf("task-2 status = %q, want %q", statuses["task-2"], store.TaskStatusCompleted)
+	}
+}
+
+func TestRunEmbeddedWorker_SkipsQueuedTaskAfterIssueClose(t *testing.T) {
+	firstStarted := make(chan struct{}, 1)
+	secondStarted := make(chan struct{}, 1)
+	releaseFirst := make(chan struct{})
+
+	var mu sync.Mutex
+	callCount := 0
+	mockRT := &mockRuntime{name: config.RuntimeClaudeCode, resultFn: func(ctx context.Context, _ *config.AgentConfig, _ *launcher.TaskContext) (*launcher.Result, error) {
+		mu.Lock()
+		callCount++
+		callNum := callCount
+		mu.Unlock()
+
+		switch callNum {
+		case 1:
+			firstStarted <- struct{}{}
+			<-ctx.Done()
+			<-releaseFirst
+			return nil, ctx.Err()
+		case 2:
+			secondStarted <- struct{}{}
+			return &launcher.Result{
+				ExitCode: 0,
+				Duration: 50 * time.Millisecond,
+				Meta:     map[string]string{},
+			}, nil
+		default:
+			t.Fatalf("unexpected runtime call %d", callNum)
+			return nil, nil
+		}
+	}}
+	deps, st := newWorkerTestDeps(t, mockRT)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	taskCh := make(chan router.WorkerTask, 2)
+	done := make(chan struct{})
+	go func() {
+		runEmbeddedWorker(ctx, taskCh, deps, 2)
+		close(done)
+	}()
+
+	taskCh <- newWorkerTestTask(t, st, "owner/repo", 9, "task-1")
+	taskCh <- newWorkerTestTask(t, st, "owner/repo", 9, "task-2")
+	close(taskCh)
+
+	select {
+	case <-firstStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first task did not start")
+	}
+
+	deps.closedIssues.MarkClosed("owner/repo", 9)
+	if err := st.DeleteIssueCache("owner/repo", 9); err != nil {
+		t.Fatal(err)
+	}
+	if !deps.runningTasks.Cancel("owner/repo", 9) {
+		t.Fatal("expected cancel for issue #9 to succeed")
+	}
+	close(releaseFirst)
+
+	select {
+	case <-secondStarted:
+		t.Fatal("queued same-issue task started after the issue was closed")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("embedded worker did not exit after closing queued issue")
+	}
+
+	statuses := taskStatusesByID(t, st)
+	if statuses["task-1"] != store.TaskStatusFailed {
+		t.Fatalf("task-1 status = %q, want %q", statuses["task-1"], store.TaskStatusFailed)
+	}
+	if statuses["task-2"] != store.TaskStatusFailed {
+		t.Fatalf("task-2 status = %q, want %q", statuses["task-2"], store.TaskStatusFailed)
 	}
 }
 
