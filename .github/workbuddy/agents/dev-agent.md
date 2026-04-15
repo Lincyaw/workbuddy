@@ -41,10 +41,11 @@ prompt: |
   1. Stage and commit your changes with a descriptive message referencing
      issue #{{.Issue.Number}}.
   2. Push the branch to origin: `git push -u origin workbuddy/issue-{{.Issue.Number}}`.
-  3. If no open PR exists for this branch, create one with
-     `gh pr create --title "..." --body "Fixes #{{.Issue.Number}}"` and capture the PR URL.
-  4. Remove `status:developing`, add `status:reviewing`, and post a comment
-     including the PR URL (or branch name if PR creation fails).
+  3. You MUST have an open PR for this branch before proceeding. If no open PR
+     exists, create one with `gh pr create --title "..." --body "Fixes #{{.Issue.Number}}"`
+     and capture the PR URL.
+  4. ONLY after the PR exists: remove `status:developing`, add `status:reviewing`,
+     and post a comment including the PR URL. Do NOT change labels if there is no PR.
 
   Use the repo's own CLAUDE.md / skills for project-specific dev-loop, PR conventions, and tooling.
 ---

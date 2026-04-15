@@ -26,6 +26,11 @@ prompt: |
   Read the issue's `## Acceptance Criteria` section AND the artifact (PR,
   comment, or report linked to the issue).
 
+  BEFORE evaluating criteria, verify there is an open PR for this issue
+  (check `Related PRs` above or run `gh pr list --search "Fixes #{{.Issue.Number}}"`).
+  If no open PR exists, the review FAILS immediately with the reason:
+  "No open PR found for issue #{{.Issue.Number}}. The dev agent must create a PR before review."
+
   Evaluate EACH criterion as pass / fail / cannot-judge, with concrete
   evidence (file:line, test name, or quoted text).
 
