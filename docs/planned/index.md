@@ -12,6 +12,7 @@
 | Agent catalog | 登记规划中的 agent 类型，作为批量开 issue 的索引 | `.github/workbuddy/agents/` | Agent schema vNext |
 | 迁移路径 | 控制 v0.1.x 到 v0.2.x 的重构顺序 | `internal/launcher/`, `internal/config/`, `internal/audit/` | 上述全部 |
 | 分布式拓扑与 CLI | 从单进程 `serve` 演进到 coordinator/worker 分离 | `cmd/`, `internal/router/`, `internal/registry/` | 独立，不依赖上述 |
+| Artifact 布局收敛 | Session artifact 从 worktree 内迁到仓库根 `.workbuddy/sessions/` | `internal/launcher/`, `cmd/serve.go`, `internal/audit/` | Runtime / Session 抽象、Event Schema v1 |
 
 ## 文档列表
 
@@ -21,6 +22,7 @@
 - `docs/planned/agent-catalog.md`
 - `docs/planned/distributed-topology-and-cli.md`
 - `docs/planned/runtime-migration-plan.md`
+- `docs/planned/artifact-layout.md`
 
 ## 维护规则
 
