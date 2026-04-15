@@ -512,15 +512,16 @@ func (s *Store) ListIssueCaches(repo string) ([]IssueCache, error) {
 
 // AgentSession represents a row in the agent_sessions table.
 type AgentSession struct {
-	ID        int64
-	SessionID string
-	TaskID    string
-	Repo      string
-	IssueNum  int
-	AgentName string
-	Summary   string
-	RawPath   string
-	CreatedAt time.Time
+	ID         int64
+	SessionID  string
+	TaskID     string
+	Repo       string
+	IssueNum   int
+	AgentName  string
+	Summary    string
+	RawPath    string
+	TaskStatus string
+	CreatedAt  time.Time
 }
 
 // InsertAgentSession records an agent session.
@@ -539,8 +540,11 @@ func (s *Store) InsertAgentSession(sess AgentSession) (int64, error) {
 // QueryAgentSessions returns sessions for a repo+issue.
 func (s *Store) QueryAgentSessions(repo string, issueNum int) ([]AgentSession, error) {
 	rows, err := s.db.Query(
-		`SELECT id, session_id, task_id, repo, issue_num, agent_name, summary, raw_path, created_at
-		 FROM agent_sessions WHERE repo = ? AND issue_num = ? ORDER BY id`,
+		`SELECT s.id, s.session_id, s.task_id, s.repo, s.issue_num, s.agent_name, s.summary, s.raw_path, s.created_at,
+		        COALESCE(t.status, '') AS task_status
+		 FROM agent_sessions s
+		 LEFT JOIN task_queue t ON s.task_id = t.id
+		 WHERE s.repo = ? AND s.issue_num = ? ORDER BY s.id`,
 		repo, issueNum,
 	)
 	if err != nil {
@@ -553,7 +557,7 @@ func (s *Store) QueryAgentSessions(repo string, issueNum int) ([]AgentSession, e
 		var sess AgentSession
 		var createdAt string
 		if err := rows.Scan(&sess.ID, &sess.SessionID, &sess.TaskID, &sess.Repo, &sess.IssueNum,
-			&sess.AgentName, &sess.Summary, &sess.RawPath, &createdAt); err != nil {
+			&sess.AgentName, &sess.Summary, &sess.RawPath, &createdAt, &sess.TaskStatus); err != nil {
 			return nil, fmt.Errorf("store: scan agent session: %w", err)
 		}
 		sess.CreatedAt, _ = parseTimestamp(createdAt, "agent_session.created_at")
@@ -572,24 +576,28 @@ type SessionFilter struct {
 
 // ListAgentSessions returns sessions matching the given filter, ordered by
 // creation time descending. Zero-value filter fields are ignored.
+// It also joins task_queue to surface the current task status.
 func (s *Store) ListAgentSessions(f SessionFilter) ([]AgentSession, error) {
-	q := `SELECT id, session_id, task_id, repo, issue_num, agent_name, summary, raw_path, created_at
-	      FROM agent_sessions WHERE 1=1`
+	q := `SELECT s.id, s.session_id, s.task_id, s.repo, s.issue_num, s.agent_name, s.summary, s.raw_path, s.created_at,
+	             COALESCE(t.status, '') AS task_status
+	      FROM agent_sessions s
+	      LEFT JOIN task_queue t ON s.task_id = t.id
+	      WHERE 1=1`
 	var args []any
 
 	if f.Repo != "" {
-		q += " AND repo = ?"
+		q += " AND s.repo = ?"
 		args = append(args, f.Repo)
 	}
 	if f.IssueNum != 0 {
-		q += " AND issue_num = ?"
+		q += " AND s.issue_num = ?"
 		args = append(args, f.IssueNum)
 	}
 	if f.AgentName != "" {
-		q += " AND agent_name = ?"
+		q += " AND s.agent_name = ?"
 		args = append(args, f.AgentName)
 	}
-	q += " ORDER BY id DESC"
+	q += " ORDER BY s.id DESC"
 
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
@@ -602,7 +610,7 @@ func (s *Store) ListAgentSessions(f SessionFilter) ([]AgentSession, error) {
 		var sess AgentSession
 		var createdAt string
 		if err := rows.Scan(&sess.ID, &sess.SessionID, &sess.TaskID, &sess.Repo, &sess.IssueNum,
-			&sess.AgentName, &sess.Summary, &sess.RawPath, &createdAt); err != nil {
+			&sess.AgentName, &sess.Summary, &sess.RawPath, &createdAt, &sess.TaskStatus); err != nil {
 			return nil, fmt.Errorf("store: scan agent session: %w", err)
 		}
 		sess.CreatedAt, _ = parseTimestamp(createdAt, "agent_session.created_at")
@@ -611,16 +619,35 @@ func (s *Store) ListAgentSessions(f SessionFilter) ([]AgentSession, error) {
 	return out, rows.Err()
 }
 
+// UpdateAgentSession updates summary and raw_path for an existing session.
+func (s *Store) UpdateAgentSession(sessionID, summary, rawPath string) error {
+	res, err := s.db.Exec(
+		`UPDATE agent_sessions SET summary = ?, raw_path = ? WHERE session_id = ?`,
+		summary, rawPath, sessionID,
+	)
+	if err != nil {
+		return fmt.Errorf("store: update agent session: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("store: update agent session: session %q not found", sessionID)
+	}
+	return nil
+}
+
 // GetAgentSession returns a single session by session_id, or nil if not found.
 func (s *Store) GetAgentSession(sessionID string) (*AgentSession, error) {
 	var sess AgentSession
 	var createdAt string
 	err := s.db.QueryRow(
-		`SELECT id, session_id, task_id, repo, issue_num, agent_name, summary, raw_path, created_at
-		 FROM agent_sessions WHERE session_id = ?`,
+		`SELECT s.id, s.session_id, s.task_id, s.repo, s.issue_num, s.agent_name, s.summary, s.raw_path, s.created_at,
+		        COALESCE(t.status, '') AS task_status
+		 FROM agent_sessions s
+		 LEFT JOIN task_queue t ON s.task_id = t.id
+		 WHERE s.session_id = ?`,
 		sessionID,
 	).Scan(&sess.ID, &sess.SessionID, &sess.TaskID, &sess.Repo, &sess.IssueNum,
-		&sess.AgentName, &sess.Summary, &sess.RawPath, &createdAt)
+		&sess.AgentName, &sess.Summary, &sess.RawPath, &createdAt, &sess.TaskStatus)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

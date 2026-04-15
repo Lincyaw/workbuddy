@@ -17,6 +17,12 @@ prompt: |
   Body:
   {{.Issue.Body}}
 
+  Previous comments (including earlier dev reports and review verdicts):
+  {{.Issue.CommentsText}}
+
+  Related PRs:
+  {{.RelatedPRsText}}
+
   Read the issue's `## Acceptance Criteria` section AND the artifact (PR,
   comment, or report linked to the issue).
 

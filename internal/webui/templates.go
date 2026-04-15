@@ -25,6 +25,13 @@ const listHTML = `<!DOCTYPE html>
   a:hover { text-decoration: underline; }
   code { background: #f0f3f6; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
   .empty { text-align: center; padding: 32px; color: #656d76; }
+  .status-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; }
+  .status-running { background: #fff8c5; color: #7d4e00; }
+  .status-completed { background: #dcffe4; color: #116329; }
+  .status-failed { background: #ffe2e5; color: #a40e26; }
+  .status-timeout { background: #ffe2e5; color: #a40e26; }
+  .status-pending { background: #eef1f4; color: #57606a; }
+  .status-default { background: #f0f3f6; color: #24292f; }
 </style>
 </head>
 <body>
@@ -46,6 +53,7 @@ const listHTML = `<!DOCTYPE html>
         <th>Agent</th>
         <th>Repo</th>
         <th>Issue</th>
+        <th>Status</th>
         <th>Created</th>
       </tr>
     </thead>
@@ -56,6 +64,13 @@ const listHTML = `<!DOCTYPE html>
         <td>{{.AgentName}}</td>
         <td>{{.Repo}}</td>
         <td>#{{.IssueNum}}</td>
+        <td>
+          {{if .TaskStatus}}
+            <span class="status-badge status-{{.TaskStatus}}">{{.TaskStatus}}</span>
+          {{else}}
+            <span class="status-badge status-default">unknown</span>
+          {{end}}
+        </td>
         <td>{{.CreatedAt.Format "2006-01-02 15:04:05"}}</td>
       </tr>
     {{end}}

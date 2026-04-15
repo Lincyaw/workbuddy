@@ -63,10 +63,10 @@ func TestCreateAndRemove(t *testing.T) {
 	}
 
 	// Verify the branch was created.
-	cmd := exec.Command("git", "branch", "--list", "workbuddy/issue-42/*")
+	cmd := exec.Command("git", "branch", "--list", "workbuddy/issue-42")
 	cmd.Dir = repoDir
 	out, _ := cmd.Output()
-	if !strings.Contains(string(out), "workbuddy/issue-42/task-abc") {
+	if !strings.Contains(string(out), "workbuddy/issue-42") {
 		t.Errorf("expected workbuddy branch, got: %s", out)
 	}
 
@@ -81,7 +81,7 @@ func TestCreateAndRemove(t *testing.T) {
 	}
 
 	// Branch should be gone.
-	cmd = exec.Command("git", "branch", "--list", "workbuddy/issue-42/*")
+	cmd = exec.Command("git", "branch", "--list", "workbuddy/issue-42")
 	cmd.Dir = repoDir
 	out, _ = cmd.Output()
 	if strings.TrimSpace(string(out)) != "" {

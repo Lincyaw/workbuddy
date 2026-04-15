@@ -850,6 +850,17 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 		log.Printf("[worker] report started failed: %v", err)
 	}
 
+	// Record the session early so the web UI can show it while running.
+	if _, err := deps.store.InsertAgentSession(store.AgentSession{
+		SessionID: sessionID,
+		TaskID:    task.TaskID,
+		Repo:      task.Repo,
+		IssueNum:  task.IssueNum,
+		AgentName: task.AgentName,
+	}); err != nil {
+		log.Printf("[worker] failed to record session start: %v", err)
+	}
+
 	session, err := deps.launcher.Start(taskCtx, task.Agent, task.Context)
 	if err != nil {
 		log.Printf("[worker] failed to start agent %s: %v", task.AgentName, err)

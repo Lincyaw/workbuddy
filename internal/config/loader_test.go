@@ -175,11 +175,11 @@ func TestRepositorySampleConfig_LoadsMinimalAgentCatalog(t *testing.T) {
 		t.Fatalf("repository sample config agent count = %d, want %d; catalog is now minimal (dev + review only)", got, len(expectedAgents))
 	}
 
-	if got := cfg.Agents["dev-agent"].Runtime; got != RuntimeClaudeCode {
-		t.Fatalf("dev-agent runtime = %q, want %q", got, RuntimeClaudeCode)
+	if got := cfg.Agents["dev-agent"].Runtime; got != RuntimeCodexExec {
+		t.Fatalf("dev-agent runtime = %q, want %q", got, RuntimeCodexExec)
 	}
-	if got := cfg.Agents["review-agent"].Runtime; got != RuntimeClaudeCode {
-		t.Fatalf("review-agent runtime = %q, want %q", got, RuntimeClaudeCode)
+	if got := cfg.Agents["review-agent"].Runtime; got != RuntimeCodexExec {
+		t.Fatalf("review-agent runtime = %q, want %q", got, RuntimeCodexExec)
 	}
 
 	// Both agents' trigger labels (status:developing, status:reviewing) should be

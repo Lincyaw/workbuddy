@@ -1287,6 +1287,52 @@ func TestExecuteTask_LabelValidationUsesPreRunStateTransitions(t *testing.T) {
 	}
 }
 
+// TestExecuteTask_RecordsSessionEarly verifies that the session row is
+// inserted into agent_sessions before the agent finishes, so the web UI
+// can display running sessions.
+func TestExecuteTask_RecordsSessionEarly(t *testing.T) {
+	sessionID := "sess-early-001"
+	rt := &mockRuntime{name: config.RuntimeClaudeCode, resultFn: func(_ context.Context, _ *config.AgentConfig, _ *launcher.TaskContext) (*launcher.Result, error) {
+		return &launcher.Result{
+			ExitCode: 0,
+			Stdout:   "done",
+			Duration: 50 * time.Millisecond,
+			Meta:     map[string]string{},
+		}, nil
+	}}
+	deps, st := newWorkerTestDeps(t, rt)
+
+	task := router.WorkerTask{
+		TaskID:    "task-early",
+		Repo:      "owner/repo",
+		IssueNum:  99,
+		AgentName: "dev-agent",
+		Agent:     &config.AgentConfig{Name: "dev-agent", Runtime: config.RuntimeClaudeCode, Prompt: "fix"},
+		Workflow:  "dev-workflow",
+		State:     "developing",
+		Context:   &launcher.TaskContext{Repo: "owner/repo", RepoRoot: t.TempDir(), WorkDir: t.TempDir(), Session: launcher.SessionContext{ID: sessionID}},
+	}
+
+	// We can't easily inspect the DB mid-run in a single goroutine, but we
+	// can verify that after executeTask returns, the auditor updated the
+	// pre-existing row rather than creating a duplicate.
+	executeTask(context.Background(), task, deps)
+
+	sessions, err := st.ListAgentSessions(store.SessionFilter{Repo: "owner/repo"})
+	if err != nil {
+		t.Fatalf("ListAgentSessions: %v", err)
+	}
+	var found int
+	for _, s := range sessions {
+		if s.SessionID == sessionID {
+			found++
+		}
+	}
+	if found != 1 {
+		t.Fatalf("expected exactly 1 session row for %s, got %d", sessionID, found)
+	}
+}
+
 func TestStreamSessionEventsUsesRepoRoot(t *testing.T) {
 	repoRoot := t.TempDir()
 	workDir := t.TempDir()

@@ -17,6 +17,12 @@ prompt: |
   Body:
   {{.Issue.Body}}
 
+  Previous comments (including review feedback):
+  {{.Issue.CommentsText}}
+
+  Related PRs:
+  {{.RelatedPRsText}}
+
   Read the issue body for a `## Acceptance Criteria` section.
 
   - If the section is missing or lists no verifiable criteria: add label
@@ -25,10 +31,22 @@ prompt: |
   - Otherwise: produce the artifact that satisfies every criterion — code,
     docs, dependency bump, investigation report, whatever fits. For any
     verifiable criterion, include tests or checks that demonstrate it holds.
-  - When the artifact is ready: remove `status:developing`, add
-    `status:reviewing`.
 
-  Use the repo's own CLAUDE.md / skills for project-specific dev-loop, PR conventions, and tooling. Report the artifact link when finished.
+  You are working on branch `workbuddy/issue-{{.Issue.Number}}`. Before making
+  changes, check if `origin/workbuddy/issue-{{.Issue.Number}}` exists; if so,
+  run `git pull origin workbuddy/issue-{{.Issue.Number}}` or rebase onto it so
+  you continue prior work.
+
+  When the artifact is ready:
+  1. Stage and commit your changes with a descriptive message referencing
+     issue #{{.Issue.Number}}.
+  2. Push the branch to origin: `git push -u origin workbuddy/issue-{{.Issue.Number}}`.
+  3. If no open PR exists for this branch, create one with
+     `gh pr create --title "..." --body "Fixes #{{.Issue.Number}}"` and capture the PR URL.
+  4. Remove `status:developing`, add `status:reviewing`, and post a comment
+     including the PR URL (or branch name if PR creation fails).
+
+  Use the repo's own CLAUDE.md / skills for project-specific dev-loop, PR conventions, and tooling.
 ---
 
 ## Dev Agent

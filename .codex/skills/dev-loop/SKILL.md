@@ -1,6 +1,6 @@
 ---
 name: dev-loop
-description: Use when implementing a feature, fix, refactor, or content change that should go through a complete delivery loop: implement, test, vibe-check, AI review, and measurement before keeping or discarding the change. Trigger when the user asks to build something, fix a bug, write or revise content, improve quality, or when you need to decide whether a change is actually ready to ship. 中文触发：开发、实现、修复、写代码、改一下、做这个功能、加个功能、修个 bug、帮我写、帮我改、重构。
+description: "Use when implementing a feature, fix, refactor, or content change that should go through a complete delivery loop: implement, test, vibe-check, AI review, and measurement before keeping or discarding the change. Trigger when the user asks to build something, fix a bug, write or revise content, improve quality, or when you need to decide whether a change is actually ready to ship. 中文触发：开发、实现、修复、写代码、改一下、做这个功能、加个功能、修个 bug、帮我写、帮我改、重构。"
 ---
 
 # Dev Loop

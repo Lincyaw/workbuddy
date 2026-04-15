@@ -101,8 +101,19 @@ func (a *Auditor) Capture(sessionID, taskID, repo string, issueNum int, agentNam
 		Summary:   summary,
 		RawPath:   rawPath,
 	}
-	if _, err := a.store.InsertAgentSession(sess); err != nil {
-		return fmt.Errorf("audit: insert session: %w", err)
+	// If the session was pre-recorded at task start, update it; otherwise insert.
+	existing, err := a.store.GetAgentSession(sessionID)
+	if err != nil {
+		return fmt.Errorf("audit: check session: %w", err)
+	}
+	if existing != nil {
+		if err := a.store.UpdateAgentSession(sessionID, summary, rawPath); err != nil {
+			return fmt.Errorf("audit: update session: %w", err)
+		}
+	} else {
+		if _, err := a.store.InsertAgentSession(sess); err != nil {
+			return fmt.Errorf("audit: insert session: %w", err)
+		}
 	}
 	return nil
 }
@@ -129,23 +140,26 @@ func (a *Auditor) RecordLabelValidation(repo string, issueNum int, payload Label
 
 // Query returns sessions matching the given filter.
 func (a *Auditor) Query(filter Filter) ([]store.AgentSession, error) {
-	q := `SELECT id, session_id, task_id, repo, issue_num, agent_name, summary, raw_path, created_at
-	      FROM agent_sessions WHERE 1=1`
+	q := `SELECT s.id, s.session_id, s.task_id, s.repo, s.issue_num, s.agent_name, s.summary, s.raw_path, s.created_at,
+	             COALESCE(t.status, '') AS task_status
+	      FROM agent_sessions s
+	      LEFT JOIN task_queue t ON s.task_id = t.id
+	      WHERE 1=1`
 	var args []any
 
 	if filter.SessionID != "" {
-		q += " AND session_id = ?"
+		q += " AND s.session_id = ?"
 		args = append(args, filter.SessionID)
 	}
 	if filter.IssueNum != 0 {
-		q += " AND issue_num = ?"
+		q += " AND s.issue_num = ?"
 		args = append(args, filter.IssueNum)
 	}
 	if filter.AgentName != "" {
-		q += " AND agent_name = ?"
+		q += " AND s.agent_name = ?"
 		args = append(args, filter.AgentName)
 	}
-	q += " ORDER BY id"
+	q += " ORDER BY s.id"
 
 	rows, err := a.store.DB().Query(q, args...)
 	if err != nil {
@@ -158,7 +172,7 @@ func (a *Auditor) Query(filter Filter) ([]store.AgentSession, error) {
 		var s store.AgentSession
 		var createdAt string
 		if err := rows.Scan(&s.ID, &s.SessionID, &s.TaskID, &s.Repo, &s.IssueNum,
-			&s.AgentName, &s.Summary, &s.RawPath, &createdAt); err != nil {
+			&s.AgentName, &s.Summary, &s.RawPath, &createdAt, &s.TaskStatus); err != nil {
 			return nil, fmt.Errorf("audit: scan session: %w", err)
 		}
 		out = append(out, s)

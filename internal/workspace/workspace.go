@@ -28,32 +28,51 @@ func NewManager(baseDir string) *Manager {
 }
 
 // Create creates a new git worktree for the given task and returns its path.
-// The worktree is created at .workbuddy/worktrees/<issue>-<taskID>/ branching
-// from the current HEAD of the main worktree.
+// The worktree is created at .workbuddy/worktrees/<issue>/ branching from
+// the current HEAD (or from origin/workbuddy/issue-<issue> if it exists).
+// Branch names are deterministic per issue so work persists across cycles.
 func (m *Manager) Create(issueNum int, taskID string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	name := fmt.Sprintf("issue-%d-%s", issueNum, shortID(taskID))
-	wtPath := filepath.Join(m.baseDir, worktreeDir, name)
+	branchName := fmt.Sprintf("workbuddy/issue-%d", issueNum)
+	wtPath := filepath.Join(m.baseDir, worktreeDir, fmt.Sprintf("issue-%d", issueNum))
+
+	// Remove any existing worktree for this issue to avoid conflicts.
+	if existing := m.findWorktreePath(branchName); existing != "" {
+		_ = exec.Command("git", "worktree", "remove", "--force", existing).Run()
+		_ = exec.Command("git", "worktree", "prune").Run()
+	}
+	_ = os.RemoveAll(wtPath)
 
 	// Ensure parent directory exists.
 	if err := os.MkdirAll(filepath.Dir(wtPath), 0755); err != nil {
 		return "", fmt.Errorf("workspace: mkdir: %w", err)
 	}
 
-	// Create a new branch for isolation. Branch name includes issue number
-	// so multiple tasks for the same issue get separate branches.
-	branchName := fmt.Sprintf("workbuddy/issue-%d/%s", issueNum, shortID(taskID))
-
-	cmd := exec.Command("git", "worktree", "add", "-b", branchName, wtPath, "HEAD")
-	cmd.Dir = m.baseDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("workspace: git worktree add: %s: %w", strings.TrimSpace(string(out)), err)
+	// If the local branch already exists, create worktree from it directly.
+	// Otherwise branch from origin/branch (if it exists) or HEAD.
+	if m.localBranchExists(branchName) {
+		cmd := exec.Command("git", "worktree", "add", wtPath, branchName)
+		cmd.Dir = m.baseDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("workspace: git worktree add from existing branch: %s: %w", strings.TrimSpace(string(out)), err)
+		}
+		log.Printf("[workspace] created worktree %s (branch %s from local) for issue #%d",
+			wtPath, branchName, issueNum)
+	} else {
+		baseRef := "HEAD"
+		if m.remoteBranchExists(branchName) {
+			baseRef = "origin/" + branchName
+		}
+		cmd := exec.Command("git", "worktree", "add", "-b", branchName, wtPath, baseRef)
+		cmd.Dir = m.baseDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("workspace: git worktree add: %s: %w", strings.TrimSpace(string(out)), err)
+		}
+		log.Printf("[workspace] created worktree %s (branch %s from %s) for issue #%d",
+			wtPath, branchName, baseRef, issueNum)
 	}
-
-	log.Printf("[workspace] created worktree %s (branch %s) for issue #%d task %s",
-		wtPath, branchName, issueNum, shortID(taskID))
 	return wtPath, nil
 }
 
@@ -104,6 +123,50 @@ func (m *Manager) Remove(wtPath string) error {
 		log.Printf("[workspace] removed worktree %s", wtPath)
 	}
 	return combined
+}
+
+// findWorktreePath returns the filesystem path of an existing worktree for the
+// given branch, or empty string if none exists.
+func (m *Manager) findWorktreePath(branchName string) string {
+	cmd := exec.Command("git", "worktree", "list", "--porcelain")
+	cmd.Dir = m.baseDir
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+
+	lines := strings.Split(string(out), "\n")
+	var currentPath string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "worktree ") {
+			currentPath = strings.TrimPrefix(line, "worktree ")
+		}
+		if strings.HasPrefix(line, "branch ") {
+			ref := strings.TrimPrefix(line, "branch ")
+			localBranch := strings.TrimPrefix(ref, "refs/heads/")
+			if localBranch == branchName && currentPath != "" {
+				return currentPath
+			}
+		}
+		if line == "" {
+			currentPath = ""
+		}
+	}
+	return ""
+}
+
+// localBranchExists reports whether a local branch <branchName> exists.
+func (m *Manager) localBranchExists(branchName string) bool {
+	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branchName)
+	cmd.Dir = m.baseDir
+	return cmd.Run() == nil
+}
+
+// remoteBranchExists reports whether origin/<branchName> exists.
+func (m *Manager) remoteBranchExists(branchName string) bool {
+	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/remotes/origin/"+branchName)
+	cmd.Dir = m.baseDir
+	return cmd.Run() == nil
 }
 
 // worktreeBranch returns the branch checked out in the given worktree path.

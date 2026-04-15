@@ -157,6 +157,36 @@ func TestHandleList_FilterByAgent(t *testing.T) {
 	}
 }
 
+func TestHandleList_ShowsTaskStatus(t *testing.T) {
+	st := newTestStore(t)
+	seedSessions(t, st)
+	// Insert matching tasks so LEFT JOIN yields statuses.
+	if err := st.InsertTask(store.TaskRecord{ID: "task-1", Repo: "org/repo", IssueNum: 1, AgentName: "dev-agent", Status: store.TaskStatusRunning}); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+	if err := st.InsertTask(store.TaskRecord{ID: "task-2", Repo: "org/repo", IssueNum: 2, AgentName: "test-agent", Status: store.TaskStatusFailed}); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+	h := NewHandler(st)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest("GET", "/sessions", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "status-running") {
+		t.Error("expected running status badge")
+	}
+	if !strings.Contains(body, "status-failed") {
+		t.Error("expected failed status badge")
+	}
+}
+
 func TestHandleDetail_Found(t *testing.T) {
 	st := newTestStore(t)
 	seedSessions(t, st)

@@ -168,6 +168,18 @@ func TestCreateAndReadWrite(t *testing.T) {
 		t.Fatalf("unexpected sessions: %+v", sessions)
 	}
 
+	// UpdateAgentSession
+	if err := s.UpdateAgentSession("sess-1", "updated summary", "/tmp/updated"); err != nil {
+		t.Fatalf("UpdateAgentSession: %v", err)
+	}
+	sess, err := s.GetAgentSession("sess-1")
+	if err != nil {
+		t.Fatalf("GetAgentSession after update: %v", err)
+	}
+	if sess == nil || sess.Summary != "updated summary" || sess.RawPath != "/tmp/updated" {
+		t.Fatalf("unexpected session after update: %+v", sess)
+	}
+
 	// --- Dependency tables ---
 	err = s.ReplaceIssueDependencies("org/repo", 1, []IssueDependency{{
 		Repo:              "org/repo",
