@@ -496,9 +496,12 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	sm := statemachine.NewStateMachine(cfg.Workflows, st, dispatchCh, evlog)
 	depResolver := dependency.NewResolver(st, ghReader, evlog)
 
-	// Workspace isolation via git worktrees
-	wsMgr := workspace.NewManager(repoDir)
-	_ = wsMgr.Prune() // clean up orphaned worktrees from prior crashes
+	// Workspace isolation is only needed for the embedded worker path.
+	var wsMgr *workspace.Manager
+	if !opts.coordinatorAPI {
+		wsMgr = workspace.NewManager(repoDir)
+		wsMgr.Prune() // clean up orphaned worktrees from prior crashes
+	}
 
 	// Router
 	rt := router.NewRouter(cfg.Agents, reg, st, cfg.Global.Repo, repoDir, taskCh, wsMgr, !opts.coordinatorAPI)

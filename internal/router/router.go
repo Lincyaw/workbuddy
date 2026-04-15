@@ -119,9 +119,7 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 		return
 	}
 
-	// Distributed coordinator mode persists pending tasks for HTTP workers and
-	// does not need to render an in-process task payload yet.
-	if r.taskChan == nil {
+	if !r.dispatchToEmbedded || r.taskChan == nil {
 		return
 	}
 
@@ -184,10 +182,6 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 		Workflow:     req.Workflow,
 		State:        req.State,
 		WorktreePath: worktreePath,
-	}
-
-	if !r.dispatchToEmbedded || r.taskChan == nil {
-		return
 	}
 
 	select {
