@@ -270,7 +270,7 @@ Worker in the same process. Communication is via Go channels.`,
 func init() {
 	serveCmd.Flags().IntP("port", "p", defaultPort, "HTTP server port")
 	serveCmd.Flags().Duration("poll-interval", defaultPollInterval, "GitHub poll interval")
-	serveCmd.Flags().Int("max-parallel-tasks", 0, "Maximum number of embedded worker tasks to run in parallel across issues (0 = auto, min(NumCPU, 4))")
+	serveCmd.Flags().Int("max-parallel-tasks", 0, fmt.Sprintf("Maximum number of embedded worker tasks to run in parallel across issues (0 = auto, min(NumCPU, %d))", defaultMaxParallelTasks))
 	serveCmd.Flags().StringSlice("roles", []string{"dev", "test", "review"}, "Worker roles")
 	serveCmd.Flags().String("config-dir", ".github/workbuddy", "Configuration directory")
 	serveCmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "SQLite database path")
@@ -600,44 +600,42 @@ func runEmbeddedWorker(ctx context.Context, taskCh <-chan router.WorkerTask, dep
 	}
 
 	issueLocks := &issueTaskLocks{}
-	parallelLimiter := make(chan struct{}, maxParallelTasks)
 	var wg sync.WaitGroup
 
-	for {
-		select {
-		case <-ctx.Done():
-			wg.Wait()
-			return
-		case task, ok := <-taskCh:
-			if !ok {
-				wg.Wait()
-				return
-			}
-			// Acquire the global slot before spawning so taskCh provides natural
-			// backpressure and in-flight goroutines are capped at maxParallelTasks.
-			select {
-			case parallelLimiter <- struct{}{}:
-			case <-ctx.Done():
-				wg.Wait()
-				return
-			}
-			wg.Add(1)
-			go func(task router.WorkerTask) {
-				defer wg.Done()
-				defer func() { <-parallelLimiter }()
-
-				issueLock := issueLocks.Acquire(task.Repo, task.IssueNum)
-				defer issueLock.Release()
-
-				if deps.closedIssues != nil && deps.closedIssues.IsClosed(task.Repo, task.IssueNum) {
-					skipTaskForClosedIssue(task, deps)
+	// Fixed-size worker pool. Each worker pulls from taskCh and serializes
+	// same-repo+issue work via per-issue locks. This caps in-flight goroutines
+	// at maxParallelTasks without holding a global slot while waiting on a
+	// per-issue lock (which would cause head-of-line blocking across issues).
+	for i := 0; i < maxParallelTasks; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
 					return
+				case task, ok := <-taskCh:
+					if !ok {
+						return
+					}
+					runWorkerTask(ctx, task, deps, issueLocks)
 				}
-
-				executeTask(ctx, task, deps)
-			}(task)
-		}
+			}
+		}()
 	}
+	wg.Wait()
+}
+
+func runWorkerTask(ctx context.Context, task router.WorkerTask, deps *workerDeps, issueLocks *issueTaskLocks) {
+	issueLock := issueLocks.Acquire(task.Repo, task.IssueNum)
+	defer issueLock.Release()
+
+	if deps.closedIssues != nil && deps.closedIssues.IsClosed(task.Repo, task.IssueNum) {
+		skipTaskForClosedIssue(task, deps)
+		return
+	}
+
+	executeTask(ctx, task, deps)
 }
 
 func skipTaskForClosedIssue(task router.WorkerTask, deps *workerDeps) {
@@ -649,8 +647,12 @@ func skipTaskForClosedIssue(task router.WorkerTask, deps *workerDeps) {
 			log.Printf("[worker] failed to update skipped task status: %v", err)
 		}
 	}
-	if deps.sm != nil && deps.store != nil {
-		deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, fetchCachedLabels(deps.store, task.Repo, task.IssueNum))
+	if deps.sm != nil {
+		var labels []string
+		if deps.store != nil {
+			labels = fetchCachedLabels(deps.store, task.Repo, task.IssueNum)
+		}
+		deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, labels)
 	}
 }
 
