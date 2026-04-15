@@ -550,6 +550,56 @@ func TestPollEmitsCycleDoneSentinel(t *testing.T) {
 	}
 }
 
+func TestPollTruncatedIssueListStillEmitsBufferedEvents(t *testing.T) {
+	st := testStore(t)
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     "owner/repo",
+		IssueNum: 1,
+		Labels:   `["bug"]`,
+		State:    "open",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	issues := make([]Issue, 0, ghListLimit)
+	issues = append(issues, Issue{Number: 1, Title: "Bug report", State: "open", Labels: []string{"enhancement"}})
+	for i := 2; i <= ghListLimit; i++ {
+		issues = append(issues, Issue{Number: i, Title: fmt.Sprintf("Issue %d", i), State: "open"})
+	}
+
+	gh := &mockGHReader{
+		issues: issues,
+		prs: []PR{
+			{Number: 10, URL: "https://github.com/owner/repo/pull/10", Branch: "feature", State: "open"},
+		},
+	}
+	p := NewPoller(gh, st, "owner/repo", time.Hour)
+
+	ctx := context.Background()
+	p.poll(ctx)
+	events := drain(p.Events(), 500*time.Millisecond)
+
+	var sawLabelAdded, sawLabelRemoved, sawPREvent, sawUnexpectedClose bool
+	for _, ev := range events {
+		switch {
+		case ev.Type == EventLabelAdded && ev.IssueNum == 1 && ev.Detail == "enhancement":
+			sawLabelAdded = true
+		case ev.Type == EventLabelRemoved && ev.IssueNum == 1 && ev.Detail == "bug":
+			sawLabelRemoved = true
+		case (ev.Type == EventPRCreated || ev.Type == EventPRStateChanged) && ev.IssueNum == 10:
+			sawPREvent = true
+		case ev.Type == EventIssueClosed:
+			sawUnexpectedClose = true
+		}
+	}
+	if !sawLabelAdded || !sawLabelRemoved || !sawPREvent {
+		t.Fatalf("expected buffered label/pr events to flush under truncation, got %+v", events)
+	}
+	if sawUnexpectedClose {
+		t.Fatalf("unexpected issue_closed under truncated issue list: %+v", events)
+	}
+}
+
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
