@@ -53,24 +53,36 @@ prompt: |
   ## Steps
   1. Check out the PR branch:
      gh pr checkout <N> --repo {{.Repo}}
-  2. Run the test suite and static checks — these are the ONLY hard gates:
+  2. **Probe the environment before gating.** A tool not being on `PATH` is
+     an environment problem, not a code defect — investigate and fix it
+     before blocking the PR. Figure out which tools the gates actually need
+     based on the diff (skip toolchain gates entirely for docs-only PRs),
+     then if something is missing, try the usual recovery moves (shell init
+     files, common install locations under `$HOME`, filesystem search) and
+     re-check. Only after those fail should you raise it as a BLOCKING
+     finding, and clearly label it "environment" so humans know the fix is
+     infra, not code. Log your probe attempts in the agent report.
+  3. Run the test suite and static checks — these are the ONLY hard gates
+     once the environment is ready:
      go build ./...
      go vet ./...
      go test ./... -count=1
+     (Substitute the stack-appropriate command set: `npm test && npm run lint`,
+     `pytest && ruff check`, `cargo test`, etc.)
      If any fail, treat it as a BLOCKING finding and go to the "If build/vet/tests fail
      OR BLOCKING finding" branch under "When done" — do NOT attempt a formal
      request-changes review (GitHub refuses it on self-authored PRs). Otherwise proceed.
-  3. Read the PR diff against project conventions.
-  4. Classify every finding as BLOCKING or non-blocking:
+  4. Read the PR diff against project conventions.
+  5. Classify every finding as BLOCKING or non-blocking:
      - BLOCKING: correctness bugs, security issues, data loss risks,
        missing tests for new logic, broken invariants, violates CLAUDE.md.
      - NON-BLOCKING: style nits, doc cross-reference polish, wording,
        unimportant refactors, speculative edge cases, anything the dev
        agent could address in a future PR without harm.
-  5. Be generous about approving. If there are only non-blocking findings,
+  6. Be generous about approving. If there are only non-blocking findings,
      DO NOT bounce the PR back. Leave the notes as a PR comment (not a
      review) and still mark the issue done.
-  6. Self-authored-PR caveat: GitHub refuses formal approve/request-changes
+  7. Self-authored-PR caveat: GitHub refuses formal approve/request-changes
      when the authenticated account is the PR author. That is FINE — the
      label transition below is authoritative; a formal GitHub review is
      optional.
@@ -130,24 +142,36 @@ command: >
   ## Steps
   1. Check out the PR branch:
      gh pr checkout <N> --repo {{.Repo}}
-  2. Run the test suite and static checks — these are the ONLY hard gates:
+  2. **Probe the environment before gating.** A tool not being on `PATH` is
+     an environment problem, not a code defect — investigate and fix it
+     before blocking the PR. Figure out which tools the gates actually need
+     based on the diff (skip toolchain gates entirely for docs-only PRs),
+     then if something is missing, try the usual recovery moves (shell init
+     files, common install locations under `$HOME`, filesystem search) and
+     re-check. Only after those fail should you raise it as a BLOCKING
+     finding, and clearly label it "environment" so humans know the fix is
+     infra, not code. Log your probe attempts in the agent report.
+  3. Run the test suite and static checks — these are the ONLY hard gates
+     once the environment is ready:
      go build ./...
      go vet ./...
      go test ./... -count=1
+     (Substitute the stack-appropriate command set: `npm test && npm run lint`,
+     `pytest && ruff check`, `cargo test`, etc.)
      If any fail, treat it as a BLOCKING finding and go to the "If build/vet/tests fail
      OR BLOCKING finding" branch under "When done" — do NOT attempt a formal
      request-changes review (GitHub refuses it on self-authored PRs). Otherwise proceed.
-  3. Read the PR diff against project conventions.
-  4. Classify every finding as BLOCKING or non-blocking:
+  4. Read the PR diff against project conventions.
+  5. Classify every finding as BLOCKING or non-blocking:
      - BLOCKING: correctness bugs, security issues, data loss risks,
        missing tests for new logic, broken invariants, violates CLAUDE.md.
      - NON-BLOCKING: style nits, doc cross-reference polish, wording,
        unimportant refactors, speculative edge cases, anything the dev
        agent could address in a future PR without harm.
-  5. Be generous about approving. If there are only non-blocking findings,
+  6. Be generous about approving. If there are only non-blocking findings,
      DO NOT bounce the PR back. Leave the notes as a PR comment (not a
      review) and still mark the issue done.
-  6. Self-authored-PR caveat: GitHub refuses formal approve/request-changes
+  7. Self-authored-PR caveat: GitHub refuses formal approve/request-changes
      when the authenticated account is the PR author. That is FINE — the
      label transition below is authoritative; a formal GitHub review is
      optional.
