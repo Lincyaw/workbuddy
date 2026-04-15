@@ -50,7 +50,10 @@ type codexSession struct {
 }
 
 func newCodexSession(agent *config.AgentConfig, task *TaskContext, prompt string) *codexSession {
-	baseDir := task.WorkDir
+	baseDir := task.RepoRoot
+	if baseDir == "" {
+		baseDir = task.WorkDir
+	}
 	if baseDir == "" {
 		baseDir = "."
 	}

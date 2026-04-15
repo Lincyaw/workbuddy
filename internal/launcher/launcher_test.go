@@ -13,6 +13,7 @@ import (
 
 func newTestTask(t *testing.T) *TaskContext {
 	t.Helper()
+	repoRoot := t.TempDir()
 	dir := t.TempDir()
 	return &TaskContext{
 		Issue: IssueContext{
@@ -25,8 +26,9 @@ func newTestTask(t *testing.T) *TaskContext {
 			URL:    "https://github.com/test/repo/pull/1",
 			Branch: "feat/test",
 		},
-		Repo:    "test/repo",
-		WorkDir: dir,
+		Repo:     "test/repo",
+		RepoRoot: repoRoot,
+		WorkDir:  dir,
 		Session: SessionContext{
 			ID: "session-abc-123",
 		},

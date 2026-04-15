@@ -69,6 +69,7 @@ type TaskContext struct {
 	Issue          IssueContext
 	PR             PRContext
 	Repo           string
+	RepoRoot       string
 	WorkDir        string
 	Session        SessionContext
 	RelatedPRs     []PRSummary
@@ -115,16 +116,16 @@ type SessionRef struct {
 }
 
 type Result struct {
-	ExitCode    int
-	Stdout      string
-	Stderr      string
-	Duration    time.Duration
-	Meta        map[string]string
+	ExitCode int
+	Stdout   string
+	Stderr   string
+	Duration time.Duration
+	Meta     map[string]string
 	// SessionPath is the canonical session artifact path handed to audit
 	// and reporter. When Event Schema v1 capture succeeds this points at
 	// the normalized events-v1.jsonl; otherwise it falls back to whatever
 	// the runtime produced natively (e.g. codex-exec.jsonl).
-	SessionPath    string
+	SessionPath string
 	// RawSessionPath preserves the runtime-native artifact path (if any)
 	// when SessionPath has been overridden with the normalized v1 stream.
 	RawSessionPath string

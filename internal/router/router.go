@@ -21,14 +21,14 @@ import (
 
 // WorkerTask is the unit of work sent to an embedded Worker via channel.
 type WorkerTask struct {
-	TaskID      string
-	Repo        string
-	IssueNum    int
-	AgentName   string
-	Agent       *config.AgentConfig
-	Context     *launcher.TaskContext
-	Workflow    string
-	State       string
+	TaskID       string
+	Repo         string
+	IssueNum     int
+	AgentName    string
+	Agent        *config.AgentConfig
+	Context      *launcher.TaskContext
+	Workflow     string
+	State        string
 	WorktreePath string // path to isolated worktree, empty if isolation disabled
 }
 
@@ -39,6 +39,7 @@ type Router struct {
 	registry *registry.Registry
 	store    *store.Store
 	repo     string
+	repoRoot string
 	taskChan chan<- WorkerTask
 	wsMgr    *workspace.Manager // nil = no workspace isolation
 }
@@ -50,6 +51,7 @@ func NewRouter(
 	reg *registry.Registry,
 	st *store.Store,
 	repo string,
+	repoRoot string,
 	taskChan chan<- WorkerTask,
 	wsMgr *workspace.Manager,
 ) *Router {
@@ -58,6 +60,7 @@ func NewRouter(
 		registry: reg,
 		store:    st,
 		repo:     repo,
+		repoRoot: repoRoot,
 		taskChan: taskChan,
 		wsMgr:    wsMgr,
 	}
@@ -140,6 +143,7 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 	taskCtx := &launcher.TaskContext{
 		Issue:          issueCtx,
 		Repo:           req.Repo,
+		RepoRoot:       r.repoRoot,
 		WorkDir:        workDir,
 		RelatedPRs:     relatedPRs,
 		RelatedPRsText: formatRelatedPRs(relatedPRs),

@@ -21,6 +21,7 @@
 | `docs/implemented/current-config-workflow-and-agents.md` | 当前 config/agent/workflow schema 与触发行为 | `internal/config/`, `.github/workbuddy/agents/`, `.github/workbuddy/workflows/` |
 | `docs/implemented/current-runtime-reporting-and-audit.md` | 当前 launcher、reporter、audit、sessions UI 行为 | `internal/launcher/`, `internal/reporter/`, `internal/audit/`, `internal/webui/` |
 | `docs/implemented/current-persistence-and-workspace.md` | 当前存储、事件日志、worker registry、worktree 隔离 | `internal/store/`, `internal/eventlog/`, `internal/registry/`, `internal/workspace/` |
+| `docs/implemented/artifact-layout.md` | 当前 session artifact 位于仓库根 `.workbuddy/sessions/`，不会随 worktree 清理丢失 | `cmd/serve.go`, `cmd/run.go`, `internal/launcher/`, `internal/router/router.go`, `internal/audit/` |
 
 ## 维护规则
 
