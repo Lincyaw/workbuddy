@@ -55,3 +55,25 @@ func TestProcessSessionSessionLookupPathPrefersRepo(t *testing.T) {
 		t.Fatalf("lookup path = %q, want %q", got, task.Repo)
 	}
 }
+
+func TestClaudePolicyArgs_SandboxGatesPermissionBypass(t *testing.T) {
+	cases := []struct {
+		sandbox    string
+		wantBypass bool
+	}{
+		{"read-only", false},
+		{"workspace-write", false},
+		{"danger-full-access", true},
+		{"", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.sandbox, func(t *testing.T) {
+			args := claudePolicyArgs(config.PolicyConfig{Sandbox: tc.sandbox})
+			joined := strings.Join(args, " ")
+			has := strings.Contains(joined, "--dangerously-skip-permissions")
+			if has != tc.wantBypass {
+				t.Fatalf("sandbox=%q args=%q bypass=%v want %v", tc.sandbox, joined, has, tc.wantBypass)
+			}
+		})
+	}
+}
