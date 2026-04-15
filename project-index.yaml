@@ -41,7 +41,8 @@ documentation:
         - internal/poller/poller.go
         - internal/statemachine/statemachine.go
         - internal/router/router.go
-      notes: Current single-process serve architecture and execution chain.
+        - internal/store/store.go
+      notes: Current single-process serve architecture, GH call boundary, and retry/failure control boundary.
 
     - path: docs/implemented/current-config-workflow-and-agents.md
       bucket: implemented
@@ -186,16 +187,6 @@ documentation:
         - .github/workbuddy/agents/dev-agent.md
       notes: Drift in event scope and label-routing ownership.
 
-    - path: docs/mismatch/retry-and-failure-drift.md
-      bucket: mismatch
-      status: maintained
-      related_code:
-        - internal/statemachine/statemachine.go
-        - internal/store/store.go
-        - .github/workbuddy/workflows/feature-dev.md
-        - .github/workbuddy/workflows/bugfix.md
-      notes: Retry-limit and failed-state semantics are only partially enforced today.
-
     - path: docs/mismatch/codex-runtime-drift.md
       bucket: mismatch
       status: archived
@@ -289,7 +280,7 @@ requirements:
       Label-driven state machine with cycle detection and retry limits.
       When a back-edge (e.g. reviewing→developing) is traversed, increment
       a per-issue per-edge counter. If counter >= workflow.max_retries,
-      transition to "failed" state instead.
+      record retry/failure intent instead of dispatching the back-edge.
     priority: P0
     version: v0.1.0
     status: tested
@@ -299,18 +290,21 @@ requirements:
       - "AC-003-3: 条件匹配时执行状态转换：移除旧 status label、添加新 status label（通过 gh issue edit）"
       - "AC-003-4: 转换时如果 transition 指定了 assign agent，通知 Task Router"
       - "AC-003-5: 回退边（目标状态在历史中出现过）触发 CycleTracker 计数"
-      - "AC-003-6: CycleTracker 计数 >= max_retries 时，拒绝回退，转到 failed 状态并添加 needs-human label"
+      - "AC-003-6: CycleTracker 计数 >= max_retries 时，拒绝回退，记录 TypeCycleLimitReached 和 TypeTransitionToFailed 事件；status:failed / needs-human label 写回仍由 agent 或人工执行"
       - "AC-003-7: CycleTracker 数据持久化到 SQLite transition_counts 表"
       - "AC-003-8: Issue 没有匹配任何 workflow 时静默跳过（不报错）；匹配多个 workflow 时记录 error 事件到 Event Log 并跳过该 Issue（不执行任何 workflow），防止歧义执行"
       - "AC-003-9: 同一 Issue 不会因为一次 poll 触发多次转换（幂等性）"
       - "AC-003-10: 同一 Issue 在有 Agent 正在执行时，不派发新的同类 Agent（执行互斥锁，基于 task_queue 状态检查）"
       - "AC-003-11: Stuck 检测——任务状态变为 completed/failed/timeout 后，如果 N 分钟内（可配置，默认 5min）对应 Issue 的 label 未发生变化，标记为 stuck 并记录事件到 Event Log（触发条件是 Agent 执行结束但没改 label，而非纯时间窗口）"
-      - "AC-003-12: 单元测试：正常转换、回退计数、超过上限转 failed、无匹配跳过、多 workflow 匹配拒绝、幂等、执行互斥、stuck 检测 8 种场景"
+      - "AC-003-12: 单元测试：正常转换、回退计数、超过上限记录 retry/failure intent、无匹配跳过、多 workflow 匹配拒绝、幂等、执行互斥、stuck 检测 8 种场景"
     code:
       - internal/statemachine/statemachine.go
       - internal/statemachine/rules.go
     tests:
       - internal/statemachine/statemachine_test.go
+    related_docs:
+      - docs/implemented/current-architecture.md
+    notes: Current implemented docs record that max-retry overflow emits TypeCycleLimitReached and TypeTransitionToFailed while failed/needs-human label writeback remains agent-owned rather than Go-owned.
     deps: [REQ-001, REQ-024]
 
   - id: REQ-004

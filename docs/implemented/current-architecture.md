@@ -74,3 +74,17 @@ workbuddy serve
 - Go 侧并不直接代替 agent 修改 issue label。
 
 这和旧设计的“中心状态机统一管理所有迁移”不是同一件事，后续如要调整，必须先改 `docs/mismatch/` 中对应差异文档。
+
+## 当前重试与失败边界
+
+当前 `max_retries` 闭环只有“检测 + 计数 + 记录 intent”，还不是 Go 侧完整的失败标签编排能力。
+
+- `internal/statemachine/statemachine.go` 会根据回退边历史调用 `internal/store/store.go` 的 `IncrementTransition` / `QueryTransitionCounts`，把每个 issue 的回退次数持久化到 SQLite `transition_counts` 表。
+- 当回退次数达到 `workflow.max_retries` 时，state machine 只记录 `TypeCycleLimitReached` 和 `TypeTransitionToFailed` 事件，并停止派发这次回退；这里记录的是“应该失败 / 需要人工介入”的 intent。
+- Go 侧不会直接写 `status:failed` 或 `needs-human` label。当前 GH call boundary 仍然是 agent 通过 `gh issue edit` 负责 label 写回，Go 侧只做检测、审计和派发。
+
+这也意味着当前 retry/failure 语义仍然有明确边界：
+
+- 去重只覆盖单个 poll 周期内的相同事件，`ResetDedup()` 会在下一轮 poll 前清空内存去重集合，所以 retry 是否再次触发仍然受 poll 周期切分影响。
+- state entry 在 label 变化时会主动清理 stale inflight；`MarkAgentCompleted` 和 `CheckStuck` 再依据“任务完成时看到的 labels”判断后续事件，label 变化和 task 完成之间仍然存在竞态窗口。
+- back-edge 计数持久化与 GitHub label 写回不是同一个原子动作，所以 `transition_counts` 已更新，并不等于 `status:failed` / `needs-human` 已经被外部执行端成功写回。
