@@ -210,39 +210,39 @@ func (p *Poller) poll(ctx context.Context) {
 	// since issues beyond the first page would be falsely classified as closed.
 	if len(issues) >= ghListLimit {
 		log.Printf("[poller] issue list may be truncated (%d results), skipping close detection", len(issues))
-		return
-	}
-	openIssueNums := make(map[int]bool, len(issues))
-	for _, iss := range issues {
-		openIssueNums[iss.Number] = true
-	}
-	// Also include PR numbers so we don't treat them as closed issues.
-	openPRNums := make(map[int]bool, len(prs))
-	for _, pr := range prs {
-		openPRNums[pr.Number] = true
-	}
+	} else {
+		openIssueNums := make(map[int]bool, len(issues))
+		for _, iss := range issues {
+			openIssueNums[iss.Number] = true
+		}
+		// Also include PR numbers so we don't treat them as closed issues.
+		openPRNums := make(map[int]bool, len(prs))
+		for _, pr := range prs {
+			openPRNums[pr.Number] = true
+		}
 
-	cachedNums, err := p.store.ListCachedIssueNums(p.repo)
-	if err != nil {
-		log.Printf("[poller] error listing cached issue nums for %s: %v", p.repo, err)
-		return
-	}
-
-	for _, num := range cachedNums {
-		if ctx.Err() != nil {
+		cachedNums, err := p.store.ListCachedIssueNums(p.repo)
+		if err != nil {
+			log.Printf("[poller] error listing cached issue nums for %s: %v", p.repo, err)
 			return
 		}
-		if openIssueNums[num] || openPRNums[num] {
-			continue
-		}
-		pending = append(pending, ChangeEvent{
-			Type:     EventIssueClosed,
-			Repo:     p.repo,
-			IssueNum: num,
-			Detail:   "issue no longer in open issues list",
-		})
-		if err := p.store.DeleteIssueCache(p.repo, num); err != nil {
-			log.Printf("[poller] error deleting cache for closed issue %s#%d: %v", p.repo, num, err)
+
+		for _, num := range cachedNums {
+			if ctx.Err() != nil {
+				return
+			}
+			if openIssueNums[num] || openPRNums[num] {
+				continue
+			}
+			pending = append(pending, ChangeEvent{
+				Type:     EventIssueClosed,
+				Repo:     p.repo,
+				IssueNum: num,
+				Detail:   "issue no longer in open issues list",
+			})
+			if err := p.store.DeleteIssueCache(p.repo, num); err != nil {
+				log.Printf("[poller] error deleting cache for closed issue %s#%d: %v", p.repo, num, err)
+			}
 		}
 	}
 	for _, ev := range pending {
