@@ -17,9 +17,11 @@ type docsProjectIndex struct {
 		} `yaml:"documents"`
 	} `yaml:"documentation"`
 	Requirements []struct {
-		ID          string   `yaml:"id"`
-		Notes       string   `yaml:"notes"`
-		RelatedDocs []string `yaml:"related_docs"`
+		ID                 string   `yaml:"id"`
+		Description        string   `yaml:"description"`
+		AcceptanceCriteria []string `yaml:"acceptance_criteria"`
+		Notes              string   `yaml:"notes"`
+		RelatedDocs        []string `yaml:"related_docs"`
 	} `yaml:"requirements"`
 }
 
@@ -52,13 +54,23 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
+func assertContainsAll(t *testing.T, path, content string, want []string) {
+	t.Helper()
+
+	for _, needle := range want {
+		if !strings.Contains(content, needle) {
+			t.Fatalf("%s missing %q", path, needle)
+		}
+	}
+}
+
 func TestRetryFailureDocsMigratedToImplemented(t *testing.T) {
 	if _, err := os.Stat("docs/mismatch/retry-and-failure-drift.md"); !os.IsNotExist(err) {
 		t.Fatalf("docs/mismatch/retry-and-failure-drift.md should be removed, stat err=%v", err)
 	}
 
 	architecture := readRepoFile(t, "docs/implemented/current-architecture.md")
-	for _, want := range []string{
+	assertContainsAll(t, "docs/implemented/current-architecture.md", architecture, []string{
 		"## 当前重试与失败边界",
 		"TypeCycleLimitReached",
 		"TypeTransitionToFailed",
@@ -69,10 +81,23 @@ func TestRetryFailureDocsMigratedToImplemented(t *testing.T) {
 		"CheckStuck",
 		"internal/statemachine/statemachine.go",
 		"internal/store/store.go",
+	})
+
+	for _, workflowPath := range []string{
+		".github/workbuddy/workflows/feature-dev.md",
+		".github/workbuddy/workflows/bugfix.md",
 	} {
-		if !strings.Contains(architecture, want) {
-			t.Fatalf("docs/implemented/current-architecture.md missing %q", want)
+		workflow := readRepoFile(t, workflowPath)
+		if strings.Contains(workflow, `action: add_label "needs-human"`) {
+			t.Fatalf("%s should not claim automatic needs-human label writeback", workflowPath)
 		}
+		assertContainsAll(t, workflowPath, workflow, []string{
+			"`failed` 仍然是 workflow schema 中可识别的终态 label",
+			"Go runtime 不会在 retry 超限时直接写入",
+			"status:failed",
+			"needs-human",
+			"record retry/failure intent",
+		})
 	}
 }
 
@@ -117,6 +142,26 @@ func TestRetryFailureDocIndexesStaySynced(t *testing.T) {
 		}
 		if !strings.Contains(req.Notes, "TypeCycleLimitReached") || !strings.Contains(req.Notes, "failed/needs-human") {
 			t.Fatal("REQ-003 notes should describe the implemented retry/failure boundary")
+		}
+		assertContainsAll(t, "project-index.yaml REQ-003", req.Description, []string{
+			"record retry/failure intent",
+		})
+		if containsString(req.AcceptanceCriteria, "AC-003-6: CycleTracker 计数 >= max_retries 时，拒绝回退，转到 failed 状态并添加 needs-human label") {
+			t.Fatal("REQ-003 should not claim automatic failed/needs-human writeback on retry overflow")
+		}
+		matchedAC0036 := false
+		for _, criterion := range req.AcceptanceCriteria {
+			if strings.Contains(criterion, "AC-003-6:") {
+				matchedAC0036 = true
+				assertContainsAll(t, "project-index.yaml REQ-003 AC-003-6", criterion, []string{
+					"TypeCycleLimitReached",
+					"TypeTransitionToFailed",
+					"agent 或人工执行",
+				})
+			}
+		}
+		if !matchedAC0036 {
+			t.Fatal("REQ-003 should include AC-003-6")
 		}
 	}
 

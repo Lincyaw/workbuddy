@@ -44,5 +44,7 @@ states:
 
   failed:
     enter_label: "status:failed"
-    action: add_label "needs-human"
 ```
+
+`failed` 仍然是 workflow schema 中可识别的终态 label，但当前 Go runtime 不会在 retry 超限时直接写入
+`status:failed` 或 `needs-human`；它只会 record retry/failure intent，后续 label 写回仍由 agent 或人工执行。
