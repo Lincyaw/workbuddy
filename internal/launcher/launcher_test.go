@@ -632,6 +632,13 @@ func TestExtractPrompt(t *testing.T) {
 			wantArgs:   []string{"--print"},
 		},
 		{
+			name:       "with extra flags before prompt",
+			input:      `claude --model sonnet --output-format stream-json -p "hello world"`,
+			wantOK:     true,
+			wantPrompt: "hello world",
+			wantArgs:   []string{"--model", "sonnet", "--output-format", "stream-json"},
+		},
+		{
 			name:   "not a claude command",
 			input:  `echo "hello world"`,
 			wantOK: false,

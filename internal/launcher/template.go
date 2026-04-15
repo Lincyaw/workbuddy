@@ -10,7 +10,7 @@ import (
 
 // shellEscape wraps a string in single quotes with proper escaping so it is
 // safe to interpolate into a shell command. Interior single quotes are replaced
-// with the sequence '\'' (end quote, escaped quote, start quote).
+// with the sequence '\” (end quote, escaped quote, start quote).
 func shellEscape(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
@@ -77,8 +77,9 @@ func renderCommandRaw(cmdTemplate string, task *TaskContext) (string, error) {
 	return buf.String(), nil
 }
 
-// promptPattern matches "claude -p ..." or "claude --print -p ..." command prefixes.
-var promptPattern = regexp.MustCompile(`^claude\s+(?:--print\s+)?-p\s+["']`)
+// promptPattern matches "claude ... -p '...'" command prefixes with optional
+// flags before `-p`, such as `--model sonnet` or `--output-format stream-json`.
+var promptPattern = regexp.MustCompile(`^claude\s+.*-p\s+["']`)
 
 // extractPrompt detects a "claude [flags] -p '...'" command and extracts the
 // prompt text along with any extra flags before -p (e.g., --print). This allows

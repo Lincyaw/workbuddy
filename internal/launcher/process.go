@@ -32,6 +32,9 @@ func (s *processSession) Run(ctx context.Context, events chan<- launcherevents.E
 	if timeout == 0 {
 		timeout = 30 * time.Minute
 	}
+	if s.wantsClaudeStreamJSON() {
+		return s.runClaudeStream(ctx, timeout, events)
+	}
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -127,7 +130,7 @@ func (s *processSession) buildCommand(execCtx context.Context) (*exec.Cmd, error
 func newClaudePromptCommand(execCtx context.Context, prompt string, extraArgs []string, policy config.PolicyConfig) *exec.Cmd {
 	args := append([]string{}, extraArgs...)
 	args = append(args, claudePolicyArgs(policy)...)
-	args = append(args, "--print")
+	args = append(args, "--output-format", "stream-json")
 	cmd := exec.CommandContext(execCtx, "claude", args...)
 	cmd.Stdin = strings.NewReader(prompt)
 	return cmd

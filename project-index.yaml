@@ -24,13 +24,14 @@ documentation:
         - cmd/serve.go
         - internal/config/loader.go
         - internal/launcher/launcher.go
+        - internal/launcher/claude_stream.go
         - internal/poller/poller.go
         - internal/router/router.go
         - internal/statemachine/statemachine.go
         - internal/store/store.go
         - internal/audit/audit.go
         - internal/webui/handler.go
-      notes: Current code-aligned capability map.
+      notes: Current code-aligned capability map, including Session/Event v1 runtime behavior.
 
     - path: docs/implemented/current-architecture.md
       bucket: implemented
@@ -69,12 +70,28 @@ documentation:
         - internal/launcher/launcher.go
         - internal/launcher/claude.go
         - internal/launcher/codex.go
+        - internal/launcher/claude_stream.go
         - internal/launcher/process.go
         - internal/reporter/reporter.go
         - internal/reporter/format.go
         - internal/audit/audit.go
         - internal/webui/handler.go
-      notes: Current one-shot runtime model and the reporting/audit/session UI chain.
+      notes: Current Session-based launcher model plus the reporting, audit, and sessions UI chain.
+
+    - path: docs/implemented/event-schema-v1.md
+      bucket: implemented
+      status: maintained
+      related_code:
+        - internal/launcher/types.go
+        - internal/launcher/events/
+        - internal/launcher/codex.go
+        - internal/launcher/claude_stream.go
+        - internal/launcher/process.go
+        - cmd/serve.go
+        - internal/audit/audit.go
+        - internal/webui/handler.go
+        - internal/reporter/reporter.go
+      notes: Unified Event Schema v1 contract, runtime mappings, and downstream artifact consumption.
 
     - path: docs/implemented/current-persistence-and-workspace.md
       bucket: implemented
@@ -134,17 +151,6 @@ documentation:
         - .github/workbuddy/agents/codex-dev-agent.md
         - .github/workbuddy/agents/codex-review-agent.md
       notes: policy, prompt, and output_contract are implemented; launcher now validates final JSON output against agent-declared JSON Schema files.
-
-    - path: docs/planned/event-schema-v1.md
-      bucket: planned
-      status: tested
-      related_code:
-        - internal/launcher/types.go
-        - internal/launcher/events/
-        - internal/launcher/codex.go
-        - internal/audit/audit.go
-        - internal/webui/handler.go
-      notes: Event Schema v1 core types, codex mapping, serialization tests, and session artifact persistence are implemented and locally exercised.
 
     - path: docs/planned/distributed-topology-and-cli.md
       bucket: planned

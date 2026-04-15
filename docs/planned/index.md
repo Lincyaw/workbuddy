@@ -7,7 +7,6 @@
 | 主题 | 目标 | 基线代码 | 依赖前置 |
 | --- | --- | --- | --- |
 | Runtime / Session 抽象 | 从 `Launch(...)` 升级为 `Runtime.Start(...) -> Session` | `internal/launcher/` | — |
-| Event Schema v1 | 给 runtime、audit、web UI、reporter 一个统一事件模型 | `internal/launcher/`, `internal/audit/`, `internal/webui/` | Runtime / Session 抽象 |
 | Agent catalog | 登记规划中的 agent 类型，作为批量开 issue 的索引 | `.github/workbuddy/agents/` | Agent schema vNext |
 | Issue dependency mechanism | 为 issue 增加声明式前置依赖、blocked/unblock 规则与可观测图查询 | `internal/poller/`, `internal/statemachine/`, `internal/router/`, `internal/store/` | 独立；与现有 workflow label 兼容 |
 | 迁移路径 | 控制 v0.1.x 到 v0.2.x 的重构顺序 | `internal/launcher/`, `internal/config/`, `internal/audit/` | 上述全部 |
@@ -15,7 +14,6 @@
 ## 文档列表
 
 - `docs/planned/runtime-session-architecture.md`
-- `docs/planned/event-schema-v1.md`
 - `docs/planned/agent-catalog.md`
 - `docs/planned/issue-dependencies.md`
 - `docs/planned/distributed-topology-and-cli.md`
