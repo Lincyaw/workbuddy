@@ -196,20 +196,6 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 		exitCode = exitErr.ExitCode()
 	}
 
-	// Codex is supposed to print a `task_complete` JSONL line before exiting.
-	// If it crashed or exited early without one, consumers of the event stream
-	// would otherwise never see a terminal event. Synthesize one so audit/UI
-	// always has a turn-completion signal.
-	if events != nil && !mapper.turnCompleteSaw {
-		status := "ok"
-		if exitCode != 0 {
-			status = "error"
-			emitEvent(events, &seq, s.task.Session.ID, mapper.effectiveTurnID(), launcherevents.KindError, launcherevents.ErrorPayload{Code: "codex_exit", Message: fmt.Sprintf("codex exec exited %d without task_complete", exitCode), Recoverable: false}, nil)
-		}
-		emitEvent(events, &seq, s.task.Session.ID, mapper.effectiveTurnID(), launcherevents.KindTurnCompleted, launcherevents.TurnCompletedPayload{TurnID: mapper.effectiveTurnID(), Status: status}, nil)
-		mapper.turnCompleteSaw = true
-	}
-
 	lastMessage := readOptionalFile(s.lastMsgPath)
 	result := &Result{
 		ExitCode:    exitCode,
@@ -230,7 +216,20 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 	}
 
 	if err := validateOutputContract(s.agent, result); err != nil {
+		emitOutputContractFailure(events, &seq, s.task.Session.ID, mapper.effectiveTurnID(), err)
 		return result, err
+	}
+	if events != nil {
+		if mapper.turnCompleted != nil {
+			emitEvent(events, &seq, s.task.Session.ID, mapper.effectiveTurnID(), launcherevents.KindTurnCompleted, *mapper.turnCompleted, mapper.turnCompletedRaw)
+		} else {
+			status := "ok"
+			if exitCode != 0 {
+				status = "error"
+				emitEvent(events, &seq, s.task.Session.ID, mapper.effectiveTurnID(), launcherevents.KindError, launcherevents.ErrorPayload{Code: "codex_exit", Message: fmt.Sprintf("codex exec exited %d without task_complete", exitCode), Recoverable: false}, nil)
+			}
+			emitEvent(events, &seq, s.task.Session.ID, mapper.effectiveTurnID(), launcherevents.KindTurnCompleted, launcherevents.TurnCompletedPayload{TurnID: mapper.effectiveTurnID(), Status: status}, nil)
+		}
 	}
 
 	return result, nil
@@ -294,11 +293,13 @@ func readOptionalFile(path string) string {
 }
 
 type codexEventMapper struct {
-	sessionID       string
-	sessionRef      SessionRef
-	turnID          string
-	tokenUsage      *launcherevents.TokenUsagePayload
-	turnCompleteSaw bool
+	sessionID        string
+	sessionRef       SessionRef
+	turnID           string
+	tokenUsage       *launcherevents.TokenUsagePayload
+	turnCompleteSaw  bool
+	turnCompleted    *launcherevents.TurnCompletedPayload
+	turnCompletedRaw []byte
 }
 
 func newCodexEventMapper(sessionID string) *codexEventMapper {
@@ -422,7 +423,10 @@ func (m *codexEventMapper) Map(line []byte, seq *uint64) []launcherevents.Event 
 			status = "error"
 		}
 		m.turnCompleteSaw = true
-		return []launcherevents.Event{m.makeEvent(seq, launcherevents.KindTurnCompleted, launcherevents.TurnCompletedPayload{TurnID: m.effectiveTurnID(), Status: status}, line)}
+		payload := launcherevents.TurnCompletedPayload{TurnID: m.effectiveTurnID(), Status: status}
+		m.turnCompleted = &payload
+		m.turnCompletedRaw = cloneRaw(line)
+		return nil
 
 	case "error":
 		code := rawString(raw, "code")

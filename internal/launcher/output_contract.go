@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
+	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 	"github.com/xeipuuv/gojsonschema"
 )
 
@@ -65,4 +66,19 @@ func stripMetaBlock(stdout string) string {
 		return stdout
 	}
 	return stdout[:beginIdx] + after[endIdx+len(metaEndMarker):]
+}
+
+func emitOutputContractFailure(events chan<- launcherevents.Event, seq *uint64, sessionID, turnID string, err error) {
+	if events == nil || err == nil {
+		return
+	}
+	emitEvent(events, seq, sessionID, turnID, launcherevents.KindError, launcherevents.ErrorPayload{
+		Code:        "output_contract",
+		Message:     err.Error(),
+		Recoverable: false,
+	}, nil)
+	emitEvent(events, seq, sessionID, turnID, launcherevents.KindTurnCompleted, launcherevents.TurnCompletedPayload{
+		TurnID: turnID,
+		Status: "error",
+	}, nil)
 }

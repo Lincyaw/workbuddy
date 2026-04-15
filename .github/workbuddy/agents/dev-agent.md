@@ -27,7 +27,8 @@ prompt: |
   3. For any relevant PR:
      gh pr view <N> --repo {{.Repo}} --comments
      gh pr diff <N> --repo {{.Repo}}
-     gh pr view <N> --repo {{.Repo}} --json reviews,reviewThreads
+     gh pr view <N> --repo {{.Repo}} --json reviews
+     gh api repos/{{.Repo}}/pulls/<N>/comments --paginate
   4. Carefully address the latest test/review feedback. Do not redo work that was already accepted.
 
   ## Handling existing PRs
@@ -81,7 +82,8 @@ command: >
   3. For any relevant PR:
      gh pr view <N> --repo {{.Repo}} --comments
      gh pr diff <N> --repo {{.Repo}}
-     gh pr view <N> --repo {{.Repo}} --json reviews,reviewThreads
+     gh pr view <N> --repo {{.Repo}} --json reviews
+     gh api repos/{{.Repo}}/pulls/<N>/comments --paginate
   4. Carefully address the latest test/review feedback. Do not redo work that was already accepted.
 
   ## Handling existing PRs

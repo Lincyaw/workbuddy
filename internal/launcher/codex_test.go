@@ -46,7 +46,6 @@ func TestCodexEventMapperFixture(t *testing.T) {
 		launcherevents.KindToolResult,
 		launcherevents.KindFileChange,
 		launcherevents.KindTokenUsage,
-		launcherevents.KindTurnCompleted,
 	}
 	if len(got) != len(wantKinds) {
 		t.Fatalf("got %d events, want %d", len(got), len(wantKinds))
@@ -71,6 +70,9 @@ func TestCodexEventMapperFixture(t *testing.T) {
 	}
 	if change.Path != "file.txt" || change.ChangeKind != "modify" {
 		t.Fatalf("unexpected file change: %+v", change)
+	}
+	if mapper.turnCompleted == nil || mapper.turnCompleted.Status != "ok" {
+		t.Fatalf("pending turn completion = %+v", mapper.turnCompleted)
 	}
 }
 
@@ -375,6 +377,41 @@ func TestLaunch_CodexOutputContractRejectsInvalidLastMessage(t *testing.T) {
 	}
 	if result == nil || result.ExitCode != 0 {
 		t.Fatalf("expected successful codex result, got %+v", result)
+	}
+}
+
+func TestCodexSessionRun_EmitsErrorTerminalEventOnOutputContractFailure(t *testing.T) {
+	restore := installFakeCodexLastMessage(t, `{"missing":"status"}`)
+	defer restore()
+
+	task := newTestTask(t)
+	agentDir := t.TempDir()
+	writeOutputSchema(t, agentDir)
+
+	session := newCodexSession(&config.AgentConfig{
+		Name:    "codex-agent",
+		Runtime: config.RuntimeCodexExec,
+		Prompt:  "return json",
+		Policy:  config.PolicyConfig{Sandbox: "read-only", Approval: "never"},
+		OutputContract: config.OutputContractConfig{
+			SchemaFile: "schemas/result.json",
+		},
+		SourcePath: filepath.Join(agentDir, "agent.md"),
+		Timeout:    10 * time.Second,
+	}, task, "return json")
+
+	events, result, err := collectSessionEvents(t, session)
+	if err == nil {
+		t.Fatal("expected output contract validation error")
+	}
+	if result == nil || result.ExitCode != 0 {
+		t.Fatalf("expected successful codex result, got %+v", result)
+	}
+	if got := turnCompletedStatuses(t, events); len(got) != 1 || got[0] != "error" {
+		t.Fatalf("turn.completed statuses = %v, want [error]", got)
+	}
+	if got := eventErrorCodes(t, events); len(got) != 1 || got[0] != "output_contract" {
+		t.Fatalf("error codes = %v, want [output_contract]", got)
 	}
 }
 
