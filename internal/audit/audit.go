@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/Lincyaw/workbuddy/internal/launcher"
+	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
@@ -239,6 +240,10 @@ func summarizeClaude(data []byte) string {
 // ---------------------------------------------------------------------------
 
 func summarizeCodex(result *launcher.Result, data string) string {
+	if summary, ok := summarizeCodexEvents(result, data); ok {
+		return summary
+	}
+
 	var b strings.Builder
 	b.WriteString("## Codex Session Summary\n\n")
 	if result != nil && result.LastMessage != "" {
@@ -283,6 +288,87 @@ func summarizeCodex(result *launcher.Result, data string) string {
 	}
 
 	return b.String()
+}
+
+func summarizeCodexEvents(result *launcher.Result, data string) (string, bool) {
+	lines := strings.Split(strings.TrimSpace(data), "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) == "" {
+		return "", false
+	}
+
+	var first launcherevents.Event
+	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil || first.Kind == "" {
+		return "", false
+	}
+
+	var b strings.Builder
+	b.WriteString("## Codex Session Summary\n\n")
+	if result != nil && result.LastMessage != "" {
+		b.WriteString("### Final Message\n")
+		fmt.Fprintf(&b, "> %s\n\n", truncate(result.LastMessage, 500))
+	}
+
+	eventCounts := map[launcherevents.EventKind]int{}
+	var lastUsage *launcherevents.TokenUsagePayload
+	var commands []string
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var evt launcherevents.Event
+		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+			continue
+		}
+		eventCounts[evt.Kind]++
+		switch evt.Kind {
+		case launcherevents.KindCommandExec:
+			var payload launcherevents.CommandExecPayload
+			if err := json.Unmarshal(evt.Payload, &payload); err == nil && len(payload.Cmd) > 0 {
+				commands = append(commands, strings.Join(payload.Cmd, " "))
+			}
+		case launcherevents.KindTokenUsage:
+			var payload launcherevents.TokenUsagePayload
+			if err := json.Unmarshal(evt.Payload, &payload); err == nil {
+				lastUsage = &payload
+			}
+		}
+	}
+
+	b.WriteString("### Event Counts\n")
+	for _, kind := range []launcherevents.EventKind{
+		launcherevents.KindTurnStarted,
+		launcherevents.KindAgentMessage,
+		launcherevents.KindCommandExec,
+		launcherevents.KindCommandOutput,
+		launcherevents.KindToolCall,
+		launcherevents.KindToolResult,
+		launcherevents.KindFileChange,
+		launcherevents.KindTokenUsage,
+		launcherevents.KindTurnCompleted,
+		launcherevents.KindError,
+		launcherevents.KindLog,
+	} {
+		if eventCounts[kind] == 0 {
+			continue
+		}
+		fmt.Fprintf(&b, "- %s: %d\n", kind, eventCounts[kind])
+	}
+	b.WriteString("\n")
+
+	if len(commands) > 0 {
+		b.WriteString("### Commands\n")
+		for _, command := range commands {
+			fmt.Fprintf(&b, "- %s\n", truncate(command, 200))
+		}
+		b.WriteString("\n")
+	}
+
+	if lastUsage != nil {
+		b.WriteString("### Token Usage\n")
+		fmt.Fprintf(&b, "- input: %d\n- output: %d\n- cached: %d\n- total: %d\n", lastUsage.Input, lastUsage.Output, lastUsage.Cached, lastUsage.Total)
+	}
+
+	return b.String(), true
 }
 
 // ---------------------------------------------------------------------------

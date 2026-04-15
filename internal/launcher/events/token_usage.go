@@ -1,5 +1,7 @@
 package events
 
+const KindTokenUsage EventKind = "token.usage"
+
 type TokenUsagePayload struct {
 	Input  int `json:"input"`
 	Output int `json:"output"`

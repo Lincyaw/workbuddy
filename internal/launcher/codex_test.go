@@ -14,48 +14,63 @@ import (
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 )
 
-func TestCodexEventMapper(t *testing.T) {
+func TestCodexEventMapperFixture(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "codex-exec-events.jsonl"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
 	mapper := newCodexEventMapper("session-1")
 	var seq uint64
-	lines := [][]byte{
-		[]byte(`{"type":"thread.started","thread_id":"thread-abc"}`),
-		[]byte(`{"type":"turn.started"}`),
-		[]byte(`{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"PONG"}}`),
-		[]byte(`{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'echo PONG'","status":"in_progress"}}`),
-		[]byte(`{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'echo PONG'","aggregated_output":"PONG\n","exit_code":0,"status":"completed"}}`),
-		[]byte(`{"type":"turn.completed","usage":{"input_tokens":12,"cached_input_tokens":3,"output_tokens":4}}`),
-	}
 	var got []launcherevents.Event
-	for _, line := range lines {
-		got = append(got, mapper.Map(line, &seq)...)
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		got = append(got, mapper.Map([]byte(line), &seq)...)
 	}
+
 	if mapper.sessionRef.ID != "thread-abc" {
 		t.Fatalf("session ref = %+v", mapper.sessionRef)
 	}
-	if len(got) != 7 {
-		t.Fatalf("got %d events, want 7", len(got))
+	if mapper.turnID != "task-123" {
+		t.Fatalf("turn id = %q", mapper.turnID)
 	}
-	if got[0].Kind != launcherevents.KindTurnStarted {
-		t.Fatalf("first kind = %s", got[0].Kind)
+
+	wantKinds := []launcherevents.EventKind{
+		launcherevents.KindTurnStarted,
+		launcherevents.KindAgentMessage,
+		launcherevents.KindAgentMessage,
+		launcherevents.KindReasoning,
+		launcherevents.KindCommandExec,
+		launcherevents.KindCommandOutput,
+		launcherevents.KindToolResult,
+		launcherevents.KindToolCall,
+		launcherevents.KindToolResult,
+		launcherevents.KindFileChange,
+		launcherevents.KindTokenUsage,
+		launcherevents.KindTurnCompleted,
 	}
-	if got[1].Kind != launcherevents.KindAgentMessage {
-		t.Fatalf("second kind = %s", got[1].Kind)
+	if len(got) != len(wantKinds) {
+		t.Fatalf("got %d events, want %d", len(got), len(wantKinds))
 	}
-	if got[2].Kind != launcherevents.KindCommandExec {
-		t.Fatalf("third kind = %s", got[2].Kind)
+	for i, want := range wantKinds {
+		if got[i].Kind != want {
+			t.Fatalf("event[%d] kind = %s, want %s", i, got[i].Kind, want)
+		}
 	}
-	if got[3].Kind != launcherevents.KindCommandOutput || got[4].Kind != launcherevents.KindToolResult {
-		t.Fatalf("command events mismatch: %s %s", got[3].Kind, got[4].Kind)
-	}
-	if got[5].Kind != launcherevents.KindTokenUsage || got[6].Kind != launcherevents.KindTurnCompleted {
-		t.Fatalf("tail kinds = %s %s", got[5].Kind, got[6].Kind)
-	}
+
 	var usage launcherevents.TokenUsagePayload
-	if err := json.Unmarshal(got[5].Payload, &usage); err != nil {
+	if err := json.Unmarshal(got[10].Payload, &usage); err != nil {
 		t.Fatalf("usage payload: %v", err)
 	}
-	if usage.Total != 16 || usage.Cached != 3 {
+	if usage.Total != 16 || usage.Cached != 2 {
 		t.Fatalf("unexpected usage: %+v", usage)
+	}
+
+	var change launcherevents.FileChangePayload
+	if err := json.Unmarshal(got[9].Payload, &change); err != nil {
+		t.Fatalf("file change payload: %v", err)
+	}
+	if change.Path != "file.txt" || change.ChangeKind != "modify" {
+		t.Fatalf("unexpected file change: %+v", change)
 	}
 }
 
@@ -71,10 +86,17 @@ func TestCodexPromptPrefersPromptField(t *testing.T) {
 	}
 }
 
-func TestLaunch_CodexRuntimeUsesPrompt(t *testing.T) {
-	if _, err := exec.LookPath("codex"); err != nil {
-		t.Skip("codex not installed")
+func TestCodexSessionSetApproverNotSupported(t *testing.T) {
+	session := newCodexSession(&config.AgentConfig{}, newTestTask(t), "hello")
+	if err := session.SetApprover(AlwaysAllow{}); err != ErrNotSupported {
+		t.Fatalf("SetApprover error = %v", err)
 	}
+}
+
+func TestLaunch_CodexRuntimeUsesPrompt(t *testing.T) {
+	restore := installFakeCodex(t)
+	defer restore()
+
 	launcher := NewLauncher()
 	task := newTestTask(t)
 	agent := &config.AgentConfig{
@@ -85,7 +107,7 @@ func TestLaunch_CodexRuntimeUsesPrompt(t *testing.T) {
 			Sandbox:  "read-only",
 			Approval: "never",
 		},
-		Timeout: 60 * time.Second,
+		Timeout: 10 * time.Second,
 	}
 	result, err := launcher.Launch(context.Background(), agent, task)
 	if err != nil {
@@ -94,10 +116,10 @@ func TestLaunch_CodexRuntimeUsesPrompt(t *testing.T) {
 	if result.LastMessage != "PONG" {
 		t.Fatalf("last message = %q", result.LastMessage)
 	}
-	if result.SessionRef.ID == "" {
-		t.Fatal("expected session ref from thread.started")
+	if result.SessionRef.ID != "thread-abc" {
+		t.Fatalf("session ref = %+v", result.SessionRef)
 	}
-	if result.TokenUsage == nil || result.TokenUsage.Total == 0 {
+	if result.TokenUsage == nil || result.TokenUsage.Total != 16 {
 		t.Fatalf("expected token usage, got %+v", result.TokenUsage)
 	}
 	if result.SessionPath == "" {
@@ -107,18 +129,82 @@ func TestLaunch_CodexRuntimeUsesPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read session path: %v", err)
 	}
-	if !strings.Contains(string(data), `"type":"turn.completed"`) {
+	if !strings.Contains(string(data), `"type":"task_complete"`) {
 		t.Fatalf("expected codex jsonl artifact, got: %s", string(data))
 	}
 }
 
 func TestCodexSessionRunEmitsEventsAndArtifact(t *testing.T) {
+	restore := installFakeCodex(t)
+	defer restore()
+
+	launcher := NewLauncher()
+	task := newTestTask(t)
+	agent := &config.AgentConfig{
+		Name:    "codex-agent",
+		Runtime: config.RuntimeCodexExec,
+		Prompt:  "Run `echo PONG` and then reply DONE.",
+		Policy:  config.PolicyConfig{Sandbox: "danger-full-access", Approval: "on-request"},
+		Timeout: 10 * time.Second,
+	}
+	session, err := launcher.Start(context.Background(), agent, task)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = session.Close() }()
+
+	ch := make(chan launcherevents.Event, 32)
+	var collected []launcherevents.Event
+	done := make(chan struct{})
+	go func() {
+		for evt := range ch {
+			collected = append(collected, evt)
+		}
+		close(done)
+	}()
+
+	result, err := session.Run(context.Background(), ch)
+	close(ch)
+	<-done
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if result.LastMessage != "PONG" {
+		t.Fatalf("last message = %q", result.LastMessage)
+	}
+
+	kinds := map[launcherevents.EventKind]bool{}
+	for _, evt := range collected {
+		kinds[evt.Kind] = true
+	}
+	for _, want := range []launcherevents.EventKind{
+		launcherevents.KindTurnStarted,
+		launcherevents.KindCommandExec,
+		launcherevents.KindCommandOutput,
+		launcherevents.KindToolResult,
+		launcherevents.KindAgentMessage,
+		launcherevents.KindTokenUsage,
+		launcherevents.KindTurnCompleted,
+	} {
+		if !kinds[want] {
+			t.Fatalf("missing event kind %s in %v", want, kinds)
+		}
+	}
+
+	lastMsgPath := filepath.Join(filepath.Dir(result.SessionPath), "codex-last-message.txt")
+	if _, err := os.Stat(lastMsgPath); err != nil {
+		t.Fatalf("expected last message file: %v", err)
+	}
+}
+
+func TestCodexExecE2E(t *testing.T) {
 	if os.Getenv("CODEX_E2E") != "1" {
-		t.Skip("set CODEX_E2E=1 to run codex runtime integration test")
+		t.Skip("set CODEX_E2E=1 to run codex runtime e2e")
 	}
 	if _, err := exec.LookPath("codex"); err != nil {
 		t.Skip("codex not installed")
 	}
+
 	launcher := NewLauncher()
 	task := newTestTask(t)
 	agent := &config.AgentConfig{
@@ -133,7 +219,8 @@ func TestCodexSessionRunEmitsEventsAndArtifact(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	defer func() { _ = session.Close() }()
-	ch := make(chan launcherevents.Event, 32)
+
+	ch := make(chan launcherevents.Event, 64)
 	var collected []launcherevents.Event
 	done := make(chan struct{})
 	go func() {
@@ -142,25 +229,63 @@ func TestCodexSessionRunEmitsEventsAndArtifact(t *testing.T) {
 		}
 		close(done)
 	}()
+
 	result, err := session.Run(context.Background(), ch)
 	close(ch)
 	<-done
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if result.LastMessage != "DONE" {
-		t.Fatalf("last message = %q", result.LastMessage)
+	if result.LastMessage == "" {
+		t.Fatal("expected last message")
 	}
-	kinds := map[launcherevents.EventKind]bool{}
-	for _, evt := range collected {
-		kinds[evt.Kind] = true
+	if len(collected) == 0 {
+		t.Fatal("expected event stream")
 	}
-	for _, want := range []launcherevents.EventKind{launcherevents.KindTurnStarted, launcherevents.KindCommandExec, launcherevents.KindCommandOutput, launcherevents.KindToolResult, launcherevents.KindAgentMessage, launcherevents.KindTokenUsage, launcherevents.KindTurnCompleted} {
-		if !kinds[want] {
-			t.Fatalf("missing event kind %s in %v", want, kinds)
-		}
+}
+
+func installFakeCodex(t *testing.T) func() {
+	t.Helper()
+
+	fixturePath := filepath.Join(t.TempDir(), "codex-exec-events.jsonl")
+	data, err := os.ReadFile(filepath.Join("testdata", "codex-exec-events.jsonl"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(filepath.Dir(result.SessionPath), "codex-last-message.txt")); err != nil {
-		t.Fatalf("expected last message file: %v", err)
+	if err := os.WriteFile(fixturePath, data, 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	binDir := t.TempDir()
+	scriptPath := filepath.Join(binDir, "codex")
+	script := "#!/bin/sh\n" +
+		"output_last_message=''\n" +
+		"while [ $# -gt 0 ]; do\n" +
+		"  case \"$1\" in\n" +
+		"    --output-last-message)\n" +
+		"      output_last_message=\"$2\"\n" +
+		"      shift 2\n" +
+		"      ;;\n" +
+		"    *)\n" +
+		"      shift\n" +
+		"      ;;\n" +
+		"  esac\n" +
+		"done\n" +
+		"if [ -n \"$output_last_message\" ]; then\n" +
+		"  mkdir -p \"$(dirname \"$output_last_message\")\"\n" +
+		"  printf 'PONG\\n' > \"$output_last_message\"\n" +
+		"fi\n" +
+		"cat \"" + fixturePath + "\"\n" +
+		"printf 'codex stderr for testing\\n' >&2\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	if err := os.Setenv("PATH", binDir+string(os.PathListSeparator)+oldPath); err != nil {
+		t.Fatalf("set PATH: %v", err)
+	}
+	return func() {
+		_ = os.Setenv("PATH", oldPath)
 	}
 }

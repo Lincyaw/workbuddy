@@ -7,21 +7,6 @@ import (
 
 type EventKind string
 
-const (
-	KindTurnStarted   EventKind = "turn.started"
-	KindTurnCompleted EventKind = "turn.completed"
-	KindAgentMessage  EventKind = "agent.message"
-	KindReasoning     EventKind = "reasoning"
-	KindToolCall      EventKind = "tool.call"
-	KindToolResult    EventKind = "tool.result"
-	KindCommandExec   EventKind = "command.exec"
-	KindCommandOutput EventKind = "command.output"
-	KindFileChange    EventKind = "file.change"
-	KindTokenUsage    EventKind = "token.usage"
-	KindError         EventKind = "error"
-	KindLog           EventKind = "log"
-)
-
 type Event struct {
 	Kind      EventKind       `json:"kind"`
 	Timestamp time.Time       `json:"ts"`

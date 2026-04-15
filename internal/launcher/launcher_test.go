@@ -219,13 +219,16 @@ func TestLaunch_ClaudeCodeRuntime(t *testing.T) {
 
 // Test 8: codex runtime — verify the runtime is registered and works
 func TestLaunch_CodexRuntime(t *testing.T) {
+	restore := installFakeCodex(t)
+	defer restore()
+
 	launcher := NewLauncher()
 	task := newTestTask(t)
 
 	agent := &config.AgentConfig{
 		Name:    "codex-agent",
 		Runtime: "codex",
-		Prompt:  "Reply with exactly codex output",
+		Prompt:  "Reply with exactly PONG",
 		Policy: config.PolicyConfig{
 			Sandbox:  "read-only",
 			Approval: "never",
@@ -237,8 +240,8 @@ func TestLaunch_CodexRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.LastMessage != "codex output" {
-		t.Errorf("expected last message 'codex output', got: %q", result.LastMessage)
+	if result.LastMessage != "PONG" {
+		t.Errorf("expected last message 'PONG', got: %q", result.LastMessage)
 	}
 }
 

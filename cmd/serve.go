@@ -565,7 +565,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 		return
 	}
 
-	if result != nil && result.SessionPath == "" && eventsPath != "" {
+	if result != nil && eventsPath != "" {
 		result.SessionPath = eventsPath
 	}
 

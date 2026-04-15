@@ -30,13 +30,14 @@ const (
 )
 
 var validRuntimes = map[string]bool{
-	RuntimeClaudeCode: true,
-	RuntimeClaudeShot: true,
-	RuntimeCodex:      true,
-	RuntimeCodexExec:  true,
+	RuntimeClaudeCode:  true,
+	RuntimeClaudeShot:  true,
+	RuntimeCodex:       true,
+	RuntimeCodexExec:   true,
+	RuntimeCodexServer: true,
 }
 
-var publicRuntimes = []string{RuntimeClaudeCode, RuntimeCodex}
+var publicRuntimes = []string{RuntimeClaudeCode, RuntimeCodex, RuntimeCodexServer}
 
 // LoadConfig loads the full configuration from the given config directory.
 // It returns the parsed config, a list of non-fatal warnings, and any error.
@@ -197,7 +198,11 @@ func normalizeAgentConfig(agent *AgentConfig) ([]Warning, error) {
 
 	switch agent.Runtime {
 	case RuntimeClaudeCode, RuntimeClaudeShot:
-		if agent.Policy.Sandbox != "danger-full-access" {
+		switch agent.Policy.Sandbox {
+		case "read-only", "danger-full-access":
+		case "workspace-write":
+			warnings = append(warnings, Warning{Message: fmt.Sprintf("agent %q: runtime %q does not support workspace-write sandbox; degrading to read-only semantics", agent.Name, agent.Runtime)})
+		default:
 			return warnings, fmt.Errorf("unsupported policy.sandbox %q for runtime %q", agent.Policy.Sandbox, agent.Runtime)
 		}
 		if agent.Policy.Approval != "never" {
@@ -214,6 +219,17 @@ func normalizeAgentConfig(agent *AgentConfig) ([]Warning, error) {
 		default:
 			return warnings, fmt.Errorf("unsupported policy.approval %q for runtime %q", agent.Policy.Approval, agent.Runtime)
 		}
+	case RuntimeCodexServer:
+		switch agent.Policy.Sandbox {
+		case "read-only", "workspace-write", "danger-full-access":
+		default:
+			return warnings, fmt.Errorf("unsupported policy.sandbox %q for runtime %q", agent.Policy.Sandbox, agent.Runtime)
+		}
+		switch agent.Policy.Approval {
+		case "never", "on-failure", "on-request", "via-approver":
+		default:
+			return warnings, fmt.Errorf("unsupported policy.approval %q for runtime %q", agent.Policy.Approval, agent.Runtime)
+		}
 	default:
 		return warnings, fmt.Errorf("unsupported runtime %q", agent.Runtime)
 	}
@@ -224,8 +240,10 @@ func normalizeAgentConfig(agent *AgentConfig) ([]Warning, error) {
 func defaultSandboxForRuntime(runtime string) string {
 	switch runtime {
 	case RuntimeClaudeCode, RuntimeClaudeShot:
-		return "danger-full-access"
+		return "read-only"
 	case RuntimeCodexExec:
+		return "read-only"
+	case RuntimeCodexServer:
 		return "read-only"
 	default:
 		return ""
@@ -234,7 +252,7 @@ func defaultSandboxForRuntime(runtime string) string {
 
 func defaultApprovalForRuntime(runtime string) string {
 	switch runtime {
-	case RuntimeClaudeCode, RuntimeClaudeShot, RuntimeCodexExec:
+	case RuntimeClaudeCode, RuntimeClaudeShot, RuntimeCodexExec, RuntimeCodexServer:
 		return "never"
 	default:
 		return ""

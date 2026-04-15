@@ -1,5 +1,7 @@
 package events
 
+const KindCommandOutput EventKind = "command.output"
+
 type CommandOutputPayload struct {
 	CallID string `json:"call_id"`
 	Stream string `json:"stream"`
