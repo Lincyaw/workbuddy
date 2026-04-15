@@ -59,6 +59,7 @@ Reporter 负责向 GitHub issue 写评论，当前主要有两类输出：
 
 - 开始执行时的 started comment
 - 执行结束后的结果 comment
+- 在 `ExitCode == 0` 但 workflow label 没有变化时，再追加一条 managed comment，建议人工加 `needs-human`
 
 它当前依赖的信息主要来自：
 
@@ -66,6 +67,7 @@ Reporter 负责向 GitHub issue 写评论，当前主要有两类输出：
 - session id
 - worker id
 - retry 次数
+- post-Run label validation summary
 
 Reporter 还没有直接消费实时 event stream，但在 `serve` 主链路里：
 
@@ -86,6 +88,7 @@ Auditor 会把 session 产物归档到磁盘，并把摘要写入 SQLite：
 - Event v1 artifact 优先按统一 schema 做摘要
 - Codex 原生日志文本只作为旧路径 fallback
 - 若没有 session 文件，就退化为 stdout/stderr 摘要
+- 另外还会把 post-Run label validation 以 `label.validation` 事件写入 `events` 表
 
 代码：
 

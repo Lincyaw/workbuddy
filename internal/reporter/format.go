@@ -23,6 +23,7 @@ type ReportData struct {
 	PRLink      string // optional PR URL
 	ErrorDetail string // optional error message
 	SessionURL  string // optional URL to session detail page
+	LabelLine   string // optional label validation summary
 }
 
 // statusBadge returns a Markdown status badge string.
@@ -77,6 +78,11 @@ func FormatReportAt(d ReportData, ts time.Time) string {
 		fmt.Fprintf(&b, ":mag: **[View Session Details](%s)**\n\n", d.SessionURL)
 	}
 
+	if d.LabelLine != "" {
+		b.WriteString(d.LabelLine)
+		b.WriteString("\n\n")
+	}
+
 	// Error detail for failure/timeout/retry-limit
 	if d.ErrorDetail != "" {
 		b.WriteString("### Error\n\n")
@@ -109,6 +115,23 @@ func FormatReportAt(d ReportData, ts time.Time) string {
 	}
 
 	// Footer with signature and timestamp
+	b.WriteString("---\n")
+	fmt.Fprintf(&b, "*workbuddy coordinator | %s*\n", ts.UTC().Format(time.RFC3339))
+
+	return b.String()
+}
+
+func FormatNeedsHumanReport(labelLine string, ts time.Time) string {
+	var b strings.Builder
+
+	b.WriteString("## Managed Follow-up\n\n")
+	b.WriteString("The agent exited successfully but did not change the workflow label.\n\n")
+	if labelLine != "" {
+		b.WriteString(labelLine)
+		b.WriteString("\n\n")
+	}
+	b.WriteString("Recommended next step: add `needs-human` and review the issue manually.\n\n")
+
 	b.WriteString("---\n")
 	fmt.Fprintf(&b, "*workbuddy coordinator | %s*\n", ts.UTC().Format(time.RFC3339))
 

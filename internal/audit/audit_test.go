@@ -228,6 +228,40 @@ func TestCapture_CodexEventSchemaArtifact(t *testing.T) {
 	}
 }
 
+func TestRecordLabelValidation(t *testing.T) {
+	aud, _ := setup(t)
+
+	payload := LabelValidationPayload{
+		Pre:            []string{"workbuddy", "status:developing"},
+		Post:           []string{"workbuddy", "status:reviewing"},
+		ExitCode:       0,
+		Classification: "ok",
+	}
+
+	if err := aud.RecordLabelValidation("owner/repo", 9, payload); err != nil {
+		t.Fatalf("RecordLabelValidation: %v", err)
+	}
+
+	events, err := aud.store.QueryEvents("owner/repo")
+	if err != nil {
+		t.Fatalf("QueryEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].Type != string(EventKindLabelValidation) {
+		t.Fatalf("event type = %q, want %q", events[0].Type, EventKindLabelValidation)
+	}
+
+	var got LabelValidationPayload
+	if err := json.Unmarshal([]byte(events[0].Payload), &got); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if got.Classification != payload.Classification {
+		t.Fatalf("Classification = %q, want %q", got.Classification, payload.Classification)
+	}
+}
+
 // Scenario 3: Large file truncation
 func TestCapture_LargeFileTruncation(t *testing.T) {
 	aud, tmpDir := setup(t)

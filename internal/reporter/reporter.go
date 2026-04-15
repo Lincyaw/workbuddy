@@ -56,9 +56,14 @@ func (r *Reporter) ReportStarted(repo string, issueNum int, agentName, sessionID
 	return r.gh.WriteComment(repo, issueNum, body)
 }
 
+func (r *Reporter) ReportNeedsHuman(repo string, issueNum int, labelLine string) error {
+	body := FormatNeedsHumanReport(labelLine, time.Now())
+	return r.gh.WriteComment(repo, issueNum, body)
+}
+
 // Report formats and posts an agent execution report to the issue.
 func (r *Reporter) Report(repo string, issueNum int, agentName string, result *launcher.Result,
-	sessionID, workerID string, retryCount, maxRetries int) error {
+	sessionID, workerID string, retryCount, maxRetries int, labelLine string) error {
 
 	status := "success"
 	var errorDetail string
@@ -110,6 +115,7 @@ func (r *Reporter) Report(repo string, issueNum int, agentName string, result *l
 		PRLink:      prLink,
 		ErrorDetail: errorDetail,
 		SessionURL:  sessionURL,
+		LabelLine:   labelLine,
 	}
 
 	body := FormatReportAt(data, time.Now())

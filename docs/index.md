@@ -31,6 +31,7 @@
 - `docs/implemented/agent-schema-vnext.md`
 - `docs/implemented/agent-catalog.md`
 - `docs/implemented/current-runtime-reporting-and-audit.md`
+- `docs/implemented/runtime-session-architecture.md`
 - `docs/implemented/event-schema-v1.md`
 - `docs/implemented/current-persistence-and-workspace.md`
 - `docs/implemented/artifact-layout.md`
@@ -38,7 +39,6 @@
 ### Planned
 
 - `docs/planned/index.md`
-- `docs/planned/runtime-session-architecture.md`
 - `docs/planned/issue-dependencies.md`
 - `docs/planned/distributed-topology-and-cli.md`
 - `docs/planned/runtime-migration-plan.md`
