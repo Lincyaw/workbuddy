@@ -74,6 +74,11 @@ output_contract:
 - `.github/workbuddy/agents/review-agent.md`
 - `.github/workbuddy/agents/codex-dev-agent.md`
 - `.github/workbuddy/agents/codex-review-agent.md`
+- `.github/workbuddy/agents/triage-agent.md`
+- `.github/workbuddy/agents/docs-agent.md`
+- `.github/workbuddy/agents/security-audit-agent.md`
+- `.github/workbuddy/agents/dependency-bump-agent.md`
+- `.github/workbuddy/agents/release-agent.md`
 
 ## 尚未做的事
 

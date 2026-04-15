@@ -151,6 +151,49 @@ func TestRepositorySampleConfig_MatchesGlobalConfigSchema(t *testing.T) {
 	}
 }
 
+func TestRepositorySampleConfig_LoadsExpandedAgentCatalog(t *testing.T) {
+	configDir := filepath.Join("..", "..", ".github", "workbuddy")
+
+	cfg, warnings, err := LoadConfig(configDir)
+	if err != nil {
+		t.Fatalf("LoadConfig(repository sample): %v", err)
+	}
+
+	expectedAgents := []string{
+		"dev-agent",
+		"review-agent",
+		"codex-dev-agent",
+		"codex-review-agent",
+		"triage-agent",
+		"docs-agent",
+		"security-audit-agent",
+		"dependency-bump-agent",
+		"release-agent",
+	}
+	for _, name := range expectedAgents {
+		if _, ok := cfg.Agents[name]; !ok {
+			t.Fatalf("repository sample config missing agent %q", name)
+		}
+	}
+
+	if got := cfg.Agents["triage-agent"].Runtime; got != RuntimeClaudeShot {
+		t.Fatalf("triage-agent runtime = %q, want %q", got, RuntimeClaudeShot)
+	}
+	if got := cfg.Agents["security-audit-agent"].Runtime; got != RuntimeCodexServer {
+		t.Fatalf("security-audit-agent runtime = %q, want %q", got, RuntimeCodexServer)
+	}
+	if got := cfg.Agents["dependency-bump-agent"].Runtime; got != RuntimeCodexExec {
+		t.Fatalf("dependency-bump-agent runtime = %q, want %q", got, RuntimeCodexExec)
+	}
+	if got := cfg.Agents["release-agent"].Runtime; got != RuntimeCodexServer {
+		t.Fatalf("release-agent runtime = %q, want %q", got, RuntimeCodexServer)
+	}
+
+	if len(warnings) == 0 {
+		t.Fatal("expected repository sample config to surface at least one trigger-label warning for non-workflow catalog agents")
+	}
+}
+
 // Test 1: Normal parse — agents, workflows, and global config all load correctly.
 func TestLoadConfig_NormalParse(t *testing.T) {
 	dir := setupConfigDir(t, map[string]string{

@@ -58,6 +58,11 @@ documentation:
         - .github/workbuddy/agents/review-agent.md
         - .github/workbuddy/agents/codex-dev-agent.md
         - .github/workbuddy/agents/codex-review-agent.md
+        - .github/workbuddy/agents/triage-agent.md
+        - .github/workbuddy/agents/docs-agent.md
+        - .github/workbuddy/agents/security-audit-agent.md
+        - .github/workbuddy/agents/dependency-bump-agent.md
+        - .github/workbuddy/agents/release-agent.md
         - .github/workbuddy/workflows/feature-dev.md
         - .github/workbuddy/workflows/bugfix.md
       notes: Current config, agent, workflow, and label-driven trigger behavior.
@@ -150,7 +155,30 @@ documentation:
         - .github/workbuddy/agents/review-agent.md
         - .github/workbuddy/agents/codex-dev-agent.md
         - .github/workbuddy/agents/codex-review-agent.md
+        - .github/workbuddy/agents/triage-agent.md
+        - .github/workbuddy/agents/docs-agent.md
+        - .github/workbuddy/agents/security-audit-agent.md
+        - .github/workbuddy/agents/dependency-bump-agent.md
+        - .github/workbuddy/agents/release-agent.md
       notes: policy, prompt, and output_contract are implemented; launcher now validates final JSON output against agent-declared JSON Schema files.
+
+    - path: docs/implemented/agent-catalog.md
+      bucket: implemented
+      status: tested
+      related_code:
+        - .github/workbuddy/agents/dev-agent.md
+        - .github/workbuddy/agents/review-agent.md
+        - .github/workbuddy/agents/codex-dev-agent.md
+        - .github/workbuddy/agents/codex-review-agent.md
+        - .github/workbuddy/agents/triage-agent.md
+        - .github/workbuddy/agents/docs-agent.md
+        - .github/workbuddy/agents/security-audit-agent.md
+        - .github/workbuddy/agents/dependency-bump-agent.md
+        - .github/workbuddy/agents/release-agent.md
+        - .github/workbuddy/agents/schemas/
+        - internal/config/loader.go
+        - internal/config/types.go
+      notes: Repository sample config now materializes the catalog agents as concrete vNext agent definitions with prompt, policy, and output_contract metadata.
 
     - path: docs/planned/distributed-topology-and-cli.md
       bucket: planned
@@ -171,13 +199,6 @@ documentation:
         - internal/audit/audit.go
         - internal/reporter/reporter.go
       notes: Phased migration path from one-shot runtime to session-oriented runtime.
-
-    - path: docs/planned/agent-catalog.md
-      bucket: planned
-      status: maintained
-      related_code:
-        - .github/workbuddy/agents/
-      notes: Catalog of planned agent types remains the future index, while codex-dev-agent now explicitly notes the codex-exec Event v1 and draft-PR development path.
 
     - path: docs/planned/issue-dependencies.md
       bucket: planned
