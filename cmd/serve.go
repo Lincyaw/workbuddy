@@ -350,7 +350,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	wsMgr.Prune() // clean up orphaned worktrees from prior crashes
 
 	// Router
-	rt := router.NewRouter(cfg.Agents, reg, st, cfg.Global.Repo, taskCh, wsMgr)
+	rt := router.NewRouter(cfg.Agents, reg, st, cfg.Global.Repo, repoDir, taskCh, wsMgr)
 
 	// Launcher
 	lnch := launcherOverride
@@ -738,10 +738,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 }
 
 func streamSessionEvents(sessionsDir string, taskCtx *launcher.TaskContext, eventsCh <-chan launcherevents.Event) (string, func() error) {
-	if sessionsDir == "" {
-		sessionsDir = ".workbuddy/sessions"
-	}
-	path := filepath.Join(sessionsDir, taskCtx.Session.ID, "events-v1.jsonl")
+	path := filepath.Join(sessionArtifactsBaseDir(sessionsDir, taskCtx), taskCtx.Session.ID, "events-v1.jsonl")
 	errCh := make(chan error, 1)
 	go func() {
 		// Always drain eventsCh to completion so the runtime is never blocked
@@ -778,6 +775,21 @@ func streamSessionEvents(sessionsDir string, taskCtx *launcher.TaskContext, even
 		}
 	}()
 	return path, func() error { return <-errCh }
+}
+
+func sessionArtifactsBaseDir(sessionsDir string, taskCtx *launcher.TaskContext) string {
+	if taskCtx != nil {
+		if repoRoot := strings.TrimSpace(taskCtx.RepoRoot); repoRoot != "" {
+			return filepath.Join(repoRoot, ".workbuddy", "sessions")
+		}
+		if workDir := strings.TrimSpace(taskCtx.WorkDir); workDir != "" {
+			return filepath.Join(workDir, ".workbuddy", "sessions")
+		}
+	}
+	if sessionsDir != "" {
+		return sessionsDir
+	}
+	return ".workbuddy/sessions"
 }
 
 // addClaimReaction adds an eyes reaction to the issue to signal an agent claimed it.

@@ -102,9 +102,10 @@ func runRuntimeWithOpts(ctx context.Context, opts *runOpts, lnch *launcher.Launc
 	}
 
 	task := &launcher.TaskContext{
-		Repo:    filepath.Base(workdir),
-		WorkDir: workdir,
-		Session: launcher.SessionContext{ID: "session-" + uuid.NewString()},
+		Repo:     filepath.Base(workdir),
+		RepoRoot: workdir,
+		WorkDir:  workdir,
+		Session:  launcher.SessionContext{ID: "session-" + uuid.NewString()},
 	}
 	result, err := lnch.Launch(ctx, agent, task)
 	if err != nil {

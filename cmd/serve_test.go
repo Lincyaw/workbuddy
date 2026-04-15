@@ -227,6 +227,7 @@ func newWorkerTestDeps(t *testing.T, rt *mockRuntime) (*workerDeps, *store.Store
 
 func newWorkerTestTask(t *testing.T, st *store.Store, repo string, issueNum int, taskID string) router.WorkerTask {
 	t.Helper()
+	repoRoot := t.TempDir()
 
 	if err := st.InsertTask(store.TaskRecord{
 		ID:        taskID,
@@ -259,8 +260,9 @@ func newWorkerTestTask(t *testing.T, st *store.Store, repo string, issueNum int,
 		Workflow: "dev-workflow",
 		State:    "developing",
 		Context: &launcher.TaskContext{
-			Repo:    repo,
-			WorkDir: t.TempDir(),
+			Repo:     repo,
+			RepoRoot: repoRoot,
+			WorkDir:  t.TempDir(),
 			Issue: launcher.IssueContext{
 				Number: issueNum,
 				Title:  fmt.Sprintf("Issue %d", issueNum),
@@ -847,8 +849,9 @@ func TestExecuteTask_PersistsPartialResultOnRunError(t *testing.T) {
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	workdir := t.TempDir()
+	repoRoot := t.TempDir()
 	sessionID := "session-partial"
-	artifactDir := filepath.Join(workdir, ".workbuddy", "sessions", sessionID)
+	artifactDir := filepath.Join(repoRoot, ".workbuddy", "sessions", sessionID)
 	artifactPath := filepath.Join(artifactDir, "codex-exec.jsonl")
 	writeFile(t, artifactPath, "{\"type\":\"task_started\"}\n")
 
@@ -908,7 +911,7 @@ func TestExecuteTask_PersistsPartialResultOnRunError(t *testing.T) {
 		Agent:     &config.AgentConfig{Name: "codex-dev-agent", Runtime: config.RuntimeCodexExec, Prompt: "test prompt"},
 		Workflow:  "dev-workflow",
 		State:     "developing",
-		Context:   &launcher.TaskContext{Repo: "owner/repo", WorkDir: workdir, Session: launcher.SessionContext{ID: sessionID}},
+		Context:   &launcher.TaskContext{Repo: "owner/repo", RepoRoot: repoRoot, WorkDir: workdir, Session: launcher.SessionContext{ID: sessionID}},
 	}
 
 	executeTask(context.Background(), task, deps)
@@ -934,6 +937,12 @@ func TestExecuteTask_PersistsPartialResultOnRunError(t *testing.T) {
 	if _, err := os.Stat(sessions[0].RawPath); err != nil {
 		t.Fatalf("archived raw path missing: %v", err)
 	}
+	if !strings.HasPrefix(artifactPath, repoRoot) {
+		t.Fatalf("runtime artifact path = %q, want under repo root %q", artifactPath, repoRoot)
+	}
+	if strings.HasPrefix(artifactPath, workdir) {
+		t.Fatalf("runtime artifact path should not remain under workdir: %q", artifactPath)
+	}
 
 	comments := gh.Comments()
 	if len(comments) != 2 {
@@ -941,5 +950,33 @@ func TestExecuteTask_PersistsPartialResultOnRunError(t *testing.T) {
 	}
 	if !strings.Contains(comments[1], "partial failure report") {
 		t.Fatalf("final report missing partial result: %s", comments[1])
+	}
+}
+
+func TestStreamSessionEventsUsesRepoRoot(t *testing.T) {
+	repoRoot := t.TempDir()
+	workDir := t.TempDir()
+	taskCtx := &launcher.TaskContext{
+		RepoRoot: repoRoot,
+		WorkDir:  workDir,
+		Session:  launcher.SessionContext{ID: "session-123"},
+	}
+	eventsCh := make(chan launcherevents.Event, 1)
+	path, wait := streamSessionEvents(filepath.Join(t.TempDir(), "ignored", ".workbuddy", "sessions"), taskCtx, eventsCh)
+	eventsCh <- launcherevents.Event{Kind: launcherevents.KindLog}
+	close(eventsCh)
+	if err := wait(); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+
+	want := filepath.Join(repoRoot, ".workbuddy", "sessions", taskCtx.Session.ID, "events-v1.jsonl")
+	if path != want {
+		t.Fatalf("path = %q, want %q", path, want)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected events file: %v", err)
+	}
+	if strings.HasPrefix(path, workDir) {
+		t.Fatalf("events path should not live under workdir: %q", path)
 	}
 }

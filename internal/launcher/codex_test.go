@@ -172,6 +172,13 @@ func TestCodexSessionRunEmitsEventsAndArtifact(t *testing.T) {
 	if result.LastMessage != "PONG" {
 		t.Fatalf("last message = %q", result.LastMessage)
 	}
+	wantDir := filepath.Join(task.RepoRoot, ".workbuddy", "sessions", task.Session.ID)
+	if filepath.Dir(result.SessionPath) != wantDir {
+		t.Fatalf("session path dir = %q, want %q", filepath.Dir(result.SessionPath), wantDir)
+	}
+	if strings.HasPrefix(result.SessionPath, task.WorkDir) {
+		t.Fatalf("session path should not live under workdir: %q", result.SessionPath)
+	}
 
 	kinds := map[launcherevents.EventKind]bool{}
 	for _, evt := range collected {
@@ -194,6 +201,17 @@ func TestCodexSessionRunEmitsEventsAndArtifact(t *testing.T) {
 	lastMsgPath := filepath.Join(filepath.Dir(result.SessionPath), "codex-last-message.txt")
 	if _, err := os.Stat(lastMsgPath); err != nil {
 		t.Fatalf("expected last message file: %v", err)
+	}
+}
+
+func TestNewCodexSessionFallsBackToWorkDirWhenRepoRootEmpty(t *testing.T) {
+	task := newTestTask(t)
+	task.RepoRoot = ""
+
+	session := newCodexSession(&config.AgentConfig{}, task, "hello")
+	wantDir := filepath.Join(task.WorkDir, ".workbuddy", "sessions", task.Session.ID)
+	if filepath.Dir(session.stdoutPath) != wantDir {
+		t.Fatalf("stdout path dir = %q, want %q", filepath.Dir(session.stdoutPath), wantDir)
 	}
 }
 

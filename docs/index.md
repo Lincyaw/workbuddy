@@ -30,6 +30,7 @@
 - `docs/implemented/current-config-workflow-and-agents.md`
 - `docs/implemented/current-runtime-reporting-and-audit.md`
 - `docs/implemented/current-persistence-and-workspace.md`
+- `docs/implemented/artifact-layout.md`
 
 ### Planned
 

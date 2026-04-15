@@ -87,6 +87,19 @@ documentation:
         - internal/workspace/workspace.go
       notes: Current persistence, event logging, registry, and worktree isolation behavior.
 
+    - path: docs/implemented/artifact-layout.md
+      bucket: implemented
+      status: maintained
+      related_code:
+        - cmd/run.go
+        - cmd/serve.go
+        - internal/launcher/codex.go
+        - internal/launcher/types.go
+        - internal/router/router.go
+        - internal/audit/audit.go
+        - internal/workspace/workspace.go
+      notes: Session artifacts now converge on repo-root .workbuddy/sessions/ and remain auditable even when worktrees are cleaned up or the runtime returns an error alongside a Result.
+
     - path: docs/planned/index.md
       bucket: planned
       status: maintained
@@ -156,17 +169,6 @@ documentation:
       related_code:
         - .github/workbuddy/agents/
       notes: Catalog of planned agent types remains the future index, while codex-dev-agent now explicitly notes the codex-exec Event v1 and draft-PR development path.
-
-    - path: docs/planned/artifact-layout.md
-      bucket: planned
-      status: proposed
-      related_code:
-        - internal/launcher/codex.go
-        - internal/launcher/types.go
-        - cmd/serve.go
-        - internal/audit/audit.go
-        - internal/workspace/workspace.go
-      notes: Move session artifacts out of per-task worktrees into repo-root .workbuddy/sessions/ so they survive worktree cleanup and the runtime error path reaches auditor.
 
     - path: docs/mismatch/index.md
       bucket: mismatch
