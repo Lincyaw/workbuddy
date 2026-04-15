@@ -3,7 +3,6 @@ package dependency
 import (
 	"context"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
@@ -120,13 +119,11 @@ func TestBuildResolveResultVerdicts(t *testing.T) {
 	closedCache := map[int]poller.IssueDetails{}
 
 	tests := []struct {
-		name    string
-		issue   poller.Issue
-		decl    ParsedDeclaration
-		cycle   []string
-		want    string
-		needNH  bool
-		blocked bool
+		name  string
+		issue poller.Issue
+		decl  ParsedDeclaration
+		cycle []string
+		want  string
 	}{
 		{
 			name:  "ready when dep done",
@@ -135,27 +132,23 @@ func TestBuildResolveResultVerdicts(t *testing.T) {
 			want:  store.DependencyVerdictReady,
 		},
 		{
-			name:    "blocked when dep open",
-			issue:   openIssues[1],
-			decl:    ParsedDeclaration{Dependencies: []ParsedDependency{{Raw: "#3", Repo: "owner/repo", IssueNum: 3, Status: store.DependencyStatusActive, Normalized: "owner/repo#3"}}},
-			want:    store.DependencyVerdictBlocked,
-			blocked: true,
+			name:  "blocked when dep open",
+			issue: openIssues[1],
+			decl:  ParsedDeclaration{Dependencies: []ParsedDependency{{Raw: "#3", Repo: "owner/repo", IssueNum: 3, Status: store.DependencyStatusActive, Normalized: "owner/repo#3"}}},
+			want:  store.DependencyVerdictBlocked,
 		},
 		{
-			name:   "override wins",
-			issue:  openIssues[4],
-			decl:   ParsedDeclaration{Dependencies: []ParsedDependency{{Raw: "#3", Repo: "owner/repo", IssueNum: 3, Status: store.DependencyStatusActive, Normalized: "owner/repo#3"}}},
-			want:   store.DependencyVerdictOverride,
-			needNH: false,
+			name:  "override wins",
+			issue: openIssues[4],
+			decl:  ParsedDeclaration{Dependencies: []ParsedDependency{{Raw: "#3", Repo: "owner/repo", IssueNum: 3, Status: store.DependencyStatusActive, Normalized: "owner/repo#3"}}},
+			want:  store.DependencyVerdictOverride,
 		},
 		{
-			name:    "needs human on cycle",
-			issue:   openIssues[1],
-			decl:    ParsedDeclaration{Dependencies: []ParsedDependency{{Raw: "#2", Repo: "owner/repo", IssueNum: 2, Status: store.DependencyStatusActive, Normalized: "owner/repo#2"}}},
-			cycle:   []string{"#1", "#2", "#1"},
-			want:    store.DependencyVerdictNeedsHuman,
-			needNH:  true,
-			blocked: true,
+			name:  "needs human on cycle",
+			issue: openIssues[1],
+			decl:  ParsedDeclaration{Dependencies: []ParsedDependency{{Raw: "#2", Repo: "owner/repo", IssueNum: 2, Status: store.DependencyStatusActive, Normalized: "owner/repo#2"}}},
+			cycle: []string{"#1", "#2", "#1"},
+			want:  store.DependencyVerdictNeedsHuman,
 		},
 		{
 			name:  "ready when closed via pr",
@@ -171,17 +164,11 @@ func TestBuildResolveResultVerdicts(t *testing.T) {
 			if result.State.Verdict != tt.want {
 				t.Fatalf("verdict=%q want %q", result.State.Verdict, tt.want)
 			}
-			if result.Queue.DesiredNeedsHuman != tt.needNH {
-				t.Fatalf("needsHuman=%v want %v", result.Queue.DesiredNeedsHuman, tt.needNH)
-			}
-			if result.Queue.DesiredBlocked != tt.blocked {
-				t.Fatalf("blocked=%v want %v", result.Queue.DesiredBlocked, tt.blocked)
-			}
 		})
 	}
 }
 
-func TestResolverEvaluateOpenIssuesEnqueuesIdempotently(t *testing.T) {
+func TestResolverEvaluateOpenIssuesPersistsVerdictIdempotently(t *testing.T) {
 	st := newTestStore(t)
 	if err := st.UpsertIssueCache(store.IssueCache{
 		Repo:     "owner/repo",
@@ -206,26 +193,6 @@ func TestResolverEvaluateOpenIssuesEnqueuesIdempotently(t *testing.T) {
 	if err := resolver.EvaluateOpenIssues(context.Background(), "owner/repo", 1); err != nil {
 		t.Fatalf("EvaluateOpenIssues: %v", err)
 	}
-	queue, err := st.ListQueuedDependencyReconciles("owner/repo", 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(queue) != 1 {
-		t.Fatalf("queued items=%d want 1", len(queue))
-	}
-	firstGen := queue[0].Generation
-
-	if err := resolver.EvaluateOpenIssues(context.Background(), "owner/repo", 2); err != nil {
-		t.Fatalf("EvaluateOpenIssues second run: %v", err)
-	}
-	queue, err = st.ListQueuedDependencyReconciles("owner/repo", 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(queue) != 1 || queue[0].Generation != firstGen {
-		t.Fatalf("queue should remain idempotent, got %+v", queue)
-	}
-
 	state, err := st.QueryIssueDependencyState("owner/repo", 3)
 	if err != nil {
 		t.Fatal(err)
@@ -233,7 +200,58 @@ func TestResolverEvaluateOpenIssuesEnqueuesIdempotently(t *testing.T) {
 	if state == nil || state.Verdict != store.DependencyVerdictReady {
 		t.Fatalf("state verdict=%v", state)
 	}
-	if !strings.Contains(queue[0].DesiredCommentBody, Marker) {
-		t.Fatalf("managed comment missing marker: %s", queue[0].DesiredCommentBody)
+
+	// Second pass on identical cache should leave verdict intact.
+	if err := resolver.EvaluateOpenIssues(context.Background(), "owner/repo", 2); err != nil {
+		t.Fatalf("EvaluateOpenIssues second run: %v", err)
+	}
+	state2, err := st.QueryIssueDependencyState("owner/repo", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state2 == nil || state2.Verdict != store.DependencyVerdictReady {
+		t.Fatalf("state verdict after second eval=%v", state2)
+	}
+
+	// Dependency rows must be persisted.
+	deps, err := st.ListIssueDependencies("owner/repo", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deps) != 1 || deps[0].DependsOnIssueNum != 2 {
+		t.Fatalf("unexpected deps: %+v", deps)
+	}
+}
+
+// Invalid dependency refs (unparseable repo/issue) must not be persisted to
+// the issue_dependencies table — they only surface in the verdict.
+func TestResolverEvaluateSkipsInvalidRefsInDB(t *testing.T) {
+	st := newTestStore(t)
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     "owner/repo",
+		IssueNum: 7,
+		Labels:   `["status:developing"]`,
+		Body:     "```yaml\nworkbuddy:\n  depends_on:\n    - \"not-a-ref\"\n```",
+		State:    "open",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resolver := NewResolver(st, &fakeReader{}, eventlog.NewEventLogger(st))
+	if err := resolver.EvaluateOpenIssues(context.Background(), "owner/repo", 1); err != nil {
+		t.Fatalf("EvaluateOpenIssues: %v", err)
+	}
+	deps, err := st.ListIssueDependencies("owner/repo", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deps) != 0 {
+		t.Fatalf("invalid refs should not be persisted, got: %+v", deps)
+	}
+	state, err := st.QueryIssueDependencyState("owner/repo", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil || state.Verdict != store.DependencyVerdictNeedsHuman {
+		t.Fatalf("invalid ref should yield needs_human verdict, got: %+v", state)
 	}
 }

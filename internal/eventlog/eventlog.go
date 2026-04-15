@@ -27,10 +27,10 @@ const (
 	TypeTransitionToFailed     = "transition_to_failed"
 	TypeStuckDetected          = "stuck_detected"
 	TypeDispatchSkippedInflight = "dispatch_skipped_inflight"
-	TypeDependencyVerdictChanged = "dependency_verdict_changed"
-	TypeDependencyQueueQueued    = "dependency_queue_queued"
-	TypeDependencyCycleDetected  = "dependency_cycle_detected"
+	TypeDependencyVerdictChanged    = "dependency_verdict_changed"
+	TypeDependencyCycleDetected     = "dependency_cycle_detected"
 	TypeDependencyOverrideActivated = "dependency_override_activated"
+	TypeDispatchBlockedByDependency = "dispatch_blocked_by_dependency"
 )
 
 // AllEventTypes lists every recognised event type.
@@ -51,9 +51,9 @@ var AllEventTypes = []string{
 	TypeStuckDetected,
 	TypeDispatchSkippedInflight,
 	TypeDependencyVerdictChanged,
-	TypeDependencyQueueQueued,
 	TypeDependencyCycleDetected,
 	TypeDependencyOverrideActivated,
+	TypeDispatchBlockedByDependency,
 }
 
 // EventFilter specifies optional criteria for querying events.

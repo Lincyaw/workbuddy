@@ -194,7 +194,6 @@ func TestCreateAndReadWrite(t *testing.T) {
 		ResumeLabel:       "status:developing",
 		BlockedReasonHash: "reason",
 		GraphVersion:      1,
-		LastCommentHash:   "comment-hash",
 	})
 	if err != nil {
 		t.Fatalf("UpsertIssueDependencyState: %v", err)
@@ -206,36 +205,18 @@ func TestCreateAndReadWrite(t *testing.T) {
 	if depState == nil || depState.Verdict != DependencyVerdictBlocked {
 		t.Fatalf("unexpected dependency state: %+v", depState)
 	}
-	enqueued, err := s.UpsertDependencyReconcile(DependencyReconcileQueueItem{
-		Repo:               "org/repo",
-		IssueNum:           1,
-		DesiredBlocked:     true,
-		DesiredResumeLabel: "status:developing",
-		DesiredCommentBody: "comment",
-		DesiredCommentHash: "comment-hash",
-	})
+	if depState.LastReactionBlocked {
+		t.Fatalf("LastReactionBlocked should default to false, got: %+v", depState)
+	}
+	if err := s.MarkDependencyReactionApplied("org/repo", 1, true); err != nil {
+		t.Fatalf("MarkDependencyReactionApplied: %v", err)
+	}
+	depState, err = s.QueryIssueDependencyState("org/repo", 1)
 	if err != nil {
-		t.Fatalf("UpsertDependencyReconcile: %v", err)
+		t.Fatalf("QueryIssueDependencyState after MarkDependencyReactionApplied: %v", err)
 	}
-	if !enqueued {
-		t.Fatal("expected reconcile item to be enqueued")
-	}
-	queued, err := s.ListQueuedDependencyReconciles("org/repo", 10)
-	if err != nil {
-		t.Fatalf("ListQueuedDependencyReconciles: %v", err)
-	}
-	if len(queued) != 1 {
-		t.Fatalf("expected 1 queued reconcile item, got %d", len(queued))
-	}
-	if err := s.MarkDependencyReconcileApplied("org/repo", 1, queued[0].Generation, "comment-hash", "123"); err != nil {
-		t.Fatalf("MarkDependencyReconcileApplied: %v", err)
-	}
-	latest, err := s.LatestDependencyReconcile("org/repo", 1)
-	if err != nil {
-		t.Fatalf("LatestDependencyReconcile: %v", err)
-	}
-	if latest == nil || latest.Status != DependencyQueueStatusApplied {
-		t.Fatalf("unexpected latest reconcile item: %+v", latest)
+	if !depState.LastReactionBlocked {
+		t.Fatalf("LastReactionBlocked should be true after Mark, got: %+v", depState)
 	}
 }
 

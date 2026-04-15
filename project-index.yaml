@@ -191,8 +191,8 @@ documentation:
         - internal/router/router.go
         - internal/store/store.go
         - internal/store/types.go
-        - .github/workbuddy/agents/dependency-resolver-agent.md
-      notes: Implemented dependency gating now includes parser normalization, queue-backed reconcile, schedule-driven resolver dispatch, and cycle detection.
+        - internal/reporter/reporter.go
+      notes: Implemented dependency gating with parser normalization, cycle detection, and a 😕 confused-reaction signal for blocked state (no managed comment, no resolver agent — the 2-agent catalog stays minimal).
 
     - path: docs/mismatch/index.md
       bucket: mismatch
@@ -938,21 +938,22 @@ requirements:
     title: Issue Dependency Mechanism
     description: >
       Parse `workbuddy.depends_on` declarations from issue bodies, persist
-      dependency graph state in SQLite, compute dependency verdicts each poll
-      cycle, hard-gate dispatch when blocked, and reconcile GitHub blocked
-      UX through a dedicated dependency-resolver agent.
+      a minimal dependency graph in SQLite, compute dependency verdicts each
+      poll cycle, hard-gate dispatch when blocked, and surface blocked-state
+      on GitHub via a 😕 confused emoji reaction (added/removed by the
+      Coordinator). No third agent and no managed comment.
     priority: P0
     version: v0.1.0
     status: tested
     acceptance_criteria:
       - "AC-031-1: 解析 issue body 中第一个同时满足 `yaml` fence 且包含 `workbuddy.depends_on` 的代码块；`#N` 规范化为 `owner/repo#N`，忽略自然语言 mentions"
-      - "AC-031-2: 新增并迁移 SQLite 表 `issue_dependencies`、`issue_dependency_state`、`dependency_reconcile_queue`，对现有数据库保持 additive/backward-compatible"
+      - "AC-031-2: 新增并迁移 SQLite 表 `issue_dependencies`、`issue_dependency_state`，对现有数据库保持 additive/backward-compatible；非法 dep 引用只影响 verdict，不写入 issue_dependencies"
       - "AC-031-3: GH reader 支持读取单 issue 当前 state/body/labels/stateReason，并通过 gh GraphQL 判断 closed issue 是否由 linked PR 关闭"
       - "AC-031-4: 每个 poll cycle 基于当前 open issue graph 计算 `ready` / `blocked` / `override` / `needs_human` verdict，并检测 cycle"
-      - "AC-031-5: `statemachine.dispatchAgent` 与 router pre-dispatch 都会在 verdict=`blocked`/`needs_human` 时拒绝派发；`override` 允许继续"
-      - "AC-031-6: 维护 schedule-driven `dependency-resolver-agent`，消费 reconcile queue 并用 managed comment marker `<!-- workbuddy:dependency-status -->` 对齐 GitHub surface"
-      - "AC-031-7: 依赖 verdict、queue、cycle、override 行为写入 event log 审计事件"
-      - "AC-031-8: 单元测试覆盖 parser、cycle detection、verdict 分类、dispatch gate；集成测试证明 dependent issue 在 upstream done 前不会派发"
+      - "AC-031-5: `statemachine.dispatchAgent` 与 router pre-dispatch 都会在 verdict=`blocked`/`needs_human` 时拒绝派发；`override` 允许继续；statemachine 写 `dispatch_blocked_by_dependency` 事件"
+      - "AC-031-6: 在 verdict 翻转时由 Coordinator 通过 `gh api .../reactions` 加/去 `confused` 反应，状态记入 `last_reaction_blocked` 防止重复写入"
+      - "AC-031-7: 依赖 verdict、cycle、override、dispatch-blocked 行为写入 event log 审计事件"
+      - "AC-031-8: 单元测试覆盖 parser、cycle detection、verdict 分类、dispatch gate、reaction reconciler；集成测试证明 dependent issue 在 upstream done 前不会派发"
     code:
       - cmd/serve.go
       - internal/dependency/dependency.go
@@ -962,8 +963,7 @@ requirements:
       - internal/store/store.go
       - internal/store/types.go
       - internal/eventlog/eventlog.go
-      - .github/workbuddy/agents/dependency-resolver-agent.md
-      - .github/workbuddy/agents/schemas/dependency-resolver-agent-result.json
+      - internal/reporter/reporter.go
       - docs/implemented/issue-dependencies.md
     tests:
       - internal/dependency/dependency_test.go

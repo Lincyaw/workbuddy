@@ -64,11 +64,6 @@ const (
 	DependencyVerdictBlocked    = "blocked"
 	DependencyVerdictOverride   = "override"
 	DependencyVerdictNeedsHuman = "needs_human"
-
-	DependencyQueueStatusQueued     = "queued"
-	DependencyQueueStatusApplied    = "applied"
-	DependencyQueueStatusSuperseded = "superseded"
-	DependencyQueueStatusFailed     = "failed"
 )
 
 type IssueDependency struct {
@@ -80,30 +75,19 @@ type IssueDependency struct {
 	Status            string
 }
 
+// IssueDependencyState is the cached per-issue dep verdict used by the
+// dispatch gate and for change detection (reaction add/remove).
+//
+// LastReactionBlocked records the last on-GitHub reaction state we applied,
+// so the Coordinator only issues a reaction-write when it actually flips.
 type IssueDependencyState struct {
-	Repo              string
-	IssueNum          int
-	Verdict           string
-	ResumeLabel       string
-	BlockedReasonHash string
-	OverrideActive    bool
-	GraphVersion      int64
-	LastCommentHash   string
-	LastCommentID     string
-	LastEvaluatedAt   time.Time
-}
-
-type DependencyReconcileQueueItem struct {
-	Repo               string
-	IssueNum           int
-	Generation         int64
-	DesiredBlocked     bool
-	DesiredResumeLabel string
-	DesiredNeedsHuman  bool
-	DesiredCommentBody string
-	DesiredCommentHash string
-	Status             string
-	RequestedAt        time.Time
-	AppliedAt          time.Time
-	LastError          string
+	Repo                string
+	IssueNum            int
+	Verdict             string
+	ResumeLabel         string
+	BlockedReasonHash   string
+	OverrideActive      bool
+	GraphVersion        int64
+	LastReactionBlocked bool
+	LastEvaluatedAt     time.Time
 }

@@ -158,25 +158,9 @@ func (s *Store) createTables() error {
 			blocked_reason_hash TEXT,
 			override_active INTEGER NOT NULL DEFAULT 0,
 			graph_version INTEGER NOT NULL DEFAULT 0,
-			last_comment_hash TEXT,
-			last_comment_id TEXT,
+			last_reaction_blocked INTEGER NOT NULL DEFAULT 0,
 			last_evaluated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (repo, issue_num)
-		)`,
-		`CREATE TABLE IF NOT EXISTS dependency_reconcile_queue (
-			repo TEXT NOT NULL,
-			issue_num INTEGER NOT NULL,
-			generation INTEGER NOT NULL,
-			desired_blocked INTEGER NOT NULL DEFAULT 0,
-			desired_resume_label TEXT,
-			desired_needs_human INTEGER NOT NULL DEFAULT 0,
-			desired_comment_body TEXT,
-			desired_comment_hash TEXT,
-			status TEXT NOT NULL,
-			requested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			applied_at DATETIME,
-			last_error TEXT,
-			PRIMARY KEY (repo, issue_num, generation)
 		)`,
 	}
 	for _, stmt := range stmts {
@@ -186,6 +170,14 @@ func (s *Store) createTables() error {
 	}
 	if _, err := s.db.Exec(`ALTER TABLE issue_cache ADD COLUMN body TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("store: alter issue_cache add body: %w", err)
+	}
+	// Forward-migrate any pre-existing issue_dependency_state rows: drop the
+	// old managed-comment anchor columns by adding the new reaction column if
+	// the table was created by an earlier schema. SQLite has no DROP COLUMN
+	// in older versions, but the unused columns are harmless to leave; we
+	// just need last_reaction_blocked to exist.
+	if _, err := s.db.Exec(`ALTER TABLE issue_dependency_state ADD COLUMN last_reaction_blocked INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("store: alter issue_dependency_state add last_reaction_blocked: %w", err)
 	}
 	return nil
 }
@@ -698,11 +690,17 @@ func (s *Store) ListIssueDependencies(repo string, issueNum int) ([]IssueDepende
 	return out, rows.Err()
 }
 
+// UpsertIssueDependencyState writes the verdict-state row.
+//
+// Note: LastReactionBlocked is preserved across upserts via COALESCE so that
+// EvaluateOpenIssues (which doesn't know whether the reaction was applied yet)
+// cannot accidentally clear the reaction-state tracker. The Coordinator's
+// reaction reconciler uses MarkDependencyReactionApplied to update it.
 func (s *Store) UpsertIssueDependencyState(state IssueDependencyState) error {
 	_, err := s.db.Exec(
 		`INSERT INTO issue_dependency_state
-		 (repo, issue_num, verdict, resume_label, blocked_reason_hash, override_active, graph_version, last_comment_hash, last_comment_id, last_evaluated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		 (repo, issue_num, verdict, resume_label, blocked_reason_hash, override_active, graph_version, last_reaction_blocked, last_evaluated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		 ON CONFLICT (repo, issue_num)
 		 DO UPDATE SET
 		   verdict = excluded.verdict,
@@ -710,11 +708,9 @@ func (s *Store) UpsertIssueDependencyState(state IssueDependencyState) error {
 		   blocked_reason_hash = excluded.blocked_reason_hash,
 		   override_active = excluded.override_active,
 		   graph_version = excluded.graph_version,
-		   last_comment_hash = excluded.last_comment_hash,
-		   last_comment_id = excluded.last_comment_id,
 		   last_evaluated_at = CURRENT_TIMESTAMP`,
 		state.Repo, state.IssueNum, state.Verdict, state.ResumeLabel, state.BlockedReasonHash,
-		boolToInt(state.OverrideActive), state.GraphVersion, state.LastCommentHash, state.LastCommentID,
+		boolToInt(state.OverrideActive), state.GraphVersion, boolToInt(state.LastReactionBlocked),
 	)
 	if err != nil {
 		return fmt.Errorf("store: upsert issue dependency state: %w", err)
@@ -722,18 +718,33 @@ func (s *Store) UpsertIssueDependencyState(state IssueDependencyState) error {
 	return nil
 }
 
+// MarkDependencyReactionApplied records the reaction state we just applied
+// (or removed) on GitHub, so subsequent cycles can detect a flip cheaply.
+func (s *Store) MarkDependencyReactionApplied(repo string, issueNum int, blocked bool) error {
+	_, err := s.db.Exec(
+		`UPDATE issue_dependency_state
+		 SET last_reaction_blocked = ?
+		 WHERE repo = ? AND issue_num = ?`,
+		boolToInt(blocked), repo, issueNum,
+	)
+	if err != nil {
+		return fmt.Errorf("store: mark dependency reaction applied: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) QueryIssueDependencyState(repo string, issueNum int) (*IssueDependencyState, error) {
 	var state IssueDependencyState
-	var overrideActive int
+	var overrideActive, lastReactionBlocked int
 	var evaluatedAt string
 	err := s.db.QueryRow(
-		`SELECT repo, issue_num, verdict, resume_label, blocked_reason_hash, override_active, graph_version, last_comment_hash, last_comment_id, last_evaluated_at
+		`SELECT repo, issue_num, verdict, resume_label, blocked_reason_hash, override_active, graph_version, last_reaction_blocked, last_evaluated_at
 		 FROM issue_dependency_state
 		 WHERE repo = ? AND issue_num = ?`,
 		repo, issueNum,
 	).Scan(
 		&state.Repo, &state.IssueNum, &state.Verdict, &state.ResumeLabel, &state.BlockedReasonHash, &overrideActive,
-		&state.GraphVersion, &state.LastCommentHash, &state.LastCommentID, &evaluatedAt,
+		&state.GraphVersion, &lastReactionBlocked, &evaluatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -742,136 +753,9 @@ func (s *Store) QueryIssueDependencyState(repo string, issueNum int) (*IssueDepe
 		return nil, fmt.Errorf("store: query issue dependency state: %w", err)
 	}
 	state.OverrideActive = overrideActive != 0
+	state.LastReactionBlocked = lastReactionBlocked != 0
 	state.LastEvaluatedAt, _ = parseTimestamp(evaluatedAt, "issue_dependency_state.last_evaluated_at")
 	return &state, nil
-}
-
-func (s *Store) UpsertDependencyReconcile(item DependencyReconcileQueueItem) (bool, error) {
-	current, err := s.LatestDependencyReconcile(item.Repo, item.IssueNum)
-	if err != nil {
-		return false, err
-	}
-	if current != nil &&
-		current.DesiredBlocked == item.DesiredBlocked &&
-		current.DesiredResumeLabel == item.DesiredResumeLabel &&
-		current.DesiredNeedsHuman == item.DesiredNeedsHuman &&
-		current.DesiredCommentHash == item.DesiredCommentHash &&
-		(current.Status == DependencyQueueStatusQueued || current.Status == DependencyQueueStatusApplied) {
-		return false, nil
-	}
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return false, fmt.Errorf("store: begin upsert dependency reconcile: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, err := tx.Exec(
-		`UPDATE dependency_reconcile_queue
-		 SET status = ?
-		 WHERE repo = ? AND issue_num = ? AND status = ?`,
-		DependencyQueueStatusSuperseded, item.Repo, item.IssueNum, DependencyQueueStatusQueued,
-	); err != nil {
-		return false, fmt.Errorf("store: supersede dependency reconcile queue: %w", err)
-	}
-
-	var nextGen int64 = 1
-	if current != nil {
-		nextGen = current.Generation + 1
-	}
-	item.Generation = nextGen
-
-	if _, err := tx.Exec(
-		`INSERT INTO dependency_reconcile_queue
-		 (repo, issue_num, generation, desired_blocked, desired_resume_label, desired_needs_human, desired_comment_body, desired_comment_hash, status, requested_at, applied_at, last_error)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, NULL, '')`,
-		item.Repo, item.IssueNum, item.Generation, boolToInt(item.DesiredBlocked), item.DesiredResumeLabel,
-		boolToInt(item.DesiredNeedsHuman), item.DesiredCommentBody, item.DesiredCommentHash, DependencyQueueStatusQueued,
-	); err != nil {
-		return false, fmt.Errorf("store: insert dependency reconcile queue: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("store: commit dependency reconcile queue: %w", err)
-	}
-	return true, nil
-}
-
-func (s *Store) LatestDependencyReconcile(repo string, issueNum int) (*DependencyReconcileQueueItem, error) {
-	var item DependencyReconcileQueueItem
-	var desiredBlocked, desiredNeedsHuman int
-	var requestedAt, appliedAt sql.NullString
-	var lastError sql.NullString
-	err := s.db.QueryRow(
-		`SELECT repo, issue_num, generation, desired_blocked, desired_resume_label, desired_needs_human, desired_comment_body, desired_comment_hash, status, requested_at, applied_at, last_error
-		 FROM dependency_reconcile_queue
-		 WHERE repo = ? AND issue_num = ?
-		 ORDER BY generation DESC
-		 LIMIT 1`,
-		repo, issueNum,
-	).Scan(
-		&item.Repo, &item.IssueNum, &item.Generation, &desiredBlocked, &item.DesiredResumeLabel, &desiredNeedsHuman,
-		&item.DesiredCommentBody, &item.DesiredCommentHash, &item.Status, &requestedAt, &appliedAt, &lastError,
-	)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("store: latest dependency reconcile: %w", err)
-	}
-	item.DesiredBlocked = desiredBlocked != 0
-	item.DesiredNeedsHuman = desiredNeedsHuman != 0
-	if requestedAt.Valid {
-		item.RequestedAt, _ = parseTimestamp(requestedAt.String, "dependency_reconcile_queue.requested_at")
-	}
-	if appliedAt.Valid {
-		item.AppliedAt, _ = parseTimestamp(appliedAt.String, "dependency_reconcile_queue.applied_at")
-	}
-	item.LastError = lastError.String
-	return &item, nil
-}
-
-func (s *Store) ListQueuedDependencyReconciles(repo string, limit int) ([]DependencyReconcileQueueItem, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	rows, err := s.db.Query(
-		`SELECT repo, issue_num, generation, desired_blocked, desired_resume_label, desired_needs_human, desired_comment_body, desired_comment_hash, status, requested_at, applied_at, last_error
-		 FROM dependency_reconcile_queue
-		 WHERE repo = ? AND status = ?
-		 ORDER BY requested_at, issue_num
-		 LIMIT ?`,
-		repo, DependencyQueueStatusQueued, limit,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("store: list queued dependency reconciles: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var out []DependencyReconcileQueueItem
-	for rows.Next() {
-		var item DependencyReconcileQueueItem
-		var desiredBlocked, desiredNeedsHuman int
-		var requestedAt, appliedAt sql.NullString
-		var lastError sql.NullString
-		if err := rows.Scan(
-			&item.Repo, &item.IssueNum, &item.Generation, &desiredBlocked, &item.DesiredResumeLabel, &desiredNeedsHuman,
-			&item.DesiredCommentBody, &item.DesiredCommentHash, &item.Status, &requestedAt, &appliedAt, &lastError,
-		); err != nil {
-			return nil, fmt.Errorf("store: scan queued dependency reconcile: %w", err)
-		}
-		item.DesiredBlocked = desiredBlocked != 0
-		item.DesiredNeedsHuman = desiredNeedsHuman != 0
-		if requestedAt.Valid {
-			item.RequestedAt, _ = parseTimestamp(requestedAt.String, "dependency_reconcile_queue.requested_at")
-		}
-		if appliedAt.Valid {
-			item.AppliedAt, _ = parseTimestamp(appliedAt.String, "dependency_reconcile_queue.applied_at")
-		}
-		item.LastError = lastError.String
-		out = append(out, item)
-	}
-	return out, rows.Err()
 }
 
 func (s *Store) HasActiveTask(repo string, issueNum int, agentName string) (bool, error) {
@@ -886,48 +770,6 @@ func (s *Store) HasActiveTask(repo string, issueNum int, agentName string) (bool
 		return false, fmt.Errorf("store: has active task: %w", err)
 	}
 	return count > 0, nil
-}
-
-func (s *Store) MarkDependencyReconcileApplied(repo string, issueNum int, generation int64, commentHash, commentID string) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return fmt.Errorf("store: begin mark dependency reconcile applied: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, err := tx.Exec(
-		`UPDATE dependency_reconcile_queue
-		 SET status = ?, applied_at = CURRENT_TIMESTAMP, last_error = ''
-		 WHERE repo = ? AND issue_num = ? AND generation = ?`,
-		DependencyQueueStatusApplied, repo, issueNum, generation,
-	); err != nil {
-		return fmt.Errorf("store: update dependency reconcile applied: %w", err)
-	}
-	if _, err := tx.Exec(
-		`UPDATE issue_dependency_state
-		 SET last_comment_hash = ?, last_comment_id = ?
-		 WHERE repo = ? AND issue_num = ?`,
-		commentHash, commentID, repo, issueNum,
-	); err != nil {
-		return fmt.Errorf("store: update dependency state comment anchor: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("store: commit dependency reconcile applied: %w", err)
-	}
-	return nil
-}
-
-func (s *Store) MarkDependencyReconcileFailed(repo string, issueNum int, generation int64, lastErr string) error {
-	_, err := s.db.Exec(
-		`UPDATE dependency_reconcile_queue
-		 SET status = ?, last_error = ?
-		 WHERE repo = ? AND issue_num = ? AND generation = ?`,
-		DependencyQueueStatusFailed, lastErr, repo, issueNum, generation,
-	)
-	if err != nil {
-		return fmt.Errorf("store: mark dependency reconcile failed: %w", err)
-	}
-	return nil
 }
 
 func boolToInt(v bool) int {

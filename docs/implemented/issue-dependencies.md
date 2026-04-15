@@ -2,6 +2,37 @@
 
 状态：implemented
 
+## Status: minimal 2-agent design
+
+> **The implementation diverged from the original draft below.** The shipped
+> design is intentionally smaller:
+>
+> - **No `dependency-resolver-agent`.** The agent catalog stays at exactly
+>   two agents (`dev-agent`, `review-agent`).
+> - **No managed comment.** Dependency state is surfaced on GitHub via a
+>   single 😕 **confused reaction** added to the issue when blocked and
+>   removed when unblocked. This is the only GitHub UX signal beyond the
+>   regular agent comment stream.
+> - **No reconcile queue / generation table.** The Coordinator computes the
+>   verdict in-process every poll cycle and only writes the
+>   `issue_dependency_state` row plus the reaction.
+> - **Dispatch gate.** Both `internal/router/router.go` and
+>   `internal/statemachine/statemachine.go` look up the verdict and refuse
+>   to dispatch when it is `blocked` or `needs_human`. The state machine
+>   logs `dispatch_blocked_by_dependency` events for audit.
+> - **Pure-programmatic work** (parsing, cycle detection, verdict
+>   computation, reaction add/remove) lives in Coordinator Go. Reactions
+>   are written by `internal/reporter/reporter.go` via `gh api .../reactions`
+>   — this is the one new GH write boundary granted to Go code beyond
+>   plain comments.
+> - The `override:force-unblock` label still works as an in-band human
+>   override; it sets the verdict to `override` (treated as ready) but no
+>   longer drives any DB-side reconcile-queue logic.
+>
+> The historical draft below is preserved for context (Option A, Option B,
+> the original reconcile flow, etc.) but should be read as design
+> archaeology, not as a description of running code.
+
 ## Goal
 
 为 workbuddy 增加一个可生产使用的 issue dependency 机制，让 issue B 可以声明“在 issue A 满足前不得启动”，并且这个约束同时满足：

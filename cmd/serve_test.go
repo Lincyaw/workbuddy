@@ -50,24 +50,10 @@ timeout: 30s
 ---
 # Dev Agent
 `
-	dependencyResolverAgentMD := `---
-name: dependency-resolver-agent
-description: Dependency resolver
-triggers:
-  - label: "status:blocked"
-    event: labeled
-role: maintenance
-runtime: claude-code
-command: echo '{"generation":1,"status":"applied","comment_hash":"x","comment_id":"1"}'
-timeout: 30s
----
-# Dependency Resolver Agent
-`
 	if err := os.MkdirAll(filepath.Join(dir, "agents"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(dir, "agents", "dev-agent.md"), agentMD)
-	writeFile(t, filepath.Join(dir, "agents", "dependency-resolver-agent.md"), dependencyResolverAgentMD)
 
 	// Workflow
 	workflowMD := `---

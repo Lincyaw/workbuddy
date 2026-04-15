@@ -1,6 +1,7 @@
 package reporter
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -140,5 +141,51 @@ func TestReportNeedsHuman(t *testing.T) {
 	}
 	if !strings.Contains(gh.comments[0], "needs-human") {
 		t.Fatalf("expected needs-human recommendation in comment: %s", gh.comments[0])
+	}
+}
+
+type mockReactions struct {
+	calls []struct {
+		repo     string
+		issueNum int
+		blocked  bool
+	}
+	err error
+}
+
+func (m *mockReactions) SetBlockedReaction(_ context.Context, repo string, issueNum int, blocked bool) error {
+	m.calls = append(m.calls, struct {
+		repo     string
+		issueNum int
+		blocked  bool
+	}{repo, issueNum, blocked})
+	return m.err
+}
+
+func TestSetBlockedReactionDelegatesToManager(t *testing.T) {
+	r := NewReporter(&mockGHWriter{})
+	mock := &mockReactions{}
+	r.SetReactionManager(mock)
+
+	if err := r.SetBlockedReaction(context.Background(), "owner/repo", 7, true); err != nil {
+		t.Fatalf("SetBlockedReaction(true): %v", err)
+	}
+	if err := r.SetBlockedReaction(context.Background(), "owner/repo", 7, false); err != nil {
+		t.Fatalf("SetBlockedReaction(false): %v", err)
+	}
+	if len(mock.calls) != 2 {
+		t.Fatalf("want 2 calls, got %d", len(mock.calls))
+	}
+	if mock.calls[0].blocked != true || mock.calls[1].blocked != false {
+		t.Fatalf("call sequence wrong: %+v", mock.calls)
+	}
+	if mock.calls[0].repo != "owner/repo" || mock.calls[0].issueNum != 7 {
+		t.Fatalf("call args wrong: %+v", mock.calls[0])
+	}
+}
+
+func TestReactionConfusedConstant(t *testing.T) {
+	if ReactionConfused != "confused" {
+		t.Fatalf("ReactionConfused = %q, want %q", ReactionConfused, "confused")
 	}
 }

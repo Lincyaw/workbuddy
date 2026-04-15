@@ -572,30 +572,38 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 				log.Printf("[serve] dependency resolver error: %v", err)
 				return
 			}
-			items, err := st.ListQueuedDependencyReconciles(cfg.Global.Repo, 100)
+			// Reaction reconciler: for every issue we just evaluated, if the
+			// blocked-state on GitHub differs from the verdict we just
+			// computed, add or remove the 😕 reaction. This is the only
+			// GitHub UX surface for blocked state — we do NOT write a managed
+			// comment.
+			caches, err := st.ListIssueCaches(cfg.Global.Repo)
 			if err != nil {
-				log.Printf("[serve] dependency queue list error: %v", err)
+				log.Printf("[serve] dependency reaction list-caches error: %v", err)
 				return
 			}
-			for _, item := range items {
-				active, err := st.HasActiveTask(item.Repo, item.IssueNum, dependency.ResolverAgentName)
+			for _, cached := range caches {
+				if cached.State != "open" {
+					continue
+				}
+				state, err := st.QueryIssueDependencyState(cached.Repo, cached.IssueNum)
 				if err != nil {
-					log.Printf("[serve] dependency queue active-task check failed: %v", err)
+					log.Printf("[serve] dependency reaction query state %s#%d: %v", cached.Repo, cached.IssueNum, err)
 					continue
 				}
-				if active {
+				if state == nil {
 					continue
 				}
-				select {
-				case dispatchCh <- statemachine.DispatchRequest{
-					Repo:      item.Repo,
-					IssueNum:  item.IssueNum,
-					AgentName: dependency.ResolverAgentName,
-					Workflow:  dependency.DependencySchedulerReason,
-					State:     dependency.DependencySchedulerReason,
-				}:
-				case <-ctx.Done():
-					return
+				wantBlocked := state.Verdict == store.DependencyVerdictBlocked || state.Verdict == store.DependencyVerdictNeedsHuman
+				if wantBlocked == state.LastReactionBlocked {
+					continue
+				}
+				if err := rep.SetBlockedReaction(ctx, cached.Repo, cached.IssueNum, wantBlocked); err != nil {
+					log.Printf("[serve] dependency reaction set %s#%d blocked=%v: %v", cached.Repo, cached.IssueNum, wantBlocked, err)
+					continue
+				}
+				if err := st.MarkDependencyReactionApplied(cached.Repo, cached.IssueNum, wantBlocked); err != nil {
+					log.Printf("[serve] dependency reaction mark %s#%d: %v", cached.Repo, cached.IssueNum, err)
 				}
 			}
 		}
@@ -832,19 +840,14 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	}
 	log.Printf("[worker] executing task %s: agent=%s issue=%s#%d",
 		task.TaskID, task.AgentName, task.Repo, task.IssueNum)
-	isDependencyResolver := task.AgentName == dependency.ResolverAgentName
 
 	// Add claim reaction (eyes) to signal this issue is being worked on.
-	if !isDependencyResolver {
-		addClaimReaction(taskCtx, task.Repo, task.IssueNum, task.AgentName)
-	}
+	addClaimReaction(taskCtx, task.Repo, task.IssueNum, task.AgentName)
 
 	// Post "Agent Started" comment with session link.
 	sessionID := task.Context.Session.ID
-	if !isDependencyResolver {
-		if err := deps.reporter.ReportStarted(task.Repo, task.IssueNum, task.AgentName, sessionID, deps.workerID); err != nil {
-			log.Printf("[worker] report started failed: %v", err)
-		}
+	if err := deps.reporter.ReportStarted(task.Repo, task.IssueNum, task.AgentName, sessionID, deps.workerID); err != nil {
+		log.Printf("[worker] report started failed: %v", err)
 	}
 
 	session, err := deps.launcher.Start(taskCtx, task.Agent, task.Context)
@@ -951,12 +954,6 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	if err := deps.auditor.Capture(sessionID, task.TaskID, task.Repo, task.IssueNum, task.AgentName, result); err != nil {
 		log.Printf("[worker] audit capture failed: %v", err)
 	}
-	if isDependencyResolver {
-		if err := handleDependencyResolverResult(task, deps, result, status); err != nil {
-			log.Printf("[worker] dependency resolver result handling failed: %v", err)
-		}
-	}
-
 	// Get retry count for reporting
 	retryCount := 0
 	maxRetries := 3
@@ -974,11 +971,9 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	}
 
 	// Report to issue
-	if !isDependencyResolver {
-		if err := deps.reporter.Report(task.Repo, task.IssueNum, task.AgentName, result,
-			sessionID, deps.workerID, retryCount, maxRetries, labelSummary); err != nil {
-			log.Printf("[worker] report failed: %v", err)
-		}
+	if err := deps.reporter.Report(task.Repo, task.IssueNum, task.AgentName, result,
+		sessionID, deps.workerID, retryCount, maxRetries, labelSummary); err != nil {
+		log.Printf("[worker] report failed: %v", err)
 	}
 
 	// Mark agent completed in state machine
@@ -1170,46 +1165,6 @@ func exitCodeForValidation(result *launcher.Result) int {
 		return -1
 	}
 	return result.ExitCode
-}
-
-type dependencyResolverResult struct {
-	Generation  int64  `json:"generation"`
-	Status      string `json:"status"`
-	CommentHash string `json:"comment_hash"`
-	CommentID   string `json:"comment_id"`
-	Error       string `json:"error"`
-}
-
-func handleDependencyResolverResult(task router.WorkerTask, deps *workerDeps, result *launcher.Result, taskStatus string) error {
-	latest, err := deps.store.LatestDependencyReconcile(task.Repo, task.IssueNum)
-	if err != nil {
-		return err
-	}
-	if latest == nil {
-		return nil
-	}
-	if result == nil {
-		return deps.store.MarkDependencyReconcileFailed(task.Repo, task.IssueNum, latest.Generation, "missing_result")
-	}
-
-	var payload dependencyResolverResult
-	if err := json.Unmarshal([]byte(strings.TrimSpace(result.Stdout)), &payload); err != nil {
-		return deps.store.MarkDependencyReconcileFailed(task.Repo, task.IssueNum, latest.Generation, "invalid_json_output")
-	}
-	if payload.Generation == 0 {
-		payload.Generation = latest.Generation
-	}
-	if taskStatus == store.TaskStatusCompleted && payload.Status == store.DependencyQueueStatusApplied {
-		return deps.store.MarkDependencyReconcileApplied(task.Repo, task.IssueNum, payload.Generation, payload.CommentHash, payload.CommentID)
-	}
-	reason := strings.TrimSpace(payload.Error)
-	if reason == "" {
-		reason = strings.TrimSpace(payload.Status)
-	}
-	if reason == "" {
-		reason = "unknown"
-	}
-	return deps.store.MarkDependencyReconcileFailed(task.Repo, task.IssueNum, payload.Generation, reason)
 }
 
 func cloneLabels(labels []string) []string {

@@ -1,3 +1,7 @@
+// Package dependency parses `workbuddy.depends_on` blocks from Issue bodies,
+// detects cycles, and computes a per-issue dispatch verdict (ready / blocked /
+// needs_human / override). The Coordinator gates dispatch on the verdict and
+// surfaces blocked-state purely via a 😕 emoji reaction (no managed comment).
 package dependency
 
 import (
@@ -18,13 +22,13 @@ import (
 )
 
 const (
-	Marker                    = "<!-- workbuddy:dependency-status -->"
-	OverrideLabel             = "override:force-unblock"
-	StatusBlocked             = "status:blocked"
-	StatusDone                = "status:done"
-	StatusFailed              = "status:failed"
-	ResolverAgentName         = "dependency-resolver-agent"
-	DependencySchedulerReason = "dependency_reconcile"
+	// OverrideLabel, when present on an issue, forces the verdict to
+	// "override" regardless of upstream dependency state. Parsed-only here:
+	// no DB write side-effect tied to the label itself.
+	OverrideLabel = "override:force-unblock"
+	StatusBlocked = "status:blocked"
+	StatusDone    = "status:done"
+	StatusFailed  = "status:failed"
 )
 
 var yamlFenceRe = regexp.MustCompile("(?s)```yaml\\s*\n(.*?)```")
@@ -56,7 +60,6 @@ type ParsedDeclaration struct {
 
 type ResolveResult struct {
 	State store.IssueDependencyState
-	Queue store.DependencyReconcileQueueItem
 	Deps  []store.IssueDependency
 }
 
@@ -105,6 +108,10 @@ func ParseDeclaration(repo, body string) ParsedDeclaration {
 	return ParsedDeclaration{}
 }
 
+// EvaluateOpenIssues parses dependency declarations for every cached open
+// issue, detects cycles, computes a verdict, persists `issue_dependencies`
+// (only for refs that parsed successfully) and the verdict state, and emits
+// events when verdicts change.
 func (r *Resolver) EvaluateOpenIssues(ctx context.Context, repo string, graphVersion int64) error {
 	issues, err := r.store.ListIssueCaches(repo)
 	if err != nil {
@@ -128,8 +135,14 @@ func (r *Resolver) EvaluateOpenIssues(ctx context.Context, repo string, graphVer
 	for num, issue := range openIssues {
 		decl := ParseDeclaration(repo, issue.Body)
 		parsedDecls[num] = decl
+		// Only persist dependency rows for refs that parsed successfully
+		// (valid repo + valid issue number). Invalid refs influence the
+		// verdict but never become DB rows.
 		deps := make([]store.IssueDependency, 0, len(decl.Dependencies))
 		for _, dep := range decl.Dependencies {
+			if dep.Repo == "" || dep.IssueNum <= 0 {
+				continue
+			}
 			deps = append(deps, store.IssueDependency{
 				Repo:              repo,
 				IssueNum:          num,
@@ -167,13 +180,8 @@ func (r *Resolver) EvaluateOpenIssues(ctx context.Context, repo string, graphVer
 		}
 		if prev != nil && prev.ResumeLabel != "" && result.State.ResumeLabel == "" {
 			result.State.ResumeLabel = prev.ResumeLabel
-			result.Queue.DesiredResumeLabel = prev.ResumeLabel
 		}
 		if err := r.store.UpsertIssueDependencyState(result.State); err != nil {
-			return err
-		}
-		enqueued, err := r.store.UpsertDependencyReconcile(result.Queue)
-		if err != nil {
 			return err
 		}
 		if prev == nil || prev.Verdict != result.State.Verdict || prev.BlockedReasonHash != result.State.BlockedReasonHash || prev.OverrideActive != result.State.OverrideActive {
@@ -193,12 +201,6 @@ func (r *Resolver) EvaluateOpenIssues(ctx context.Context, repo string, graphVer
 				"resume_label": result.State.ResumeLabel,
 			})
 		}
-		if enqueued {
-			r.eventlog.Log(eventlog.TypeDependencyQueueQueued, repo, num, map[string]any{
-				"generation_hint": graphVersion,
-				"verdict":         result.State.Verdict,
-			})
-		}
 	}
 
 	return nil
@@ -215,38 +217,26 @@ func buildResolveResult(
 	reader IssueReader,
 ) ResolveResult {
 	reasons := make([]string, 0)
-	commentLines := []string{Marker, "", fmt.Sprintf("Issue `%s#%d` dependency verdict: `%s`.", repo, issue.Number, store.DependencyVerdictReady)}
 	verdict := store.DependencyVerdictReady
-	needsHuman := false
 	overrideActive := hasLabel(issue.Labels, OverrideLabel)
 	resumeLabel := findResumeLabel(issue.Labels, "")
 
-	if len(decl.Dependencies) > 0 {
-		commentLines = []string{Marker, "", "Dependencies:"}
-	}
 	if len(cyclePath) > 0 {
 		verdict = store.DependencyVerdictNeedsHuman
-		needsHuman = true
 		reasons = append(reasons, "cycle:"+strings.Join(cyclePath, " -> "))
-		commentLines = append(commentLines, fmt.Sprintf("- cycle detected: `%s`", strings.Join(cyclePath, " -> ")))
 	}
 
 	for _, dep := range decl.Dependencies {
-		status := "open"
 		switch dep.Status {
 		case store.DependencyStatusUnsupportedCrossRepo:
-			status = "unsupported-cross-repo"
 			verdict = store.DependencyVerdictNeedsHuman
-			needsHuman = true
-			reasons = append(reasons, dep.Normalized+":"+status)
+			reasons = append(reasons, dep.Normalized+":unsupported-cross-repo")
 		case store.DependencyStatusInvalid:
-			status = "invalid"
 			verdict = store.DependencyVerdictNeedsHuman
-			needsHuman = true
 			reasons = append(reasons, dep.Raw+":"+dep.ParseErrorReason)
 		default:
 			if depIssue, ok := openIssues[dep.IssueNum]; ok && dep.Repo == repo {
-				status = classifyOpenDependency(depIssue.Labels)
+				status := classifyOpenDependency(depIssue.Labels)
 				if status != "done" {
 					if status == "failed" {
 						reasons = append(reasons, dep.Normalized+":failed")
@@ -268,43 +258,25 @@ func buildResolveResult(
 					}
 				}
 				if ok && detail.State == "closed" && detail.ClosedByLinkedPR {
-					status = "done"
+					// done — no reason added
 				} else if ok && detail.State == "closed" {
-					status = "closed-without-linked-pr"
-					reasons = append(reasons, dep.Normalized+":"+status)
+					reasons = append(reasons, dep.Normalized+":closed-without-linked-pr")
 					if verdict == store.DependencyVerdictReady {
 						verdict = store.DependencyVerdictBlocked
 					}
 				} else {
-					status = "invalid"
 					verdict = store.DependencyVerdictNeedsHuman
-					needsHuman = true
 					reasons = append(reasons, dep.Normalized+":unreadable")
 				}
 			}
 		}
-		label := dep.Normalized
-		if label == "" {
-			label = dep.Raw
-		}
-		commentLines = append(commentLines, fmt.Sprintf("- `%s`: `%s`", label, status))
 	}
 
 	if overrideActive {
 		verdict = store.DependencyVerdictOverride
-		needsHuman = false
-		commentLines = append(commentLines, "", "Override active via `override:force-unblock`.")
 	}
 
-	commentLines[2] = fmt.Sprintf("Issue `%s#%d` dependency verdict: `%s`.", repo, issue.Number, verdict)
-	if len(commentLines) == 3 {
-		commentLines = append(commentLines, "", "No active dependencies.")
-	}
-
-	commentBody := strings.Join(commentLines, "\n")
 	reasonHash := hashStrings(reasons...)
-	commentHash := hashStrings(commentBody)
-
 	state := store.IssueDependencyState{
 		Repo:              repo,
 		IssueNum:          issue.Number,
@@ -313,19 +285,9 @@ func buildResolveResult(
 		BlockedReasonHash: reasonHash,
 		OverrideActive:    overrideActive,
 		GraphVersion:      graphVersion,
-		LastCommentHash:   commentHash,
 		LastEvaluatedAt:   time.Now(),
 	}
-	queue := store.DependencyReconcileQueueItem{
-		Repo:               repo,
-		IssueNum:           issue.Number,
-		DesiredBlocked:     verdict == store.DependencyVerdictBlocked || verdict == store.DependencyVerdictNeedsHuman,
-		DesiredResumeLabel: resumeLabel,
-		DesiredNeedsHuman:  needsHuman,
-		DesiredCommentBody: commentBody,
-		DesiredCommentHash: commentHash,
-	}
-	return ResolveResult{State: state, Queue: queue}
+	return ResolveResult{State: state}
 }
 
 func normalizeDependency(repo, raw string) ParsedDependency {

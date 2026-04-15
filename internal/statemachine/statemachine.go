@@ -277,8 +277,7 @@ func (sm *StateMachine) dispatchAgent(ctx context.Context, repo string, issueNum
 		return fmt.Errorf("statemachine: query dependency state: %w", err)
 	}
 	if depState != nil && (depState.Verdict == store.DependencyVerdictBlocked || depState.Verdict == store.DependencyVerdictNeedsHuman) {
-		sm.eventlog.Log(eventlog.TypeDependencyQueueQueued, repo, issueNum, map[string]string{
-			"reason":  "dispatch_blocked",
+		sm.eventlog.Log(eventlog.TypeDispatchBlockedByDependency, repo, issueNum, map[string]string{
 			"verdict": depState.Verdict,
 			"agent":   agentName,
 		})

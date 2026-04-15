@@ -177,18 +177,11 @@ func TestIssueDependenciesImplementedDocIndexed(t *testing.T) {
 	docContent := readRepoFile(t, docPath)
 	assertContainsAll(t, docPath, docContent, []string{
 		"# Issue Dependency Mechanism",
+		"## Status: minimal 2-agent design",
+		"confused reaction",
+		"dispatch_blocked_by_dependency",
+		"Dispatch gate",
 		"## Goal",
-		"## 当前状态",
-		"## Convention Compliance",
-		"## 目标状态",
-		"## Concrete Code Touch Points",
-		"## Rejected Alternatives",
-		"## Distance From Current Code",
-		"## Migration from Prior Draft",
-		"## Migration Path",
-		"Option A",
-		"dependency-resolver-agent",
-		"不是字面量 dotted key",
 		"`status:blocked`",
 		"`override:force-unblock`",
 	})
