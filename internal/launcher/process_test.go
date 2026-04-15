@@ -58,16 +58,17 @@ func TestProcessSessionSessionLookupPathPrefersRepo(t *testing.T) {
 
 func TestClaudePolicyArgs_SandboxGatesPermissionBypass(t *testing.T) {
 	cases := []struct {
+		name       string
 		sandbox    string
 		wantBypass bool
 	}{
-		{"read-only", false},
-		{"workspace-write", false},
-		{"danger-full-access", true},
-		{"", false},
+		{"read-only", "read-only", false},
+		{"workspace-write", "workspace-write", false},
+		{"danger-full-access", "danger-full-access", true},
+		{"empty", "", false},
 	}
 	for _, tc := range cases {
-		t.Run(tc.sandbox, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			args := claudePolicyArgs(config.PolicyConfig{Sandbox: tc.sandbox})
 			joined := strings.Join(args, " ")
 			has := strings.Contains(joined, "--dangerously-skip-permissions")
