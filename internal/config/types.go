@@ -24,17 +24,24 @@ type PolicyConfig struct {
 	Timeout  time.Duration `yaml:"timeout"`
 }
 
+// OutputContractConfig describes a structured-output contract for an agent.
+type OutputContractConfig struct {
+	SchemaFile string `yaml:"schema_file"`
+}
+
 // AgentConfig defines an agent loaded from .github/workbuddy/agents/*.md.
 type AgentConfig struct {
-	Name        string        `yaml:"name"`
-	Description string        `yaml:"description"`
-	Triggers    []TriggerRule `yaml:"triggers"`
-	Role        string        `yaml:"role"`
-	Runtime     string        `yaml:"runtime"`
-	Command     string        `yaml:"command"`
-	Prompt      string        `yaml:"prompt"`
-	Policy      PolicyConfig  `yaml:"policy"`
-	Timeout     time.Duration `yaml:"timeout"`
+	Name           string               `yaml:"name"`
+	Description    string               `yaml:"description"`
+	Triggers       []TriggerRule        `yaml:"triggers"`
+	Role           string               `yaml:"role"`
+	Runtime        string               `yaml:"runtime"`
+	Command        string               `yaml:"command"`
+	Prompt         string               `yaml:"prompt"`
+	Policy         PolicyConfig         `yaml:"policy"`
+	OutputContract OutputContractConfig `yaml:"output_contract"`
+	Timeout        time.Duration        `yaml:"timeout"`
+	SourcePath     string               `yaml:"-"`
 }
 
 // TriggerRule defines when an agent is activated.

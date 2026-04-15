@@ -229,6 +229,10 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 		}
 	}
 
+	if err := validateOutputContract(s.agent, result); err != nil {
+		return result, err
+	}
+
 	return result, nil
 }
 

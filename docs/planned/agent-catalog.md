@@ -4,7 +4,7 @@
 
 ## 目的
 
-Agent 抽象（`docs/planned/agent-schema-vnext.md`）落地后，可以批量定义不同 role 的 agent。这份文档登记**已规划但尚未实现**的 agent 类型，作为开 issue 的索引。
+Agent schema vNext（`docs/implemented/agent-schema-vnext.md`）已经落地；这份文档登记**已规划但尚未实现**的 agent 类型，作为开 issue 的索引。
 
 每个 agent 条目登记：
 

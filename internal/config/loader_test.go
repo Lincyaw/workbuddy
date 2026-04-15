@@ -791,3 +791,74 @@ prompt: |
 		t.Fatalf("runtime = %q", cfg.Agents["future-agent"].Runtime)
 	}
 }
+
+func TestLoadConfig_OutputContractSchemaPathResolved(t *testing.T) {
+	agent := `---
+name: contract-agent
+description: Structured output agent
+triggers:
+  - label: "status:developing"
+    event: labeled
+role: dev
+runtime: codex
+prompt: |
+  emit json
+output_contract:
+  schema_file: schemas/result.json
+---
+## Agent
+`
+	schema := `{
+  "type": "object",
+  "required": ["status"],
+  "properties": {
+    "status": {"type": "string"}
+  }
+}
+`
+	dir := setupConfigDir(t, map[string]string{
+		"agents/contract-agent.md":   agent,
+		"agents/schemas/result.json": schema,
+		"workflows/feature-dev.md":   validWorkflow,
+	})
+
+	cfg, warnings, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v", warnings)
+	}
+	got := cfg.Agents["contract-agent"].OutputContractSchemaPath()
+	want := filepath.Join(dir, "agents", "schemas", "result.json")
+	if got != want {
+		t.Fatalf("schema path = %q, want %q", got, want)
+	}
+}
+
+func TestLoadConfig_OutputContractSchemaFileMissing(t *testing.T) {
+	agent := `---
+name: contract-agent
+description: Structured output agent
+triggers:
+  - label: "status:developing"
+    event: labeled
+role: dev
+runtime: codex
+prompt: |
+  emit json
+output_contract:
+  schema_file: schemas/missing.json
+---
+## Agent
+`
+	dir := setupConfigDir(t, map[string]string{"agents/contract-agent.md": agent})
+
+	_, _, err := LoadConfig(dir)
+	if err == nil {
+		t.Fatal("expected schema file error")
+	}
+	if !strings.Contains(err.Error(), "output_contract.schema_file") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

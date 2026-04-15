@@ -40,6 +40,9 @@
 - `triggers`
 - `role`
 - `runtime`
+- `policy`
+- `prompt`
+- `output_contract`
 - `command`
 - `timeout`
 
@@ -51,13 +54,16 @@
 默认行为：
 
 - `runtime` 为空时默认走 `claude-code`
-- `command` 是当前真正的执行入口
+- `prompt` 存在时 runtime 优先消费 `prompt`
+- `command` 保留为兼容字段，在没有 `prompt` 时继续作为执行入口
+- `output_contract.schema_file` 可声明最终 JSON 输出的校验 schema；launcher 在 session 成功结束后校验最终输出
 
 代码：
 
 - `internal/config/types.go`
 - `internal/config/loader.go`
 - `internal/launcher/launcher.go`
+- `internal/launcher/output_contract.go`
 
 ## 当前 Workflow Schema
 

@@ -35,6 +35,26 @@ func newTestTask(t *testing.T) *TaskContext {
 	}
 }
 
+func writeOutputSchema(t *testing.T, dir string) string {
+	t.Helper()
+	schemaDir := filepath.Join(dir, "schemas")
+	if err := os.MkdirAll(schemaDir, 0o755); err != nil {
+		t.Fatalf("mkdir schema dir: %v", err)
+	}
+	schemaPath := filepath.Join(schemaDir, "result.json")
+	schema := `{
+  "type": "object",
+  "required": ["status"],
+  "properties": {
+    "status": {"type": "string"}
+  }
+}`
+	if err := os.WriteFile(schemaPath, []byte(schema), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	return schemaPath
+}
+
 // Test 1: Normal execution — command runs and returns stdout, stderr, exit code 0
 func TestLaunch_NormalExec(t *testing.T) {
 	launcher := NewLauncher()
@@ -244,6 +264,64 @@ func TestLaunch_CodexRuntime(t *testing.T) {
 	}
 	if result.LastMessage != "PONG" {
 		t.Errorf("expected last message 'PONG', got: %q", result.LastMessage)
+	}
+}
+
+func TestLaunch_OutputContractValidatesProcessOutput(t *testing.T) {
+	launcher := NewLauncher()
+	task := newTestTask(t)
+	agentDir := t.TempDir()
+	schemaPath := writeOutputSchema(t, agentDir)
+
+	agent := &config.AgentConfig{
+		Name:    "structured-agent",
+		Runtime: "claude-code",
+		Command: `printf '{"status":"ok"}'`,
+		OutputContract: config.OutputContractConfig{
+			SchemaFile: "schemas/result.json",
+		},
+		SourcePath: filepath.Join(agentDir, "agent.md"),
+		Timeout:    10 * time.Second,
+	}
+
+	result, err := launcher.Launch(context.Background(), agent, task)
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("exit code = %d", result.ExitCode)
+	}
+	if agent.OutputContractSchemaPath() != schemaPath {
+		t.Fatalf("schema path = %q, want %q", agent.OutputContractSchemaPath(), schemaPath)
+	}
+}
+
+func TestLaunch_OutputContractRejectsInvalidProcessOutput(t *testing.T) {
+	launcher := NewLauncher()
+	task := newTestTask(t)
+	agentDir := t.TempDir()
+	writeOutputSchema(t, agentDir)
+
+	agent := &config.AgentConfig{
+		Name:    "structured-agent",
+		Runtime: "claude-code",
+		Command: `printf '{"missing":"status"}'`,
+		OutputContract: config.OutputContractConfig{
+			SchemaFile: "schemas/result.json",
+		},
+		SourcePath: filepath.Join(agentDir, "agent.md"),
+		Timeout:    10 * time.Second,
+	}
+
+	result, err := launcher.Launch(context.Background(), agent, task)
+	if err == nil {
+		t.Fatal("expected output contract validation error")
+	}
+	if result == nil || result.ExitCode != 0 {
+		t.Fatalf("expected successful process result, got %+v", result)
+	}
+	if !strings.Contains(err.Error(), "output_contract") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

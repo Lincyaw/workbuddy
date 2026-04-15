@@ -135,6 +135,7 @@ func parseAgentFile(path string) (*AgentConfig, []Warning, error) {
 	if err := yaml.Unmarshal(fm, &agent); err != nil {
 		return nil, nil, fmt.Errorf("config: %s: %w", path, err)
 	}
+	agent.SourcePath = path
 
 	fname := filepath.Base(path)
 	if agent.Name == "" {
@@ -180,6 +181,18 @@ func normalizeAgentConfig(agent *AgentConfig) ([]Warning, error) {
 
 	if agent.Policy.Timeout > 0 {
 		agent.Timeout = agent.Policy.Timeout
+	}
+	if agent.OutputContract.SchemaFile != "" {
+		if strings.TrimSpace(agent.OutputContract.SchemaFile) == "" {
+			return warnings, fmt.Errorf("output_contract.schema_file cannot be blank")
+		}
+		schemaPath := agent.OutputContractSchemaPath()
+		if schemaPath == "" {
+			return warnings, fmt.Errorf("output_contract.schema_file requires agent.SourcePath")
+		}
+		if _, err := os.Stat(schemaPath); err != nil {
+			return warnings, fmt.Errorf("output_contract.schema_file %q: %w", agent.OutputContract.SchemaFile, err)
+		}
 	}
 
 	if agent.Policy.Sandbox == "" {
@@ -236,6 +249,22 @@ func normalizeAgentConfig(agent *AgentConfig) ([]Warning, error) {
 	}
 
 	return warnings, nil
+}
+
+// OutputContractSchemaPath resolves the output_contract.schema_file against the
+// agent file path so agent-local schema folders work without global path rules.
+func (a *AgentConfig) OutputContractSchemaPath() string {
+	schemaFile := strings.TrimSpace(a.OutputContract.SchemaFile)
+	if schemaFile == "" {
+		return ""
+	}
+	if filepath.IsAbs(schemaFile) {
+		return schemaFile
+	}
+	if strings.TrimSpace(a.SourcePath) == "" {
+		return ""
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(a.SourcePath), schemaFile))
 }
 
 func defaultSandboxForRuntime(runtime string) string {
