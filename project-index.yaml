@@ -1,21 +1,219 @@
-# Workbuddy — Requirements Index
-# Single source of truth for all requirements.
-# See CLAUDE.md for maintenance rules.
-#
-# Architecture: Hub-Spoke (Coordinator + Worker)
-# v0.1.0: single-process serve (Coordinator + Worker via channel)
-# v0.2.0: distributed (Coordinator HTTP API + Worker long-polling)
-# v0.3.0: advanced orchestration
+documentation:
+  buckets:
+    implemented:
+      path: docs/implemented/
+      description: Current source-of-truth documents aligned with the codebase.
+    planned:
+      path: docs/planned/
+      description: Forward-looking designs that are not implemented yet.
+    mismatch:
+      path: docs/mismatch/
+      description: Known gaps between current code and requirement expression.
 
-project:
-  name: workbuddy
-  description: GitHub Issue-driven agent orchestration platform (Hub-Spoke architecture)
-  version: v0.1.0
+  documents:
+    - path: docs/index.md
+      bucket: implemented
+      status: maintained
+      related_code: []
+      notes: Master entry point for the reorganized three-bucket documentation set.
 
-# Version scope:
-#   v0.1.0 (单机合体): REQ-001~006, REQ-009, REQ-010, REQ-013, REQ-017, REQ-023, REQ-024, REQ-030
-#   v0.2.0 (分布式+可观测): REQ-007, REQ-008, REQ-011, REQ-018~022, REQ-025~029
-#   v0.3.0 (高级编排): REQ-012, REQ-014~016
+    - path: docs/implemented/index.md
+      bucket: implemented
+      status: maintained
+      related_code:
+        - cmd/serve.go
+        - internal/config/loader.go
+        - internal/launcher/launcher.go
+        - internal/poller/poller.go
+        - internal/router/router.go
+        - internal/statemachine/statemachine.go
+        - internal/store/store.go
+        - internal/audit/audit.go
+        - internal/webui/handler.go
+      notes: Current code-aligned capability map.
+
+    - path: docs/implemented/current-architecture.md
+      bucket: implemented
+      status: maintained
+      related_code:
+        - cmd/root.go
+        - cmd/serve.go
+        - internal/poller/poller.go
+        - internal/statemachine/statemachine.go
+        - internal/router/router.go
+      notes: Current single-process serve architecture and execution chain.
+
+    - path: docs/implemented/current-config-workflow-and-agents.md
+      bucket: implemented
+      status: maintained
+      related_code:
+        - internal/config/types.go
+        - internal/config/loader.go
+        - internal/poller/poller.go
+        - internal/statemachine/statemachine.go
+        - .github/workbuddy/agents/dev-agent.md
+        - .github/workbuddy/agents/test-agent.md
+        - .github/workbuddy/agents/review-agent.md
+        - .github/workbuddy/agents/codex-dev-agent.md
+        - .github/workbuddy/workflows/feature-dev.md
+        - .github/workbuddy/workflows/bugfix.md
+      notes: Current config, agent, workflow, and label-driven trigger behavior.
+
+    - path: docs/implemented/current-runtime-reporting-and-audit.md
+      bucket: implemented
+      status: maintained
+      related_code:
+        - internal/launcher/types.go
+        - internal/launcher/launcher.go
+        - internal/launcher/claude.go
+        - internal/launcher/codex.go
+        - internal/launcher/process.go
+        - internal/reporter/reporter.go
+        - internal/reporter/format.go
+        - internal/audit/audit.go
+        - internal/webui/handler.go
+      notes: Current one-shot runtime model and the reporting/audit/session UI chain.
+
+    - path: docs/implemented/current-persistence-and-workspace.md
+      bucket: implemented
+      status: maintained
+      related_code:
+        - internal/store/store.go
+        - internal/store/types.go
+        - internal/eventlog/log.go
+        - internal/registry/registry.go
+        - internal/workspace/workspace.go
+      notes: Current persistence, event logging, registry, and worktree isolation behavior.
+
+    - path: docs/planned/index.md
+      bucket: planned
+      status: maintained
+      related_code:
+        - internal/launcher/types.go
+        - internal/config/types.go
+        - cmd/root.go
+      notes: Future-state design map.
+
+    - path: docs/planned/runtime-session-architecture.md
+      bucket: planned
+      status: proposed
+      related_code:
+        - internal/launcher/types.go
+        - internal/launcher/launcher.go
+        - internal/audit/audit.go
+        - internal/reporter/reporter.go
+        - internal/webui/handler.go
+      notes: Target Runtime -> Session architecture and result/approver evolution.
+
+    - path: docs/planned/agent-schema-vnext.md
+      bucket: planned
+      status: proposed
+      related_code:
+        - internal/config/types.go
+        - internal/config/loader.go
+        - .github/workbuddy/agents/dev-agent.md
+        - .github/workbuddy/agents/codex-dev-agent.md
+      notes: Planned agent schema evolution with policy, prompt, and output contract.
+
+    - path: docs/planned/event-schema-v1.md
+      bucket: planned
+      status: proposed
+      related_code:
+        - internal/launcher/types.go
+        - internal/audit/audit.go
+        - internal/webui/handler.go
+      notes: Planned normalized runtime event schema.
+
+    - path: docs/planned/distributed-topology-and-cli.md
+      bucket: planned
+      status: proposed
+      related_code:
+        - cmd/root.go
+        - cmd/serve.go
+        - internal/router/router.go
+        - internal/registry/registry.go
+      notes: Planned distributed coordinator/worker topology and future CLI surface.
+
+    - path: docs/planned/runtime-migration-plan.md
+      bucket: planned
+      status: proposed
+      related_code:
+        - internal/launcher/types.go
+        - internal/config/types.go
+        - internal/audit/audit.go
+        - internal/reporter/reporter.go
+      notes: Phased migration path from one-shot runtime to session-oriented runtime.
+
+    - path: docs/planned/agent-catalog.md
+      bucket: planned
+      status: proposed
+      related_code:
+        - .github/workbuddy/agents/
+      notes: Catalog of planned agent types (codex-test, triage, docs, security, deps, release) used as the index when batch-creating issues.
+
+    - path: docs/mismatch/index.md
+      bucket: mismatch
+      status: maintained
+      related_code:
+        - .github/workbuddy/config.yaml
+        - internal/config/types.go
+        - internal/poller/poller.go
+        - internal/statemachine/statemachine.go
+        - internal/launcher/codex.go
+        - cmd/serve.go
+      notes: Active documentation and implementation drift queue.
+
+    - path: docs/mismatch/config-schema-drift.md
+      bucket: mismatch
+      status: maintained
+      related_code:
+        - .github/workbuddy/config.yaml
+        - internal/config/types.go
+        - internal/config/loader.go
+        - cmd/serve.go
+      notes: Drift between the config sample and the actual config loader schema.
+
+    - path: docs/mismatch/poller-and-state-machine-drift.md
+      bucket: mismatch
+      status: maintained
+      related_code:
+        - internal/poller/poller.go
+        - internal/statemachine/statemachine.go
+        - .github/workbuddy/agents/dev-agent.md
+      notes: Drift in event scope and label-routing ownership.
+
+    - path: docs/mismatch/retry-and-failure-drift.md
+      bucket: mismatch
+      status: maintained
+      related_code:
+        - internal/statemachine/statemachine.go
+        - internal/store/store.go
+        - .github/workbuddy/workflows/feature-dev.md
+        - .github/workbuddy/workflows/bugfix.md
+      notes: Retry-limit and failed-state semantics are only partially enforced today.
+
+    - path: docs/mismatch/codex-runtime-drift.md
+      bucket: mismatch
+      status: maintained
+      related_code:
+        - .github/workbuddy/agents/codex-dev-agent.md
+        - internal/launcher/codex.go
+        - internal/launcher/process.go
+        - internal/reporter/reporter.go
+        - internal/audit/audit.go
+      notes: Codex agent documentation currently overstates structured runtime integration.
+
+    - path: docs/mismatch/roadmap-structure-drift.md
+      bucket: mismatch
+      status: maintained
+      related_code:
+        - cmd/root.go
+        - cmd/serve.go
+        - internal/launcher/
+        - internal/audit/
+        - internal/webui/
+        - internal/workspace/
+      notes: Old roadmap structure and deliverable naming no longer match the repository layout.
 
 requirements:
   # ============================================================

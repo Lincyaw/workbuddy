@@ -1,0 +1,4 @@
+interface:
+  display_name: "Index"
+  short_description: "Keep docs aligned with code"
+  default_prompt: "Use $index to audit this repository's code and docs, then rebuild the implemented, planned, and mismatch documentation buckets."

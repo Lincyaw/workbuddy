@@ -1,0 +1,4 @@
+interface:
+  display_name: "Setup Repo"
+  short_description: "Bootstrap a workbuddy repository"
+  default_prompt: "Use $setup-repo to configure this repository for workbuddy orchestration."
