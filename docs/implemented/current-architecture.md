@@ -73,7 +73,7 @@ workbuddy serve
 - Agent 子进程负责实际改 label。
 - Go 侧并不直接代替 agent 修改 issue label。
 
-这和旧设计的“中心状态机统一管理所有迁移”不是同一件事，后续如要调整，必须先改 `docs/mismatch/` 中对应差异文档。
+这和旧设计的“中心状态机统一管理所有迁移”不是同一件事；后续如要调整，应先同步更新当前实现文档（尤其是 `docs/implemented/current-config-workflow-and-agents.md`），如果新方案仍未落地，再补充对应的 `docs/planned/` 或 `docs/mismatch/` 文档。
 
 ## 当前重试与失败边界
 
