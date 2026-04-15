@@ -26,9 +26,10 @@
 
 代码：
 
+- `.github/workbuddy/config.yaml`
 - `internal/config/types.go`
 
-注意：`.github/workbuddy/config.yaml` 里虽然还写了 `server.port`、`agents_dir`、`workflows_dir`、`log`，但这些不属于当前实现事实，这部分差异已单独转到 `docs/mismatch/config-schema-drift.md`。
+仓库样例 `.github/workbuddy/config.yaml` 也只保留这四个顶层字段，作为当前 loader schema 的示例。
 
 ## 当前 Agent Schema
 

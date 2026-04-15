@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // helper to create a temp config directory with files.
@@ -97,6 +99,57 @@ environment: production
 poll_interval: 30s
 port: 8080
 `
+
+func TestRepositorySampleConfig_MatchesGlobalConfigSchema(t *testing.T) {
+	samplePath := filepath.Join("..", "..", ".github", "workbuddy", "config.yaml")
+	data, err := os.ReadFile(samplePath)
+	if err != nil {
+		t.Fatalf("read sample config: %v", err)
+	}
+
+	var raw map[string]any
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal sample config: %v", err)
+	}
+
+	expectedKeys := map[string]struct{}{
+		"environment":   {},
+		"poll_interval": {},
+		"port":          {},
+		"repo":          {},
+	}
+
+	if len(raw) != len(expectedKeys) {
+		t.Fatalf("top-level key count = %d, want %d (%v)", len(raw), len(expectedKeys), raw)
+	}
+	for key := range expectedKeys {
+		if _, ok := raw[key]; !ok {
+			t.Fatalf("missing top-level key %q", key)
+		}
+	}
+	for key := range raw {
+		if _, ok := expectedKeys[key]; !ok {
+			t.Fatalf("unexpected top-level key %q in repository sample config", key)
+		}
+	}
+
+	var cfg GlobalConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal sample config into GlobalConfig: %v", err)
+	}
+	if cfg.Repo != "Lincyaw/workbuddy" {
+		t.Fatalf("repo = %q, want %q", cfg.Repo, "Lincyaw/workbuddy")
+	}
+	if cfg.Environment != "dev" {
+		t.Fatalf("environment = %q, want %q", cfg.Environment, "dev")
+	}
+	if cfg.PollInterval != 30*time.Second {
+		t.Fatalf("poll_interval = %s, want 30s", cfg.PollInterval)
+	}
+	if cfg.Port != 8080 {
+		t.Fatalf("port = %d, want 8080", cfg.Port)
+	}
+}
 
 // Test 1: Normal parse — agents, workflows, and global config all load correctly.
 func TestLoadConfig_NormalParse(t *testing.T) {

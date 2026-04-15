@@ -47,6 +47,7 @@ documentation:
       bucket: implemented
       status: maintained
       related_code:
+        - .github/workbuddy/config.yaml
         - internal/config/types.go
         - internal/config/loader.go
         - internal/poller/poller.go
@@ -170,23 +171,11 @@ documentation:
       bucket: mismatch
       status: maintained
       related_code:
-        - .github/workbuddy/config.yaml
-        - internal/config/types.go
         - internal/poller/poller.go
         - internal/statemachine/statemachine.go
         - internal/launcher/codex.go
         - cmd/serve.go
       notes: Active documentation and implementation drift queue.
-
-    - path: docs/mismatch/config-schema-drift.md
-      bucket: mismatch
-      status: maintained
-      related_code:
-        - .github/workbuddy/config.yaml
-        - internal/config/types.go
-        - internal/config/loader.go
-        - cmd/serve.go
-      notes: Drift between the config sample and the actual config loader schema.
 
     - path: docs/mismatch/poller-and-state-machine-drift.md
       bucket: mismatch
@@ -248,7 +237,7 @@ requirements:
       - "AC-001-1: 解析 agents/*.md 的 YAML frontmatter，提取 name/description/triggers/role/command/timeout 字段"
       - "AC-001-2: 解析 workflows/*.md 的 YAML frontmatter（含 max_retries 字段，默认值 3）和 Markdown 内嵌 YAML code block 中的 states 定义"
       - "AC-001-3: states 定义中的 failed 状态可选，若 workflow 有回退边但未定义 failed 状态则自动补充"
-      - "AC-001-4: 解析 config.yaml，提取 repo/poll_interval/server 等配置"
+      - "AC-001-4: 解析 config.yaml，提取 repo/environment/poll_interval/port 这 4 个当前 GlobalConfig 支持的顶层字段"
       - "AC-001-5: 缺少必填字段（name, triggers, role, command）时返回明确错误，包含文件名和字段名"
       - "AC-001-6: 配置目录不存在时返回明确错误，不 panic"
       - "AC-001-7: states schema 明确定义：每个 state 含 enter_label, agent (可选), transitions[] (含 when, target, assign 字段)，在 config/types.go 中有对应结构体"
@@ -259,8 +248,11 @@ requirements:
       - "AC-001-12: Workflow trigger 冲突检测——不同 workflow 的 trigger.issue_label 不得重复（例如两个 workflow 都 trigger on 'type:feature'）；重复时返回校验错误，包含冲突的 workflow 名称"
       - "AC-001-13: Agent trigger label 一致性校验——agent 的 triggers[].label 必须在至少一个 workflow 的 states 中作为 enter_label 出现；不匹配时返回 warning（不阻塞启动，但日志中明确提示）"
       - "AC-001-14: 单元测试覆盖：正常解析、缺字段、空目录、格式错误、max_retries 默认值、states schema 验证、重复 edge 校验、无 yaml 代码块、workflow trigger 冲突、agent-label 不一致 10 种场景"
+      - "AC-001-15: 仓库样例 .github/workbuddy/config.yaml 只展示 loader 当前真实支持的 GlobalConfig 顶层字段，schema 以 internal/config/types.go 和 loader 为准"
     code:
+      - .github/workbuddy/config.yaml
       - internal/config/loader.go
+      - internal/config/types.go
     tests:
       - internal/config/loader_test.go
     deps: []

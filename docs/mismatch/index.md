@@ -6,7 +6,6 @@
 
 | 文档 | 差异主题 | 涉及代码 |
 | --- | --- | --- |
-| `docs/mismatch/config-schema-drift.md` | `config.yaml` 展示字段和真实 loader 支持字段不一致 | `.github/workbuddy/config.yaml`, `internal/config/types.go` |
 | `docs/mismatch/poller-and-state-machine-drift.md` | Poller、StateMachine 的职责边界和旧设计不一致 | `internal/poller/poller.go`, `internal/statemachine/statemachine.go` |
 | `docs/mismatch/retry-and-failure-drift.md` | `max_retries`、failed 状态和自动回退能力没有旧文档说得那么完整 | `internal/statemachine/statemachine.go`, `internal/store/store.go` |
 | `docs/mismatch/codex-runtime-drift.md` | 已归档：issue #8 已补齐 Codex 结构化 runtime 接入 | `.github/workbuddy/agents/codex-dev-agent.md`, `internal/launcher/codex.go` |
