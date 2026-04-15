@@ -65,6 +65,29 @@ type IssueCache struct {
 	UpdatedAt time.Time
 }
 
+// SessionRecord stores the durable execution session index row.
+type SessionRecord struct {
+	ID            int64
+	SessionID     string
+	TaskID        string
+	Repo          string
+	IssueNum      int
+	AgentName     string
+	Runtime       string
+	WorkerID      string
+	Attempt       int
+	Status        string
+	Dir           string
+	StdoutPath    string
+	StderrPath    string
+	ToolCallsPath string
+	MetadataPath  string
+	Summary       string
+	RawPath       string
+	CreatedAt     time.Time
+	ClosedAt      time.Time
+}
+
 const (
 	DependencyStatusActive               = "active"
 	DependencyStatusUnsupportedCrossRepo = "unsupported_cross_repo"

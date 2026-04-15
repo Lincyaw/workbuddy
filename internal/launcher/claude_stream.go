@@ -245,7 +245,13 @@ func (s *processSession) runClaudeStream(ctx context.Context, timeout time.Durat
 			}
 			stdout.Write(raw)
 			stdout.WriteByte('\n')
+			if handle := s.task.SessionHandle(); handle != nil {
+				_ = handle.WriteStdout(append(append([]byte(nil), raw...), '\n'))
+			}
 			for _, evt := range mapper.Map(raw, &seq) {
+				if handle := s.task.SessionHandle(); handle != nil {
+					_ = persistToolCallEvent(handle, "claude-code", evt)
+				}
 				if events != nil {
 					events <- evt
 				}
@@ -329,6 +335,9 @@ func (s *processSession) runClaudeStream(ctx context.Context, timeout time.Durat
 		sessionPath = s.findSession(s.sessionLookupPath())
 	}
 	if events != nil && stderr.Len() > 0 {
+		if handle := s.task.SessionHandle(); handle != nil {
+			_ = handle.WriteStderr(stderr.Bytes())
+		}
 		for _, line := range splitLines(stderr.String()) {
 			emitEvent(events, &seq, s.task.Session.ID, mapper.effectiveTurnID(), launcherevents.KindLog, launcherevents.LogPayload{Stream: "stderr", Line: line}, nil)
 		}

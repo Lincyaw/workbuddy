@@ -511,6 +511,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	if lnch == nil {
 		lnch = launcher.NewLauncher()
 	}
+	lnch.SetSessionManager(launcher.NewSessionManager(sessionsDir, st))
 
 	// Reporter
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
@@ -874,19 +875,11 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 
 	// Post "Agent Started" comment with session link.
 	sessionID := task.Context.Session.ID
+	task.Context.Session.TaskID = task.TaskID
+	task.Context.Session.WorkerID = deps.workerID
+	task.Context.Session.Attempt = currentAttempt(task, deps.store)
 	if err := deps.reporter.ReportStarted(task.Repo, task.IssueNum, task.AgentName, sessionID, deps.workerID); err != nil {
 		log.Printf("[worker] report started failed: %v", err)
-	}
-
-	// Record the session early so the web UI can show it while running.
-	if _, err := deps.store.InsertAgentSession(store.AgentSession{
-		SessionID: sessionID,
-		TaskID:    task.TaskID,
-		Repo:      task.Repo,
-		IssueNum:  task.IssueNum,
-		AgentName: task.AgentName,
-	}); err != nil {
-		log.Printf("[worker] failed to record session start: %v", err)
 	}
 
 	session, err := deps.launcher.Start(taskCtx, task.Agent, task.Context)
@@ -915,7 +908,20 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 		}()
 		return
 	}
+	var result *launcher.Result
 	defer func() { _ = session.Close() }()
+	defer func() {
+		if handle := task.Context.SessionHandle(); handle != nil {
+			status := store.TaskStatusCompleted
+			if err != nil || resultExitCode(result) != 0 {
+				status = store.TaskStatusFailed
+			}
+			if result != nil && result.Meta != nil && result.Meta["timeout"] == "true" {
+				status = store.TaskStatusTimeout
+			}
+			_ = handle.Close(status)
+		}
+	}()
 
 	preLabels, preSnapshotErr := snapshotIssueLabels(task.Repo, task.IssueNum, deps.issueReader)
 	if preSnapshotErr != nil {
@@ -925,8 +931,8 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	}
 
 	eventsCh := make(chan launcherevents.Event, 64)
-	eventsPath, waitEvents := streamSessionEvents(deps.sessionsDir, task.Context, eventsCh)
-	result, err := session.Run(taskCtx, eventsCh)
+	eventsPath, waitEvents := streamSessionEvents(task.Context, eventsCh)
+	result, err = session.Run(taskCtx, eventsCh)
 	close(eventsCh)
 	waitErr := waitEvents()
 	if waitErr != nil {
@@ -1053,59 +1059,58 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, completionLabels)
 }
 
-func streamSessionEvents(sessionsDir string, taskCtx *launcher.TaskContext, eventsCh <-chan launcherevents.Event) (string, func() error) {
-	path := filepath.Join(sessionArtifactsBaseDir(sessionsDir, taskCtx), taskCtx.Session.ID, "events-v1.jsonl")
+func currentAttempt(task router.WorkerTask, st *store.Store) int {
+	if st == nil {
+		return 0
+	}
+	counts, err := st.QueryTransitionCounts(task.Repo, task.IssueNum)
+	if err != nil {
+		return 0
+	}
+	for _, tc := range counts {
+		if tc.ToState == task.State {
+			return tc.Count
+		}
+	}
+	return 0
+}
+
+func resultExitCode(result *launcher.Result) int {
+	if result == nil {
+		return -1
+	}
+	return result.ExitCode
+}
+
+func streamSessionEvents(taskCtx *launcher.TaskContext, eventsCh <-chan launcherevents.Event) (string, func() error) {
+	handle := taskCtx.SessionHandle()
+	if handle == nil {
+		return "", func() error { return nil }
+	}
+	path := handle.EventsPath()
 	errCh := make(chan error, 1)
 	go func() {
-		// Always drain eventsCh to completion so the runtime is never blocked
-		// on a full send buffer, even if we can't persist the artifact.
-		var initErr, encodeErr error
-		var f *os.File
-		var enc *json.Encoder
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			initErr = err
-		} else if created, err := os.Create(path); err != nil {
-			initErr = err
-		} else {
-			f = created
-			enc = json.NewEncoder(f)
-		}
+		var encodeErr error
 		for evt := range eventsCh {
-			if enc == nil || encodeErr != nil {
+			if encodeErr != nil {
 				continue
 			}
-			if err := enc.Encode(evt); err != nil {
+			data, err := json.Marshal(evt)
+			if err != nil {
+				encodeErr = err
+				continue
+			}
+			if err := handle.WriteEvent(append(data, '\n')); err != nil {
 				encodeErr = err
 			}
 		}
-		if f != nil {
-			_ = f.Close()
-		}
-		switch {
-		case initErr != nil:
-			errCh <- initErr
-		case encodeErr != nil:
+		if encodeErr != nil {
 			errCh <- encodeErr
-		default:
-			errCh <- nil
+			return
 		}
+		errCh <- nil
 	}()
 	return path, func() error { return <-errCh }
-}
-
-func sessionArtifactsBaseDir(sessionsDir string, taskCtx *launcher.TaskContext) string {
-	if taskCtx != nil {
-		if repoRoot := strings.TrimSpace(taskCtx.RepoRoot); repoRoot != "" {
-			return filepath.Join(repoRoot, ".workbuddy", "sessions")
-		}
-		if workDir := strings.TrimSpace(taskCtx.WorkDir); workDir != "" {
-			return filepath.Join(workDir, ".workbuddy", "sessions")
-		}
-	}
-	if sessionsDir != "" {
-		return sessionsDir
-	}
-	return ".workbuddy/sessions"
 }
 
 // addClaimReaction adds an eyes reaction to the issue to signal an agent claimed it.

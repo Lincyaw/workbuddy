@@ -74,6 +74,7 @@ type TaskContext struct {
 	Session        SessionContext
 	RelatedPRs     []PRSummary
 	RelatedPRsText string
+	sessionHandle  *ManagedSession
 }
 
 type IssueContext struct {
@@ -108,8 +109,25 @@ type PRContext struct {
 
 type SessionContext struct {
 	ID         string
+	TaskID     string
+	WorkerID   string
+	Attempt    int
 	PreLabels  []string
 	PostLabels []string
+}
+
+func (t *TaskContext) SessionHandle() *ManagedSession {
+	if t == nil {
+		return nil
+	}
+	return t.sessionHandle
+}
+
+func (t *TaskContext) SetSessionHandle(handle *ManagedSession) {
+	if t == nil {
+		return
+	}
+	t.sessionHandle = handle
 }
 
 type SessionRef struct {

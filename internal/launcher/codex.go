@@ -51,6 +51,15 @@ type codexSession struct {
 }
 
 func newCodexSession(agent *config.AgentConfig, task *TaskContext, prompt string) *codexSession {
+	if task != nil && task.SessionHandle() != nil {
+		return &codexSession{
+			agent:       agent,
+			task:        task,
+			prompt:      prompt,
+			lastMsgPath: filepath.Join(task.SessionHandle().Dir(), "codex-last-message.txt"),
+			stdoutPath:  task.SessionHandle().StdoutPath(),
+		}
+	}
 	baseDir := task.RepoRoot
 	if baseDir == "" {
 		baseDir = task.WorkDir
@@ -72,8 +81,10 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 	if s.cachedResult != nil {
 		return s.cachedResult, nil
 	}
-	if err := os.MkdirAll(filepath.Dir(s.stdoutPath), 0o755); err != nil {
-		return nil, fmt.Errorf("launcher: codex-exec: create artifact dir: %w", err)
+	if s.task.SessionHandle() == nil {
+		if err := os.MkdirAll(filepath.Dir(s.stdoutPath), 0o755); err != nil {
+			return nil, fmt.Errorf("launcher: codex-exec: create artifact dir: %w", err)
+		}
 	}
 
 	timeout := s.agent.Timeout
@@ -101,11 +112,14 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 		return nil, fmt.Errorf("launcher: codex-exec: stderr pipe: %w", err)
 	}
 
-	stdoutFile, err := os.Create(s.stdoutPath)
-	if err != nil {
-		return nil, fmt.Errorf("launcher: codex-exec: create stdout artifact: %w", err)
+	var stdoutFile *os.File
+	if s.task.SessionHandle() == nil {
+		stdoutFile, err = os.Create(s.stdoutPath)
+		if err != nil {
+			return nil, fmt.Errorf("launcher: codex-exec: create stdout artifact: %w", err)
+		}
+		defer func() { _ = stdoutFile.Close() }()
 	}
-	defer func() { _ = stdoutFile.Close() }()
 
 	// Debug: log arg/env sizes to diagnose E2BIG
 	argSize := 0
@@ -139,8 +153,15 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 			line := scanner.Text()
 			stdoutBuf.WriteString(line)
 			stdoutBuf.WriteByte('\n')
-			_, _ = stdoutFile.WriteString(line + "\n")
+			if stdoutFile != nil {
+				_, _ = stdoutFile.WriteString(line + "\n")
+			} else if handle := s.task.SessionHandle(); handle != nil {
+				_ = handle.WriteStdout([]byte(line + "\n"))
+			}
 			for _, evt := range mapper.Map([]byte(line), &seq) {
+				if handle := s.task.SessionHandle(); handle != nil {
+					_ = persistToolCallEvent(handle, "codex", evt)
+				}
 				if events != nil {
 					events <- evt
 				}
@@ -157,6 +178,9 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 
 	runErr := cmd.Wait()
 	wg.Wait()
+	if handle := s.task.SessionHandle(); handle != nil && stderrBuf.Len() > 0 {
+		_ = handle.WriteStderr(stderrBuf.Bytes())
+	}
 	duration := time.Since(start)
 
 	// The stdout pipe may be closed when the child process exits; that is the

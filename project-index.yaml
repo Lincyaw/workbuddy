@@ -451,7 +451,7 @@ requirements:
       cancelling, and duplicate prevention.
     priority: P1
     version: v0.2.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-008-1: 为每次 agent 执行创建唯一 session ID (格式: sess-YYYYMMDD-<random>)"
       - "AC-008-2: 维护 session 状态：pending → running → completed/failed/cancelled/timeout"
@@ -461,8 +461,23 @@ requirements:
       - "AC-008-6: 防止同一 Issue 同时运行多个同类 agent 实例"
       - "AC-008-7: 所有数据持久化到 SQLite sessions 表"
       - "AC-008-8: 单元测试：创建/查询/取消/重复检测 4 种场景"
-    code: []
-    tests: []
+    code:
+      - cmd/serve.go
+      - internal/audit/audit.go
+      - internal/launcher/claude_stream.go
+      - internal/launcher/codex.go
+      - internal/launcher/launcher.go
+      - internal/launcher/process.go
+      - internal/launcher/session_manager.go
+      - internal/launcher/types.go
+      - internal/store/store.go
+      - internal/store/types.go
+    tests:
+      - cmd/serve_test.go
+      - internal/launcher/claude_stream_test.go
+      - internal/launcher/codex_test.go
+      - internal/launcher/session_manager_test.go
+      - internal/store/store_test.go
     deps: [REQ-024]
 
   # ============================================================

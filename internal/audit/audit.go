@@ -140,44 +140,23 @@ func (a *Auditor) RecordLabelValidation(repo string, issueNum int, payload Label
 
 // Query returns sessions matching the given filter.
 func (a *Auditor) Query(filter Filter) ([]store.AgentSession, error) {
-	q := `SELECT s.id, s.session_id, s.task_id, s.repo, s.issue_num, s.agent_name, s.summary, s.raw_path, s.created_at,
-	             COALESCE(t.status, '') AS task_status
-	      FROM agent_sessions s
-	      LEFT JOIN task_queue t ON s.task_id = t.id
-	      WHERE 1=1`
-	var args []any
-
-	if filter.SessionID != "" {
-		q += " AND s.session_id = ?"
-		args = append(args, filter.SessionID)
-	}
-	if filter.IssueNum != 0 {
-		q += " AND s.issue_num = ?"
-		args = append(args, filter.IssueNum)
-	}
-	if filter.AgentName != "" {
-		q += " AND s.agent_name = ?"
-		args = append(args, filter.AgentName)
-	}
-	q += " ORDER BY s.id"
-
-	rows, err := a.store.DB().Query(q, args...)
+	sessions, err := a.store.ListAgentSessions(store.SessionFilter{
+		IssueNum:  filter.IssueNum,
+		AgentName: filter.AgentName,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("audit: query sessions: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
-
-	var out []store.AgentSession
-	for rows.Next() {
-		var s store.AgentSession
-		var createdAt string
-		if err := rows.Scan(&s.ID, &s.SessionID, &s.TaskID, &s.Repo, &s.IssueNum,
-			&s.AgentName, &s.Summary, &s.RawPath, &createdAt, &s.TaskStatus); err != nil {
-			return nil, fmt.Errorf("audit: scan session: %w", err)
-		}
-		out = append(out, s)
+	if filter.SessionID == "" {
+		return sessions, nil
 	}
-	return out, rows.Err()
+	var out []store.AgentSession
+	for _, session := range sessions {
+		if session.SessionID == filter.SessionID {
+			out = append(out, session)
+		}
+	}
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------

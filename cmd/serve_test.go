@@ -262,6 +262,8 @@ func newWorkerTestDeps(t *testing.T, rt *mockRuntime, readers ...issueLabelReade
 
 	lnch := launcher.NewLauncher()
 	lnch.Register(rt, config.RuntimeClaudeCode, config.RuntimeClaudeShot)
+	sessionsDir := filepath.Join(t.TempDir(), ".workbuddy", "sessions")
+	lnch.SetSessionManager(launcher.NewSessionManager(sessionsDir, st))
 
 	var issueReader issueLabelReader
 	if len(readers) > 0 {
@@ -278,7 +280,7 @@ func newWorkerTestDeps(t *testing.T, rt *mockRuntime, readers ...issueLabelReade
 		cfg:          &config.FullConfig{Workflows: map[string]*config.WorkflowConfig{"dev-workflow": {MaxRetries: 3}}},
 		runningTasks: NewRunningTasks(),
 		closedIssues: &closedIssues{},
-		sessionsDir:  filepath.Join(t.TempDir(), ".workbuddy", "sessions"),
+		sessionsDir:  sessionsDir,
 		issueReader:  issueReader,
 	}, st
 }
@@ -295,6 +297,8 @@ func newWorkerTestDepsWithComments(t *testing.T, rt *mockRuntime, readers ...iss
 
 	lnch := launcher.NewLauncher()
 	lnch.Register(rt, config.RuntimeClaudeCode, config.RuntimeClaudeShot)
+	sessionsDir := filepath.Join(t.TempDir(), ".workbuddy", "sessions")
+	lnch.SetSessionManager(launcher.NewSessionManager(sessionsDir, st))
 
 	var issueReader issueLabelReader
 	if len(readers) > 0 {
@@ -312,7 +316,7 @@ func newWorkerTestDepsWithComments(t *testing.T, rt *mockRuntime, readers ...iss
 		cfg:          &config.FullConfig{Workflows: map[string]*config.WorkflowConfig{"dev-workflow": {MaxRetries: 3}}},
 		runningTasks: NewRunningTasks(),
 		closedIssues: &closedIssues{},
-		sessionsDir:  filepath.Join(t.TempDir(), ".workbuddy", "sessions"),
+		sessionsDir:  sessionsDir,
 		issueReader:  issueReader,
 	}, st, comments
 }
@@ -1576,8 +1580,19 @@ func TestStreamSessionEventsUsesRepoRoot(t *testing.T) {
 		WorkDir:  workDir,
 		Session:  launcher.SessionContext{ID: "session-123"},
 	}
+	manager := launcher.NewSessionManager(filepath.Join(repoRoot, ".workbuddy", "sessions"), nil)
+	handle, err := manager.Create(launcher.SessionCreateInput{
+		SessionID: taskCtx.Session.ID,
+		Repo:      "owner/repo",
+		IssueNum:  1,
+		AgentName: "dev-agent",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	taskCtx.SetSessionHandle(handle)
 	eventsCh := make(chan launcherevents.Event, 1)
-	path, wait := streamSessionEvents(filepath.Join(t.TempDir(), "ignored", ".workbuddy", "sessions"), taskCtx, eventsCh)
+	path, wait := streamSessionEvents(taskCtx, eventsCh)
 	eventsCh <- launcherevents.Event{Kind: launcherevents.KindLog}
 	close(eventsCh)
 	if err := wait(); err != nil {
