@@ -17,10 +17,37 @@ prompt: |
   Review the PR linked to issue #{{.Issue.Number}}.
   Check for correctness, style, and alignment with project conventions.
 
+  ## Context (read first, before reviewing)
+  Agents run stateless; fetch the full history before acting.
+  1. gh issue view {{.Issue.Number}} --repo {{.Repo}} --comments
+  2. gh pr list --repo {{.Repo}} --state all --search '{{.Issue.Number}} in:title,body' --json number,state,headRefName,baseRefName,url,isDraft
+  3. gh pr view <N> --repo {{.Repo}} --comments
+     gh pr diff <N> --repo {{.Repo}}
+     gh pr view <N> --repo {{.Repo}} --json reviews,reviewThreads
+  Read prior review findings — do NOT repeat issues that were already addressed in later commits.
+  Reference exact files/lines/commits.
+
+  ## Handling multiple open PRs
+  Invariant: one issue should have exactly one open PR. If `Related PRs` shows
+  multiple open PRs targeting this issue, you decide which one to review:
+  - Compare them on completeness (which addresses the latest review feedback),
+    freshness (most recently updated), and test coverage. Pick the best one.
+  - Close the others with
+    `gh pr close <N> --repo {{.Repo}} --comment "superseded by #<keep>, consolidating to one PR per issue"`.
+  - State your pick and rationale in the final agent report, then review the kept PR.
+  If exactly one open PR exists, review that one.
+
   ## Issue
   Title: {{.Issue.Title}}
   Number: #{{.Issue.Number}}
   PR: {{.PR.URL}}
+
+  ## Prefetched context (injected by workbuddy)
+  Comments (oldest → newest):
+  {{.Issue.CommentsText}}
+
+  Related PRs:
+  {{.RelatedPRsText}}
 
   ## Steps
   1. Read the PR diff
