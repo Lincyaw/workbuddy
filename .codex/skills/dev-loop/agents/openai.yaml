@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dev Loop"
+  short_description: "Run a full implement-test-measure loop"
+  default_prompt: "Use $dev-loop to drive this task through implementation, testing, vibe-checking, review, and keep/discard measurement."
