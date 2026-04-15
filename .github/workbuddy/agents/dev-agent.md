@@ -32,7 +32,7 @@ command: >
   - If NO open PR targets this issue: create a new draft PR at the end.
   - If exactly ONE open PR targets this issue: check out its head branch
     (`git fetch origin <headRefName> && git checkout <headRefName>`) and push
-  follow-up commits that address outstanding review/test feedback.
+    follow-up commits that address outstanding review/test feedback.
   - If MULTIPLE open PRs target this issue: you decide which one to keep.
     Typically prefer the PR that (a) contains commits addressing the most
     recent review feedback, (b) has larger/more complete changes, or
