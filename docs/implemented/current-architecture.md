@@ -27,7 +27,7 @@
 5. Poller 事件进入 state machine。
 6. 进入带 `agent` 的状态时，state machine 发出 dispatch request。
 7. Router 创建 task，并通过 Go channel 发送给进程内 worker。
-8. Worker 调用 launcher 运行 agent 子进程。
+8. Worker 调用 launcher 运行 agent 子进程；不同 issue 可以并行执行，但同一 `repo#issue` 仍严格串行，并受 `--max-parallel-tasks` 全局限流。
 9. 结果写回 reporter、audit、store，并通过 `/sessions` 可查看。
 
 关键代码：

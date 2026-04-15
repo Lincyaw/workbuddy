@@ -187,6 +187,102 @@ func (m *mockCommentWriter) Comments() []string {
 	return append([]string(nil), m.comments...)
 }
 
+func setupFakeGHCLI(t *testing.T) {
+	t.Helper()
+	fakeBin := t.TempDir()
+	ghPath := filepath.Join(fakeBin, "gh")
+	writeFile(t, ghPath, "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(ghPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func newWorkerTestDeps(t *testing.T, rt *mockRuntime) (*workerDeps, *store.Store) {
+	t.Helper()
+	setupFakeGHCLI(t)
+
+	st, err := store.NewStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	lnch := launcher.NewLauncher()
+	lnch.Register(rt, config.RuntimeClaudeCode, config.RuntimeClaudeShot)
+
+	return &workerDeps{
+		launcher:     lnch,
+		auditor:      audit.NewAuditor(st, filepath.Join(t.TempDir(), "archive")),
+		reporter:     reporter.NewReporter(&mockCommentWriter{}),
+		store:        st,
+		sm:           statemachine.NewStateMachine(nil, st, nil, eventlog.NewEventLogger(st)),
+		workerID:     "worker-1",
+		cfg:          &config.FullConfig{Workflows: map[string]*config.WorkflowConfig{"dev-workflow": {MaxRetries: 3}}},
+		runningTasks: NewRunningTasks(),
+		sessionsDir:  filepath.Join(t.TempDir(), ".workbuddy", "sessions"),
+	}, st
+}
+
+func newWorkerTestTask(t *testing.T, st *store.Store, repo string, issueNum int, taskID string) router.WorkerTask {
+	t.Helper()
+
+	if err := st.InsertTask(store.TaskRecord{
+		ID:        taskID,
+		Repo:      repo,
+		IssueNum:  issueNum,
+		AgentName: "dev-agent",
+		Status:    store.TaskStatusRunning,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     repo,
+		IssueNum: issueNum,
+		Labels:   `["workbuddy","status:developing"]`,
+		State:    "open",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	return router.WorkerTask{
+		TaskID:    taskID,
+		Repo:      repo,
+		IssueNum:  issueNum,
+		AgentName: "dev-agent",
+		Agent: &config.AgentConfig{
+			Name:    "dev-agent",
+			Runtime: config.RuntimeClaudeCode,
+			Prompt:  "test prompt",
+		},
+		Workflow: "dev-workflow",
+		State:    "developing",
+		Context: &launcher.TaskContext{
+			Repo:    repo,
+			WorkDir: t.TempDir(),
+			Issue: launcher.IssueContext{
+				Number: issueNum,
+				Title:  fmt.Sprintf("Issue %d", issueNum),
+			},
+			Session: launcher.SessionContext{ID: "session-" + taskID},
+		},
+	}
+}
+
+func taskStatusesByID(t *testing.T, st *store.Store) map[string]string {
+	t.Helper()
+
+	tasks, err := st.QueryTasks("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := make(map[string]string, len(tasks))
+	for _, task := range tasks {
+		statuses[task.ID] = task.Status
+	}
+	return statuses
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -429,6 +525,232 @@ func TestRunningTasks_Concurrent(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+func TestRunEmbeddedWorker_ParallelAcrossIssues(t *testing.T) {
+	started := make(chan int, 2)
+	release := make(chan struct{})
+
+	mockRT := &mockRuntime{name: config.RuntimeClaudeCode, resultFn: func(_ context.Context, _ *config.AgentConfig, task *launcher.TaskContext) (*launcher.Result, error) {
+		started <- task.Issue.Number
+		<-release
+		return &launcher.Result{
+			ExitCode: 0,
+			Duration: 50 * time.Millisecond,
+			Meta:     map[string]string{},
+		}, nil
+	}}
+	deps, st := newWorkerTestDeps(t, mockRT)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	taskCh := make(chan router.WorkerTask, 2)
+	done := make(chan struct{})
+	go func() {
+		runEmbeddedWorker(ctx, taskCh, deps, 2)
+		close(done)
+	}()
+
+	taskCh <- newWorkerTestTask(t, st, "owner/repo", 1, "task-1")
+	taskCh <- newWorkerTestTask(t, st, "owner/repo", 2, "task-2")
+	close(taskCh)
+
+	seen := map[int]bool{}
+	for len(seen) < 2 {
+		select {
+		case issueNum := <-started:
+			seen[issueNum] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("expected both issues to start concurrently, saw %v", seen)
+		}
+	}
+
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("embedded worker did not exit after completing tasks")
+	}
+
+	statuses := taskStatusesByID(t, st)
+	if statuses["task-1"] != store.TaskStatusCompleted {
+		t.Fatalf("task-1 status = %q, want %q", statuses["task-1"], store.TaskStatusCompleted)
+	}
+	if statuses["task-2"] != store.TaskStatusCompleted {
+		t.Fatalf("task-2 status = %q, want %q", statuses["task-2"], store.TaskStatusCompleted)
+	}
+}
+
+func TestRunEmbeddedWorker_SerializesTasksWithinIssue(t *testing.T) {
+	firstStarted := make(chan struct{}, 1)
+	secondStarted := make(chan struct{}, 1)
+	releaseFirst := make(chan struct{})
+	releaseSecond := make(chan struct{})
+
+	var mu sync.Mutex
+	callCount := 0
+	mockRT := &mockRuntime{name: config.RuntimeClaudeCode, resultFn: func(_ context.Context, _ *config.AgentConfig, _ *launcher.TaskContext) (*launcher.Result, error) {
+		mu.Lock()
+		callCount++
+		callNum := callCount
+		mu.Unlock()
+
+		switch callNum {
+		case 1:
+			firstStarted <- struct{}{}
+			<-releaseFirst
+		case 2:
+			secondStarted <- struct{}{}
+			<-releaseSecond
+		default:
+			t.Fatalf("unexpected runtime call %d", callNum)
+		}
+
+		return &launcher.Result{
+			ExitCode: 0,
+			Duration: 50 * time.Millisecond,
+			Meta:     map[string]string{},
+		}, nil
+	}}
+	deps, st := newWorkerTestDeps(t, mockRT)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	taskCh := make(chan router.WorkerTask, 2)
+	done := make(chan struct{})
+	go func() {
+		runEmbeddedWorker(ctx, taskCh, deps, 2)
+		close(done)
+	}()
+
+	taskCh <- newWorkerTestTask(t, st, "owner/repo", 7, "task-1")
+	taskCh <- newWorkerTestTask(t, st, "owner/repo", 7, "task-2")
+	close(taskCh)
+
+	select {
+	case <-firstStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first task did not start")
+	}
+
+	select {
+	case <-secondStarted:
+		t.Fatal("second task started before the first one completed")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	close(releaseFirst)
+
+	select {
+	case <-secondStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second task did not start after the first one completed")
+	}
+
+	close(releaseSecond)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("embedded worker did not exit after serial tasks completed")
+	}
+
+	statuses := taskStatusesByID(t, st)
+	if statuses["task-1"] != store.TaskStatusCompleted {
+		t.Fatalf("task-1 status = %q, want %q", statuses["task-1"], store.TaskStatusCompleted)
+	}
+	if statuses["task-2"] != store.TaskStatusCompleted {
+		t.Fatalf("task-2 status = %q, want %q", statuses["task-2"], store.TaskStatusCompleted)
+	}
+}
+
+func TestRunEmbeddedWorker_CancelOnlyStopsMatchingIssue(t *testing.T) {
+	started := make(chan int, 2)
+	cancelled := make(chan int, 1)
+	releaseIssue2 := make(chan struct{})
+
+	mockRT := &mockRuntime{name: config.RuntimeClaudeCode, resultFn: func(ctx context.Context, _ *config.AgentConfig, task *launcher.TaskContext) (*launcher.Result, error) {
+		started <- task.Issue.Number
+		switch task.Issue.Number {
+		case 1:
+			<-ctx.Done()
+			cancelled <- task.Issue.Number
+			return nil, ctx.Err()
+		case 2:
+			<-releaseIssue2
+			return &launcher.Result{
+				ExitCode: 0,
+				Duration: 50 * time.Millisecond,
+				Meta:     map[string]string{},
+			}, nil
+		default:
+			t.Fatalf("unexpected issue number %d", task.Issue.Number)
+			return nil, nil
+		}
+	}}
+	deps, st := newWorkerTestDeps(t, mockRT)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	taskCh := make(chan router.WorkerTask, 2)
+	done := make(chan struct{})
+	go func() {
+		runEmbeddedWorker(ctx, taskCh, deps, 2)
+		close(done)
+	}()
+
+	taskCh <- newWorkerTestTask(t, st, "owner/repo", 1, "task-1")
+	taskCh <- newWorkerTestTask(t, st, "owner/repo", 2, "task-2")
+	close(taskCh)
+
+	seen := map[int]bool{}
+	for len(seen) < 2 {
+		select {
+		case issueNum := <-started:
+			seen[issueNum] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("expected both issues to start before cancel, saw %v", seen)
+		}
+	}
+
+	if !deps.runningTasks.Cancel("owner/repo", 1) {
+		t.Fatal("expected cancel for issue #1 to succeed")
+	}
+
+	select {
+	case issueNum := <-cancelled:
+		if issueNum != 1 {
+			t.Fatalf("cancelled issue = %d, want 1", issueNum)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("issue #1 task was not cancelled")
+	}
+
+	select {
+	case <-time.After(250 * time.Millisecond):
+	case issueNum := <-cancelled:
+		t.Fatalf("unexpected additional cancellation for issue #%d", issueNum)
+	}
+
+	close(releaseIssue2)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("embedded worker did not exit after cancel test")
+	}
+
+	statuses := taskStatusesByID(t, st)
+	if statuses["task-1"] != store.TaskStatusFailed {
+		t.Fatalf("task-1 status = %q, want %q", statuses["task-1"], store.TaskStatusFailed)
+	}
+	if statuses["task-2"] != store.TaskStatusCompleted {
+		t.Fatalf("task-2 status = %q, want %q", statuses["task-2"], store.TaskStatusCompleted)
+	}
 }
 
 func TestExecuteTask_PersistsPartialResultOnRunError(t *testing.T) {
