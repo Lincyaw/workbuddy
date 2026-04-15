@@ -123,9 +123,6 @@ func (s *ghaSession) resultFromOutcome(outcome *gha.Outcome, duration time.Durat
 			"run_url": outcome.Run.HTMLURL,
 		},
 	}
-	if result.SessionPath == "" {
-		result.SessionPath = outcome.LogPath
-	}
 
 	switch outcome.Run.Conclusion {
 	case "", "success":

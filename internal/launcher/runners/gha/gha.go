@@ -74,6 +74,13 @@ type Run struct {
 	CreatedAt  time.Time
 }
 
+type dispatchResult struct {
+	RunID   int64
+	RunURL  string
+	APIURL  string
+	LogsURL string
+}
+
 type Outcome struct {
 	Run                  Run
 	LogPath              string
@@ -111,10 +118,11 @@ func (c *Client) RunWorkflow(ctx context.Context, cfg Config) (*Outcome, error) 
 	}
 
 	dispatchedAt := c.now().UTC().Add(-2 * time.Second)
-	if err := c.dispatch(ctx, cfg); err != nil {
+	dispatchRun, err := c.dispatch(ctx, cfg)
+	if err != nil {
 		return nil, err
 	}
-	run, err := c.waitForRun(ctx, cfg, dispatchedAt)
+	run, err := c.waitForRun(ctx, cfg, dispatchedAt, dispatchRun)
 	if err != nil {
 		return nil, err
 	}
@@ -139,110 +147,70 @@ func (c *Client) RunWorkflow(ctx context.Context, cfg Config) (*Outcome, error) 
 	}, nil
 }
 
-func (c *Client) dispatch(ctx context.Context, cfg Config) error {
+func (c *Client) dispatch(ctx context.Context, cfg Config) (dispatchResult, error) {
 	args := []string{
 		"api", "-X", "POST",
 		fmt.Sprintf("repos/%s/actions/workflows/%s/dispatches", cfg.Repo, cfg.Workflow),
 		"-f", "ref=" + cfg.Ref,
+		"-f", "return_run_details=true",
 		"-f", "inputs[repo]=" + cfg.Repo,
 		"-f", fmt.Sprintf("inputs[issue]=%d", cfg.IssueNumber),
 		"-f", "inputs[agent]=" + cfg.AgentName,
 		"-f", "inputs[session_id]=" + cfg.SessionID,
 	}
-	if _, err := c.runner.Run(ctx, nil, args...); err != nil {
-		return fmt.Errorf("gha: dispatch workflow %s: %w", cfg.Workflow, err)
+	out, err := c.runner.Run(ctx, nil, args...)
+	if err != nil {
+		return dispatchResult{}, fmt.Errorf("gha: dispatch workflow %s: %w", cfg.Workflow, err)
 	}
-	return nil
+	if len(bytes.TrimSpace(out)) == 0 {
+		return dispatchResult{}, fmt.Errorf("gha: dispatch workflow %s did not return run details", cfg.Workflow)
+	}
+	var payload struct {
+		ID      int64  `json:"id"`
+		HTMLURL string `json:"html_url"`
+		URL     string `json:"url"`
+		LogsURL string `json:"logs_url"`
+	}
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return dispatchResult{}, fmt.Errorf("gha: parse dispatch response: %w", err)
+	}
+	if payload.ID == 0 {
+		return dispatchResult{}, fmt.Errorf("gha: dispatch workflow %s did not return run id", cfg.Workflow)
+	}
+	return dispatchResult{
+		RunID:   payload.ID,
+		RunURL:  payload.HTMLURL,
+		APIURL:  payload.URL,
+		LogsURL: payload.LogsURL,
+	}, nil
 }
 
-func (c *Client) waitForRun(ctx context.Context, cfg Config, dispatchedAt time.Time) (Run, error) {
-	var run Run
-	var found bool
-	for {
-		select {
-		case <-ctx.Done():
-			return Run{}, fmt.Errorf("gha: wait for workflow run: %w", ctx.Err())
-		default:
-		}
-
-		runs, err := c.listRuns(ctx, cfg)
-		if err != nil {
-			return Run{}, err
-		}
-		run, found = newestRunSince(runs, dispatchedAt, cfg.Ref)
-		if found {
-			break
-		}
-		c.sleep(cfg.PollInterval)
+func (c *Client) waitForRun(ctx context.Context, cfg Config, dispatchedAt time.Time, dispatched dispatchResult) (Run, error) {
+	if dispatched.RunID == 0 {
+		return Run{}, fmt.Errorf("gha: workflow %s dispatch did not identify a run", cfg.Workflow)
 	}
-
 	for {
 		select {
 		case <-ctx.Done():
-			return Run{}, fmt.Errorf("gha: poll workflow run %d: %w", run.ID, ctx.Err())
+			return Run{}, fmt.Errorf("gha: poll workflow run %d: %w", dispatched.RunID, ctx.Err())
 		default:
 		}
-		detail, err := c.getRun(ctx, cfg.Repo, run.ID)
+		detail, err := c.getRun(ctx, cfg.Repo, dispatched.RunID)
 		if err != nil {
 			return Run{}, err
 		}
-		run = detail
+		if detail.ID == 0 {
+			return Run{}, fmt.Errorf("gha: workflow run %d returned empty metadata", dispatched.RunID)
+		}
+		run := detail
+		if run.CreatedAt.IsZero() && !dispatchedAt.IsZero() {
+			run.CreatedAt = dispatchedAt
+		}
 		if run.Status == "completed" {
 			return run, nil
 		}
 		c.sleep(cfg.PollInterval)
 	}
-}
-
-func (c *Client) listRuns(ctx context.Context, cfg Config) ([]Run, error) {
-	endpoint := fmt.Sprintf("repos/%s/actions/workflows/%s/runs?event=workflow_dispatch&per_page=20", cfg.Repo, cfg.Workflow)
-	if strings.TrimSpace(cfg.Ref) != "" {
-		endpoint += "&branch=" + cfg.Ref
-	}
-	out, err := c.runner.Run(ctx, nil, "api", endpoint)
-	if err != nil {
-		return nil, fmt.Errorf("gha: list workflow runs: %w", err)
-	}
-	var payload struct {
-		WorkflowRuns []struct {
-			ID         int64  `json:"id"`
-			HTMLURL    string `json:"html_url"`
-			Status     string `json:"status"`
-			Conclusion string `json:"conclusion"`
-			HeadBranch string `json:"head_branch"`
-			CreatedAt  string `json:"created_at"`
-		} `json:"workflow_runs"`
-	}
-	if err := json.Unmarshal(out, &payload); err != nil {
-		return nil, fmt.Errorf("gha: parse workflow runs: %w", err)
-	}
-	runs := make([]Run, 0, len(payload.WorkflowRuns))
-	for _, item := range payload.WorkflowRuns {
-		createdAt, _ := time.Parse(time.RFC3339, item.CreatedAt)
-		runs = append(runs, Run{
-			ID:         item.ID,
-			HTMLURL:    item.HTMLURL,
-			Status:     item.Status,
-			Conclusion: item.Conclusion,
-			HeadBranch: item.HeadBranch,
-			CreatedAt:  createdAt,
-		})
-	}
-	return runs, nil
-}
-
-func newestRunSince(runs []Run, since time.Time, branch string) (Run, bool) {
-	sort.Slice(runs, func(i, j int) bool { return runs[i].CreatedAt.After(runs[j].CreatedAt) })
-	for _, run := range runs {
-		if !run.CreatedAt.IsZero() && run.CreatedAt.Before(since) {
-			continue
-		}
-		if strings.TrimSpace(branch) != "" && run.HeadBranch != "" && run.HeadBranch != branch {
-			continue
-		}
-		return run, true
-	}
-	return Run{}, false
 }
 
 func (c *Client) getRun(ctx context.Context, repo string, runID int64) (Run, error) {
@@ -332,6 +300,9 @@ func (c *Client) downloadArtifacts(ctx context.Context, cfg Config, runID int64)
 				canonicalSessionPath = path
 			}
 		}
+	}
+	if canonicalSessionPath == "" {
+		return nil, "", "", fmt.Errorf("gha: run %d artifacts missing session capture (want events-v1.jsonl or codex-exec.jsonl)", runID)
 	}
 	return files, resultPath, canonicalSessionPath, nil
 }

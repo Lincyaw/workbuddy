@@ -409,7 +409,7 @@ requirements:
     status: tested
     acceptance_criteria:
       - "AC-007-1: 通过 `gh workflow run <workflow>.yml` 触发远程 workflow"
-      - "AC-007-2: 触发后通过 `gh run list` 获取 run ID"
+      - "AC-007-2: 触发后获取本次 workflow_dispatch 对应的精确 run ID"
       - "AC-007-3: 轮询 `gh run view` 等待 workflow 完成"
       - "AC-007-4: 完成后通过 `gh run view --log` 收集输出"
       - "AC-007-5: workflow 不存在或触发失败时返回明确错误"

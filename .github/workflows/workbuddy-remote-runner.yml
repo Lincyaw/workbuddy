@@ -1,4 +1,5 @@
 name: workbuddy-remote-runner
+run-name: workbuddy remote ${{ inputs.agent }} #${{ inputs.issue }} (${{ inputs.session_id }})
 
 on:
   workflow_dispatch:
@@ -52,8 +53,9 @@ jobs:
           # Replace this block with the repo-specific command that can execute
           # ${WORKBUDDY_AGENT} for ${WORKBUDDY_REPO}#${WORKBUDDY_ISSUE_NUMBER}.
           # The remote runner adapter looks for:
+          #   - events-v1.jsonl         (preferred canonical session artifact; required)
+          #   - codex-exec.jsonl        (runtime-native fallback if v1 stream is unavailable)
           #   - workbuddy-result.json   (optional result contract)
-          #   - events-v1.jsonl         (preferred canonical session artifact)
           #   - any runtime-native logs/artifacts you want to preserve
           printf '{"kind":"log","payload":{"stream":"stdout","line":"sample remote runner artifact"}}\n' > "${session_dir}/events-v1.jsonl"
           cat > "${session_dir}/workbuddy-result.json" <<JSON
