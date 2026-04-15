@@ -1032,7 +1032,7 @@ requirements:
       branch pruning.
     priority: P1
     version: v0.2.0
-    status: open
+    status: tested
     acceptance_criteria:
       - "AC-032-1: `workbuddy recover --dry-run` prints all actions it would take"
       - "AC-032-2: `workbuddy recover --kill-zombies` finds and terminates stale codex / workbuddy processes"
@@ -1041,6 +1041,10 @@ requirements:
       - "AC-032-5: Default invocation executes --kill-zombies --prune-worktrees --reset-db safely"
       - "AC-032-6: go build && go vet && go test -count=1 green after the change"
       - "AC-032-7: project-index.yaml REQ-032: status=tested"
-    code: []
-    tests: []
+    code:
+      - cmd/recover.go
+      - internal/recover/recover.go
+    tests:
+      - cmd/recover_test.go
+      - internal/recover/recover_test.go
     deps: []
