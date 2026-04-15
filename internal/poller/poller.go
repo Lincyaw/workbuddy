@@ -25,6 +25,10 @@ const (
 	EventPRCreated      = "pr_created"
 	EventPRStateChanged = "pr_state_changed"
 	EventIssueClosed    = "issue_closed"
+	// EventPollCycleDone is emitted at the end of every successful poll cycle.
+	// Consumers use it as a boundary signal — e.g. resetting per-cycle dedup
+	// state — and MUST NOT treat it as a per-issue event (IssueNum is 0).
+	EventPollCycleDone = "poll_cycle_done"
 )
 
 // ghListLimit is the maximum number of results returned by gh issue/pr list.
@@ -148,7 +152,10 @@ func (p *Poller) Run(ctx context.Context) error {
 }
 
 // poll performs a single poll cycle: list issues + PRs, diff against cache, emit events.
+// Always emits EventPollCycleDone before returning so consumers can use it as a
+// per-cycle boundary signal (e.g. to reset dedup state).
 func (p *Poller) poll(ctx context.Context) {
+	defer p.emit(ctx, ChangeEvent{Type: EventPollCycleDone, Repo: p.repo})
 	// --- Issues ---
 	issues, err := p.gh.ListIssues(p.repo)
 	if err != nil {

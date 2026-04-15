@@ -54,7 +54,8 @@ func testStore(t *testing.T) *store.Store {
 	return s
 }
 
-// drain reads all available events from the channel within a timeout.
+// drain reads all available events from the channel within a timeout, skipping
+// the per-cycle EventPollCycleDone sentinels (those are tested separately).
 func drain(ch <-chan ChangeEvent, timeout time.Duration) []ChangeEvent {
 	var out []ChangeEvent
 	timer := time.NewTimer(timeout)
@@ -64,6 +65,9 @@ func drain(ch <-chan ChangeEvent, timeout time.Duration) []ChangeEvent {
 		case ev, ok := <-ch:
 			if !ok {
 				return out
+			}
+			if ev.Type == EventPollCycleDone {
+				continue
 			}
 			out = append(out, ev)
 		case <-timer.C:
@@ -507,6 +511,37 @@ func TestIssueClosedDoesNotAffectPRs(t *testing.T) {
 	for _, ev := range events {
 		if ev.Type == EventIssueClosed {
 			t.Errorf("unexpected issue_closed event: %+v", ev)
+		}
+	}
+}
+
+// TestPollEmitsCycleDoneSentinel verifies that every successful poll cycle
+// ends with an EventPollCycleDone event so consumers can use it as a per-cycle
+// boundary signal (e.g. clearing dedup state in the state machine). Without
+// this, a label re-added in a later cycle would be silently deduped against
+// the original add, breaking review→developing retry loops.
+func TestPollEmitsCycleDoneSentinel(t *testing.T) {
+	st := testStore(t)
+	gh := &mockGHReader{
+		issues: []Issue{{Number: 1, Title: "x", State: "open", Labels: []string{"bug"}}},
+	}
+	p := NewPoller(gh, st, "owner/repo", time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = p.Run(ctx) }()
+
+	var sawCycleDone bool
+	timer := time.NewTimer(500 * time.Millisecond)
+	defer timer.Stop()
+	for !sawCycleDone {
+		select {
+		case ev := <-p.Events():
+			if ev.Type == EventPollCycleDone {
+				sawCycleDone = true
+			}
+		case <-timer.C:
+			t.Fatalf("did not observe EventPollCycleDone within timeout")
 		}
 	}
 }

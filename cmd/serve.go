@@ -471,6 +471,14 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 				if !ok {
 					return
 				}
+				// Handle poll-cycle boundary: clear state-machine dedup so events
+				// emitted in the next cycle aren't suppressed by stale per-cycle
+				// state. Without this, a label like status:developing that is
+				// re-added after a review bounce-back would be silently dropped.
+				if ev.Type == poller.EventPollCycleDone {
+					sm.ResetDedup()
+					continue
+				}
 				// Handle issue closure: cancel running agent and skip state machine.
 				if ev.Type == poller.EventIssueClosed {
 					closedTracker.MarkClosed(ev.Repo, ev.IssueNum)
