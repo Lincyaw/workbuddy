@@ -1,0 +1,12 @@
+{"type":"task_started","task_id":"task-123","session_id":"thread-abc"}
+{"type":"agent_message_delta","message":"PO"}
+{"type":"agent_message","message":"PONG"}
+{"type":"agent_reasoning_delta","text":"thinking"}
+{"type":"exec_command_begin","call_id":"cmd-1","command":["bash","-lc","echo PONG"],"cwd":"/tmp/repo"}
+{"type":"exec_command_output_delta","call_id":"cmd-1","stream":"stdout","chunk":"PONG\n"}
+{"type":"exec_command_end","call_id":"cmd-1","exit_code":0,"duration_ms":12}
+{"type":"mcp_tool_call_begin","call_id":"tool-1","invocation":{"tool":"github.search","arguments":{"q":"issue 8"}}}
+{"type":"mcp_tool_call_end","call_id":"tool-1","is_error":false,"result":{"count":1}}
+{"type":"patch_apply_begin","patch":"diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n"}
+{"type":"token_count","input_tokens":11,"cached_input_tokens":2,"output_tokens":5}
+{"type":"task_complete"}

@@ -80,6 +80,29 @@ func TestReport_Failure(t *testing.T) {
 	}
 }
 
+func TestReport_PrefersLastMessage(t *testing.T) {
+	gh := &mockGHWriter{}
+	r := NewReporter(gh)
+
+	result := &launcher.Result{
+		ExitCode:    0,
+		LastMessage: "final answer",
+		Stdout:      "raw stdout",
+		Duration:    time.Second,
+	}
+
+	if err := r.Report("test/repo", 42, "dev-agent", result, "sess-last", "worker-1", 0, 3); err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	body := gh.comments[0]
+	if !strings.Contains(body, "final answer") {
+		t.Fatalf("expected last message in report: %s", body)
+	}
+	if strings.Contains(body, "raw stdout") {
+		t.Fatalf("expected stdout fallback not to be used: %s", body)
+	}
+}
+
 func TestReport_RetryOnGHFailure(t *testing.T) {
 	gh := &mockGHWriter{failN: 1} // first call fails, second succeeds
 	r := NewReporter(gh)

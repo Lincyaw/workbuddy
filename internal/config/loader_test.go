@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // helper to create a temp config directory with files.
@@ -35,6 +36,26 @@ command: "claude -p 'do stuff'"
 timeout: 30m
 ---
 ## Dev Agent
+`
+
+const validCodexAgent = `---
+name: codex-dev-agent
+description: Codex dev agent
+triggers:
+  - label: "status:developing"
+    event: labeled
+role: dev
+runtime: codex
+policy:
+  sandbox: danger-full-access
+  approval: never
+  model: gpt-5.4
+  timeout: 25m
+prompt: |
+  solve issue {{.Issue.Number}}
+command: "codex exec legacy"
+---
+## Codex Agent
 `
 
 const validWorkflow = `---
@@ -80,9 +101,10 @@ port: 8080
 // Test 1: Normal parse — agents, workflows, and global config all load correctly.
 func TestLoadConfig_NormalParse(t *testing.T) {
 	dir := setupConfigDir(t, map[string]string{
-		"config.yaml":              validGlobalConfig,
-		"agents/dev-agent.md":      validAgent,
-		"workflows/feature-dev.md": validWorkflow,
+		"config.yaml":               validGlobalConfig,
+		"agents/dev-agent.md":       validAgent,
+		"agents/codex-dev-agent.md": validCodexAgent,
+		"workflows/feature-dev.md":  validWorkflow,
 	})
 
 	cfg, warnings, err := LoadConfig(dir)
@@ -110,6 +132,23 @@ func TestLoadConfig_NormalParse(t *testing.T) {
 		t.Errorf("agent runtime = %q, want %q", agent.Runtime, "claude-code")
 	}
 
+	codexAgent, ok := cfg.Agents["codex-dev-agent"]
+	if !ok {
+		t.Fatal("agent 'codex-dev-agent' not found")
+	}
+	if codexAgent.Runtime != RuntimeCodexExec {
+		t.Errorf("codex runtime = %q, want %q", codexAgent.Runtime, RuntimeCodexExec)
+	}
+	if codexAgent.Policy.Model != "gpt-5.4" {
+		t.Errorf("codex model = %q", codexAgent.Policy.Model)
+	}
+	if codexAgent.Timeout != 25*time.Minute {
+		t.Errorf("codex timeout = %s", codexAgent.Timeout)
+	}
+	if strings.TrimSpace(codexAgent.Prompt) == "" {
+		t.Fatal("expected prompt to be parsed")
+	}
+
 	// Check workflow.
 	wf, ok := cfg.Workflows["feature-dev"]
 	if !ok {
@@ -125,6 +164,65 @@ func TestLoadConfig_NormalParse(t *testing.T) {
 	// Agent label matches workflow enter_label, so no warning expected.
 	if len(warnings) != 0 {
 		t.Errorf("expected 0 warnings, got %d: %v", len(warnings), warnings)
+	}
+}
+
+func TestNormalizeAgentConfig_RejectsUnsupportedCodexExecApproval(t *testing.T) {
+	agent := &AgentConfig{
+		Name:    "codex-agent",
+		Runtime: RuntimeCodex,
+		Prompt:  "do work",
+		Policy: PolicyConfig{
+			Sandbox:  "danger-full-access",
+			Approval: "via-approver",
+		},
+	}
+
+	_, err := NormalizeAgentConfig(agent)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), `unsupported policy.approval "via-approver"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNormalizeAgentConfig_ClaudeWorkspaceWriteWarns(t *testing.T) {
+	agent := &AgentConfig{
+		Name:    "claude-agent",
+		Runtime: RuntimeClaudeCode,
+		Command: "echo hello",
+		Policy: PolicyConfig{
+			Sandbox:  "workspace-write",
+			Approval: "never",
+		},
+	}
+
+	warnings, err := NormalizeAgentConfig(agent)
+	if err != nil {
+		t.Fatalf("NormalizeAgentConfig: %v", err)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %d, want 1", len(warnings))
+	}
+	if !strings.Contains(warnings[0].Message, "workspace-write") {
+		t.Fatalf("warning = %q", warnings[0].Message)
+	}
+}
+
+func TestNormalizeAgentConfig_CodexAppServerAllowsViaApprover(t *testing.T) {
+	agent := &AgentConfig{
+		Name:    "appserver-agent",
+		Runtime: RuntimeCodexServer,
+		Prompt:  "hello",
+		Policy: PolicyConfig{
+			Sandbox:  "workspace-write",
+			Approval: "via-approver",
+		},
+	}
+
+	if _, err := NormalizeAgentConfig(agent); err != nil {
+		t.Fatalf("NormalizeAgentConfig: %v", err)
 	}
 }
 
@@ -538,5 +636,102 @@ states:
 	}
 	if failedState.EnterLabel != LabelFailed {
 		t.Errorf("failed state enter_label = %q, want %q", failedState.EnterLabel, LabelFailed)
+	}
+}
+
+func TestLoadConfig_CodexPolicyNormalize(t *testing.T) {
+	agent := `---
+name: codex-agent
+description: Codex agent
+triggers:
+  - label: "status:developing"
+    event: labeled
+role: dev
+runtime: codex
+policy:
+  sandbox: danger-full-access
+  approval: on-request
+  model: gpt-5.4
+  timeout: 45m
+prompt: |
+  implement issue {{.Issue.Number}}
+command: |
+  codex exec "compat"
+---
+## Agent
+`
+	dir := setupConfigDir(t, map[string]string{"agents/codex.md": agent, "workflows/feature-dev.md": validWorkflow})
+	cfg, warnings, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
+	}
+	got := cfg.Agents["codex-agent"]
+	if got.Runtime != RuntimeCodexExec {
+		t.Fatalf("runtime = %q", got.Runtime)
+	}
+	if got.Policy.Model != "gpt-5.4" || got.Policy.Approval != "on-request" || got.Policy.Sandbox != "danger-full-access" {
+		t.Fatalf("unexpected policy: %+v", got.Policy)
+	}
+	if got.Timeout != 45*time.Minute {
+		t.Fatalf("timeout = %s", got.Timeout)
+	}
+}
+
+func TestLoadConfig_UnsupportedPolicyMatrix(t *testing.T) {
+	agent := `---
+name: bad-agent
+description: Bad agent
+triggers:
+  - label: "status:developing"
+    event: labeled
+role: dev
+runtime: claude-code
+policy:
+  sandbox: read-only
+  approval: on-request
+command: "claude -p 'do stuff'"
+---
+## Agent
+`
+	dir := setupConfigDir(t, map[string]string{"agents/bad.md": agent})
+	_, _, err := LoadConfig(dir)
+	if err == nil {
+		t.Fatal("expected policy validation error")
+	}
+	if !strings.Contains(err.Error(), "unsupported policy.approval") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadConfig_CodexAppServerPolicyAccepted(t *testing.T) {
+	agent := `---
+name: future-agent
+description: Future agent
+triggers:
+  - label: "status:developing"
+    event: labeled
+role: dev
+runtime: codex-appserver
+policy:
+  sandbox: workspace-write
+  approval: via-approver
+prompt: |
+  implement issue {{.Issue.Number}}
+---
+## Agent
+`
+	dir := setupConfigDir(t, map[string]string{"agents/future.md": agent, "workflows/feature-dev.md": validWorkflow})
+	cfg, warnings, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
+	}
+	if cfg.Agents["future-agent"].Runtime != RuntimeCodexServer {
+		t.Fatalf("runtime = %q", cfg.Agents["future-agent"].Runtime)
 	}
 }

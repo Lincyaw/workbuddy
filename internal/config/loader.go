@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -20,11 +21,23 @@ func (w Warning) String() string {
 	return w.Message
 }
 
-// validRuntimes enumerates allowed agent runtime values.
+const (
+	RuntimeClaudeCode  = "claude-code"
+	RuntimeClaudeShot  = "claude-oneshot"
+	RuntimeCodex       = "codex"
+	RuntimeCodexExec   = "codex-exec"
+	RuntimeCodexServer = "codex-appserver"
+)
+
 var validRuntimes = map[string]bool{
-	"claude-code": true,
-	"codex":       true,
+	RuntimeClaudeCode:  true,
+	RuntimeClaudeShot:  true,
+	RuntimeCodex:       true,
+	RuntimeCodexExec:   true,
+	RuntimeCodexServer: true,
 }
+
+var publicRuntimes = []string{RuntimeClaudeCode, RuntimeCodex, RuntimeCodexServer}
 
 // LoadConfig loads the full configuration from the given config directory.
 // It returns the parsed config, a list of non-fatal warnings, and any error.
@@ -43,7 +56,6 @@ func LoadConfig(configDir string) (*FullConfig, []Warning, error) {
 	}
 	var warnings []Warning
 
-	// Load global config.yaml (optional — if present).
 	globalPath := filepath.Join(configDir, "config.yaml")
 	if data, err := os.ReadFile(globalPath); err == nil {
 		if err := yaml.Unmarshal(data, &cfg.Global); err != nil {
@@ -51,7 +63,6 @@ func LoadConfig(configDir string) (*FullConfig, []Warning, error) {
 		}
 	}
 
-	// Load agents.
 	agentsDir := filepath.Join(configDir, "agents")
 	if entries, err := os.ReadDir(agentsDir); err == nil {
 		for _, e := range entries {
@@ -59,15 +70,15 @@ func LoadConfig(configDir string) (*FullConfig, []Warning, error) {
 				continue
 			}
 			path := filepath.Join(agentsDir, e.Name())
-			agent, err := parseAgentFile(path)
+			agent, agentWarnings, err := parseAgentFile(path)
 			if err != nil {
 				return nil, nil, err
 			}
 			cfg.Agents[agent.Name] = agent
+			warnings = append(warnings, agentWarnings...)
 		}
 	}
 
-	// Load workflows.
 	workflowsDir := filepath.Join(configDir, "workflows")
 	if entries, err := os.ReadDir(workflowsDir); err == nil {
 		for _, e := range entries {
@@ -83,7 +94,6 @@ func LoadConfig(configDir string) (*FullConfig, []Warning, error) {
 		}
 	}
 
-	// Cross-config validations.
 	if err := validateWorkflowTriggerConflicts(cfg.Workflows); err != nil {
 		return nil, nil, err
 	}
@@ -105,57 +115,150 @@ func parseFrontmatter(data []byte) (frontmatter []byte, body string, err error) 
 		return nil, "", fmt.Errorf("missing closing YAML frontmatter delimiter")
 	}
 	fm := rest[:idx]
-	body = rest[idx+4:] // skip "\n---"
+	body = rest[idx+4:]
 	return []byte(fm), body, nil
 }
 
-// yamlCodeBlockRe matches the first ```yaml ... ``` code block.
 var yamlCodeBlockRe = regexp.MustCompile("(?s)```yaml\\s*\n(.*?)```")
 
-// parseAgentFile parses an agent Markdown file with YAML frontmatter.
-func parseAgentFile(path string) (*AgentConfig, error) {
+func parseAgentFile(path string) (*AgentConfig, []Warning, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("config: %s: %w", path, err)
+		return nil, nil, fmt.Errorf("config: %s: %w", path, err)
 	}
 	fm, _, err := parseFrontmatter(data)
 	if err != nil {
-		return nil, fmt.Errorf("config: %s: %w", path, err)
+		return nil, nil, fmt.Errorf("config: %s: %w", path, err)
 	}
 
 	var agent AgentConfig
 	if err := yaml.Unmarshal(fm, &agent); err != nil {
-		return nil, fmt.Errorf("config: %s: %w", path, err)
+		return nil, nil, fmt.Errorf("config: %s: %w", path, err)
 	}
 
-	// Validate required fields.
 	fname := filepath.Base(path)
 	if agent.Name == "" {
-		return nil, fmt.Errorf("config: %s: missing required field \"name\"", fname)
+		return nil, nil, fmt.Errorf("config: %s: missing required field \"name\"", fname)
 	}
 	if len(agent.Triggers) == 0 {
-		return nil, fmt.Errorf("config: %s: missing required field \"triggers\"", fname)
+		return nil, nil, fmt.Errorf("config: %s: missing required field \"triggers\"", fname)
 	}
 	if agent.Role == "" {
-		return nil, fmt.Errorf("config: %s: missing required field \"role\"", fname)
+		return nil, nil, fmt.Errorf("config: %s: missing required field \"role\"", fname)
 	}
-	if agent.Command == "" {
-		return nil, fmt.Errorf("config: %s: missing required field \"command\"", fname)
+	if agent.Command == "" && strings.TrimSpace(agent.Prompt) == "" {
+		return nil, nil, fmt.Errorf("config: %s: missing required field \"command\" or \"prompt\"", fname)
 	}
 
-	// Default runtime.
 	if agent.Runtime == "" {
-		agent.Runtime = "claude-code"
+		agent.Runtime = RuntimeClaudeCode
 	}
 	if !validRuntimes[agent.Runtime] {
-		return nil, fmt.Errorf("config: %s: invalid runtime %q (valid: claude-code, codex)", fname, agent.Runtime)
+		return nil, nil, fmt.Errorf("config: %s: invalid runtime %q (valid: %s)", fname, agent.Runtime, strings.Join(publicRuntimes, ", "))
 	}
 
-	return &agent, nil
+	warnings, err := normalizeAgentConfig(&agent)
+	if err != nil {
+		return nil, nil, fmt.Errorf("config: %s: %w", fname, err)
+	}
+	return &agent, warnings, nil
 }
 
-// parseWorkflowFile parses a workflow Markdown file with YAML frontmatter
-// and an embedded YAML code block for states.
+// NormalizeAgentConfig applies runtime aliases/defaults and validates the
+// runtime/policy matrix for an ad hoc agent config.
+func NormalizeAgentConfig(agent *AgentConfig) ([]Warning, error) {
+	return normalizeAgentConfig(agent)
+}
+
+func normalizeAgentConfig(agent *AgentConfig) ([]Warning, error) {
+	var warnings []Warning
+
+	switch agent.Runtime {
+	case RuntimeCodex:
+		agent.Runtime = RuntimeCodexExec
+	}
+
+	if agent.Policy.Timeout > 0 {
+		agent.Timeout = agent.Policy.Timeout
+	}
+
+	if agent.Policy.Sandbox == "" {
+		agent.Policy.Sandbox = defaultSandboxForRuntime(agent.Runtime)
+	}
+	if agent.Policy.Approval == "" {
+		agent.Policy.Approval = defaultApprovalForRuntime(agent.Runtime)
+	}
+
+	if agent.Policy.Sandbox == "" {
+		return warnings, fmt.Errorf("policy.sandbox is required for runtime %q", agent.Runtime)
+	}
+	if agent.Policy.Approval == "" {
+		return warnings, fmt.Errorf("policy.approval is required for runtime %q", agent.Runtime)
+	}
+
+	switch agent.Runtime {
+	case RuntimeClaudeCode, RuntimeClaudeShot:
+		switch agent.Policy.Sandbox {
+		case "read-only", "danger-full-access":
+		case "workspace-write":
+			warnings = append(warnings, Warning{Message: fmt.Sprintf("agent %q: runtime %q does not support workspace-write sandbox; degrading to read-only semantics", agent.Name, agent.Runtime)})
+		default:
+			return warnings, fmt.Errorf("unsupported policy.sandbox %q for runtime %q", agent.Policy.Sandbox, agent.Runtime)
+		}
+		if agent.Policy.Approval != "never" {
+			return warnings, fmt.Errorf("unsupported policy.approval %q for runtime %q", agent.Policy.Approval, agent.Runtime)
+		}
+	case RuntimeCodexExec:
+		switch agent.Policy.Sandbox {
+		case "read-only", "workspace-write", "danger-full-access":
+		default:
+			return warnings, fmt.Errorf("unsupported policy.sandbox %q for runtime %q", agent.Policy.Sandbox, agent.Runtime)
+		}
+		switch agent.Policy.Approval {
+		case "never", "on-failure", "on-request":
+		default:
+			return warnings, fmt.Errorf("unsupported policy.approval %q for runtime %q", agent.Policy.Approval, agent.Runtime)
+		}
+	case RuntimeCodexServer:
+		switch agent.Policy.Sandbox {
+		case "read-only", "workspace-write", "danger-full-access":
+		default:
+			return warnings, fmt.Errorf("unsupported policy.sandbox %q for runtime %q", agent.Policy.Sandbox, agent.Runtime)
+		}
+		switch agent.Policy.Approval {
+		case "never", "on-failure", "on-request", "via-approver":
+		default:
+			return warnings, fmt.Errorf("unsupported policy.approval %q for runtime %q", agent.Policy.Approval, agent.Runtime)
+		}
+	default:
+		return warnings, fmt.Errorf("unsupported runtime %q", agent.Runtime)
+	}
+
+	return warnings, nil
+}
+
+func defaultSandboxForRuntime(runtime string) string {
+	switch runtime {
+	case RuntimeClaudeCode, RuntimeClaudeShot:
+		return "read-only"
+	case RuntimeCodexExec:
+		return "read-only"
+	case RuntimeCodexServer:
+		return "read-only"
+	default:
+		return ""
+	}
+}
+
+func defaultApprovalForRuntime(runtime string) string {
+	switch runtime {
+	case RuntimeClaudeCode, RuntimeClaudeShot, RuntimeCodexExec, RuntimeCodexServer:
+		return "never"
+	default:
+		return ""
+	}
+}
+
 func parseWorkflowFile(path string) (*WorkflowConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -171,12 +274,10 @@ func parseWorkflowFile(path string) (*WorkflowConfig, error) {
 		return nil, fmt.Errorf("config: %s: %w", path, err)
 	}
 
-	// Default max_retries.
 	if wf.MaxRetries == 0 {
 		wf.MaxRetries = 3
 	}
 
-	// Extract states from the first ```yaml code block.
 	fname := filepath.Base(path)
 	match := yamlCodeBlockRe.FindStringSubmatch(body)
 	if match == nil {
@@ -189,18 +290,14 @@ func parseWorkflowFile(path string) (*WorkflowConfig, error) {
 	}
 	wf.States = block.States
 
-	// Validate states and edges.
 	if err := validateStates(fname, &wf); err != nil {
 		return nil, err
 	}
 
-	// Auto-add failed state if workflow has back-edges but no failed state.
 	autoAddFailedState(&wf)
-
 	return &wf, nil
 }
 
-// validateStates checks the single-edge constraint on workflow states.
 func validateStates(fname string, wf *WorkflowConfig) error {
 	for stateName, state := range wf.States {
 		seen := make(map[string]bool)
@@ -215,41 +312,22 @@ func validateStates(fname string, wf *WorkflowConfig) error {
 	return nil
 }
 
-// autoAddFailedState adds a "failed" state if the workflow has back-edges
-// (a transition where To references a state that appears earlier or the same
-// state, indicating a cycle/retry) but no explicit "failed" state.
 func autoAddFailedState(wf *WorkflowConfig) {
 	if _, exists := wf.States[StateNameFailed]; exists {
 		return
 	}
-	// Check for back-edges: any transition whose To target is a state that
-	// also has outgoing transitions (i.e., not a terminal state), creating a cycle.
-	hasBackEdge := false
 	for _, state := range wf.States {
 		for _, t := range state.Transitions {
-			if target, ok := wf.States[t.To]; ok {
-				if len(target.Transitions) > 0 {
-					hasBackEdge = true
-					break
-				}
+			if target, ok := wf.States[t.To]; ok && len(target.Transitions) > 0 {
+				wf.States[StateNameFailed] = &State{EnterLabel: LabelFailed}
+				return
 			}
-		}
-		if hasBackEdge {
-			break
-		}
-	}
-
-	if hasBackEdge {
-		wf.States[StateNameFailed] = &State{
-			EnterLabel: LabelFailed,
 		}
 	}
 }
 
-// validateWorkflowTriggerConflicts checks that no two workflows share the
-// same trigger.issue_label.
 func validateWorkflowTriggerConflicts(workflows map[string]*WorkflowConfig) error {
-	seen := make(map[string]string) // label -> workflow name
+	seen := make(map[string]string)
 	for _, wf := range workflows {
 		label := wf.Trigger.IssueLabel
 		if label == "" {
@@ -263,10 +341,7 @@ func validateWorkflowTriggerConflicts(workflows map[string]*WorkflowConfig) erro
 	return nil
 }
 
-// checkAgentLabelConsistency returns warnings for agent trigger labels that
-// don't appear as enter_label in any workflow state.
 func checkAgentLabelConsistency(cfg *FullConfig) []Warning {
-	// Collect all enter_labels from workflows.
 	enterLabels := make(map[string]bool)
 	for _, wf := range cfg.Workflows {
 		for _, state := range wf.States {
@@ -277,12 +352,16 @@ func checkAgentLabelConsistency(cfg *FullConfig) []Warning {
 	}
 
 	var warnings []Warning
-	for _, agent := range cfg.Agents {
+	names := make([]string, 0, len(cfg.Agents))
+	for name := range cfg.Agents {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		agent := cfg.Agents[name]
 		for _, trigger := range agent.Triggers {
 			if trigger.Label != "" && !enterLabels[trigger.Label] {
-				warnings = append(warnings, Warning{
-					Message: fmt.Sprintf("agent %q trigger label %q does not match any workflow state enter_label", agent.Name, trigger.Label),
-				})
+				warnings = append(warnings, Warning{Message: fmt.Sprintf("agent %q trigger label %q does not match any workflow state enter_label", agent.Name, trigger.Label)})
 			}
 		}
 	}

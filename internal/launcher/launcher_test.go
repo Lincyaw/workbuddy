@@ -219,22 +219,29 @@ func TestLaunch_ClaudeCodeRuntime(t *testing.T) {
 
 // Test 8: codex runtime — verify the runtime is registered and works
 func TestLaunch_CodexRuntime(t *testing.T) {
+	restore := installFakeCodex(t)
+	defer restore()
+
 	launcher := NewLauncher()
 	task := newTestTask(t)
 
 	agent := &config.AgentConfig{
 		Name:    "codex-agent",
 		Runtime: "codex",
-		Command: `echo "codex output"`,
-		Timeout: 10 * time.Second,
+		Prompt:  "Reply with exactly PONG",
+		Policy: config.PolicyConfig{
+			Sandbox:  "read-only",
+			Approval: "never",
+		},
+		Timeout: 30 * time.Second,
 	}
 
 	result, err := launcher.Launch(context.Background(), agent, task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(result.Stdout, "codex output") {
-		t.Errorf("expected 'codex output' in stdout, got: %q", result.Stdout)
+	if result.LastMessage != "PONG" {
+		t.Errorf("expected last message 'PONG', got: %q", result.LastMessage)
 	}
 }
 
@@ -554,7 +561,7 @@ func TestRenderCommand_AutoEscapesIssueFields(t *testing.T) {
 			Body:   "$(evil command)",
 			Labels: []string{"label; whoami"},
 		},
-		Repo: "owner/repo",
+		Repo:    "owner/repo",
 		Session: SessionContext{ID: "s1"},
 	}
 

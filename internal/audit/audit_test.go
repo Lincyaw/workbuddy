@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/launcher"
+	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
@@ -152,6 +153,78 @@ Result: 3 files modified.
 	}
 	if !strings.Contains(s.Summary, "Completed successfully") {
 		t.Errorf("summary missing key line 'Completed': %s", s.Summary)
+	}
+}
+
+func TestCapture_CodexEventSchemaArtifact(t *testing.T) {
+	aud, tmpDir := setup(t)
+
+	sessionFile := filepath.Join(tmpDir, "events-v1.jsonl")
+	events := []launcherevents.Event{
+		{
+			Kind:      launcherevents.KindTurnStarted,
+			Timestamp: time.Unix(1710000000, 0).UTC(),
+			SessionID: "sess-events",
+			TurnID:    "turn-1",
+			Seq:       1,
+			Payload:   mustJSON(t, launcherevents.TurnStartedPayload{TurnID: "turn-1"}),
+		},
+		{
+			Kind:      launcherevents.KindCommandExec,
+			Timestamp: time.Unix(1710000001, 0).UTC(),
+			SessionID: "sess-events",
+			TurnID:    "turn-1",
+			Seq:       2,
+			Payload:   mustJSON(t, launcherevents.CommandExecPayload{Cmd: []string{"bash", "-lc", "echo PONG"}, CallID: "cmd-1"}),
+		},
+		{
+			Kind:      launcherevents.KindTokenUsage,
+			Timestamp: time.Unix(1710000002, 0).UTC(),
+			SessionID: "sess-events",
+			TurnID:    "turn-1",
+			Seq:       3,
+			Payload:   mustJSON(t, launcherevents.TokenUsagePayload{Input: 10, Output: 4, Cached: 1, Total: 14}),
+		},
+	}
+	var lines []string
+	for _, evt := range events {
+		data, err := json.Marshal(evt)
+		if err != nil {
+			t.Fatalf("marshal event: %v", err)
+		}
+		lines = append(lines, string(data))
+	}
+	if err := os.WriteFile(sessionFile, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := &launcher.Result{
+		ExitCode:    0,
+		Duration:    2 * time.Second,
+		LastMessage: "PONG",
+		SessionPath: sessionFile,
+	}
+
+	if err := aud.Capture("sess-events", "task-events", "owner/repo", 8, "fix-codex", result); err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+
+	sessions, err := aud.Query(Filter{SessionID: "sess-events"})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	summary := sessions[0].Summary
+	if !strings.Contains(summary, "Event Counts") {
+		t.Fatalf("summary missing event counts: %s", summary)
+	}
+	if !strings.Contains(summary, "bash -lc echo PONG") {
+		t.Fatalf("summary missing command list: %s", summary)
+	}
+	if !strings.Contains(summary, "total: 14") {
+		t.Fatalf("summary missing token usage: %s", summary)
 	}
 }
 

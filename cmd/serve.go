@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -18,6 +19,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/launcher"
+	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
@@ -536,19 +538,41 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 		log.Printf("[worker] report started failed: %v", err)
 	}
 
-	result, err := deps.launcher.Launch(taskCtx, task.Agent, task.Context)
+	session, err := deps.launcher.Start(taskCtx, task.Agent, task.Context)
 	if err != nil {
-		log.Printf("[worker] agent %s failed: %v", task.AgentName, err)
+		log.Printf("[worker] failed to start agent %s: %v", task.AgentName, err)
 		if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
 			log.Printf("[worker] failed to update task status: %v", err)
 		}
 		deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, fetchCachedLabels(deps.store, task.Repo, task.IssueNum))
 		return
 	}
+	defer func() { _ = session.Close() }()
+
+	eventsCh := make(chan launcherevents.Event, 64)
+	eventsPath, waitEvents := streamSessionEvents(task.Context, eventsCh)
+	result, err := session.Run(taskCtx, eventsCh)
+	close(eventsCh)
+	if waitErr := waitEvents(); waitErr != nil {
+		log.Printf("[worker] event capture failed: %v", waitErr)
+	}
+	if result != nil && result.SessionPath == "" && eventsPath != "" {
+		result.SessionPath = eventsPath
+	}
+	if err != nil {
+		log.Printf("[worker] agent %s failed: %v", task.AgentName, err)
+		if result == nil {
+			if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
+				log.Printf("[worker] failed to update task status: %v", err)
+			}
+			deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, fetchCachedLabels(deps.store, task.Repo, task.IssueNum))
+			return
+		}
+	}
 
 	// Determine task status
 	status := store.TaskStatusCompleted
-	if result.ExitCode != 0 {
+	if err != nil || result.ExitCode != 0 {
 		status = store.TaskStatusFailed
 	}
 	if result.Meta != nil && result.Meta["timeout"] == "true" {
@@ -589,6 +613,41 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 
 	// Mark agent completed in state machine
 	deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, fetchCachedLabels(deps.store, task.Repo, task.IssueNum))
+}
+
+func streamSessionEvents(taskCtx *launcher.TaskContext, eventsCh <-chan launcherevents.Event) (string, func() error) {
+	baseDir := taskCtx.WorkDir
+	if baseDir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			baseDir = "."
+		} else {
+			baseDir = cwd
+		}
+	}
+	path := filepath.Join(baseDir, ".workbuddy", "sessions", taskCtx.Session.ID, "events-v1.jsonl")
+	errCh := make(chan error, 1)
+	go func() {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			errCh <- err
+			return
+		}
+		f, err := os.Create(path)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer func() { _ = f.Close() }()
+		enc := json.NewEncoder(f)
+		for evt := range eventsCh {
+			if err := enc.Encode(evt); err != nil {
+				errCh <- err
+				return
+			}
+		}
+		errCh <- nil
+	}()
+	return path, func() error { return <-errCh }
 }
 
 // addClaimReaction adds an eyes reaction to the issue to signal an agent claimed it.
