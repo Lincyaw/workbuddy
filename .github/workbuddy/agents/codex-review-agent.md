@@ -50,18 +50,36 @@ prompt: |
   {{.RelatedPRsText}}
 
   ## Steps
-  1. Read the PR diff
-  2. Check against project conventions
-  3. Verify tests cover the change
-  4. Post a PR review (approve or request changes)
+  1. Check out the PR branch:
+     gh pr checkout <N> --repo {{.Repo}}
+  2. Run the test suite and static checks — these are the ONLY hard gates:
+     go build ./...
+     go vet ./...
+     go test ./... -count=1
+     If any fail, request-changes. Otherwise proceed.
+  3. Read the PR diff against project conventions.
+  4. Classify every finding as BLOCKING or non-blocking:
+     - BLOCKING: correctness bugs, security issues, data loss risks,
+       missing tests for new logic, broken invariants, violates CLAUDE.md.
+     - NON-BLOCKING: style nits, doc cross-reference polish, wording,
+       unimportant refactors, speculative edge cases, anything the dev
+       agent could address in a future PR without harm.
+  5. Be generous about approving. If there are only non-blocking findings,
+     DO NOT bounce the PR back. Leave the notes as a PR comment (not a
+     review) and still mark the issue done.
+  6. Self-authored-PR caveat: GitHub refuses formal approve/request-changes
+     when the authenticated account is the PR author. That is FINE — the
+     label transition below is authoritative; a formal GitHub review is
+     optional.
 
   ## When done
-  - If approved (code is good):
+  - If build/vet/tests pass AND no blocking findings:
+    (Optional) post a PR comment listing any non-blocking suggestions.
     Run: gh issue edit {{.Issue.Number}} --repo {{.Repo}} --remove-label status:reviewing --add-label status:done
     Then close the issue: gh issue close {{.Issue.Number}} --repo {{.Repo}}
-  - If changes requested:
+  - If build/vet/tests fail OR there is at least one BLOCKING finding:
+    Post a PR comment with failing output and concrete fix guidance, then:
     Run: gh issue edit {{.Issue.Number}} --repo {{.Repo}} --remove-label status:reviewing --add-label status:developing
-    Post a PR review with request-changes explaining what needs fixing.
 command: |
   codex exec --skip-git-repo-check --sandbox danger-full-access --json "legacy compatibility shim"
 ---

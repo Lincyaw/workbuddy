@@ -26,17 +26,8 @@ states:
     enter_label: "status:developing"
     agent: codex-dev-agent
     transitions:
-      - to: testing
-        when: labeled "status:testing"
-
-  testing:
-    enter_label: "status:testing"
-    agent: codex-test-agent
-    transitions:
       - to: reviewing
         when: labeled "status:reviewing"
-      - to: developing
-        when: labeled "status:developing"
 
   reviewing:
     enter_label: "status:reviewing"
@@ -61,9 +52,12 @@ states:
 ### State graph
 
 ```
-triage → developing ⇄ testing ⇄ reviewing → done
-              ↑_________________________↓
+triage → developing ⇄ reviewing → done
+              ↑_____________↓
               (back-edges: retry count tracked, max 3)
+
+The reviewing agent runs the test suite (go build / go test / go vet)
+itself before approving. A separate test stage is no longer needed.
 
 Any back-edge exceeding max_retries → record retry/failure intent
 ```

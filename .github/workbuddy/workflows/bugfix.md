@@ -1,6 +1,6 @@
 ---
 name: bugfix
-description: Bug fix lifecycle - faster path with mandatory testing
+description: Bug fix lifecycle - faster path; reviewer runs tests
 trigger:
   issue_label: "type:bug"
 max_retries: 3
@@ -17,17 +17,8 @@ states:
     enter_label: "status:developing"
     agent: codex-dev-agent
     transitions:
-      - to: testing
-        when: labeled "status:testing"
-
-  testing:
-    enter_label: "status:testing"
-    agent: codex-test-agent
-    transitions:
       - to: reviewing
         when: labeled "status:reviewing"
-      - to: developing
-        when: labeled "status:developing"
 
   reviewing:
     enter_label: "status:reviewing"

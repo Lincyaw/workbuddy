@@ -61,7 +61,7 @@ prompt: |
 
   ## When done
   - If implementation is complete and PR is opened:
-    Run: gh issue edit {{.Issue.Number}} --repo {{.Repo}} --remove-label status:developing --add-label status:testing
+    Run: gh issue edit {{.Issue.Number}} --repo {{.Repo}} --remove-label status:developing --add-label status:reviewing
   - If the task is ambiguous or blocked:
     Comment on the issue asking for clarification. Do NOT change labels.
 command: |
