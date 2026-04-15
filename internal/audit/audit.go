@@ -66,7 +66,7 @@ func (a *Auditor) Capture(sessionID, taskID, repo string, issueNum int, agentNam
 			// Generate summary based on runtime.
 			switch {
 			case strings.Contains(strings.ToLower(agentName), "codex"):
-				summary = summarizeCodex(string(data))
+				summary = summarizeCodex(result, string(data))
 			default: // claude-code or unknown — try JSON parse
 				summary = summarizeClaude(data)
 			}
@@ -238,9 +238,13 @@ func summarizeClaude(data []byte) string {
 // Codex session parsing
 // ---------------------------------------------------------------------------
 
-func summarizeCodex(data string) string {
+func summarizeCodex(result *launcher.Result, data string) string {
 	var b strings.Builder
 	b.WriteString("## Codex Session Summary\n\n")
+	if result != nil && result.LastMessage != "" {
+		b.WriteString("### Final Message\n")
+		fmt.Fprintf(&b, "> %s\n\n", truncate(result.LastMessage, 500))
+	}
 
 	lines := strings.Split(data, "\n")
 	var keyLines []string
@@ -266,7 +270,6 @@ func summarizeCodex(data string) string {
 			fmt.Fprintf(&b, "- %s\n", l)
 		}
 	} else {
-		// Fallback: first 20 lines.
 		b.WriteString("### Log Excerpt\n```\n")
 		limit := 20
 		if len(lines) < limit {
@@ -291,6 +294,11 @@ func buildMinimalSummary(result *launcher.Result) string {
 	b.WriteString("## Session Summary (no session file)\n\n")
 	fmt.Fprintf(&b, "- Exit code: %d\n", result.ExitCode)
 	fmt.Fprintf(&b, "- Duration: %s\n", result.Duration)
+	if result.LastMessage != "" {
+		b.WriteString("\n### Final Message\n```\n")
+		b.WriteString(truncate(result.LastMessage, 500))
+		b.WriteString("\n```\n")
+	}
 	if result.Stdout != "" {
 		b.WriteString("\n### Stdout (excerpt)\n```\n")
 		b.WriteString(truncate(result.Stdout, 500))

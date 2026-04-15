@@ -96,33 +96,37 @@ documentation:
 
     - path: docs/planned/runtime-session-architecture.md
       bucket: planned
-      status: proposed
+      status: implemented
       related_code:
         - internal/launcher/types.go
         - internal/launcher/launcher.go
+        - internal/launcher/events/
+        - internal/launcher/codex.go
         - internal/audit/audit.go
         - internal/reporter/reporter.go
         - internal/webui/handler.go
-      notes: Target Runtime -> Session architecture and result/approver evolution.
+      notes: Runtime/Session abstraction, one-shot codex-exec session execution, and Result evolution are now implemented; long-lived runtime pooling remains planned.
 
     - path: docs/planned/agent-schema-vnext.md
       bucket: planned
-      status: proposed
+      status: implemented
       related_code:
         - internal/config/types.go
         - internal/config/loader.go
         - .github/workbuddy/agents/dev-agent.md
         - .github/workbuddy/agents/codex-dev-agent.md
-      notes: Planned agent schema evolution with policy, prompt, and output contract.
+      notes: policy/prompt minimal set is implemented; output_contract and longer-term deprecation steps remain planned.
 
     - path: docs/planned/event-schema-v1.md
       bucket: planned
-      status: proposed
+      status: tested
       related_code:
         - internal/launcher/types.go
+        - internal/launcher/events/
+        - internal/launcher/codex.go
         - internal/audit/audit.go
         - internal/webui/handler.go
-      notes: Planned normalized runtime event schema.
+      notes: Event Schema v1 core types, codex mapping, serialization tests, and session artifact persistence are implemented and locally exercised.
 
     - path: docs/planned/distributed-topology-and-cli.md
       bucket: planned
@@ -194,14 +198,14 @@ documentation:
 
     - path: docs/mismatch/codex-runtime-drift.md
       bucket: mismatch
-      status: maintained
+      status: archived
       related_code:
         - .github/workbuddy/agents/codex-dev-agent.md
         - internal/launcher/codex.go
         - internal/launcher/process.go
         - internal/reporter/reporter.go
         - internal/audit/audit.go
-      notes: Codex agent documentation currently overstates structured runtime integration.
+      notes: Historical drift resolved by the Runtime/Session and Event Schema v1 codex-exec implementation; keep only as archive context.
 
     - path: docs/mismatch/roadmap-structure-drift.md
       bucket: mismatch

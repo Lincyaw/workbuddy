@@ -10,18 +10,23 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/config"
 )
 
-// ClaudeRuntime implements Runtime for claude-code (claude -p mode).
 type ClaudeRuntime struct{}
 
-// Name returns the runtime identifier.
-func (r *ClaudeRuntime) Name() string { return "claude-code" }
+func (r *ClaudeRuntime) Name() string { return config.RuntimeClaudeShot }
 
-// Launch executes an agent using the claude-code runtime.
-func (r *ClaudeRuntime) Launch(ctx context.Context, agent *config.AgentConfig, task *TaskContext) (*Result, error) {
-	return launchProcess(ctx, "claude-code", agent, task, findClaudeSessionPath)
+func (r *ClaudeRuntime) Start(_ context.Context, agent *config.AgentConfig, task *TaskContext) (Session, error) {
+	return newProcessSession(r.Name(), agent, task, findClaudeSessionPath), nil
 }
 
-// findClaudeSessionPath attempts to locate the claude session directory.
+func (r *ClaudeRuntime) Launch(ctx context.Context, agent *config.AgentConfig, task *TaskContext) (*Result, error) {
+	sess, err := r.Start(ctx, agent, task)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = sess.Close() }()
+	return sess.Run(ctx, nil)
+}
+
 func findClaudeSessionPath(repoPath string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -49,11 +54,9 @@ func findClaudeSessionPath(repoPath string) string {
 			return filepath.Join(claudeProjectsDir, entry.Name())
 		}
 	}
-
 	return ""
 }
 
-// buildEnvVars creates the WORKBUDDY_* environment variables for agent execution.
 func buildEnvVars(task *TaskContext) []string {
 	return []string{
 		"WORKBUDDY_ISSUE_NUMBER=" + strconv.Itoa(task.Issue.Number),

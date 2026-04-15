@@ -3,9 +3,11 @@ package launcher
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
+	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 )
 
 // Launcher dispatches agent execution to the appropriate Runtime implementation.
@@ -13,42 +15,62 @@ type Launcher struct {
 	runtimes map[string]Runtime
 }
 
-// NewLauncher creates a Launcher with built-in runtimes registered.
 func NewLauncher() *Launcher {
-	l := &Launcher{
-		runtimes: make(map[string]Runtime),
-	}
-	l.Register(&ClaudeRuntime{})
-	l.Register(&CodexRuntime{})
+	l := &Launcher{runtimes: make(map[string]Runtime)}
+	l.Register(&ClaudeRuntime{}, config.RuntimeClaudeCode, config.RuntimeClaudeShot)
+	l.Register(&CodexRuntime{}, config.RuntimeCodex, config.RuntimeCodexExec)
 	return l
 }
 
-// Register adds a Runtime implementation to the launcher.
-func (l *Launcher) Register(rt Runtime) {
+func (l *Launcher) Register(rt Runtime, aliases ...string) {
 	l.runtimes[rt.Name()] = rt
+	for _, alias := range aliases {
+		l.runtimes[alias] = rt
+	}
 }
 
-// Launch selects the appropriate runtime and executes the agent.
-func (l *Launcher) Launch(ctx context.Context, agent *config.AgentConfig, task *TaskContext) (*Result, error) {
+func (l *Launcher) Start(ctx context.Context, agent *config.AgentConfig, task *TaskContext) (Session, error) {
 	runtimeName := agent.Runtime
 	if runtimeName == "" {
-		runtimeName = "claude-code" // default runtime
+		runtimeName = config.RuntimeClaudeCode
 	}
-
 	rt, ok := l.runtimes[runtimeName]
 	if !ok {
-		supported := l.supportedRuntimes()
-		return nil, fmt.Errorf("launcher: unsupported runtime: %s, supported: %s", runtimeName, supported)
+		return nil, fmt.Errorf("launcher: unsupported runtime: %s, supported: %s", runtimeName, l.supportedRuntimes())
 	}
-
-	return rt.Launch(ctx, agent, task)
+	return rt.Start(ctx, agent, task)
 }
 
-// supportedRuntimes returns a comma-separated list of registered runtime names.
+func (l *Launcher) Launch(ctx context.Context, agent *config.AgentConfig, task *TaskContext) (*Result, error) {
+	sess, err := l.Start(ctx, agent, task)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = sess.Close() }()
+
+	ch := make(chan launcherevents.Event, 32)
+	done := make(chan struct{})
+	go func() {
+		for range ch {
+		}
+		close(done)
+	}()
+	result, runErr := sess.Run(ctx, ch)
+	close(ch)
+	<-done
+	return result, runErr
+}
+
 func (l *Launcher) supportedRuntimes() string {
-	names := make([]string, 0, len(l.runtimes))
+	seen := map[string]bool{}
+	var names []string
 	for name := range l.runtimes {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	return strings.Join(names, ", ")
 }

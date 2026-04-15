@@ -14,6 +14,7 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/launcher"
+	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
@@ -122,6 +123,23 @@ type mockRuntime struct {
 }
 
 func (m *mockRuntime) Name() string { return m.name }
+
+type mockSession struct {
+	rt    *mockRuntime
+	agent *config.AgentConfig
+	task  *launcher.TaskContext
+}
+
+func (s *mockSession) Run(ctx context.Context, _ chan<- launcherevents.Event) (*launcher.Result, error) {
+	return s.rt.Launch(ctx, s.agent, s.task)
+}
+
+func (s *mockSession) SetApprover(launcher.Approver) error { return launcher.ErrNotSupported }
+func (s *mockSession) Close() error                        { return nil }
+
+func (m *mockRuntime) Start(ctx context.Context, agent *config.AgentConfig, task *launcher.TaskContext) (launcher.Session, error) {
+	return &mockSession{rt: m, agent: agent, task: task}, nil
+}
 
 func (m *mockRuntime) Launch(ctx context.Context, agent *config.AgentConfig, task *launcher.TaskContext) (*launcher.Result, error) {
 	m.mu.Lock()

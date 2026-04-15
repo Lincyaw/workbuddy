@@ -85,7 +85,10 @@ func (r *Reporter) Report(repo string, issueNum int, agentName string, result *l
 		prLink = result.Meta["pr_url"]
 	}
 
-	output := result.Stdout
+	output := result.LastMessage
+	if output == "" {
+		output = result.Stdout
+	}
 	if output == "" && result.Stderr != "" {
 		output = result.Stderr
 	}

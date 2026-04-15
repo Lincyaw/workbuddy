@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // helper to create a temp config directory with files.
@@ -538,5 +539,96 @@ states:
 	}
 	if failedState.EnterLabel != LabelFailed {
 		t.Errorf("failed state enter_label = %q, want %q", failedState.EnterLabel, LabelFailed)
+	}
+}
+
+func TestLoadConfig_CodexPolicyNormalize(t *testing.T) {
+	agent := `---
+name: codex-agent
+description: Codex agent
+triggers:
+  - label: "status:developing"
+    event: labeled
+role: dev
+runtime: codex
+policy:
+  sandbox: danger-full-access
+  approval: on-request
+  model: gpt-5.4
+  timeout: 45m
+prompt: |
+  implement issue {{.Issue.Number}}
+command: |
+  codex exec "compat"
+---
+## Agent
+`
+	dir := setupConfigDir(t, map[string]string{"agents/codex.md": agent, "workflows/feature-dev.md": validWorkflow})
+	cfg, warnings, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
+	}
+	got := cfg.Agents["codex-agent"]
+	if got.Runtime != RuntimeCodexExec {
+		t.Fatalf("runtime = %q", got.Runtime)
+	}
+	if got.Policy.Model != "gpt-5.4" || got.Policy.Approval != "on-request" || got.Policy.Sandbox != "danger-full-access" {
+		t.Fatalf("unexpected policy: %+v", got.Policy)
+	}
+	if got.Timeout != 45*time.Minute {
+		t.Fatalf("timeout = %s", got.Timeout)
+	}
+}
+
+func TestLoadConfig_UnsupportedPolicyMatrix(t *testing.T) {
+	agent := `---
+name: bad-agent
+description: Bad agent
+triggers:
+  - label: "status:developing"
+    event: labeled
+role: dev
+runtime: claude-code
+policy:
+  sandbox: read-only
+  approval: on-request
+command: "claude -p 'do stuff'"
+---
+## Agent
+`
+	dir := setupConfigDir(t, map[string]string{"agents/bad.md": agent})
+	_, _, err := LoadConfig(dir)
+	if err == nil {
+		t.Fatal("expected policy validation error")
+	}
+	if !strings.Contains(err.Error(), "unsupported policy.sandbox") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadConfig_CodexAppServerRejectedUntilImplemented(t *testing.T) {
+	agent := `---
+name: future-agent
+description: Future agent
+triggers:
+  - label: "status:developing"
+    event: labeled
+role: dev
+runtime: codex-appserver
+prompt: |
+  implement issue {{.Issue.Number}}
+---
+## Agent
+`
+	dir := setupConfigDir(t, map[string]string{"agents/future.md": agent})
+	_, _, err := LoadConfig(dir)
+	if err == nil {
+		t.Fatal("expected unsupported runtime error")
+	}
+	if !strings.Contains(err.Error(), "invalid runtime") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

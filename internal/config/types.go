@@ -4,8 +4,8 @@ import "time"
 
 // Well-known state names.
 const (
-	StateNameFailed  = "failed"
-	LabelFailed      = "status:failed"
+	StateNameFailed = "failed"
+	LabelFailed     = "status:failed"
 )
 
 // GlobalConfig is the top-level configuration loaded from config.yaml.
@@ -16,14 +16,24 @@ type GlobalConfig struct {
 	Port         int           `yaml:"port"`
 }
 
+// PolicyConfig defines runtime-neutral execution policy knobs.
+type PolicyConfig struct {
+	Sandbox  string        `yaml:"sandbox"`
+	Approval string        `yaml:"approval"`
+	Model    string        `yaml:"model"`
+	Timeout  time.Duration `yaml:"timeout"`
+}
+
 // AgentConfig defines an agent loaded from .github/workbuddy/agents/*.md.
 type AgentConfig struct {
 	Name        string        `yaml:"name"`
 	Description string        `yaml:"description"`
 	Triggers    []TriggerRule `yaml:"triggers"`
 	Role        string        `yaml:"role"`
-	Runtime     string        `yaml:"runtime"` // "claude-code" (default) or "codex"
+	Runtime     string        `yaml:"runtime"`
 	Command     string        `yaml:"command"`
+	Prompt      string        `yaml:"prompt"`
+	Policy      PolicyConfig  `yaml:"policy"`
 	Timeout     time.Duration `yaml:"timeout"`
 }
 

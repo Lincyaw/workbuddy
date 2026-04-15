@@ -225,16 +225,20 @@ func TestLaunch_CodexRuntime(t *testing.T) {
 	agent := &config.AgentConfig{
 		Name:    "codex-agent",
 		Runtime: "codex",
-		Command: `echo "codex output"`,
-		Timeout: 10 * time.Second,
+		Prompt:  "Reply with exactly codex output",
+		Policy: config.PolicyConfig{
+			Sandbox:  "read-only",
+			Approval: "never",
+		},
+		Timeout: 30 * time.Second,
 	}
 
 	result, err := launcher.Launch(context.Background(), agent, task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(result.Stdout, "codex output") {
-		t.Errorf("expected 'codex output' in stdout, got: %q", result.Stdout)
+	if result.LastMessage != "codex output" {
+		t.Errorf("expected last message 'codex output', got: %q", result.LastMessage)
 	}
 }
 
@@ -554,7 +558,7 @@ func TestRenderCommand_AutoEscapesIssueFields(t *testing.T) {
 			Body:   "$(evil command)",
 			Labels: []string{"label; whoami"},
 		},
-		Repo: "owner/repo",
+		Repo:    "owner/repo",
 		Session: SessionContext{ID: "s1"},
 	}
 

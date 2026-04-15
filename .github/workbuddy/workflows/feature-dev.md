@@ -24,14 +24,14 @@ states:
 
   developing:
     enter_label: "status:developing"
-    agent: dev-agent
+    agent: codex-dev-agent
     transitions:
       - to: testing
         when: labeled "status:testing"
 
   testing:
     enter_label: "status:testing"
-    agent: test-agent
+    agent: codex-test-agent
     transitions:
       - to: reviewing
         when: labeled "status:reviewing"
@@ -40,7 +40,7 @@ states:
 
   reviewing:
     enter_label: "status:reviewing"
-    agent: review-agent
+    agent: codex-review-agent
     transitions:
       - to: done
         when: labeled "status:done"
