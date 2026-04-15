@@ -1,0 +1,74 @@
+name: workbuddy-remote-runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: Repository in owner/name form
+        required: true
+        type: string
+      issue:
+        description: Issue number to execute against
+        required: true
+        type: string
+      agent:
+        description: Agent name from .github/workbuddy/agents/
+        required: true
+        type: string
+      session_id:
+        description: workbuddy session id
+        required: true
+        type: string
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      actions: read
+    env:
+      WORKBUDDY_REPO: ${{ inputs.repo }}
+      WORKBUDDY_ISSUE_NUMBER: ${{ inputs.issue }}
+      WORKBUDDY_AGENT: ${{ inputs.agent }}
+      WORKBUDDY_SESSION_ID: ${{ inputs.session_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build workbuddy
+        run: go build ./...
+
+      - name: Execute agent and assemble session artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          session_dir=".workbuddy/sessions/${WORKBUDDY_SESSION_ID}"
+          mkdir -p "${session_dir}"
+
+          # Replace this block with the repo-specific command that can execute
+          # ${WORKBUDDY_AGENT} for ${WORKBUDDY_REPO}#${WORKBUDDY_ISSUE_NUMBER}.
+          # The remote runner adapter looks for:
+          #   - workbuddy-result.json   (optional result contract)
+          #   - events-v1.jsonl         (preferred canonical session artifact)
+          #   - any runtime-native logs/artifacts you want to preserve
+          printf '{"kind":"log","payload":{"stream":"stdout","line":"sample remote runner artifact"}}\n' > "${session_dir}/events-v1.jsonl"
+          cat > "${session_dir}/workbuddy-result.json" <<JSON
+          {
+            "exit_code": 0,
+            "last_message": "Remote runner placeholder completed for ${WORKBUDDY_AGENT}",
+            "meta": {
+              "runner": "github-actions"
+            },
+            "session_path": "events-v1.jsonl"
+          }
+          JSON
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workbuddy-session
+          path: .workbuddy/sessions/${{ inputs.session_id }}/
+          if-no-files-found: error

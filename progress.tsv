@@ -1,2 +1,3 @@
 date	commit	status	key_indicators	description
 2026-04-16	working	tree-green	REQ-026 tested; go build/vet/test green	Implemented worker HTTP client loop with launcher execution, heartbeat, lifecycle contract test, and reconnect test
+2026-04-16	working	keep	go_test=pass; req_007=tested; docs=updated	Implemented GitHub Actions remote runner adapter, mocked API integration test, and example workflow/docs for REQ-007.

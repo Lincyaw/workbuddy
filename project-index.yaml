@@ -406,7 +406,7 @@ requirements:
       workflows instead of local Claude Code.
     priority: P1
     version: v0.2.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-007-1: 通过 `gh workflow run <workflow>.yml` 触发远程 workflow"
       - "AC-007-2: 触发后通过 `gh run list` 获取 run ID"
@@ -415,8 +415,20 @@ requirements:
       - "AC-007-5: workflow 不存在或触发失败时返回明确错误"
       - "AC-007-6: 支持超时"
       - "AC-007-7: 单元测试：mock gh 命令验证触发和结果收集流程"
-    code: []
-    tests: []
+    code:
+      - internal/config/types.go
+      - internal/config/loader.go
+      - internal/launcher/launcher.go
+      - internal/launcher/gha_runner.go
+      - internal/launcher/runners/gha/gha.go
+      - .github/workflows/workbuddy-remote-runner.yml
+      - docs/implemented/remote-runner-github-actions.md
+      - docs/implemented/current-config-workflow-and-agents.md
+      - docs/implemented/current-runtime-reporting-and-audit.md
+    tests:
+      - internal/config/loader_test.go
+      - internal/launcher/launcher_test.go
+      - internal/launcher/runners/gha/gha_test.go
     deps: []
 
   - id: REQ-008

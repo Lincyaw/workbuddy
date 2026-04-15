@@ -13,3 +13,4 @@
 
 - `[L2]` REQ-026 models the worker/coordinator payload around serialized `config.AgentConfig` plus `launcher.TaskContext`, so the remote worker executes through the existing launcher boundary instead of creating a second task schema just for HTTP mode.
 - `[L2]` Task `ack` and `result` submission are retried with capped exponential backoff and treated as idempotent coordinator operations, which lets the worker survive coordinator restarts without re-running a completed launcher session.
+- `[L3]` REQ-007 keeps GitHub integration on the `gh` CLI boundary by implementing the remote runner as a GitHub Actions adapter that shells out to `gh api`, then reconstructs `launcher.Result` from downloaded logs and artifacts instead of introducing a raw HTTP client beside the existing GH command model.

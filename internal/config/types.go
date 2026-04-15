@@ -29,19 +29,29 @@ type OutputContractConfig struct {
 	SchemaFile string `yaml:"schema_file"`
 }
 
+// GitHubActionsRunnerConfig defines the workflow and polling knobs for the
+// remote GitHub Actions runner.
+type GitHubActionsRunnerConfig struct {
+	Workflow     string        `yaml:"workflow"`
+	Ref          string        `yaml:"ref"`
+	PollInterval time.Duration `yaml:"poll_interval"`
+}
+
 // AgentConfig defines an agent loaded from .github/workbuddy/agents/*.md.
 type AgentConfig struct {
-	Name           string               `yaml:"name"`
-	Description    string               `yaml:"description"`
-	Triggers       []TriggerRule        `yaml:"triggers"`
-	Role           string               `yaml:"role"`
-	Runtime        string               `yaml:"runtime"`
-	Command        string               `yaml:"command"`
-	Prompt         string               `yaml:"prompt"`
-	Policy         PolicyConfig         `yaml:"policy"`
-	OutputContract OutputContractConfig `yaml:"output_contract"`
-	Timeout        time.Duration        `yaml:"timeout"`
-	SourcePath     string               `yaml:"-"`
+	Name           string                    `yaml:"name"`
+	Description    string                    `yaml:"description"`
+	Triggers       []TriggerRule             `yaml:"triggers"`
+	Role           string                    `yaml:"role"`
+	Runner         string                    `yaml:"runner"`
+	Runtime        string                    `yaml:"runtime"`
+	Command        string                    `yaml:"command"`
+	Prompt         string                    `yaml:"prompt"`
+	Policy         PolicyConfig              `yaml:"policy"`
+	GitHubActions  GitHubActionsRunnerConfig `yaml:"github_actions"`
+	OutputContract OutputContractConfig      `yaml:"output_contract"`
+	Timeout        time.Duration             `yaml:"timeout"`
+	SourcePath     string                    `yaml:"-"`
 }
 
 // TriggerRule defines when an agent is activated.
