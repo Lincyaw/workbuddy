@@ -46,7 +46,6 @@ func TestCodexEventMapperFixture(t *testing.T) {
 		launcherevents.KindToolResult,
 		launcherevents.KindFileChange,
 		launcherevents.KindTokenUsage,
-		launcherevents.KindTurnCompleted,
 	}
 	if len(got) != len(wantKinds) {
 		t.Fatalf("got %d events, want %d", len(got), len(wantKinds))
@@ -71,6 +70,9 @@ func TestCodexEventMapperFixture(t *testing.T) {
 	}
 	if change.Path != "file.txt" || change.ChangeKind != "modify" {
 		t.Fatalf("unexpected file change: %+v", change)
+	}
+	if mapper.turnCompleted == nil || mapper.turnCompleted.Status != "ok" {
+		t.Fatalf("pending turn completion = %+v", mapper.turnCompleted)
 	}
 }
 
@@ -318,6 +320,101 @@ func TestCodexSessionRunSynthesizesTurnCompletedOnCrash(t *testing.T) {
 	}
 }
 
+func TestLaunch_CodexOutputContractValidatesLastMessage(t *testing.T) {
+	restore := installFakeCodexLastMessage(t, `{"status":"ok"}`)
+	defer restore()
+
+	launcher := NewLauncher()
+	task := newTestTask(t)
+	agentDir := t.TempDir()
+	writeOutputSchema(t, agentDir)
+
+	agent := &config.AgentConfig{
+		Name:    "codex-agent",
+		Runtime: config.RuntimeCodexExec,
+		Prompt:  "return json",
+		Policy:  config.PolicyConfig{Sandbox: "read-only", Approval: "never"},
+		OutputContract: config.OutputContractConfig{
+			SchemaFile: "schemas/result.json",
+		},
+		SourcePath: filepath.Join(agentDir, "agent.md"),
+		Timeout:    10 * time.Second,
+	}
+
+	result, err := launcher.Launch(context.Background(), agent, task)
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	if result.LastMessage != `{"status":"ok"}` {
+		t.Fatalf("last message = %q", result.LastMessage)
+	}
+}
+
+func TestLaunch_CodexOutputContractRejectsInvalidLastMessage(t *testing.T) {
+	restore := installFakeCodexLastMessage(t, `{"missing":"status"}`)
+	defer restore()
+
+	launcher := NewLauncher()
+	task := newTestTask(t)
+	agentDir := t.TempDir()
+	writeOutputSchema(t, agentDir)
+
+	agent := &config.AgentConfig{
+		Name:    "codex-agent",
+		Runtime: config.RuntimeCodexExec,
+		Prompt:  "return json",
+		Policy:  config.PolicyConfig{Sandbox: "read-only", Approval: "never"},
+		OutputContract: config.OutputContractConfig{
+			SchemaFile: "schemas/result.json",
+		},
+		SourcePath: filepath.Join(agentDir, "agent.md"),
+		Timeout:    10 * time.Second,
+	}
+
+	result, err := launcher.Launch(context.Background(), agent, task)
+	if err == nil {
+		t.Fatal("expected output contract validation error")
+	}
+	if result == nil || result.ExitCode != 0 {
+		t.Fatalf("expected successful codex result, got %+v", result)
+	}
+}
+
+func TestCodexSessionRun_EmitsErrorTerminalEventOnOutputContractFailure(t *testing.T) {
+	restore := installFakeCodexLastMessage(t, `{"missing":"status"}`)
+	defer restore()
+
+	task := newTestTask(t)
+	agentDir := t.TempDir()
+	writeOutputSchema(t, agentDir)
+
+	session := newCodexSession(&config.AgentConfig{
+		Name:    "codex-agent",
+		Runtime: config.RuntimeCodexExec,
+		Prompt:  "return json",
+		Policy:  config.PolicyConfig{Sandbox: "read-only", Approval: "never"},
+		OutputContract: config.OutputContractConfig{
+			SchemaFile: "schemas/result.json",
+		},
+		SourcePath: filepath.Join(agentDir, "agent.md"),
+		Timeout:    10 * time.Second,
+	}, task, "return json")
+
+	events, result, err := collectSessionEvents(t, session)
+	if err == nil {
+		t.Fatal("expected output contract validation error")
+	}
+	if result == nil || result.ExitCode != 0 {
+		t.Fatalf("expected successful codex result, got %+v", result)
+	}
+	if got := turnCompletedStatuses(t, events); len(got) != 1 || got[0] != "error" {
+		t.Fatalf("turn.completed statuses = %v, want [error]", got)
+	}
+	if got := eventErrorCodes(t, events); len(got) != 1 || got[0] != "output_contract" {
+		t.Fatalf("error codes = %v, want [output_contract]", got)
+	}
+}
+
 func installFakeCodex(t *testing.T) func() {
 	t.Helper()
 
@@ -351,6 +448,51 @@ func installFakeCodex(t *testing.T) func() {
 		"fi\n" +
 		"cat \"" + fixturePath + "\"\n" +
 		"printf 'codex stderr for testing\\n' >&2\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	if err := os.Setenv("PATH", binDir+string(os.PathListSeparator)+oldPath); err != nil {
+		t.Fatalf("set PATH: %v", err)
+	}
+	return func() {
+		_ = os.Setenv("PATH", oldPath)
+	}
+}
+
+func installFakeCodexLastMessage(t *testing.T, lastMessage string) func() {
+	t.Helper()
+
+	fixturePath := filepath.Join(t.TempDir(), "codex-exec-events.jsonl")
+	data, err := os.ReadFile(filepath.Join("testdata", "codex-exec-events.jsonl"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	if err := os.WriteFile(fixturePath, data, 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	binDir := t.TempDir()
+	scriptPath := filepath.Join(binDir, "codex")
+	script := "#!/bin/sh\n" +
+		"output_last_message=''\n" +
+		"while [ $# -gt 0 ]; do\n" +
+		"  case \"$1\" in\n" +
+		"    --output-last-message)\n" +
+		"      output_last_message=\"$2\"\n" +
+		"      shift 2\n" +
+		"      ;;\n" +
+		"    *)\n" +
+		"      shift\n" +
+		"      ;;\n" +
+		"  esac\n" +
+		"done\n" +
+		"if [ -n \"$output_last_message\" ]; then\n" +
+		"  mkdir -p \"$(dirname \"$output_last_message\")\"\n" +
+		"  printf '%s\\n' '" + strings.ReplaceAll(lastMessage, "'", "'\"'\"'") + "' > \"$output_last_message\"\n" +
+		"fi\n" +
+		"cat \"" + fixturePath + "\"\n"
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake codex: %v", err)
 	}

@@ -2,6 +2,7 @@ package launcher
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
+	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 )
 
 func newTestTask(t *testing.T) *TaskContext {
@@ -33,6 +35,75 @@ func newTestTask(t *testing.T) *TaskContext {
 			ID: "session-abc-123",
 		},
 	}
+}
+
+func writeOutputSchema(t *testing.T, dir string) string {
+	t.Helper()
+	schemaDir := filepath.Join(dir, "schemas")
+	if err := os.MkdirAll(schemaDir, 0o755); err != nil {
+		t.Fatalf("mkdir schema dir: %v", err)
+	}
+	schemaPath := filepath.Join(schemaDir, "result.json")
+	schema := `{
+  "type": "object",
+  "required": ["status"],
+  "properties": {
+    "status": {"type": "string"}
+  }
+}`
+	if err := os.WriteFile(schemaPath, []byte(schema), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+	return schemaPath
+}
+
+func collectSessionEvents(t *testing.T, session Session) ([]launcherevents.Event, *Result, error) {
+	t.Helper()
+	ch := make(chan launcherevents.Event, 32)
+	var events []launcherevents.Event
+	done := make(chan struct{})
+	go func() {
+		for evt := range ch {
+			events = append(events, evt)
+		}
+		close(done)
+	}()
+	result, err := session.Run(context.Background(), ch)
+	close(ch)
+	<-done
+	return events, result, err
+}
+
+func turnCompletedStatuses(t *testing.T, events []launcherevents.Event) []string {
+	t.Helper()
+	var statuses []string
+	for _, evt := range events {
+		if evt.Kind != launcherevents.KindTurnCompleted {
+			continue
+		}
+		var payload launcherevents.TurnCompletedPayload
+		if err := json.Unmarshal(evt.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal turn.completed payload: %v", err)
+		}
+		statuses = append(statuses, payload.Status)
+	}
+	return statuses
+}
+
+func eventErrorCodes(t *testing.T, events []launcherevents.Event) []string {
+	t.Helper()
+	var codes []string
+	for _, evt := range events {
+		if evt.Kind != launcherevents.KindError {
+			continue
+		}
+		var payload launcherevents.ErrorPayload
+		if err := json.Unmarshal(evt.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal error payload: %v", err)
+		}
+		codes = append(codes, payload.Code)
+	}
+	return codes
 }
 
 // Test 1: Normal execution — command runs and returns stdout, stderr, exit code 0
@@ -244,6 +315,95 @@ func TestLaunch_CodexRuntime(t *testing.T) {
 	}
 	if result.LastMessage != "PONG" {
 		t.Errorf("expected last message 'PONG', got: %q", result.LastMessage)
+	}
+}
+
+func TestLaunch_OutputContractValidatesProcessOutput(t *testing.T) {
+	launcher := NewLauncher()
+	task := newTestTask(t)
+	agentDir := t.TempDir()
+	schemaPath := writeOutputSchema(t, agentDir)
+
+	agent := &config.AgentConfig{
+		Name:    "structured-agent",
+		Runtime: "claude-code",
+		Command: `printf '{"status":"ok"}'`,
+		OutputContract: config.OutputContractConfig{
+			SchemaFile: "schemas/result.json",
+		},
+		SourcePath: filepath.Join(agentDir, "agent.md"),
+		Timeout:    10 * time.Second,
+	}
+
+	result, err := launcher.Launch(context.Background(), agent, task)
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("exit code = %d", result.ExitCode)
+	}
+	if agent.OutputContractSchemaPath() != schemaPath {
+		t.Fatalf("schema path = %q, want %q", agent.OutputContractSchemaPath(), schemaPath)
+	}
+}
+
+func TestLaunch_OutputContractRejectsInvalidProcessOutput(t *testing.T) {
+	launcher := NewLauncher()
+	task := newTestTask(t)
+	agentDir := t.TempDir()
+	writeOutputSchema(t, agentDir)
+
+	agent := &config.AgentConfig{
+		Name:    "structured-agent",
+		Runtime: "claude-code",
+		Command: `printf '{"missing":"status"}'`,
+		OutputContract: config.OutputContractConfig{
+			SchemaFile: "schemas/result.json",
+		},
+		SourcePath: filepath.Join(agentDir, "agent.md"),
+		Timeout:    10 * time.Second,
+	}
+
+	result, err := launcher.Launch(context.Background(), agent, task)
+	if err == nil {
+		t.Fatal("expected output contract validation error")
+	}
+	if result == nil || result.ExitCode != 0 {
+		t.Fatalf("expected successful process result, got %+v", result)
+	}
+	if !strings.Contains(err.Error(), "output_contract") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestProcessSessionRun_EmitsErrorTerminalEventOnOutputContractFailure(t *testing.T) {
+	task := newTestTask(t)
+	agentDir := t.TempDir()
+	writeOutputSchema(t, agentDir)
+
+	session := newProcessSession(config.RuntimeClaudeCode, &config.AgentConfig{
+		Name:    "structured-agent",
+		Runtime: config.RuntimeClaudeCode,
+		Command: `printf '{"missing":"status"}'`,
+		OutputContract: config.OutputContractConfig{
+			SchemaFile: "schemas/result.json",
+		},
+		SourcePath: filepath.Join(agentDir, "agent.md"),
+		Timeout:    10 * time.Second,
+	}, task, nil)
+
+	events, result, err := collectSessionEvents(t, session)
+	if err == nil {
+		t.Fatal("expected output contract validation error")
+	}
+	if result == nil || result.ExitCode != 0 {
+		t.Fatalf("expected successful process result, got %+v", result)
+	}
+	if got := turnCompletedStatuses(t, events); len(got) != 1 || got[0] != "error" {
+		t.Fatalf("turn.completed statuses = %v, want [error]", got)
+	}
+	if got := eventErrorCodes(t, events); len(got) != 1 || got[0] != "output_contract" {
+		t.Fatalf("error codes = %v, want [output_contract]", got)
 	}
 }
 

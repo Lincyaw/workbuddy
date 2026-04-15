@@ -88,9 +88,14 @@ func (s *processSession) Run(ctx context.Context, events chan<- launcherevents.E
 	if stderr.Len() > 0 {
 		emitEvent(events, &seq, s.task.Session.ID, s.task.Session.ID, launcherevents.KindLog, launcherevents.LogPayload{Stream: "stderr", Line: strings.TrimRight(stderr.String(), "\n")}, nil)
 	}
-	emitEvent(events, &seq, s.task.Session.ID, s.task.Session.ID, launcherevents.KindTurnCompleted, launcherevents.TurnCompletedPayload{TurnID: s.task.Session.ID, Status: status}, nil)
 
-	return &Result{ExitCode: exitCode, Stdout: stdout.String(), Stderr: stderr.String(), Duration: duration, Meta: meta, SessionPath: sessionPath}, nil
+	result := &Result{ExitCode: exitCode, Stdout: stdout.String(), Stderr: stderr.String(), Duration: duration, Meta: meta, SessionPath: sessionPath}
+	if err := validateOutputContract(s.agent, result); err != nil {
+		emitOutputContractFailure(events, &seq, s.task.Session.ID, s.task.Session.ID, err)
+		return result, err
+	}
+	emitEvent(events, &seq, s.task.Session.ID, s.task.Session.ID, launcherevents.KindTurnCompleted, launcherevents.TurnCompletedPayload{TurnID: s.task.Session.ID, Status: status}, nil)
+	return result, nil
 }
 
 func (s *processSession) buildCommand(execCtx context.Context) (*exec.Cmd, error) {

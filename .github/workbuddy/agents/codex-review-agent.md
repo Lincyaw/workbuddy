@@ -23,7 +23,8 @@ prompt: |
   2. gh pr list --repo {{.Repo}} --state all --search '{{.Issue.Number}} in:title,body' --json number,state,headRefName,baseRefName,url,isDraft
   3. gh pr view <N> --repo {{.Repo}} --comments
      gh pr diff <N> --repo {{.Repo}}
-     gh pr view <N> --repo {{.Repo}} --json reviews,reviewThreads
+     gh pr view <N> --repo {{.Repo}} --json reviews
+     gh api repos/{{.Repo}}/pulls/<N>/comments --paginate
   Read prior review findings — do NOT repeat issues that were already addressed in later commits.
   Reference exact files/lines/commits.
 

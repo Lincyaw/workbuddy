@@ -122,15 +122,18 @@ documentation:
         - internal/webui/handler.go
       notes: Runtime/Session abstraction, one-shot codex-exec session execution, and Result evolution are now implemented; long-lived runtime pooling remains planned.
 
-    - path: docs/planned/agent-schema-vnext.md
-      bucket: planned
-      status: implemented
+    - path: docs/implemented/agent-schema-vnext.md
+      bucket: implemented
+      status: tested
       related_code:
         - internal/config/types.go
         - internal/config/loader.go
+        - internal/launcher/output_contract.go
         - .github/workbuddy/agents/dev-agent.md
+        - .github/workbuddy/agents/review-agent.md
         - .github/workbuddy/agents/codex-dev-agent.md
-      notes: policy/prompt minimal set is implemented; output_contract and longer-term deprecation steps remain planned.
+        - .github/workbuddy/agents/codex-review-agent.md
+      notes: policy, prompt, and output_contract are implemented; launcher now validates final JSON output against agent-declared JSON Schema files.
 
     - path: docs/planned/event-schema-v1.md
       bucket: planned
