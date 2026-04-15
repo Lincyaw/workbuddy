@@ -66,18 +66,38 @@ func (AlwaysAllow) Approve(context.Context, ApprovalRequest) ApprovalDecision {
 
 // TaskContext provides the context for template rendering and agent execution.
 type TaskContext struct {
-	Issue   IssueContext
-	PR      PRContext
-	Repo    string
-	WorkDir string
-	Session SessionContext
+	Issue          IssueContext
+	PR             PRContext
+	Repo           string
+	WorkDir        string
+	Session        SessionContext
+	RelatedPRs     []PRSummary
+	RelatedPRsText string
 }
 
 type IssueContext struct {
-	Number int
-	Title  string
-	Body   string
-	Labels []string
+	Number       int
+	Title        string
+	Body         string
+	Labels       []string
+	Comments     []IssueComment
+	CommentsText string
+}
+
+type IssueComment struct {
+	Author    string
+	Body      string
+	CreatedAt string
+}
+
+type PRSummary struct {
+	Number      int
+	State       string
+	Title       string
+	HeadRefName string
+	BaseRefName string
+	URL         string
+	IsDraft     bool
 }
 
 type PRContext struct {

@@ -21,14 +21,16 @@ func shellEscape(s string) string {
 func safeTaskContext(task *TaskContext) *TaskContext {
 	escaped := *task
 	escaped.Issue = IssueContext{
-		Number: task.Issue.Number,
-		Title:  shellEscape(task.Issue.Title),
-		Body:   shellEscape(task.Issue.Body),
-		Labels: make([]string, len(task.Issue.Labels)),
+		Number:       task.Issue.Number,
+		Title:        shellEscape(task.Issue.Title),
+		Body:         shellEscape(task.Issue.Body),
+		Labels:       make([]string, len(task.Issue.Labels)),
+		CommentsText: shellEscape(task.Issue.CommentsText),
 	}
 	for i, l := range task.Issue.Labels {
 		escaped.Issue.Labels[i] = shellEscape(l)
 	}
+	escaped.RelatedPRsText = shellEscape(task.RelatedPRsText)
 	return &escaped
 }
 

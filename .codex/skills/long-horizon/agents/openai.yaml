@@ -1,0 +1,4 @@
+interface:
+  display_name: "Long Horizon"
+  short_description: "Decide autonomously before asking"
+  default_prompt: "Use $long-horizon to handle this task autonomously, following a convention -> research -> reasoning -> ask escalation ladder."
