@@ -41,7 +41,8 @@ documentation:
         - internal/poller/poller.go
         - internal/statemachine/statemachine.go
         - internal/router/router.go
-      notes: Current single-process serve architecture and execution chain.
+        - internal/store/store.go
+      notes: Current single-process serve architecture, GH call boundary, and retry/failure control boundary.
 
     - path: docs/implemented/current-config-workflow-and-agents.md
       bucket: implemented
@@ -197,16 +198,6 @@ documentation:
         - .github/workbuddy/agents/dev-agent.md
       notes: Drift in event scope and label-routing ownership.
 
-    - path: docs/mismatch/retry-and-failure-drift.md
-      bucket: mismatch
-      status: maintained
-      related_code:
-        - internal/statemachine/statemachine.go
-        - internal/store/store.go
-        - .github/workbuddy/workflows/feature-dev.md
-        - .github/workbuddy/workflows/bugfix.md
-      notes: Retry-limit and failed-state semantics are only partially enforced today.
-
     - path: docs/mismatch/codex-runtime-drift.md
       bucket: mismatch
       status: archived
@@ -319,6 +310,9 @@ requirements:
       - internal/statemachine/rules.go
     tests:
       - internal/statemachine/statemachine_test.go
+    related_docs:
+      - docs/implemented/current-architecture.md
+    notes: Current implemented docs record that max-retry overflow emits TypeCycleLimitReached and TypeTransitionToFailed while failed/needs-human label writeback remains agent-owned rather than Go-owned.
     deps: [REQ-001, REQ-024]
 
   - id: REQ-004
