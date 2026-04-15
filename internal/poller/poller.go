@@ -57,6 +57,15 @@ type PR struct {
 	State  string `json:"state"`
 }
 
+type IssueDetails struct {
+	Number           int
+	State            string
+	StateReason      string
+	Body             string
+	Labels           []string
+	ClosedByLinkedPR bool
+}
+
 // ChangeEvent describes a detected change between two polls.
 type ChangeEvent struct {
 	Type     string // EventIssueCreated, EventLabelAdded, EventLabelRemoved, EventPRCreated, EventPRStateChanged
@@ -75,6 +84,7 @@ type GHReader interface {
 	ListIssues(repo string) ([]Issue, error)
 	ListPRs(repo string) ([]PR, error)
 	CheckRepoAccess(repo string) error
+	ReadIssue(repo string, issueNum int) (IssueDetails, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +166,7 @@ func (p *Poller) Run(ctx context.Context) error {
 // per-cycle boundary signal (e.g. to reset dedup state).
 func (p *Poller) poll(ctx context.Context) {
 	defer p.emit(ctx, ChangeEvent{Type: EventPollCycleDone, Repo: p.repo})
+	var pending []ChangeEvent
 	// --- Issues ---
 	issues, err := p.gh.ListIssues(p.repo)
 	if err != nil {
@@ -171,7 +182,7 @@ func (p *Poller) poll(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		p.diffIssue(ctx, iss)
+		pending = append(pending, p.diffIssue(iss)...)
 	}
 
 	// --- PRs ---
@@ -189,7 +200,7 @@ func (p *Poller) poll(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		p.diffPR(ctx, pr)
+		pending = append(pending, p.diffPR(pr)...)
 	}
 
 	// --- Detect closed/deleted issues ---
@@ -224,8 +235,7 @@ func (p *Poller) poll(ctx context.Context) {
 		if openIssueNums[num] || openPRNums[num] {
 			continue
 		}
-		// This issue was in cache but not in current poll results — it was closed/deleted.
-		p.emit(ctx, ChangeEvent{
+		pending = append(pending, ChangeEvent{
 			Type:     EventIssueClosed,
 			Repo:     p.repo,
 			IssueNum: num,
@@ -235,21 +245,27 @@ func (p *Poller) poll(ctx context.Context) {
 			log.Printf("[poller] error deleting cache for closed issue %s#%d: %v", p.repo, num, err)
 		}
 	}
+	for _, ev := range pending {
+		if ctx.Err() != nil {
+			return
+		}
+		p.emit(ctx, ev)
+	}
 }
 
 // diffIssue compares a live issue against the cache and emits change events.
-func (p *Poller) diffIssue(ctx context.Context, iss Issue) {
+func (p *Poller) diffIssue(iss Issue) []ChangeEvent {
 	labelsJSON := labelsToJSON(iss.Labels)
+	var events []ChangeEvent
 
 	cached, err := p.store.QueryIssueCache(p.repo, iss.Number)
 	if err != nil {
 		log.Printf("[poller] error querying cache for %s#%d: %v", p.repo, iss.Number, err)
-		return
+		return nil
 	}
 
 	if cached == nil {
-		// New issue (or first sync after restart).
-		p.emit(ctx, ChangeEvent{
+		events = append(events, ChangeEvent{
 			Type:     EventIssueCreated,
 			Repo:     p.repo,
 			IssueNum: iss.Number,
@@ -261,7 +277,7 @@ func (p *Poller) diffIssue(ctx context.Context, iss Issue) {
 		oldLabels := labelsFromJSON(cached.Labels)
 		added, removed := diffLabels(oldLabels, iss.Labels)
 		for _, l := range added {
-			p.emit(ctx, ChangeEvent{
+			events = append(events, ChangeEvent{
 				Type:     EventLabelAdded,
 				Repo:     p.repo,
 				IssueNum: iss.Number,
@@ -270,7 +286,7 @@ func (p *Poller) diffIssue(ctx context.Context, iss Issue) {
 			})
 		}
 		for _, l := range removed {
-			p.emit(ctx, ChangeEvent{
+			events = append(events, ChangeEvent{
 				Type:     EventLabelRemoved,
 				Repo:     p.repo,
 				IssueNum: iss.Number,
@@ -285,14 +301,16 @@ func (p *Poller) diffIssue(ctx context.Context, iss Issue) {
 		Repo:     p.repo,
 		IssueNum: iss.Number,
 		Labels:   labelsJSON,
+		Body:     iss.Body,
 		State:    iss.State,
 	}); err != nil {
 		log.Printf("[poller] error upserting cache for %s#%d: %v", p.repo, iss.Number, err)
 	}
+	return events
 }
 
 // diffPR compares a live PR against the cache and emits change events.
-func (p *Poller) diffPR(ctx context.Context, pr PR) {
+func (p *Poller) diffPR(pr PR) []ChangeEvent {
 	// PRs are cached with negative number to avoid collision with issues.
 	// Actually, PR numbers are distinct from issue numbers on GitHub, but
 	// to be safe we use a "pr:" prefix in the state field.
@@ -301,19 +319,19 @@ func (p *Poller) diffPR(ctx context.Context, pr PR) {
 	cached, err := p.store.QueryIssueCache(p.repo, pr.Number)
 	if err != nil {
 		log.Printf("[poller] error querying cache for PR %s#%d: %v", p.repo, pr.Number, err)
-		return
+		return nil
 	}
+	var events []ChangeEvent
 
 	if cached == nil {
-		p.emit(ctx, ChangeEvent{
+		events = append(events, ChangeEvent{
 			Type:     EventPRCreated,
 			Repo:     p.repo,
 			IssueNum: pr.Number,
 			Detail:   pr.Branch,
 		})
 	} else if cached.State != stateVal {
-		// Detect state changes (checks, reviews show as state changes).
-		p.emit(ctx, ChangeEvent{
+		events = append(events, ChangeEvent{
 			Type:     EventPRStateChanged,
 			Repo:     p.repo,
 			IssueNum: pr.Number,
@@ -326,10 +344,12 @@ func (p *Poller) diffPR(ctx context.Context, pr PR) {
 		Repo:     p.repo,
 		IssueNum: pr.Number,
 		Labels:   "",
+		Body:     "",
 		State:    stateVal,
 	}); err != nil {
 		log.Printf("[poller] error upserting cache for PR %s#%d: %v", p.repo, pr.Number, err)
 	}
+	return events
 }
 
 // emit sends a ChangeEvent on the events channel, respecting context cancellation.

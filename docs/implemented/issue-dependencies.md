@@ -1,6 +1,6 @@
 # Issue Dependency Mechanism
 
-状态：planned
+状态：implemented
 
 ## Goal
 

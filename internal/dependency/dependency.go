@@ -1,0 +1,484 @@
+package dependency
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/poller"
+	"github.com/Lincyaw/workbuddy/internal/store"
+	"gopkg.in/yaml.v3"
+)
+
+const (
+	Marker                    = "<!-- workbuddy:dependency-status -->"
+	OverrideLabel             = "override:force-unblock"
+	StatusBlocked             = "status:blocked"
+	StatusDone                = "status:done"
+	StatusFailed              = "status:failed"
+	ResolverAgentName         = "dependency-resolver-agent"
+	DependencySchedulerReason = "dependency_reconcile"
+)
+
+var yamlFenceRe = regexp.MustCompile("(?s)```yaml\\s*\n(.*?)```")
+var fqIssueRefRe = regexp.MustCompile(`^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)#([1-9][0-9]*)$`)
+
+type IssueReader interface {
+	ListIssues(repo string) ([]poller.Issue, error)
+	ReadIssue(repo string, issueNum int) (poller.IssueDetails, error)
+}
+
+type EventRecorder interface {
+	Log(eventType, repo string, issueNum int, payload interface{})
+}
+
+type ParsedDependency struct {
+	Raw              string
+	Repo             string
+	IssueNum         int
+	Status           string
+	Normalized       string
+	ParseErrorReason string
+}
+
+type ParsedDeclaration struct {
+	Dependencies []ParsedDependency
+	SourceHash   string
+	HasBlock     bool
+}
+
+type ResolveResult struct {
+	State store.IssueDependencyState
+	Queue store.DependencyReconcileQueueItem
+	Deps  []store.IssueDependency
+}
+
+type Resolver struct {
+	store    *store.Store
+	reader   IssueReader
+	eventlog EventRecorder
+}
+
+func NewResolver(st *store.Store, reader IssueReader, eventlog EventRecorder) *Resolver {
+	return &Resolver{store: st, reader: reader, eventlog: eventlog}
+}
+
+func ParseDeclaration(repo, body string) ParsedDeclaration {
+	matches := yamlFenceRe.FindAllStringSubmatch(body, -1)
+	for _, match := range matches {
+		var raw struct {
+			Workbuddy struct {
+				DependsOn []string `yaml:"depends_on"`
+			} `yaml:"workbuddy"`
+		}
+		if err := yaml.Unmarshal([]byte(match[1]), &raw); err != nil {
+			continue
+		}
+		if raw.Workbuddy.DependsOn == nil {
+			continue
+		}
+		decl := ParsedDeclaration{HasBlock: true}
+		seen := make(map[string]struct{})
+		for _, dep := range raw.Workbuddy.DependsOn {
+			parsed := normalizeDependency(repo, dep)
+			if parsed.Normalized != "" {
+				if _, ok := seen[parsed.Normalized]; ok {
+					continue
+				}
+				seen[parsed.Normalized] = struct{}{}
+			}
+			decl.Dependencies = append(decl.Dependencies, parsed)
+		}
+		sort.Slice(decl.Dependencies, func(i, j int) bool {
+			return decl.Dependencies[i].Normalized < decl.Dependencies[j].Normalized
+		})
+		decl.SourceHash = hashStrings(match[1], dependenciesSignature(decl.Dependencies))
+		return decl
+	}
+	return ParsedDeclaration{}
+}
+
+func (r *Resolver) EvaluateOpenIssues(ctx context.Context, repo string, graphVersion int64) error {
+	issues, err := r.store.ListIssueCaches(repo)
+	if err != nil {
+		return err
+	}
+	openIssues := make(map[int]poller.Issue, len(issues))
+	for _, cached := range issues {
+		if cached.State != "open" {
+			continue
+		}
+		openIssues[cached.IssueNum] = poller.Issue{
+			Number: cached.IssueNum,
+			Body:   cached.Body,
+			State:  cached.State,
+			Labels: labelsFromJSON(cached.Labels),
+		}
+	}
+
+	parsedDecls := make(map[int]ParsedDeclaration, len(openIssues))
+	graph := make(map[int][]int)
+	for num, issue := range openIssues {
+		decl := ParseDeclaration(repo, issue.Body)
+		parsedDecls[num] = decl
+		deps := make([]store.IssueDependency, 0, len(decl.Dependencies))
+		for _, dep := range decl.Dependencies {
+			deps = append(deps, store.IssueDependency{
+				Repo:              repo,
+				IssueNum:          num,
+				DependsOnRepo:     dep.Repo,
+				DependsOnIssueNum: dep.IssueNum,
+				SourceHash:        decl.SourceHash,
+				Status:            dep.Status,
+			})
+			if dep.Status == store.DependencyStatusActive && dep.Repo == repo {
+				graph[num] = append(graph[num], dep.IssueNum)
+			}
+		}
+		if err := r.store.ReplaceIssueDependencies(repo, num, deps); err != nil {
+			return err
+		}
+	}
+
+	cycles := detectCycles(graph)
+	closedCache := make(map[int]poller.IssueDetails)
+
+	for num, issue := range openIssues {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		result := buildResolveResult(repo, issue, parsedDecls[num], graphVersion, cycles[num], openIssues, closedCache, r.reader)
+		prev, err := r.store.QueryIssueDependencyState(repo, num)
+		if err != nil {
+			return err
+		}
+		if !parsedDecls[num].HasBlock && prev == nil {
+			continue
+		}
+		if prev != nil && prev.ResumeLabel != "" && result.State.ResumeLabel == "" {
+			result.State.ResumeLabel = prev.ResumeLabel
+			result.Queue.DesiredResumeLabel = prev.ResumeLabel
+		}
+		if err := r.store.UpsertIssueDependencyState(result.State); err != nil {
+			return err
+		}
+		enqueued, err := r.store.UpsertDependencyReconcile(result.Queue)
+		if err != nil {
+			return err
+		}
+		if prev == nil || prev.Verdict != result.State.Verdict || prev.BlockedReasonHash != result.State.BlockedReasonHash || prev.OverrideActive != result.State.OverrideActive {
+			r.eventlog.Log(eventlog.TypeDependencyVerdictChanged, repo, num, map[string]any{
+				"verdict":         result.State.Verdict,
+				"override_active": result.State.OverrideActive,
+				"graph_version":   graphVersion,
+			})
+		}
+		if cycles[num] != nil {
+			r.eventlog.Log(eventlog.TypeDependencyCycleDetected, repo, num, map[string]any{
+				"cycle_path": cycles[num],
+			})
+		}
+		if result.State.OverrideActive {
+			r.eventlog.Log(eventlog.TypeDependencyOverrideActivated, repo, num, map[string]any{
+				"resume_label": result.State.ResumeLabel,
+			})
+		}
+		if enqueued {
+			r.eventlog.Log(eventlog.TypeDependencyQueueQueued, repo, num, map[string]any{
+				"generation_hint": graphVersion,
+				"verdict":         result.State.Verdict,
+			})
+		}
+	}
+
+	return nil
+}
+
+func buildResolveResult(
+	repo string,
+	issue poller.Issue,
+	decl ParsedDeclaration,
+	graphVersion int64,
+	cyclePath []string,
+	openIssues map[int]poller.Issue,
+	closedCache map[int]poller.IssueDetails,
+	reader IssueReader,
+) ResolveResult {
+	reasons := make([]string, 0)
+	commentLines := []string{Marker, "", fmt.Sprintf("Issue `%s#%d` dependency verdict: `%s`.", repo, issue.Number, store.DependencyVerdictReady)}
+	verdict := store.DependencyVerdictReady
+	needsHuman := false
+	overrideActive := hasLabel(issue.Labels, OverrideLabel)
+	resumeLabel := findResumeLabel(issue.Labels, "")
+
+	if len(decl.Dependencies) > 0 {
+		commentLines = []string{Marker, "", "Dependencies:"}
+	}
+	if len(cyclePath) > 0 {
+		verdict = store.DependencyVerdictNeedsHuman
+		needsHuman = true
+		reasons = append(reasons, "cycle:"+strings.Join(cyclePath, " -> "))
+		commentLines = append(commentLines, fmt.Sprintf("- cycle detected: `%s`", strings.Join(cyclePath, " -> ")))
+	}
+
+	for _, dep := range decl.Dependencies {
+		status := "open"
+		switch dep.Status {
+		case store.DependencyStatusUnsupportedCrossRepo:
+			status = "unsupported-cross-repo"
+			verdict = store.DependencyVerdictNeedsHuman
+			needsHuman = true
+			reasons = append(reasons, dep.Normalized+":"+status)
+		case store.DependencyStatusInvalid:
+			status = "invalid"
+			verdict = store.DependencyVerdictNeedsHuman
+			needsHuman = true
+			reasons = append(reasons, dep.Raw+":"+dep.ParseErrorReason)
+		default:
+			if depIssue, ok := openIssues[dep.IssueNum]; ok && dep.Repo == repo {
+				status = classifyOpenDependency(depIssue.Labels)
+				if status != "done" {
+					if status == "failed" {
+						reasons = append(reasons, dep.Normalized+":failed")
+					} else {
+						reasons = append(reasons, dep.Normalized+":open")
+					}
+					if verdict == store.DependencyVerdictReady {
+						verdict = store.DependencyVerdictBlocked
+					}
+				}
+			} else {
+				detail, ok := closedCache[dep.IssueNum]
+				if !ok && dep.Repo == repo {
+					read, err := reader.ReadIssue(repo, dep.IssueNum)
+					if err == nil {
+						detail = read
+						closedCache[dep.IssueNum] = detail
+						ok = true
+					}
+				}
+				if ok && detail.State == "closed" && detail.ClosedByLinkedPR {
+					status = "done"
+				} else if ok && detail.State == "closed" {
+					status = "closed-without-linked-pr"
+					reasons = append(reasons, dep.Normalized+":"+status)
+					if verdict == store.DependencyVerdictReady {
+						verdict = store.DependencyVerdictBlocked
+					}
+				} else {
+					status = "invalid"
+					verdict = store.DependencyVerdictNeedsHuman
+					needsHuman = true
+					reasons = append(reasons, dep.Normalized+":unreadable")
+				}
+			}
+		}
+		label := dep.Normalized
+		if label == "" {
+			label = dep.Raw
+		}
+		commentLines = append(commentLines, fmt.Sprintf("- `%s`: `%s`", label, status))
+	}
+
+	if overrideActive {
+		verdict = store.DependencyVerdictOverride
+		needsHuman = false
+		commentLines = append(commentLines, "", "Override active via `override:force-unblock`.")
+	}
+
+	commentLines[2] = fmt.Sprintf("Issue `%s#%d` dependency verdict: `%s`.", repo, issue.Number, verdict)
+	if len(commentLines) == 3 {
+		commentLines = append(commentLines, "", "No active dependencies.")
+	}
+
+	commentBody := strings.Join(commentLines, "\n")
+	reasonHash := hashStrings(reasons...)
+	commentHash := hashStrings(commentBody)
+
+	state := store.IssueDependencyState{
+		Repo:              repo,
+		IssueNum:          issue.Number,
+		Verdict:           verdict,
+		ResumeLabel:       resumeLabel,
+		BlockedReasonHash: reasonHash,
+		OverrideActive:    overrideActive,
+		GraphVersion:      graphVersion,
+		LastCommentHash:   commentHash,
+		LastEvaluatedAt:   time.Now(),
+	}
+	queue := store.DependencyReconcileQueueItem{
+		Repo:               repo,
+		IssueNum:           issue.Number,
+		DesiredBlocked:     verdict == store.DependencyVerdictBlocked || verdict == store.DependencyVerdictNeedsHuman,
+		DesiredResumeLabel: resumeLabel,
+		DesiredNeedsHuman:  needsHuman,
+		DesiredCommentBody: commentBody,
+		DesiredCommentHash: commentHash,
+	}
+	return ResolveResult{State: state, Queue: queue}
+}
+
+func normalizeDependency(repo, raw string) ParsedDependency {
+	raw = strings.TrimSpace(raw)
+	parsed := ParsedDependency{Raw: raw}
+	switch {
+	case strings.HasPrefix(raw, "#"):
+		var num int
+		if _, err := fmt.Sscanf(raw, "#%d", &num); err != nil || num <= 0 {
+			parsed.Status = store.DependencyStatusInvalid
+			parsed.ParseErrorReason = "invalid_issue_number"
+			return parsed
+		}
+		parsed.Repo = repo
+		parsed.IssueNum = num
+		parsed.Status = store.DependencyStatusActive
+	case fqIssueRefRe.MatchString(raw):
+		match := fqIssueRefRe.FindStringSubmatch(raw)
+		var num int
+		if _, err := fmt.Sscanf(match[3], "%d", &num); err != nil || num <= 0 {
+			parsed.Status = store.DependencyStatusInvalid
+			parsed.ParseErrorReason = "invalid_repo_issue"
+			return parsed
+		}
+		parsed.Repo = match[1] + "/" + match[2]
+		parsed.IssueNum = num
+		if parsed.Repo == repo {
+			parsed.Status = store.DependencyStatusActive
+		} else {
+			parsed.Status = store.DependencyStatusUnsupportedCrossRepo
+		}
+	default:
+		parsed.Status = store.DependencyStatusInvalid
+		parsed.ParseErrorReason = "invalid_format"
+	}
+	if parsed.Repo != "" && parsed.IssueNum > 0 {
+		parsed.Normalized = fmt.Sprintf("%s#%d", parsed.Repo, parsed.IssueNum)
+	}
+	return parsed
+}
+
+func detectCycles(graph map[int][]int) map[int][]string {
+	type color int
+	const (
+		white color = iota
+		gray
+		black
+	)
+	colors := make(map[int]color, len(graph))
+	stack := make([]int, 0)
+	out := make(map[int][]string)
+	var visit func(int)
+	visit = func(node int) {
+		colors[node] = gray
+		stack = append(stack, node)
+		for _, next := range graph[node] {
+			switch colors[next] {
+			case white:
+				visit(next)
+			case gray:
+				path := extractCyclePath(stack, next)
+				for _, n := range path {
+					out[n] = formatCycle(path)
+				}
+			}
+		}
+		stack = stack[:len(stack)-1]
+		colors[node] = black
+	}
+	keys := make([]int, 0, len(graph))
+	for node := range graph {
+		keys = append(keys, node)
+	}
+	sort.Ints(keys)
+	for _, node := range keys {
+		if colors[node] == white {
+			visit(node)
+		}
+	}
+	return out
+}
+
+func extractCyclePath(stack []int, target int) []int {
+	start := 0
+	for i, n := range stack {
+		if n == target {
+			start = i
+			break
+		}
+	}
+	path := append([]int(nil), stack[start:]...)
+	path = append(path, target)
+	return path
+}
+
+func formatCycle(path []int) []string {
+	out := make([]string, len(path))
+	for i, n := range path {
+		out[i] = fmt.Sprintf("#%d", n)
+	}
+	return out
+}
+
+func classifyOpenDependency(labels []string) string {
+	switch {
+	case hasLabel(labels, StatusDone):
+		return "done"
+	case hasLabel(labels, StatusFailed):
+		return "failed"
+	default:
+		return "open"
+	}
+}
+
+func hasLabel(labels []string, want string) bool {
+	for _, label := range labels {
+		if label == want {
+			return true
+		}
+	}
+	return false
+}
+
+func findResumeLabel(labels []string, fallback string) string {
+	for _, label := range labels {
+		if strings.HasPrefix(label, "status:") && label != StatusBlocked {
+			return label
+		}
+	}
+	return fallback
+}
+
+func hashStrings(parts ...string) string {
+	h := sha256.New()
+	for _, part := range parts {
+		_, _ = h.Write([]byte(part))
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func dependenciesSignature(deps []ParsedDependency) string {
+	data, _ := json.Marshal(deps)
+	return string(data)
+}
+
+func labelsFromJSON(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var labels []string
+	if err := json.Unmarshal([]byte(raw), &labels); err != nil {
+		return nil
+	}
+	return labels
+}

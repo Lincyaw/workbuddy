@@ -129,13 +129,16 @@ func TestCreateAndReadWrite(t *testing.T) {
 		t.Fatalf("unexpected issue cache: %+v", ic)
 	}
 	// Upsert update.
-	err = s.UpsertIssueCache(IssueCache{Repo: "org/repo", IssueNum: 1, Labels: `["bug","wip"]`, State: "open"})
+	err = s.UpsertIssueCache(IssueCache{Repo: "org/repo", IssueNum: 1, Labels: `["bug","wip"]`, Body: "body", State: "open"})
 	if err != nil {
 		t.Fatalf("UpsertIssueCache update: %v", err)
 	}
 	ic, _ = s.QueryIssueCache("org/repo", 1)
 	if ic.Labels != `["bug","wip"]` {
 		t.Fatalf("expected updated labels, got %s", ic.Labels)
+	}
+	if ic.Body != "body" {
+		t.Fatalf("expected updated body, got %q", ic.Body)
 	}
 	// Cache miss.
 	ic, err = s.QueryIssueCache("org/repo", 999)
@@ -163,6 +166,76 @@ func TestCreateAndReadWrite(t *testing.T) {
 	}
 	if len(sessions) != 1 || sessions[0].Summary != "ok" {
 		t.Fatalf("unexpected sessions: %+v", sessions)
+	}
+
+	// --- Dependency tables ---
+	err = s.ReplaceIssueDependencies("org/repo", 1, []IssueDependency{{
+		Repo:              "org/repo",
+		IssueNum:          1,
+		DependsOnRepo:     "org/repo",
+		DependsOnIssueNum: 2,
+		SourceHash:        "hash-1",
+		Status:            DependencyStatusActive,
+	}})
+	if err != nil {
+		t.Fatalf("ReplaceIssueDependencies: %v", err)
+	}
+	deps, err := s.ListIssueDependencies("org/repo", 1)
+	if err != nil {
+		t.Fatalf("ListIssueDependencies: %v", err)
+	}
+	if len(deps) != 1 || deps[0].DependsOnIssueNum != 2 {
+		t.Fatalf("unexpected dependencies: %+v", deps)
+	}
+	err = s.UpsertIssueDependencyState(IssueDependencyState{
+		Repo:              "org/repo",
+		IssueNum:          1,
+		Verdict:           DependencyVerdictBlocked,
+		ResumeLabel:       "status:developing",
+		BlockedReasonHash: "reason",
+		GraphVersion:      1,
+		LastCommentHash:   "comment-hash",
+	})
+	if err != nil {
+		t.Fatalf("UpsertIssueDependencyState: %v", err)
+	}
+	depState, err := s.QueryIssueDependencyState("org/repo", 1)
+	if err != nil {
+		t.Fatalf("QueryIssueDependencyState: %v", err)
+	}
+	if depState == nil || depState.Verdict != DependencyVerdictBlocked {
+		t.Fatalf("unexpected dependency state: %+v", depState)
+	}
+	enqueued, err := s.UpsertDependencyReconcile(DependencyReconcileQueueItem{
+		Repo:               "org/repo",
+		IssueNum:           1,
+		DesiredBlocked:     true,
+		DesiredResumeLabel: "status:developing",
+		DesiredCommentBody: "comment",
+		DesiredCommentHash: "comment-hash",
+	})
+	if err != nil {
+		t.Fatalf("UpsertDependencyReconcile: %v", err)
+	}
+	if !enqueued {
+		t.Fatal("expected reconcile item to be enqueued")
+	}
+	queued, err := s.ListQueuedDependencyReconciles("org/repo", 10)
+	if err != nil {
+		t.Fatalf("ListQueuedDependencyReconciles: %v", err)
+	}
+	if len(queued) != 1 {
+		t.Fatalf("expected 1 queued reconcile item, got %d", len(queued))
+	}
+	if err := s.MarkDependencyReconcileApplied("org/repo", 1, queued[0].Generation, "comment-hash", "123"); err != nil {
+		t.Fatalf("MarkDependencyReconcileApplied: %v", err)
+	}
+	latest, err := s.LatestDependencyReconcile("org/repo", 1)
+	if err != nil {
+		t.Fatalf("LatestDependencyReconcile: %v", err)
+	}
+	if latest == nil || latest.Status != DependencyQueueStatusApplied {
+		t.Fatalf("unexpected latest reconcile item: %+v", latest)
 	}
 }
 

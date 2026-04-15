@@ -272,6 +272,19 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 func (sm *StateMachine) dispatchAgent(ctx context.Context, repo string, issueNum int, agentName, workflow, state string) error {
 	issueKey := fmt.Sprintf("%s#%d", repo, issueNum)
 
+	depState, err := sm.store.QueryIssueDependencyState(repo, issueNum)
+	if err != nil {
+		return fmt.Errorf("statemachine: query dependency state: %w", err)
+	}
+	if depState != nil && (depState.Verdict == store.DependencyVerdictBlocked || depState.Verdict == store.DependencyVerdictNeedsHuman) {
+		sm.eventlog.Log(eventlog.TypeDependencyQueueQueued, repo, issueNum, map[string]string{
+			"reason":  "dispatch_blocked",
+			"verdict": depState.Verdict,
+			"agent":   agentName,
+		})
+		return nil
+	}
+
 	// Execution mutex: don't dispatch if agent is already running.
 	sm.inflightMu.Lock()
 	if sm.inflight[issueKey] {

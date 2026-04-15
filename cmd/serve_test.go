@@ -50,10 +50,24 @@ timeout: 30s
 ---
 # Dev Agent
 `
+	dependencyResolverAgentMD := `---
+name: dependency-resolver-agent
+description: Dependency resolver
+triggers:
+  - label: "status:blocked"
+    event: labeled
+role: maintenance
+runtime: claude-code
+command: echo '{"generation":1,"status":"applied","comment_hash":"x","comment_id":"1"}'
+timeout: 30s
+---
+# Dependency Resolver Agent
+`
 	if err := os.MkdirAll(filepath.Join(dir, "agents"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(dir, "agents", "dev-agent.md"), agentMD)
+	writeFile(t, filepath.Join(dir, "agents", "dependency-resolver-agent.md"), dependencyResolverAgentMD)
 
 	// Workflow
 	workflowMD := `---
@@ -130,6 +144,22 @@ func (m *mockGHReader) ReadIssueLabels(_ string, _ int) ([]string, error) {
 	return append([]string(nil), m.labelSnapshots[idx]...), nil
 }
 
+func (m *mockGHReader) ReadIssue(_ string, issueNum int) (poller.IssueDetails, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, issue := range m.issues {
+		if issue.Number == issueNum {
+			return poller.IssueDetails{
+				Number: issueNum,
+				State:  issue.State,
+				Body:   issue.Body,
+				Labels: append([]string(nil), issue.Labels...),
+			}, nil
+		}
+	}
+	return poller.IssueDetails{Number: issueNum, State: "closed"}, nil
+}
+
 func (m *mockGHReader) SetIssues(issues []poller.Issue) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -141,6 +171,7 @@ type mockRuntime struct {
 	name     string
 	mu       sync.Mutex
 	calls    int
+	countFor string
 	resultFn func(ctx context.Context, agent *config.AgentConfig, task *launcher.TaskContext) (*launcher.Result, error)
 }
 
@@ -165,7 +196,9 @@ func (m *mockRuntime) Start(ctx context.Context, agent *config.AgentConfig, task
 
 func (m *mockRuntime) Launch(ctx context.Context, agent *config.AgentConfig, task *launcher.TaskContext) (*launcher.Result, error) {
 	m.mu.Lock()
-	m.calls++
+	if m.countFor == "" || (agent != nil && agent.Name == m.countFor) {
+		m.calls++
+	}
 	fn := m.resultFn
 	m.mu.Unlock()
 	if fn != nil {
@@ -279,6 +312,54 @@ func newWorkerTestDepsWithComments(t *testing.T, rt *mockRuntime, readers ...iss
 		sessionsDir:  filepath.Join(t.TempDir(), ".workbuddy", "sessions"),
 		issueReader:  issueReader,
 	}, st, comments
+}
+
+func TestServeDependencyGateBlocksUntilDependencyDone(t *testing.T) {
+	setupFakeGHCLI(t)
+	repo := "owner/repo"
+	configDir := setupTestConfigDir(t, repo)
+	rt := &mockRuntime{name: "mock", countFor: "dev-agent"}
+
+	gh := &mockGHReader{}
+	gh.onPoll = func(call int) {
+		switch call {
+		case 1:
+			gh.issues = []poller.Issue{
+				{Number: 1, Title: "A", State: "open", Labels: []string{"workbuddy", "status:triage"}},
+				{Number: 2, Title: "B", State: "open", Labels: []string{"workbuddy", "status:developing"}, Body: "```yaml\nworkbuddy:\n  depends_on:\n    - \"#1\"\n```"},
+			}
+		case 2:
+			gh.issues = []poller.Issue{
+				{Number: 1, Title: "A", State: "open", Labels: []string{"workbuddy", "status:done"}},
+				{Number: 2, Title: "B", State: "open", Labels: []string{"workbuddy", "status:blocked"}, Body: "```yaml\nworkbuddy:\n  depends_on:\n    - \"#1\"\n```"},
+			}
+		default:
+			gh.issues = []poller.Issue{
+				{Number: 1, Title: "A", State: "open", Labels: []string{"workbuddy", "status:done"}},
+				{Number: 2, Title: "B", State: "open", Labels: []string{"workbuddy", "status:developing"}, Body: "```yaml\nworkbuddy:\n  depends_on:\n    - \"#1\"\n```"},
+			}
+		}
+	}
+
+	lnch := launcher.NewLauncher()
+	lnch.Register(rt, config.RuntimeClaudeCode, config.RuntimeClaudeShot)
+	opts := &serveOpts{
+		port:             18939,
+		pollInterval:     40 * time.Millisecond,
+		maxParallelTasks: 1,
+		roles:            []string{"dev"},
+		configDir:        configDir,
+		dbPath:           filepath.Join(t.TempDir(), "workbuddy.db"),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+
+	if err := runServeWithOpts(opts, gh, lnch, ctx); err != nil {
+		t.Fatalf("runServeWithOpts: %v", err)
+	}
+	if calls := rt.CallCount(); calls != 1 {
+		t.Fatalf("runtime call count=%d want 1", calls)
+	}
 }
 
 func newWorkerTestTask(t *testing.T, st *store.Store, repo string, issueNum int, taskID string) router.WorkerTask {
