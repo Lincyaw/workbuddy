@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/launcher"
@@ -108,6 +109,16 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 		issueCtx.Body = body
 		issueCtx.Labels = labels
 	}
+	if comments, err := fetchIssueComments(req.Repo, req.IssueNum); err != nil {
+		log.Printf("[router] warning: could not fetch issue comments: %v", err)
+	} else {
+		issueCtx.Comments = comments
+		issueCtx.CommentsText = formatComments(comments)
+	}
+	relatedPRs, err := fetchRelatedPRs(req.Repo, req.IssueNum)
+	if err != nil {
+		log.Printf("[router] warning: could not fetch related PRs: %v", err)
+	}
 
 	// Determine WorkDir: use an isolated worktree if workspace manager is set,
 	// otherwise fall back to CWD.
@@ -127,9 +138,11 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 	}
 
 	taskCtx := &launcher.TaskContext{
-		Issue:   issueCtx,
-		Repo:    req.Repo,
-		WorkDir: workDir,
+		Issue:          issueCtx,
+		Repo:           req.Repo,
+		WorkDir:        workDir,
+		RelatedPRs:     relatedPRs,
+		RelatedPRsText: formatRelatedPRs(relatedPRs),
 		Session: launcher.SessionContext{
 			ID: fmt.Sprintf("session-%s", taskID),
 		},
@@ -194,4 +207,111 @@ func fetchIssueDetails(repo string, issueNum int) (title, body string, labels []
 		labels[i] = l.Name
 	}
 	return detail.Title, detail.Body, labels, nil
+}
+
+// ghIssueComments is the shape returned by `gh issue view --json comments`.
+type ghIssueComments struct {
+	Comments []struct {
+		Author    struct{ Login string } `json:"author"`
+		Body      string                 `json:"body"`
+		CreatedAt string                 `json:"createdAt"`
+	} `json:"comments"`
+}
+
+func fetchIssueComments(repo string, issueNum int) ([]launcher.IssueComment, error) {
+	cmd := exec.Command("gh", "issue", "view",
+		fmt.Sprintf("%d", issueNum),
+		"--repo", repo,
+		"--json", "comments",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("gh issue view comments: %w", err)
+	}
+	var parsed ghIssueComments
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		return nil, fmt.Errorf("gh issue view comments: parse: %w", err)
+	}
+	result := make([]launcher.IssueComment, 0, len(parsed.Comments))
+	for _, c := range parsed.Comments {
+		result = append(result, launcher.IssueComment{
+			Author:    c.Author.Login,
+			Body:      c.Body,
+			CreatedAt: c.CreatedAt,
+		})
+	}
+	return result, nil
+}
+
+func formatComments(comments []launcher.IssueComment) string {
+	if len(comments) == 0 {
+		return "(no comments)"
+	}
+	var b strings.Builder
+	for i, c := range comments {
+		if i > 0 {
+			b.WriteString("\n---\n")
+		}
+		fmt.Fprintf(&b, "[%s by %s]\n%s", c.CreatedAt, c.Author, c.Body)
+	}
+	return b.String()
+}
+
+type ghPRSummary struct {
+	Number      int    `json:"number"`
+	State       string `json:"state"`
+	Title       string `json:"title"`
+	HeadRefName string `json:"headRefName"`
+	BaseRefName string `json:"baseRefName"`
+	URL         string `json:"url"`
+	IsDraft     bool   `json:"isDraft"`
+}
+
+func fetchRelatedPRs(repo string, issueNum int) ([]launcher.PRSummary, error) {
+	cmd := exec.Command("gh", "pr", "list",
+		"--repo", repo,
+		"--state", "all",
+		"--search", fmt.Sprintf("%d in:title,body", issueNum),
+		"--json", "number,state,title,headRefName,baseRefName,url,isDraft",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("gh pr list: %w", err)
+	}
+	var parsed []ghPRSummary
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		return nil, fmt.Errorf("gh pr list: parse: %w", err)
+	}
+	result := make([]launcher.PRSummary, 0, len(parsed))
+	for _, p := range parsed {
+		result = append(result, launcher.PRSummary{
+			Number:      p.Number,
+			State:       p.State,
+			Title:       p.Title,
+			HeadRefName: p.HeadRefName,
+			BaseRefName: p.BaseRefName,
+			URL:         p.URL,
+			IsDraft:     p.IsDraft,
+		})
+	}
+	return result, nil
+}
+
+func formatRelatedPRs(prs []launcher.PRSummary) string {
+	if len(prs) == 0 {
+		return "(no related PRs)"
+	}
+	var b strings.Builder
+	for i, p := range prs {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		draft := ""
+		if p.IsDraft {
+			draft = " [draft]"
+		}
+		fmt.Fprintf(&b, "#%d [%s]%s %s (head: %s, base: %s) - %s",
+			p.Number, p.State, draft, p.Title, p.HeadRefName, p.BaseRefName, p.URL)
+	}
+	return b.String()
 }
