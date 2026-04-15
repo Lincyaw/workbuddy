@@ -199,35 +199,10 @@ func (h *Handler) handleEventsJSON(w http.ResponseWriter, r *http.Request, sessi
 	}
 	defer func() { _ = f.Close() }()
 
-	lines, err := readAllLines(f)
+	out, total, start, end, err := readEventSlice(f, offset, limit, tail)
 	if err != nil {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
-	}
-	total := len(lines)
-
-	start, end := offset, offset+limit
-	if tail {
-		end = total
-		start = total - limit
-		if start < 0 {
-			start = 0
-		}
-	}
-	if start > total {
-		start = total
-	}
-	if end > total {
-		end = total
-	}
-
-	out := make([]trimmedEvent, 0, end-start)
-	for i := start; i < end; i++ {
-		ev, ok := parseAndTrim(lines[i], i)
-		if !ok {
-			continue
-		}
-		out = append(out, ev)
 	}
 
 	writeJSON(w, eventsResponse{
@@ -236,6 +211,74 @@ func (h *Handler) handleEventsJSON(w http.ResponseWriter, r *http.Request, sessi
 		Start:  start,
 		End:    end,
 	})
+}
+
+// readEventSlice streams the file line-by-line and collects only the requested
+// slice so memory stays O(limit) instead of O(total). For `tail` it keeps a
+// ring buffer of the last `limit` lines.
+func readEventSlice(r io.Reader, offset, limit int, tail bool) ([]trimmedEvent, int, int, int, error) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+
+	if tail {
+		ring := make([]string, 0, limit)
+		total := 0
+		for sc.Scan() {
+			line := sc.Text()
+			total++
+			if len(ring) < limit {
+				ring = append(ring, line)
+			} else {
+				copy(ring, ring[1:])
+				ring[limit-1] = line
+			}
+		}
+		if err := sc.Err(); err != nil {
+			return nil, 0, 0, 0, err
+		}
+		start := total - len(ring)
+		if start < 0 {
+			start = 0
+		}
+		end := total
+		out := make([]trimmedEvent, 0, len(ring))
+		for i, line := range ring {
+			ev, ok := parseAndTrim(line, start+i)
+			if !ok {
+				continue
+			}
+			out = append(out, ev)
+		}
+		return out, total, start, end, nil
+	}
+
+	total := 0
+	desiredEnd := offset + limit
+	out := make([]trimmedEvent, 0, limit)
+	for sc.Scan() {
+		idx := total
+		total++
+		if idx < offset || idx >= desiredEnd {
+			continue
+		}
+		ev, ok := parseAndTrim(sc.Text(), idx)
+		if !ok {
+			continue
+		}
+		out = append(out, ev)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, 0, 0, 0, err
+	}
+	start := offset
+	if start > total {
+		start = total
+	}
+	end := desiredEnd
+	if end > total {
+		end = total
+	}
+	return out, total, start, end, nil
 }
 
 // handleStream tails events-v1.jsonl and pushes new events via SSE.
@@ -347,21 +390,31 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, sessionID
 // ---------------------------------------------------------------------------
 
 func (h *Handler) eventsPath(sessionID string) string {
-	if h.sessionsDir == "" || sessionID == "" {
+	if h.sessionsDir == "" || !isValidSessionID(sessionID) {
 		return ""
 	}
-	return filepath.Join(h.sessionsDir, sessionID, "events-v1.jsonl")
+	baseDir := filepath.Clean(h.sessionsDir)
+	fullPath := filepath.Join(baseDir, sessionID, "events-v1.jsonl")
+	rel, err := filepath.Rel(baseDir, fullPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return ""
+	}
+	return fullPath
 }
 
-func readAllLines(r io.Reader) ([]string, error) {
-	var out []string
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for sc.Scan() {
-		out = append(out, sc.Text())
+// isValidSessionID rejects empty IDs, dot-paths, and any value containing a
+// path separator so a request cannot traverse out of the configured sessions
+// directory.
+func isValidSessionID(sessionID string) bool {
+	if sessionID == "" || sessionID == "." || sessionID == ".." {
+		return false
 	}
-	return out, sc.Err()
+	if strings.ContainsAny(sessionID, `/\`) {
+		return false
+	}
+	return true
 }
+
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")

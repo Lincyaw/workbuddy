@@ -203,7 +203,7 @@ const detailHTML = `<!DOCTYPE html>
 {{if .HasEvents}}
 <script>
 (function() {
-  const SID = {{.Session.SessionID}};
+  const SID = {{printf "%q" .Session.SessionID}};
   const timeline = document.getElementById("timeline");
   const statusEl = document.getElementById("status");
   const emptyEl = document.getElementById("empty");
