@@ -772,24 +772,21 @@ requirements:
   - id: REQ-022
     title: CLI - logs command
     description: >
-      `workbuddy logs` — query event log from SQLite.
+      `workbuddy logs` resolves an issue run via the SQLite session index
+      and prints archived stdout, stderr, or tool-call artifacts from the
+      session directory, with optional live follow for running sessions.
     priority: P1
     version: v0.2.0
-    status: pending
+    status: tested
     acceptance_criteria:
-      - "AC-022-1: 默认显示今天的事件"
-      - "AC-022-2: --since/--until 日期范围筛选"
-      - "AC-022-3: --type 事件类型筛选"
-      - "AC-022-4: --issue 按 issue number 筛选"
-      - "AC-022-5: --agent 按 agent name 筛选"
-      - "AC-022-6: --repo 按仓库筛选"
-      - "AC-022-7: --follow (-f) 实时追踪"
-      - "AC-022-8: --json 输出原始 JSON"
-      - "AC-022-9: 无日志时提示 'No events found'"
-      - "AC-022-10: 单元测试：日期/类型/repo 筛选"
-    code: []
-    tests: []
-    deps: [REQ-009, REQ-024]
+      - "AC-022-1: `workbuddy logs --repo OWNER/NAME --issue N` resolves a session via the SQLite sessions index and prints archived stdout for the latest attempt by default"
+      - "AC-022-2: `--attempt K` selects a specific issue attempt from the ordered session history"
+      - "AC-022-3: `--stream stdout|stderr|tool-calls` prints the requested artifact stream from `events-v1.jsonl`"
+      - "AC-022-4: `--follow` tails newly appended artifact lines for running sessions"
+      - "AC-022-5: End-to-end test covers `workbuddy logs` against a fixture session directory"
+    code: [cmd/logs.go]
+    tests: [cmd/logs_test.go]
+    deps: [REQ-008]
 
   # ============================================================
   # New Requirements (Architecture Change)
