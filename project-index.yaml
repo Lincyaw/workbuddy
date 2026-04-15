@@ -173,6 +173,19 @@ documentation:
         - .github/workbuddy/agents/
       notes: Catalog of planned agent types remains the future index, while codex-dev-agent now explicitly notes the codex-exec Event v1 and draft-PR development path.
 
+    - path: docs/planned/issue-dependencies.md
+      bucket: planned
+      status: proposed
+      related_code:
+        - cmd/serve.go
+        - internal/poller/poller.go
+        - internal/statemachine/statemachine.go
+        - internal/router/router.go
+        - internal/store/store.go
+        - internal/store/types.go
+        - internal/webui/handler.go
+      notes: Proposed dependency declaration, gating, blocked-state visibility, auto-unblock, cycle detection, and future cross-repo extension path.
+
     - path: docs/mismatch/index.md
       bucket: mismatch
       status: maintained
