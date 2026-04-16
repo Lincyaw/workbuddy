@@ -168,7 +168,7 @@ func TestWorkerPairsWithCoordinatorAndCompletesTask(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		tasks, err := st.QueryTasks("")
+		tasks, err := st.QueryTasks(store.TaskStatusCompleted)
 		_ = st.Close()
 		if err != nil {
 			t.Fatal(err)

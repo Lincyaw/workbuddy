@@ -12,6 +12,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/store"
+	"github.com/Lincyaw/workbuddy/internal/workflow"
 )
 
 // ChangeEvent represents a state change detected by the Poller.
@@ -64,6 +65,8 @@ type StateMachine struct {
 	// key: "repo#issueNum" → (completionTime, labelsAtCompletion)
 	completionMu    sync.Mutex
 	completionTimes map[string]completionRecord
+
+	workflowManager *workflow.Manager
 }
 
 type completionRecord struct {
@@ -78,6 +81,10 @@ func NewStateMachine(
 	dispatch chan<- DispatchRequest,
 	eventlog EventRecorder,
 ) *StateMachine {
+	var workflowManager *workflow.Manager
+	if st != nil {
+		workflowManager = workflow.NewManager(st.DB())
+	}
 	return &StateMachine{
 		workflows:       workflows,
 		store:           st,
@@ -86,6 +93,7 @@ func NewStateMachine(
 		inflight:        make(map[string]bool),
 		stuckTimeout:    StuckTimeout,
 		completionTimes: make(map[string]completionRecord),
+		workflowManager: workflowManager,
 	}
 }
 
@@ -159,6 +167,9 @@ func (sm *StateMachine) findMatchingWorkflows(event ChangeEvent) []*config.Workf
 func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.WorkflowConfig, event ChangeEvent) error {
 	// Determine current state from labels.
 	currentStateName, currentState := sm.findCurrentState(wf, event.Labels)
+	if err := sm.ensureWorkflowInstance(wf.Name, event.Repo, event.IssueNum, currentStateName); err != nil {
+		return fmt.Errorf("statemachine: ensure workflow instance: %w", err)
+	}
 	if currentState == nil {
 		// Issue has the workflow trigger but no status label matching any state.
 		// Could be initial state or misconfigured. Skip silently.
@@ -250,6 +261,13 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 			}
 		}
 
+		// Persist the workflow state transition.
+		if sm.workflowManager != nil {
+			if _, err := sm.workflowManager.Advance(event.Repo, event.IssueNum, wf.Name, currentStateName, targetStateName, currentState.Agent); err != nil {
+				return fmt.Errorf("statemachine: persist workflow transition: %w", err)
+			}
+		}
+
 		// Log the transition.
 		sm.eventlog.Log(eventlog.TypeTransition, event.Repo, event.IssueNum,
 			map[string]string{"from": currentStateName, "to": targetStateName})
@@ -266,6 +284,14 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 	}
 
 	return nil
+}
+
+func (sm *StateMachine) ensureWorkflowInstance(workflowName, repo string, issueNum int, currentState string) error {
+	if sm.workflowManager == nil {
+		return nil
+	}
+	_, err := sm.workflowManager.CreateIfMissing(repo, issueNum, workflowName, currentState)
+	return err
 }
 
 // DispatchAgent sends a dispatch request for the given agent, respecting the inflight mutex.

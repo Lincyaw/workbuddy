@@ -674,15 +674,20 @@ requirements:
       per issue. Persist to SQLite.
     priority: P1
     version: v0.3.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-014-1: 为每个匹配 workflow trigger 的 Issue 创建 WorkflowInstance"
       - "AC-014-2: WorkflowInstance 记录：workflow 名称、issue 编号、当前状态、转换历史"
       - "AC-014-3: 支持查询某个 Issue 的 workflow 进度"
       - "AC-014-4: 持久化 workflow instance 到 SQLite"
       - "AC-014-5: 单元测试：创建实例、状态推进、历史记录 3 种场景"
-    code: []
-    tests: []
+    code:
+      - internal/statemachine/statemachine.go
+      - internal/store/store.go
+      - internal/workflow/workflow.go
+    tests:
+      - internal/workflow/workflow_test.go
+      - internal/statemachine/statemachine_test.go
     deps: [REQ-013]
 
   - id: REQ-015
