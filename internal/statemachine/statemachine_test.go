@@ -109,6 +109,7 @@ func newTestSM(t *testing.T) (*StateMachine, *fakeRecorder, chan DispatchRequest
 		st,
 		dispatch,
 		rec,
+		nil,
 	)
 	return sm, rec, dispatch
 }
@@ -356,6 +357,7 @@ func TestMultiWorkflowReject(t *testing.T) {
 		st,
 		dispatch,
 		rec,
+		nil,
 	)
 
 	err := sm.HandleEvent(context.Background(), ChangeEvent{
@@ -458,6 +460,7 @@ func TestParallelStateDispatchesAllAgents(t *testing.T) {
 		st,
 		dispatch,
 		rec,
+		nil,
 	)
 
 	if err := sm.HandleEvent(context.Background(), ChangeEvent{
@@ -496,6 +499,7 @@ func TestParallelStateAllPassed_SucceedsWhenAllSuccess(t *testing.T) {
 		st,
 		dispatch,
 		rec,
+		nil,
 	)
 
 	if err := sm.HandleEvent(context.Background(), ChangeEvent{
@@ -528,6 +532,7 @@ func TestParallelStateAllPassed_FailsOnPartialFailure(t *testing.T) {
 		st,
 		dispatch,
 		rec,
+		nil,
 	)
 
 	if err := sm.HandleEvent(context.Background(), ChangeEvent{
@@ -562,6 +567,7 @@ func TestParallelStateAnyPassed_ProgressesOnFirstSuccess(t *testing.T) {
 		st,
 		dispatch,
 		rec,
+		nil,
 	)
 
 	if err := sm.HandleEvent(context.Background(), ChangeEvent{
@@ -750,6 +756,7 @@ func TestDispatchRespectsContext(t *testing.T) {
 		st,
 		dispatch,
 		rec,
+		nil,
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())

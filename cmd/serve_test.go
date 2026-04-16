@@ -287,7 +287,7 @@ func newWorkerTestDeps(t *testing.T, rt *mockRuntime, readers ...issueLabelReade
 		auditor:      audit.NewAuditor(st, filepath.Join(t.TempDir(), "archive")),
 		reporter:     reporter.NewReporter(&mockCommentWriter{}),
 		store:        st,
-		sm:           statemachine.NewStateMachine(nil, st, nil, eventlog.NewEventLogger(st)),
+		sm:           statemachine.NewStateMachine(nil, st, nil, eventlog.NewEventLogger(st), nil),
 		workerID:     "worker-1",
 		cfg:          &config.FullConfig{Workflows: map[string]*config.WorkflowConfig{"dev-workflow": {MaxRetries: 3}}},
 		runningTasks: NewRunningTasks(),
@@ -323,7 +323,7 @@ func newWorkerTestDepsWithComments(t *testing.T, rt *mockRuntime, readers ...iss
 		auditor:      audit.NewAuditor(st, filepath.Join(t.TempDir(), "archive")),
 		reporter:     reporter.NewReporter(comments),
 		store:        st,
-		sm:           statemachine.NewStateMachine(nil, st, nil, eventlog.NewEventLogger(st)),
+		sm:           statemachine.NewStateMachine(nil, st, nil, eventlog.NewEventLogger(st), nil),
 		workerID:     "worker-1",
 		cfg:          &config.FullConfig{Workflows: map[string]*config.WorkflowConfig{"dev-workflow": {MaxRetries: 3}}},
 		runningTasks: NewRunningTasks(),
@@ -537,7 +537,7 @@ func TestServe_RecoverTasks(t *testing.T) {
 	}
 	defer func() { _ = st2.Close() }()
 
-	if err := recoverTasks(st2); err != nil {
+	if err := recoverTasks(st2, nil); err != nil {
 		t.Fatalf("recoverTasks: %v", err)
 	}
 
@@ -1466,7 +1466,7 @@ func TestExecuteTask_PersistsPartialResultOnRunError(t *testing.T) {
 	lnch := launcher.NewLauncher()
 	lnch.Register(mockRT, config.RuntimeCodex, config.RuntimeCodexExec)
 
-	sm := statemachine.NewStateMachine(nil, st, nil, eventlog.NewEventLogger(st))
+	sm := statemachine.NewStateMachine(nil, st, nil, eventlog.NewEventLogger(st), nil)
 	deps := &workerDeps{
 		launcher: lnch,
 		auditor:  audit.NewAuditor(st, filepath.Join(t.TempDir(), "archive")),

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/alertbus"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/ghutil"
 	"github.com/Lincyaw/workbuddy/internal/poller"
@@ -69,10 +70,11 @@ type Resolver struct {
 	store    *store.Store
 	reader   IssueReader
 	eventlog EventRecorder
+	alertBus *alertbus.Bus
 }
 
-func NewResolver(st *store.Store, reader IssueReader, eventlog EventRecorder) *Resolver {
-	return &Resolver{store: st, reader: reader, eventlog: eventlog}
+func NewResolver(st *store.Store, reader IssueReader, eventlog EventRecorder, alertBus *alertbus.Bus) *Resolver {
+	return &Resolver{store: st, reader: reader, eventlog: eventlog, alertBus: alertBus}
 }
 
 func ParseDeclaration(repo, body string) ParsedDeclaration {
@@ -203,6 +205,9 @@ func (r *Resolver) EvaluateOpenIssues(ctx context.Context, repo string, graphVer
 			r.eventlog.Log(eventlog.TypeDependencyCycleDetected, repo, num, map[string]any{
 				"cycle_path": cycles[num],
 			})
+			r.publishAlert(alertbus.KindDependencyCycleDetected, alertbus.SeverityError, repo, num, "", map[string]any{
+				"cycle_path": cycles[num],
+			})
 		}
 		if result.State.OverrideActive && r.eventlog != nil {
 			r.eventlog.Log(eventlog.TypeDependencyOverrideActivated, repo, num, map[string]any{
@@ -212,6 +217,21 @@ func (r *Resolver) EvaluateOpenIssues(ctx context.Context, repo string, graphVer
 	}
 
 	return unblocked, nil
+}
+
+func (r *Resolver) publishAlert(eventKind string, severity alertbus.Severity, repo string, issueNum int, agentName string, payload map[string]any) {
+	if r.alertBus == nil {
+		return
+	}
+	r.alertBus.Publish(alertbus.AlertEvent{
+		Kind:      eventKind,
+		Severity:  severity,
+		Repo:      repo,
+		IssueNum:   issueNum,
+		AgentName: agentName,
+		Timestamp: time.Now().Unix(),
+		Payload:   payload,
+	})
 }
 
 func buildResolveResult(

@@ -20,6 +20,7 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/audit"
 	"github.com/Lincyaw/workbuddy/internal/auditapi"
+	"github.com/Lincyaw/workbuddy/internal/alertbus"
 	"github.com/Lincyaw/workbuddy/internal/config"
 	coordinatorhttp "github.com/Lincyaw/workbuddy/internal/coordinator/http"
 	"github.com/Lincyaw/workbuddy/internal/dependency"
@@ -32,6 +33,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
 	"github.com/Lincyaw/workbuddy/internal/router"
+	"github.com/Lincyaw/workbuddy/internal/notifier"
 	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/tasknotify"
@@ -453,9 +455,10 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 		return fmt.Errorf("serve: init store: %w", err)
 	}
 	defer func() { _ = st.Close() }()
+	alertBus := alertbus.NewBus(64)
 
 	// 3. Recovery: mark running tasks as failed, re-route pending
-	if err := recoverTasks(st); err != nil {
+	if err := recoverTasks(st, alertBus); err != nil {
 		log.Printf("[serve] warning: recovery failed: %v", err)
 	}
 
@@ -497,8 +500,8 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	}
 
 	// State machine
-	sm := statemachine.NewStateMachine(cfg.Workflows, st, dispatchCh, evlog)
-	depResolver := dependency.NewResolver(st, ghReader, evlog)
+	sm := statemachine.NewStateMachine(cfg.Workflows, st, dispatchCh, evlog, alertBus)
+	depResolver := dependency.NewResolver(st, ghReader, evlog, alertBus)
 
 	// Workspace isolation is only needed for the embedded worker path.
 	var wsMgr *workspace.Manager
@@ -546,6 +549,11 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 
 	var wg sync.WaitGroup
 	taskHub := tasknotify.NewHub()
+	not, err := notifier.New(cfg.Notifications, alertBus, taskHub, evlog)
+	if err != nil {
+		return fmt.Errorf("serve: init notifier: %w", err)
+	}
+	not.Start(ctx)
 
 	// 5. Start HTTP server
 	mux := http.NewServeMux()
@@ -667,6 +675,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 					if !depsResolvedThisCycle {
 						runDependencyMaintenance(ctx)
 					}
+					sm.CheckAllStuck(ev.Repo)
 					depsResolvedThisCycle = false
 					sm.ResetDedup()
 					continue
@@ -1394,7 +1403,7 @@ func labelsUnchanged(pre, post []string) bool {
 }
 
 // recoverTasks marks running tasks as failed and re-routes pending tasks on restart.
-func recoverTasks(st *store.Store) error {
+func recoverTasks(st *store.Store, alertBus *alertbus.Bus) error {
 	// Mark all running tasks as failed (subprocess lost on restart)
 	running, err := st.QueryTasks(store.TaskStatusRunning)
 	if err != nil {
@@ -1404,6 +1413,20 @@ func recoverTasks(st *store.Store) error {
 		log.Printf("[serve] recovery: marking task %s as failed (was running)", t.ID)
 		if err := st.UpdateTaskStatus(t.ID, store.TaskStatusFailed); err != nil {
 			log.Printf("[serve] recovery: failed to mark task %s: %v", t.ID, err)
+		}
+		if alertBus != nil {
+			alertBus.Publish(alertbus.AlertEvent{
+				Kind:      alertbus.KindOrphanedTask,
+				Severity:  alertbus.SeverityWarn,
+				Repo:      t.Repo,
+				IssueNum:  t.IssueNum,
+				AgentName: t.AgentName,
+				Timestamp: time.Now().Unix(),
+				Payload: map[string]any{
+					"task_id": t.ID,
+					"status":  store.TaskStatusFailed,
+				},
+			})
 		}
 	}
 

@@ -33,6 +33,7 @@ const (
 	TypeDependencyCycleDetected     = "dependency_cycle_detected"
 	TypeDependencyOverrideActivated = "dependency_override_activated"
 	TypeDispatchBlockedByDependency = "dispatch_blocked_by_dependency"
+	TypeNotificationFailed         = "notification_failed"
 )
 
 // AllEventTypes lists every recognised event type.
@@ -58,6 +59,7 @@ var AllEventTypes = []string{
 	TypeDependencyCycleDetected,
 	TypeDependencyOverrideActivated,
 	TypeDispatchBlockedByDependency,
+	TypeNotificationFailed,
 }
 
 // EventFilter specifies optional criteria for querying events.

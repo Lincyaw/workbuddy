@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/alertbus"
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/poller"
@@ -83,6 +84,7 @@ type StateMachine struct {
 	store     *store.Store
 	dispatch  chan<- DispatchRequest
 	eventlog  EventRecorder
+	alertBus  *alertbus.Bus
 
 	// processedEvents tracks (repo, issueNum, eventKey) to ensure idempotency.
 	processedEvents sync.Map // key: string → struct{}
@@ -114,6 +116,7 @@ func NewStateMachine(
 	st *store.Store,
 	dispatch chan<- DispatchRequest,
 	eventlog EventRecorder,
+	alertBus *alertbus.Bus,
 ) *StateMachine {
 	var workflowManager *workflow.Manager
 	if st != nil {
@@ -124,9 +127,10 @@ func NewStateMachine(
 		store:           st,
 		dispatch:        dispatch,
 		eventlog:        eventlog,
+		alertBus:        alertBus,
 		inflight:        make(map[string]*dispatchGroup),
 		stuckTimeout:    StuckTimeout,
-		completionTimes: make(map[string]completionRecord),
+		completionTimes:  make(map[string]completionRecord),
 		workflowManager: workflowManager,
 	}
 }
@@ -247,6 +251,21 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 	return nil
 }
 
+func (sm *StateMachine) publishAlert(eventKind string, severity alertbus.Severity, repo string, issueNum int, agentName string, payload map[string]any) {
+	if sm.alertBus == nil {
+		return
+	}
+	sm.alertBus.Publish(alertbus.AlertEvent{
+		Kind:      eventKind,
+		Severity:  severity,
+		Repo:      repo,
+		IssueNum:  issueNum,
+		AgentName: agentName,
+		Timestamp: time.Now().Unix(),
+		Payload:   payload,
+	})
+}
+
 // evaluateTransitions evaluates transitions for the given state and event.
 // It returns true if any transition was taken, or an error if transition bookkeeping fails.
 func (sm *StateMachine) evaluateTransitions(ctx context.Context, wf *config.WorkflowConfig, event ChangeEvent, currentStateName string, currentState *config.State) (bool, error) {
@@ -296,6 +315,12 @@ func (sm *StateMachine) evaluateTransitions(ctx context.Context, wf *config.Work
 				// Reject back-edge, transition to failed.
 				sm.eventlog.Log(eventlog.TypeCycleLimitReached, event.Repo, event.IssueNum,
 					map[string]interface{}{"from": currentStateName, "to": targetStateName, "count": count, "max_retries": maxRetries})
+				sm.publishAlert(alertbus.KindCycleLimitReached, alertbus.SeverityError, event.Repo, event.IssueNum, "", map[string]any{
+					"from":        currentStateName,
+					"to":          targetStateName,
+					"count":       count,
+					"max_retries": maxRetries,
+				})
 
 				// Mark as failed — dispatch request not sent.
 				// The "failed" state and "needs-human" label would be applied
@@ -303,6 +328,11 @@ func (sm *StateMachine) evaluateTransitions(ctx context.Context, wf *config.Work
 				// we record the event. In v0.1.0, we still record the intent.
 				sm.eventlog.Log(eventlog.TypeTransitionToFailed, event.Repo, event.IssueNum,
 					map[string]interface{}{"from": currentStateName, "rejected_to": targetStateName, "needs_human": true})
+				sm.publishAlert(alertbus.KindTransitionToFailed, alertbus.SeverityError, event.Repo, event.IssueNum, "", map[string]any{
+					"from":        currentStateName,
+					"rejected_to": targetStateName,
+					"needs_human": true,
+				})
 				return false, nil
 			}
 		} else {
@@ -612,6 +642,10 @@ func (sm *StateMachine) MarkAgentCompleted(repo string, issueNum int, taskID, ag
 		} else {
 			sm.eventlog.Log(eventlog.TypeTransitionToFailed, repo, issueNum,
 				map[string]any{"state": group.state, "issue": issueNum, "join": join})
+			sm.publishAlert(alertbus.KindTransitionToFailed, alertbus.SeverityError, repo, issueNum, "", map[string]any{
+				"state": group.state,
+				"join":  join,
+			})
 			sm.recordStuckCandidate(issueKey, currentLabels)
 		}
 	}
@@ -689,6 +723,10 @@ func (sm *StateMachine) CheckStuck(repo string, issueNum int, currentLabels []st
 		// Labels unchanged after timeout — stuck!
 		sm.eventlog.Log(eventlog.TypeStuckDetected, repo, issueNum,
 			map[string]interface{}{"since": rec.at.Format(time.RFC3339), "labels": json.RawMessage(rec.labels)})
+		sm.publishAlert(alertbus.KindStuckDetected, alertbus.SeverityWarn, repo, issueNum, "", map[string]any{
+			"since":  rec.at.Format(time.RFC3339),
+			"labels": rec.labels,
+		})
 
 		// Clear the record so we don't keep firing.
 		sm.completionMu.Lock()
@@ -699,6 +737,27 @@ func (sm *StateMachine) CheckStuck(repo string, issueNum int, currentLabels []st
 		sm.completionMu.Lock()
 		delete(sm.completionTimes, issueKey)
 		sm.completionMu.Unlock()
+	}
+}
+
+// CheckAllStuck evaluates all open cached issues for the configured stuck timeout.
+func (sm *StateMachine) CheckAllStuck(repo string) {
+	if sm.store == nil {
+		return
+	}
+	openIssues, err := sm.store.ListIssueCaches(repo)
+	if err != nil {
+		return
+	}
+	for _, cached := range openIssues {
+		if cached.State != "open" {
+			continue
+		}
+		var labels []string
+		if err := json.Unmarshal([]byte(cached.Labels), &labels); err != nil {
+			continue
+		}
+		sm.CheckStuck(cached.Repo, cached.IssueNum, labels)
 	}
 }
 

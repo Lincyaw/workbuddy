@@ -120,6 +120,7 @@ func TestRepositorySampleConfig_MatchesGlobalConfigSchema(t *testing.T) {
 		"poll_interval": {},
 		"port":          {},
 		"repo":          {},
+		"notifications": {},
 	}
 
 	if len(raw) != len(expectedKeys) {
@@ -136,21 +137,66 @@ func TestRepositorySampleConfig_MatchesGlobalConfigSchema(t *testing.T) {
 		}
 	}
 
-	var cfg GlobalConfig
+	var cfg FullConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		t.Fatalf("unmarshal sample config into GlobalConfig: %v", err)
+		t.Fatalf("unmarshal sample config into FullConfig: %v", err)
 	}
-	if cfg.Repo != "Lincyaw/workbuddy" {
-		t.Fatalf("repo = %q, want %q", cfg.Repo, "Lincyaw/workbuddy")
+	if cfg.Global.Repo != "Lincyaw/workbuddy" {
+		t.Fatalf("repo = %q, want %q", cfg.Global.Repo, "Lincyaw/workbuddy")
 	}
-	if cfg.Environment != "dev" {
-		t.Fatalf("environment = %q, want %q", cfg.Environment, "dev")
+	if cfg.Global.Environment != "dev" {
+		t.Fatalf("environment = %q, want %q", cfg.Global.Environment, "dev")
 	}
-	if cfg.PollInterval != 30*time.Second {
-		t.Fatalf("poll_interval = %s, want 30s", cfg.PollInterval)
+	if cfg.Global.PollInterval != 30*time.Second {
+		t.Fatalf("poll_interval = %s, want 30s", cfg.Global.PollInterval)
 	}
-	if cfg.Port != 8090 {
-		t.Fatalf("port = %d, want 8090", cfg.Port)
+	if cfg.Global.Port != 8090 {
+		t.Fatalf("port = %d, want 8090", cfg.Global.Port)
+	}
+	if !cfg.Notifications.Enabled {
+		t.Fatalf("notifications.enabled = %v, want true", cfg.Notifications.Enabled)
+	}
+	if cfg.Notifications.InstanceName != "default" {
+		t.Fatalf("notifications.instance_name = %q, want %q", cfg.Notifications.InstanceName, "default")
+	}
+	if cfg.Notifications.DedupWindow != 5*time.Minute {
+		t.Fatalf("notifications.dedup_window = %s, want 5m", cfg.Notifications.DedupWindow)
+	}
+	if cfg.Notifications.BatchWindow != 0 {
+		t.Fatalf("notifications.batch_window = %s, want 0s", cfg.Notifications.BatchWindow)
+	}
+	if cfg.Notifications.Success {
+		t.Fatalf("notifications.success = %v, want false", cfg.Notifications.Success)
+	}
+	if got := cfg.Notifications.Slack.WebhookURLEnv; got != "WORKBUDDY_SLACK_WEBHOOK_URL" {
+		t.Fatalf("notifications.slack.webhook_url_env = %q, want %q", got, "WORKBUDDY_SLACK_WEBHOOK_URL")
+	}
+	if got := cfg.Notifications.Feishu.WebhookURLEnv; got != "WORKBUDDY_FEISHU_WEBHOOK_URL" {
+		t.Fatalf("notifications.feishu.webhook_url_env = %q, want %q", got, "WORKBUDDY_FEISHU_WEBHOOK_URL")
+	}
+	if got := cfg.Notifications.Telegram.BotTokenEnv; got != "WORKBUDDY_TELEGRAM_BOT_TOKEN" {
+		t.Fatalf("notifications.telegram.bot_token_env = %q, want %q", got, "WORKBUDDY_TELEGRAM_BOT_TOKEN")
+	}
+	if got := cfg.Notifications.Telegram.ChatIDEnv; got != "WORKBUDDY_TELEGRAM_CHAT_ID" {
+		t.Fatalf("notifications.telegram.chat_id_env = %q, want %q", got, "WORKBUDDY_TELEGRAM_CHAT_ID")
+	}
+	if got := cfg.Notifications.SMTP.HostEnv; got != "WORKBUDDY_SMTP_HOST" {
+		t.Fatalf("notifications.smtp.host_env = %q, want %q", got, "WORKBUDDY_SMTP_HOST")
+	}
+	if got := cfg.Notifications.SMTP.PortEnv; got != "WORKBUDDY_SMTP_PORT" {
+		t.Fatalf("notifications.smtp.port_env = %q, want %q", got, "WORKBUDDY_SMTP_PORT")
+	}
+	if got := cfg.Notifications.SMTP.UsernameEnv; got != "WORKBUDDY_SMTP_USERNAME" {
+		t.Fatalf("notifications.smtp.username_env = %q, want %q", got, "WORKBUDDY_SMTP_USERNAME")
+	}
+	if got := cfg.Notifications.SMTP.PasswordEnv; got != "WORKBUDDY_SMTP_PASSWORD" {
+		t.Fatalf("notifications.smtp.password_env = %q, want %q", got, "WORKBUDDY_SMTP_PASSWORD")
+	}
+	if got := cfg.Notifications.SMTP.FromEnv; got != "WORKBUDDY_SMTP_FROM" {
+		t.Fatalf("notifications.smtp.from_env = %q, want %q", got, "WORKBUDDY_SMTP_FROM")
+	}
+	if got := cfg.Notifications.SMTP.ToEnv; got != "WORKBUDDY_SMTP_TO" {
+		t.Fatalf("notifications.smtp.to_env = %q, want %q", got, "WORKBUDDY_SMTP_TO")
 	}
 }
 
