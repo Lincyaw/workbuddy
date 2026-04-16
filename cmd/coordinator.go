@@ -690,7 +690,10 @@ func (s *fullCoordinatorServer) handlePollTask(w http.ResponseWriter, r *http.Re
 
 	for {
 		task, err := s.claimNextTask(worker)
-		if err != nil {
+		switch {
+		case err == nil:
+		case errors.Is(err, store.ErrTaskClaimConflict):
+		default:
 			coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}

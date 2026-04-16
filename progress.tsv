@@ -7,3 +7,4 @@ date	commit	status	key_indicators	description
 2026-04-16	working	tree-cleanup-recover	in_progress	Implement REQ-032 recover command, tests, and index update
 2026-04-16	HEAD	keep	pass	REQ-032 shipped with recover command, focused integration tests, and green build/vet/test
 2026-04-16	uncommitted	keep	cmd tests=pass; multi_repo tests=pass; full build/vet/test pending	REQ-042 multi-repo dynamic registration with per-repo runtimes, worker repo binding, repo register CLI, and deregistration coverage
+2026-04-16	uncommitted	keep	go build=pass; go vet=pass; go test=pass; index-validate=pass	Hardened REQ-042 task polling against transient claim contention and SQLite busy windows; multirepo flake reproduced, fixed, and verified green

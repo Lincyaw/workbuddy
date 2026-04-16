@@ -598,6 +598,17 @@ func (s *Store) ClaimNextTask(workerID string, roles []string, repos []string, c
 	if lease <= 0 {
 		lease = 30 * time.Second
 	}
+	for attempt := 0; attempt < 5; attempt++ {
+		task, err := s.claimNextTaskOnce(workerID, roles, repos, claimToken, lease)
+		if err == nil || !isSQLiteBusyError(err) {
+			return task, err
+		}
+		time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+	}
+	return s.claimNextTaskOnce(workerID, roles, repos, claimToken, lease)
+}
+
+func (s *Store) claimNextTaskOnce(workerID string, roles []string, repos []string, claimToken string, lease time.Duration) (*TaskRecord, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("store: begin claim tx: %w", err)
@@ -698,6 +709,16 @@ func (s *Store) ClaimNextTask(workerID string, roles []string, repos []string, c
 		return nil, fmt.Errorf("store: commit claim: %w", err)
 	}
 	return &task, nil
+}
+
+func isSQLiteBusyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "database table is locked") ||
+		strings.Contains(msg, "sqlite_busy")
 }
 
 func (s *Store) ensureTaskOwnership(tx *sql.Tx, taskID, workerID string) (*TaskRecord, error) {
