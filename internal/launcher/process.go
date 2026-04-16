@@ -48,6 +48,7 @@ func (s *processSession) Run(ctx context.Context, events chan<- launcherevents.E
 	cmd.Env = append(os.Environ(), buildEnvVars(s.task)...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 10 * time.Second
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

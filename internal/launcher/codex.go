@@ -102,6 +102,7 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 	cmd.Env = append(os.Environ(), buildEnvVars(s.task)...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 10 * time.Second
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {

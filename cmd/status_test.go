@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +17,7 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/audit"
 	"github.com/Lincyaw/workbuddy/internal/store"
+	"github.com/Lincyaw/workbuddy/internal/tasknotify"
 	"github.com/spf13/cobra"
 )
 
@@ -117,6 +121,147 @@ func TestRunStatusWithOpts_Integration(t *testing.T) {
 			t.Fatalf("issue #1 should be marked stuck: %+v", got.Issues[0])
 		}
 	})
+
+	t.Run("tasks output", func(t *testing.T) {
+		var out bytes.Buffer
+		err := runStatusWithOpts(context.Background(), &statusOpts{
+			repo:    "owner/repo",
+			tasks:   true,
+			baseURL: srv.URL,
+		}, client, &out)
+		if err != nil {
+			t.Fatalf("runStatusWithOpts: %v", err)
+		}
+		got := out.String()
+		for _, want := range []string{"REPO", "AGENT", "pending", "running", "failed"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("tasks output missing %q:\n%s", want, got)
+			}
+		}
+		if strings.Contains(got, "completed") {
+			t.Fatalf("completed tasks should be filtered out:\n%s", got)
+		}
+	})
+
+	t.Run("tasks empty", func(t *testing.T) {
+		empty := newStatusTestStore(t)
+		mux := http.NewServeMux()
+		audit.NewHTTPHandler(empty).Register(mux)
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		client := &statusClient{baseURL: srv.URL, http: srv.Client()}
+		var out bytes.Buffer
+		err := runStatusWithOpts(context.Background(), &statusOpts{
+			repo:    "owner/repo",
+			tasks:   true,
+			baseURL: srv.URL,
+		}, client, &out)
+		if err != nil {
+			t.Fatalf("runStatusWithOpts: %v", err)
+		}
+		if strings.TrimSpace(out.String()) != "No tasks found." {
+			t.Fatalf("unexpected empty output: %q", out.String())
+		}
+	})
+
+	t.Run("tasks json and repo filter", func(t *testing.T) {
+		var out bytes.Buffer
+		err := runStatusWithOpts(context.Background(), &statusOpts{
+			repo:       "owner/repo",
+			tasks:      true,
+			taskStatus: store.TaskStatusFailed,
+			jsonOut:    true,
+			baseURL:    srv.URL,
+		}, client, &out)
+		if err != nil {
+			t.Fatalf("runStatusWithOpts: %v", err)
+		}
+		var rows []store.TaskRecord
+		if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+			t.Fatalf("unmarshal tasks json: %v", err)
+		}
+		if len(rows) != 1 || rows[0].Status != store.TaskStatusFailed {
+			t.Fatalf("unexpected rows: %+v", rows)
+		}
+		if rows[0].Repo != "owner/repo" {
+			t.Fatalf("repo filter not applied: %+v", rows[0])
+		}
+		if rows[0].Labels == "" {
+			t.Fatalf("expected task labels joined from issue_cache: %+v", rows[0])
+		}
+	})
+
+	t.Run("events output", func(t *testing.T) {
+		var out bytes.Buffer
+		err := runStatusWithOpts(context.Background(), &statusOpts{
+			repo:      "owner/repo",
+			events:    true,
+			eventType: "dispatch",
+			baseURL:   srv.URL,
+			now:       func() time.Time { return time.Now().UTC() },
+		}, client, &out)
+		if err != nil {
+			t.Fatalf("runStatusWithOpts: %v", err)
+		}
+		got := out.String()
+		for _, want := range []string{"TIME", "TYPE", "ISSUE", "PAYLOAD", "dispatch", "#2"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("events output missing %q:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("events empty", func(t *testing.T) {
+		empty := newStatusTestStore(t)
+		mux := http.NewServeMux()
+		audit.NewHTTPHandler(empty).Register(mux)
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		client := &statusClient{baseURL: srv.URL, http: srv.Client()}
+		var out bytes.Buffer
+		err := runStatusWithOpts(context.Background(), &statusOpts{
+			repo:    "owner/repo",
+			events:  true,
+			baseURL: srv.URL,
+			now:     func() time.Time { return time.Now().UTC() },
+		}, client, &out)
+		if err != nil {
+			t.Fatalf("runStatusWithOpts: %v", err)
+		}
+		if strings.TrimSpace(out.String()) != "No events found." {
+			t.Fatalf("unexpected empty events output: %q", out.String())
+		}
+	})
+
+	t.Run("events json and since filter", func(t *testing.T) {
+		now := time.Now().UTC()
+		var out bytes.Buffer
+		err := runStatusWithOpts(context.Background(), &statusOpts{
+			repo:    "owner/repo",
+			events:  true,
+			since:   "30m",
+			jsonOut: true,
+			baseURL: srv.URL,
+			now:     func() time.Time { return now },
+		}, client, &out)
+		if err != nil {
+			t.Fatalf("runStatusWithOpts: %v", err)
+		}
+		var rows []statusEventRow
+		if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+			t.Fatalf("unmarshal events json: %v", err)
+		}
+		if len(rows) == 0 {
+			t.Fatal("expected recent events")
+		}
+		for _, row := range rows {
+			if row.IssueNum != 2 {
+				t.Fatalf("event not filtered by since: %+v", row)
+			}
+		}
+	})
 }
 
 func newStatusTestStore(t *testing.T) *store.Store {
@@ -179,6 +324,29 @@ func fixtureStatusStore(t *testing.T, st *store.Store) {
 	insertEventAt(t, st, "owner/repo", 2, now.Add(-10*time.Minute))
 	insertEventAt(t, st, "owner/repo", 3, now.Add(-3*time.Hour))
 	insertEventAt(t, st, "owner/repo", 4, now.Add(-2*time.Hour))
+	dispatchID, err := st.InsertEvent(store.Event{
+		Type:     "dispatch",
+		Repo:     "owner/repo",
+		IssueNum: 2,
+		Payload:  `{"agent":"dev-agent","message":"dispatch payload for testing"}`,
+	})
+	if err != nil {
+		t.Fatalf("InsertEvent(dispatch): %v", err)
+	}
+	if _, err := st.DB().Exec(`UPDATE events SET ts = ? WHERE id = ?`, now.Add(-5*time.Minute).Format("2006-01-02 15:04:05"), dispatchID); err != nil {
+		t.Fatalf("UPDATE dispatch event ts: %v", err)
+	}
+	for _, task := range []store.TaskRecord{
+		{ID: "task-pending", Repo: "owner/repo", IssueNum: 1, AgentName: "dev-agent", Status: store.TaskStatusPending},
+		{ID: "task-running", Repo: "owner/repo", IssueNum: 2, AgentName: "review-agent", WorkerID: "worker-1", Status: store.TaskStatusRunning},
+		{ID: "task-failed", Repo: "owner/repo", IssueNum: 3, AgentName: "dev-agent", WorkerID: "worker-2", Status: store.TaskStatusFailed},
+		{ID: "task-completed", Repo: "owner/repo", IssueNum: 4, AgentName: "dev-agent", Status: store.TaskStatusCompleted},
+		{ID: "task-other-repo", Repo: "other/repo", IssueNum: 99, AgentName: "dev-agent", Status: store.TaskStatusFailed},
+	} {
+		if err := st.InsertTask(task); err != nil {
+			t.Fatalf("InsertTask(%s): %v", task.ID, err)
+		}
+	}
 }
 
 func insertEventAt(t *testing.T, st *store.Store, repo string, issueNum int, ts time.Time) {
@@ -212,10 +380,7 @@ func TestParseStatusFlags_UsesConfigDefaults(t *testing.T) {
 		_ = os.Chdir(prevWD)
 	})
 
-	cmd := &cobra.Command{Use: "status"}
-	cmd.Flags().String("repo", "", "")
-	cmd.Flags().Bool("stuck", false, "")
-	cmd.Flags().Bool("json", false, "")
+	cmd := newStatusFlagCommand()
 
 	opts, err := parseStatusFlags(cmd)
 	if err != nil {
@@ -243,10 +408,7 @@ func TestParseStatusFlags_UsesExplicitRepoWithoutConfig(t *testing.T) {
 		_ = os.Chdir(prevWD)
 	})
 
-	cmd := &cobra.Command{Use: "status"}
-	cmd.Flags().String("repo", "", "")
-	cmd.Flags().Bool("stuck", false, "")
-	cmd.Flags().Bool("json", false, "")
+	cmd := newStatusFlagCommand()
 	if err := cmd.Flags().Set("repo", "explicit/repo"); err != nil {
 		t.Fatalf("Set(repo): %v", err)
 	}
@@ -261,4 +423,143 @@ func TestParseStatusFlags_UsesExplicitRepoWithoutConfig(t *testing.T) {
 	if opts.baseURL != "http://127.0.0.1:8080" {
 		t.Fatalf("baseURL = %q", opts.baseURL)
 	}
+}
+
+func TestParseStatusFlags_MutualExclusion(t *testing.T) {
+	cmd := newStatusFlagCommand()
+	_ = cmd.Flags().Set("repo", "owner/repo")
+	_ = cmd.Flags().Set("tasks", "true")
+	_ = cmd.Flags().Set("events", "true")
+
+	_, err := parseStatusFlags(cmd)
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected mutual exclusion error, got %v", err)
+	}
+}
+
+func TestRunStatusWithOpts_Watch(t *testing.T) {
+	t.Run("receives completion event", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", mustJSON(t, tasknotify.TaskEvent{
+				Repo:       "owner/repo",
+				IssueNum:   7,
+				AgentName:  "dev-agent",
+				Status:     store.TaskStatusCompleted,
+				ExitCode:   0,
+				DurationMS: int64((12 * time.Second).Milliseconds()),
+			}))
+		}))
+		defer srv.Close()
+
+		client := &statusClient{baseURL: srv.URL, http: srv.Client()}
+		var out bytes.Buffer
+		err := runStatusWithOpts(context.Background(), &statusOpts{
+			repo:    "owner/repo",
+			watch:   true,
+			timeout: time.Second,
+			baseURL: srv.URL,
+		}, client, &out)
+		if err != nil {
+			t.Fatalf("runStatusWithOpts: %v", err)
+		}
+		got := out.String()
+		for _, want := range []string{"Waiting for task completion...", "ISSUE", "#7", "completed"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("watch output missing %q:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("issue filter propagated", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if got := r.URL.Query().Get("issue"); got != "9" {
+				t.Fatalf("issue query = %q, want 9", got)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", mustJSON(t, tasknotify.TaskEvent{
+				Repo:     "owner/repo",
+				IssueNum: 9, AgentName: "dev-agent", Status: store.TaskStatusFailed, ExitCode: 1,
+			}))
+		}))
+		defer srv.Close()
+
+		client := &statusClient{baseURL: srv.URL, http: srv.Client()}
+		err := runStatusWithOpts(context.Background(), &statusOpts{
+			repo:    "owner/repo",
+			watch:   true,
+			issue:   9,
+			timeout: time.Second,
+			baseURL: srv.URL,
+		}, client, io.Discard)
+		var exitErr *cliExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			t.Fatalf("expected exit code 1, got %v", err)
+		}
+	})
+
+	t.Run("watch timeout", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			<-r.Context().Done()
+		}))
+		defer srv.Close()
+
+		client := &statusClient{baseURL: srv.URL, http: srv.Client()}
+		var out bytes.Buffer
+		err := runStatusWithOpts(context.Background(), &statusOpts{
+			repo:    "owner/repo",
+			watch:   true,
+			timeout: 50 * time.Millisecond,
+			baseURL: srv.URL,
+		}, client, &out)
+		var exitErr *cliExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 3 {
+			t.Fatalf("expected exit code 3, got %v", err)
+		}
+		if !strings.Contains(out.String(), "No task completed within timeout") {
+			t.Fatalf("timeout output = %q", out.String())
+		}
+	})
+
+	t.Run("server unavailable", func(t *testing.T) {
+		client := &statusClient{
+			baseURL: "http://127.0.0.1:1",
+			http:    &http.Client{Timeout: 50 * time.Millisecond},
+		}
+		err := runStatusWithOpts(context.Background(), &statusOpts{
+			repo:    "owner/repo",
+			watch:   true,
+			timeout: time.Second,
+			baseURL: client.baseURL,
+		}, client, io.Discard)
+		var exitErr *cliExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || exitErr.Error() != "Cannot connect to workbuddy server" {
+			t.Fatalf("unexpected error: %#v", err)
+		}
+	})
+}
+
+func newStatusFlagCommand() *cobra.Command {
+	cmd := &cobra.Command{Use: "status"}
+	cmd.Flags().String("repo", "", "")
+	cmd.Flags().Bool("stuck", false, "")
+	cmd.Flags().Bool("tasks", false, "")
+	cmd.Flags().Bool("events", false, "")
+	cmd.Flags().Bool("watch", false, "")
+	cmd.Flags().Bool("json", false, "")
+	cmd.Flags().String("status", "", "")
+	cmd.Flags().String("type", "", "")
+	cmd.Flags().String("since", "", "")
+	cmd.Flags().Int("issue", 0, "")
+	cmd.Flags().Duration("timeout", defaultWatchTimeout, "")
+	return cmd
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return string(data)
 }

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -31,6 +32,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/router"
 	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
+	"github.com/Lincyaw/workbuddy/internal/tasknotify"
 	"github.com/Lincyaw/workbuddy/internal/webui"
 	"github.com/Lincyaw/workbuddy/internal/workspace"
 	"github.com/spf13/cobra"
@@ -535,6 +537,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	defer cancel()
 
 	var wg sync.WaitGroup
+	taskHub := tasknotify.NewHub()
 
 	// 5. Start HTTP server
 	mux := http.NewServeMux()
@@ -545,6 +548,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	})
 
 	audit.NewHTTPHandler(st).Register(mux)
+	mux.HandleFunc("/tasks/watch", newTaskWatchHandler(taskHub))
 
 	// Session viewer web UI (also serves JSON via auditapi.BuildSessionResponse)
 	sessionUI := webui.NewHandler(st)
@@ -695,6 +699,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 			wsMgr:        wsMgr,
 			runningTasks: runningTasks,
 			closedIssues: closedTracker,
+			taskHub:      taskHub,
 			sessionsDir:  sessionsDir,
 			issueReader:  labelReader,
 		}
@@ -765,6 +770,7 @@ type workerDeps struct {
 	wsMgr        *workspace.Manager
 	runningTasks *RunningTasks
 	closedIssues *closedIssues
+	taskHub      *tasknotify.Hub
 	sessionsDir  string
 	issueReader  issueLabelReader
 }
@@ -862,6 +868,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	}
 	log.Printf("[worker] executing task %s: agent=%s issue=%s#%d",
 		task.TaskID, task.AgentName, task.Repo, task.IssueNum)
+	startedAt := time.Now().UTC()
 
 	// Mark task as running now that the worker has actually started it.
 	if deps.store != nil {
@@ -888,6 +895,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 		if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
 			log.Printf("[worker] failed to update task status: %v", err)
 		}
+		publishTaskCompletion(deps.taskHub, task, store.TaskStatusFailed, 1, startedAt, time.Now().UTC())
 		deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, fetchCachedLabels(deps.store, task.Repo, task.IssueNum))
 		go func() {
 			timer := time.NewTimer(60 * time.Second)
@@ -994,6 +1002,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 			if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
 				log.Printf("[worker] failed to update task status: %v", err)
 			}
+			publishTaskCompletion(deps.taskHub, task, store.TaskStatusFailed, 1, startedAt, time.Now().UTC())
 			deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, completionLabels)
 			go func() {
 				timer := time.NewTimer(60 * time.Second)
@@ -1058,6 +1067,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 
 	// Mark agent completed in state machine
 	deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, completionLabels)
+	publishTaskCompletion(deps.taskHub, task, status, result.ExitCode, startedAt, time.Now().UTC())
 }
 
 func currentAttempt(task router.WorkerTask, st *store.Store) int {
@@ -1074,6 +1084,85 @@ func currentAttempt(task router.WorkerTask, st *store.Store) int {
 		}
 	}
 	return 0
+}
+
+func publishTaskCompletion(hub *tasknotify.Hub, task router.WorkerTask, status string, exitCode int, startedAt, completedAt time.Time) {
+	if hub == nil {
+		return
+	}
+	hub.Publish(tasknotify.TaskEvent{
+		TaskID:      task.TaskID,
+		Repo:        task.Repo,
+		IssueNum:    task.IssueNum,
+		AgentName:   task.AgentName,
+		Status:      status,
+		ExitCode:    exitCode,
+		DurationMS:  completedAt.Sub(startedAt).Milliseconds(),
+		StartedAt:   startedAt,
+		CompletedAt: completedAt,
+	})
+}
+
+func newTaskWatchHandler(hub *tasknotify.Hub) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if hub == nil {
+			http.Error(w, "task watch unavailable", http.StatusServiceUnavailable)
+			return
+		}
+
+		repo := strings.TrimSpace(r.URL.Query().Get("repo"))
+		issue := 0
+		if raw := strings.TrimSpace(r.URL.Query().Get("issue")); raw != "" {
+			n, err := strconv.Atoi(raw)
+			if err != nil || n <= 0 {
+				http.Error(w, "invalid issue", http.StatusBadRequest)
+				return
+			}
+			issue = n
+		}
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		subID, ch := hub.Subscribe()
+		defer hub.Unsubscribe(subID)
+
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case event, ok := <-ch:
+				if !ok {
+					return
+				}
+				if repo != "" && event.Repo != repo {
+					continue
+				}
+				if issue > 0 && event.IssueNum != issue {
+					continue
+				}
+				data, err := json.Marshal(event)
+				if err != nil {
+					http.Error(w, "failed to encode task event", http.StatusInternalServerError)
+					return
+				}
+				_, _ = fmt.Fprint(w, "event: task_complete\n")
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+				flusher.Flush()
+				return
+			}
+		}
+	}
 }
 
 func resultExitCode(result *launcher.Result) int {

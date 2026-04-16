@@ -1062,7 +1062,6 @@ requirements:
       - internal/poller/poller_test.go
       - internal/statemachine/statemachine_test.go
       - cmd/serve_test.go
-      - docs_consistency_test.go
     deps: [REQ-002, REQ-003, REQ-004, REQ-024]
 
   # ============================================================
@@ -1078,17 +1077,23 @@ requirements:
       into what the embedded worker is currently doing.
     priority: P0
     version: v0.2.0
-    status: open
+    status: tested
     acceptance_criteria:
       - "AC-033-1: `workbuddy status --tasks [--repo R] [--json]` 查询 task_queue 中非 completed 的任务并输出表格"
       - "AC-033-2: 表格列：REPO, ISSUE, AGENT, STATUS, WORKER, UPDATED"
       - "AC-033-3: --json 输出 JSON 数组，每条包含 id/repo/issue_num/agent_name/status/worker_id/updated_at"
       - "AC-033-4: 新增 HTTP endpoint `GET /tasks?repo=X&status=Y`，返回 []TaskRecord JSON"
       - "AC-033-5: --tasks 与 --stuck、--events、--watch 互斥，同时指定时返回明确错误"
-      - "AC-033-6: task_queue 为空时输出 No active tasks 而不是空表格"
+      - "AC-033-6: task_queue 为空时输出 No tasks found. 而不是空表格"
       - "AC-033-7: 单元测试：有任务、空队列、--json 格式、repo 过滤、status 过滤 5 种场景"
-    code: []
-    tests: []
+    code:
+      - cmd/status.go
+      - internal/audit/http.go
+      - internal/store/store.go
+      - internal/store/types.go
+    tests:
+      - cmd/status_test.go
+      - internal/store/store_test.go
     deps: [REQ-019, REQ-024]
 
   - id: REQ-034
@@ -1100,7 +1105,7 @@ requirements:
       redispatches when dependency verdicts change.
     priority: P0
     version: v0.2.0
-    status: open
+    status: tested
     acceptance_criteria:
       - "AC-034-1: `workbuddy cache-invalidate --repo OWNER/NAME --issue 47,48,49` 删除指定 issue 的 issue_cache 行"
       - "AC-034-2: 同时重置对应 issue 的 issue_dependency_state 行（清除 verdict，强制下一 cycle 重评估）"
@@ -1110,8 +1115,12 @@ requirements:
       - "AC-034-6: issue 在 cache 中不存在时输出 skip 提示（不报错），仍记录事件"
       - "AC-034-7: 输出每个 issue 的处理结果（deleted/skipped）和总计事件数"
       - "AC-034-8: 单元测试：正常清除、issue 不存在、有/无 dependency state、events 记录验证 4 种场景"
-    code: []
-    tests: []
+    code:
+      - cmd/cache_invalidate.go
+      - internal/store/store.go
+    tests:
+      - cmd/cache_invalidate_test.go
+      - internal/store/store_test.go
     deps: [REQ-024]
 
   - id: REQ-035
@@ -1122,7 +1131,7 @@ requirements:
       replacing the need to `tail serve.log` and grep for keywords.
     priority: P1
     version: v0.2.0
-    status: open
+    status: tested
     acceptance_criteria:
       - "AC-035-1: `workbuddy status --events [--repo R] [--since DURATION] [--type TYPE] [--json]` 查询 events 表并输出表格"
       - "AC-035-2: 表格列：TIME, TYPE, ISSUE, PAYLOAD（payload 截断到 80 字符）"
@@ -1131,8 +1140,11 @@ requirements:
       - "AC-035-5: 默认按时间倒序，最多显示 50 条；--json 无条数限制"
       - "AC-035-6: --events 与 --tasks、--stuck、--watch 互斥"
       - "AC-035-7: 单元测试：有事件、空、--since 过滤、--type 过滤、--json 格式 5 种场景"
-    code: []
-    tests: []
+    code:
+      - cmd/status.go
+      - internal/audit/http.go
+    tests:
+      - cmd/status_test.go
     deps: [REQ-019, REQ-009]
 
   - id: REQ-036
@@ -1145,7 +1157,7 @@ requirements:
       Implemented via SSE (Server-Sent Events) between serve and CLI.
     priority: P1
     version: v0.2.0
-    status: open
+    status: tested
     acceptance_criteria:
       - "AC-036-1: `workbuddy status --watch [--repo R] [--issue N] [--timeout DURATION]` 阻塞直到匹配的 task 从 running 变为 completed/failed/timeout"
       - "AC-036-2: 阻塞期间输出 Waiting for task completion...；收到事件后输出一行表格（ISSUE, AGENT, STATUS, DURATION, EXIT）并退出"
@@ -1159,8 +1171,15 @@ requirements:
       - "AC-036-10: --watch 与 --tasks、--events、--stuck 互斥"
       - "AC-036-11: 单元测试：正常等待并收到完成事件、--issue 过滤、--timeout 超时、serve 不可达 4 种场景"
       - "AC-036-12: 集成测试：启动 serve + mock agent → CLI --watch 阻塞 → agent 完成 → CLI 收到事件并退出，验证退出码"
-    code: []
-    tests: []
+    code:
+      - main.go
+      - cmd/status.go
+      - cmd/serve.go
+      - cmd/exit_error.go
+      - internal/tasknotify/hub.go
+    tests:
+      - cmd/status_test.go
+      - cmd/serve_test.go
     deps: [REQ-019, REQ-017]
 
   - id: REQ-037
@@ -1173,7 +1192,7 @@ requirements:
       and human judgment for common failure modes.
     priority: P2
     version: v0.2.0
-    status: open
+    status: tested
     acceptance_criteria:
       - "AC-037-1: `workbuddy diagnose [--repo R] [--fix] [--json]` 扫描 task_queue + events + issue_cache + issue_dependency_state 表，输出诊断结果"
       - "AC-037-2: 检测 stuck issue：中间状态（status:developing/reviewing）+ 无 active task（pending/running）+ 最后事件距今 > 1 hour"
@@ -1187,8 +1206,18 @@ requirements:
       - "AC-037-10: 无诊断问题时输出 Pipeline healthy: no issues detected 并 exit 0；有问题时 exit 1（warn 也算）"
       - "AC-037-11: 诊断逻辑在 internal/diagnose/ 包中实现，接收 *store.Store + time.Now，纯逻辑无副作用；修复逻辑在 cmd 层调用 cache-invalidate"
       - "AC-037-12: 单元测试：每种检测项（stuck/missed/orphaned/repeated）各一条正例 + 一条反例；--fix 执行验证"
-    code: []
-    tests: []
+    code:
+      - cmd/cache_invalidate.go
+      - cmd/diagnose.go
+      - internal/config/loader.go
+      - internal/config/types.go
+      - internal/diagnose/diagnose.go
+      - internal/store/store.go
+      - internal/store/types.go
+    tests:
+      - cmd/cache_invalidate_test.go
+      - cmd/diagnose_test.go
+      - internal/diagnose/diagnose_test.go
     deps: [REQ-034, REQ-024]
 
   - id: REQ-032
