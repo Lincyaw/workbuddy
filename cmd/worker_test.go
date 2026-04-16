@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -106,7 +107,7 @@ func TestWorkerPairsWithCoordinatorAndCompletesTask(t *testing.T) {
 
 	repo := "owner/test-repo"
 	configDir := setupTestConfigDir(t, repo)
-	port := 18945
+	port := getFreePort(t)
 	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
 	gh := &mockGHReader{
 		issues: []poller.Issue{
@@ -145,7 +146,7 @@ func TestWorkerPairsWithCoordinatorAndCompletesTask(t *testing.T) {
 	workerErrCh := make(chan error, 1)
 	go func() {
 		workerErrCh <- runWorkerWithOpts(&workerOpts{
-			coordinatorURL:    "http://localhost:18945",
+			coordinatorURL:    fmt.Sprintf("http://localhost:%d", port),
 			token:             "secret-token",
 			roleCSV:           "dev",
 			runtime:           config.RuntimeClaudeCode,
