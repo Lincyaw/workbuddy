@@ -271,7 +271,7 @@ func runStatusTasks(ctx context.Context, opts *statusOpts, client *statusClient,
 
 	rows := make([]store.TaskRecord, 0, len(tasks))
 	for _, task := range tasks {
-		if task.Status == store.TaskStatusCompleted {
+		if opts.taskStatus == "" && task.Status == store.TaskStatusCompleted {
 			continue
 		}
 		task.UpdatedAt = task.UpdatedAt.UTC()

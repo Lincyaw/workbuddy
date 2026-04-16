@@ -1084,7 +1084,7 @@ requirements:
       - "AC-033-3: --json 输出 JSON 数组，每条包含 id/repo/issue_num/agent_name/status/worker_id/updated_at"
       - "AC-033-4: 新增 HTTP endpoint `GET /tasks?repo=X&status=Y`，返回 []TaskRecord JSON"
       - "AC-033-5: --tasks 与 --stuck、--events、--watch 互斥，同时指定时返回明确错误"
-      - "AC-033-6: task_queue 为空时输出 No active tasks 而不是空表格"
+      - "AC-033-6: task_queue 为空时输出 No tasks found. 而不是空表格"
       - "AC-033-7: 单元测试：有任务、空队列、--json 格式、repo 过滤、status 过滤 5 种场景"
     code:
       - cmd/status.go

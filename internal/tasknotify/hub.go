@@ -62,9 +62,6 @@ func (h *Hub) Publish(event TaskEvent) {
 	h.mu.Unlock()
 
 	for _, ch := range subs {
-		select {
-		case ch <- event:
-		default:
-		}
+		ch <- event
 	}
 }

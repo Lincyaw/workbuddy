@@ -2,6 +2,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -13,7 +14,8 @@ func main() {
 		type exitCoder interface {
 			ExitCode() int
 		}
-		if ec, ok := err.(exitCoder); ok {
+		var ec exitCoder
+		if errors.As(err, &ec) {
 			if msg := err.Error(); msg != "" {
 				fmt.Fprintln(os.Stderr, msg)
 			}
