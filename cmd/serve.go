@@ -876,11 +876,19 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 		}
 		deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, fetchCachedLabels(deps.store, task.Repo, task.IssueNum))
 		go func() {
-			time.Sleep(60 * time.Second)
+			timer := time.NewTimer(60 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-taskCtx.Done():
+				return
+			}
 			if deps.closedIssues != nil && deps.closedIssues.IsClosed(task.Repo, task.IssueNum) {
 				return
 			}
-			if err := deps.sm.DispatchAgent(context.Background(), task.Repo, task.IssueNum, task.AgentName, task.Workflow, task.State); err != nil {
+			dispatchCtx, cancel := context.WithTimeout(taskCtx, 30*time.Second)
+			defer cancel()
+			if err := deps.sm.DispatchAgent(dispatchCtx, task.Repo, task.IssueNum, task.AgentName, task.Workflow, task.State); err != nil {
 				log.Printf("[worker] redispatch after start failure for %s#%d: %v", task.Repo, task.IssueNum, err)
 			}
 		}()
@@ -960,11 +968,19 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 			}
 			deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, completionLabels)
 			go func() {
-				time.Sleep(60 * time.Second)
+				timer := time.NewTimer(60 * time.Second)
+				defer timer.Stop()
+				select {
+				case <-timer.C:
+				case <-taskCtx.Done():
+					return
+				}
 				if deps.closedIssues != nil && deps.closedIssues.IsClosed(task.Repo, task.IssueNum) {
 					return
 				}
-				if err := deps.sm.DispatchAgent(context.Background(), task.Repo, task.IssueNum, task.AgentName, task.Workflow, task.State); err != nil {
+				dispatchCtx, cancel := context.WithTimeout(taskCtx, 30*time.Second)
+				defer cancel()
+				if err := deps.sm.DispatchAgent(dispatchCtx, task.Repo, task.IssueNum, task.AgentName, task.Workflow, task.State); err != nil {
 					log.Printf("[worker] redispatch after run failure for %s#%d: %v", task.Repo, task.IssueNum, err)
 				}
 			}()
