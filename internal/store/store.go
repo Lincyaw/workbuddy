@@ -443,9 +443,6 @@ func (s *Store) QueryTasksFiltered(filter TaskFilter) ([]TaskRecord, error) {
 	if filter.Status != "" {
 		query += ` AND tq.status = ?`
 		args = append(args, filter.Status)
-	} else {
-		query += ` AND tq.status <> ?`
-		args = append(args, "completed")
 	}
 	query += ` ORDER BY tq.created_at`
 
