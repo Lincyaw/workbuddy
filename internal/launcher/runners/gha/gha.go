@@ -229,7 +229,10 @@ func (c *Client) getRun(ctx context.Context, repo string, runID int64) (Run, err
 	if err := json.Unmarshal(out, &payload); err != nil {
 		return Run{}, fmt.Errorf("gha: parse run %d: %w", runID, err)
 	}
-	createdAt, _ := time.Parse(time.RFC3339, payload.CreatedAt)
+	createdAt, err := time.Parse(time.RFC3339, payload.CreatedAt)
+	if err != nil {
+		return Run{}, fmt.Errorf("gha: parse created_at for run %d: %w", runID, err)
+	}
 	return Run{
 		ID:         payload.ID,
 		HTMLURL:    payload.HTMLURL,
