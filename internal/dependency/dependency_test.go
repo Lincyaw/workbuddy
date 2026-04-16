@@ -190,7 +190,7 @@ func TestResolverEvaluateOpenIssuesPersistsVerdictIdempotently(t *testing.T) {
 	}
 
 	resolver := NewResolver(st, &fakeReader{}, eventlog.NewEventLogger(st))
-	if err := resolver.EvaluateOpenIssues(context.Background(), "owner/repo", 1); err != nil {
+	if _, err := resolver.EvaluateOpenIssues(context.Background(), "owner/repo", 1); err != nil {
 		t.Fatalf("EvaluateOpenIssues: %v", err)
 	}
 	state, err := st.QueryIssueDependencyState("owner/repo", 3)
@@ -202,7 +202,7 @@ func TestResolverEvaluateOpenIssuesPersistsVerdictIdempotently(t *testing.T) {
 	}
 
 	// Second pass on identical cache should leave verdict intact.
-	if err := resolver.EvaluateOpenIssues(context.Background(), "owner/repo", 2); err != nil {
+	if _, err := resolver.EvaluateOpenIssues(context.Background(), "owner/repo", 2); err != nil {
 		t.Fatalf("EvaluateOpenIssues second run: %v", err)
 	}
 	state2, err := st.QueryIssueDependencyState("owner/repo", 3)
@@ -237,7 +237,7 @@ func TestResolverEvaluateSkipsInvalidRefsInDB(t *testing.T) {
 		t.Fatal(err)
 	}
 	resolver := NewResolver(st, &fakeReader{}, eventlog.NewEventLogger(st))
-	if err := resolver.EvaluateOpenIssues(context.Background(), "owner/repo", 1); err != nil {
+	if _, err := resolver.EvaluateOpenIssues(context.Background(), "owner/repo", 1); err != nil {
 		t.Fatalf("EvaluateOpenIssues: %v", err)
 	}
 	deps, err := st.ListIssueDependencies("owner/repo", 7)

@@ -442,9 +442,17 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 		var depGraphVersion int64
 		runDependencyMaintenance := func(runCtx context.Context) {
 			depGraphVersion++
-			if err := depResolver.EvaluateOpenIssues(runCtx, cfg.Global.Repo, depGraphVersion); err != nil {
+			unblockedIssues, err := depResolver.EvaluateOpenIssues(runCtx, cfg.Global.Repo, depGraphVersion)
+			if err != nil {
 				log.Printf("[coordinator] dependency resolver error: %v", err)
 				return
+			}
+			for _, issueNum := range unblockedIssues {
+				if delErr := st.DeleteIssueCache(cfg.Global.Repo, issueNum); delErr != nil {
+					log.Printf("[coordinator] dependency unblock cache-invalidate #%d: %v", issueNum, delErr)
+				} else {
+					log.Printf("[coordinator] dependency unblocked #%d — cache invalidated for redispatch", issueNum)
+				}
 			}
 			caches, err := st.ListIssueCaches(cfg.Global.Repo)
 			if err != nil {

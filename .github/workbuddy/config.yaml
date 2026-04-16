@@ -4,4 +4,4 @@
 environment: dev          # dev | staging | prod
 repo: Lincyaw/workbuddy
 poll_interval: 30s
-port: 8080                # HTTP audit server port
+port: 8090                # HTTP audit server port

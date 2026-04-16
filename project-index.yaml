@@ -721,20 +721,22 @@ requirements:
     title: Issue Dependency Graph
     description: >
       Track dependencies between issues. Block downstream issues
-      until dependencies are resolved.
+      until dependencies are resolved. Auto-redispatch when deps unblock.
     priority: P2
     version: v0.3.0
-    status: pending
+    status: tested
     acceptance_criteria:
-      - "AC-016-1: 解析 Issue body 中的 'Depends on #N' 和 'Blocked by #N'"
-      - "AC-016-2: 构建 DAG"
-      - "AC-016-3: 依赖未关闭时阻止进入 developing"
-      - "AC-016-4: 依赖关闭时自动解除阻塞"
-      - "AC-016-5: `workbuddy status --deps` 显示依赖关系"
+      - "AC-016-1: 解析 Issue body 中 workbuddy.depends_on YAML block"
+      - "AC-016-2: 构建 DAG，检测环形依赖"
+      - "AC-016-3: 依赖未关闭时阻止进入 developing (verdict=blocked)"
+      - "AC-016-4: 依赖关闭时自动解除阻塞并 redispatch (cache invalidation)"
+      - "AC-016-5: 依赖状态通过 `workbuddy diagnose` 可查"
       - "AC-016-6: 单元测试：解析、阻塞、解除、环形检测 4 种场景"
-    code: []
-    tests: []
-    deps: [REQ-014]
+    code:
+      - internal/dependency/dependency.go
+    tests:
+      - internal/dependency/dependency_test.go
+    deps: [REQ-003]
 
   # ============================================================
   # CLI Commands
@@ -822,20 +824,22 @@ requirements:
   - id: REQ-020
     title: CLI - run command
     description: >
-      `workbuddy run <agent> <issue-number>` — manually trigger
-      agent for an issue, bypassing poller and state machine.
+      `workbuddy run --runtime <runtime> --prompt <prompt>` — directly
+      start a runtime session bypassing poller and state machine.
     priority: P1
     version: v0.2.0
-    status: pending
+    status: tested
     acceptance_criteria:
-      - "AC-020-1: 接受 agent name 和 issue number 作为位置参数"
-      - "AC-020-2: 跳过 poller 和状态机，直接执行 agent"
-      - "AC-020-3: --dry-run 只打印渲染后的命令"
-      - "AC-020-4: 执行完成后打印结果摘要"
-      - "AC-020-5: agent 或 issue 不存在时报错"
-      - "AC-020-6: 单元测试：正常运行、dry-run、不存在"
-    code: []
-    tests: []
+      - "AC-020-1: 接受 --runtime 和 --prompt/--prompt-file 参数"
+      - "AC-020-2: 跳过 poller 和状态机，直接通过 Launcher 执行"
+      - "AC-020-3: 支持 --sandbox, --approval, --model, --timeout 策略参数"
+      - "AC-020-4: 执行完成后输出 stdout 和 session/runtime/artifact 信息"
+      - "AC-020-5: runtime 不存在或 prompt 缺失时报错"
+      - "AC-020-6: 单元测试：正常运行、非零退出码、参数解析"
+    code:
+      - cmd/run.go
+    tests:
+      - cmd/run_test.go
     deps: [REQ-004, REQ-006]
 
   - id: REQ-021

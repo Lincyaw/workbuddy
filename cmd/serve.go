@@ -595,9 +595,17 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 		var depGraphVersion int64
 		runDependencyMaintenance := func(ctx context.Context) {
 			depGraphVersion++
-			if err := depResolver.EvaluateOpenIssues(ctx, cfg.Global.Repo, depGraphVersion); err != nil {
+			unblockedIssues, err := depResolver.EvaluateOpenIssues(ctx, cfg.Global.Repo, depGraphVersion)
+			if err != nil {
 				log.Printf("[serve] dependency resolver error: %v", err)
 				return
+			}
+			for _, issueNum := range unblockedIssues {
+				if delErr := st.DeleteIssueCache(cfg.Global.Repo, issueNum); delErr != nil {
+					log.Printf("[serve] dependency unblock cache-invalidate #%d: %v", issueNum, delErr)
+				} else {
+					log.Printf("[serve] dependency unblocked #%d — cache invalidated for redispatch", issueNum)
+				}
 			}
 			// Reaction reconciler: for every issue we just evaluated, if the
 			// blocked-state on GitHub differs from the verdict we just
@@ -1073,6 +1081,16 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	// Mark agent completed in state machine
 	deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, task.TaskID, task.AgentName, result.ExitCode, completionLabels)
 	publishTaskCompletion(deps.taskHub, task, status, result.ExitCode, startedAt, time.Now().UTC())
+
+	// Fallback: if the agent completed successfully but did not change labels,
+	// the state machine won't advance. Invalidate the poller cache and
+	// redispatch so the agent gets another chance to take action.
+	if status == store.TaskStatusCompleted && preSnapshotErr == nil && postSnapshotErr == nil && labelsUnchanged(preLabels, postLabels) {
+		log.Printf("[worker] agent %s completed for %s#%d but labels unchanged — redispatching", task.AgentName, task.Repo, task.IssueNum)
+		if err := deps.store.DeleteIssueCache(task.Repo, task.IssueNum); err != nil {
+			log.Printf("[worker] fallback cache-invalidate failed: %v", err)
+		}
+	}
 }
 
 func currentAttempt(task router.WorkerTask, st *store.Store) int {
@@ -1345,6 +1363,23 @@ func cloneLabels(labels []string) []string {
 		return nil
 	}
 	return append([]string(nil), labels...)
+}
+
+// labelsUnchanged returns true if two label slices contain the same elements.
+func labelsUnchanged(pre, post []string) bool {
+	if len(pre) != len(post) {
+		return false
+	}
+	a := append([]string(nil), pre...)
+	b := append([]string(nil), post...)
+	sort.Strings(a)
+	sort.Strings(b)
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // recoverTasks marks running tasks as failed and re-routes pending tasks on restart.

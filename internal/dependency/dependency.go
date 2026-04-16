@@ -111,11 +111,13 @@ func ParseDeclaration(repo, body string) ParsedDeclaration {
 // EvaluateOpenIssues parses dependency declarations for every cached open
 // issue, detects cycles, computes a verdict, persists `issue_dependencies`
 // (only for refs that parsed successfully) and the verdict state, and emits
-// events when verdicts change.
-func (r *Resolver) EvaluateOpenIssues(ctx context.Context, repo string, graphVersion int64) error {
+// events when verdicts change. It returns the issue numbers whose verdict
+// changed from blocked/needs_human to ready/override, so the caller can
+// invalidate the poller cache and trigger redispatch.
+func (r *Resolver) EvaluateOpenIssues(ctx context.Context, repo string, graphVersion int64) ([]int, error) {
 	issues, err := r.store.ListIssueCaches(repo)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	openIssues := make(map[int]poller.Issue, len(issues))
 	for _, cached := range issues {
@@ -135,9 +137,6 @@ func (r *Resolver) EvaluateOpenIssues(ctx context.Context, repo string, graphVer
 	for num, issue := range openIssues {
 		decl := ParseDeclaration(repo, issue.Body)
 		parsedDecls[num] = decl
-		// Only persist dependency rows for refs that parsed successfully
-		// (valid repo + valid issue number). Invalid refs influence the
-		// verdict but never become DB rows.
 		deps := make([]store.IssueDependency, 0, len(decl.Dependencies))
 		for _, dep := range decl.Dependencies {
 			if dep.Repo == "" || dep.IssueNum <= 0 {
@@ -156,24 +155,25 @@ func (r *Resolver) EvaluateOpenIssues(ctx context.Context, repo string, graphVer
 			}
 		}
 		if err := r.store.ReplaceIssueDependencies(repo, num, deps); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	cycles := detectCycles(graph)
 	closedCache := make(map[int]poller.IssueDetails)
+	var unblocked []int
 
 	for num, issue := range openIssues {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		default:
 		}
 
 		result := buildResolveResult(repo, issue, parsedDecls[num], graphVersion, cycles[num], openIssues, closedCache, r.reader)
 		prev, err := r.store.QueryIssueDependencyState(repo, num)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !parsedDecls[num].HasBlock && prev == nil {
 			continue
@@ -182,14 +182,20 @@ func (r *Resolver) EvaluateOpenIssues(ctx context.Context, repo string, graphVer
 			result.State.ResumeLabel = prev.ResumeLabel
 		}
 		if err := r.store.UpsertIssueDependencyState(result.State); err != nil {
-			return err
+			return nil, err
 		}
-		if prev == nil || prev.Verdict != result.State.Verdict || prev.BlockedReasonHash != result.State.BlockedReasonHash || prev.OverrideActive != result.State.OverrideActive {
+		verdictChanged := prev == nil || prev.Verdict != result.State.Verdict || prev.BlockedReasonHash != result.State.BlockedReasonHash || prev.OverrideActive != result.State.OverrideActive
+		if verdictChanged {
 			r.eventlog.Log(eventlog.TypeDependencyVerdictChanged, repo, num, map[string]any{
 				"verdict":         result.State.Verdict,
 				"override_active": result.State.OverrideActive,
 				"graph_version":   graphVersion,
 			})
+			if prev != nil &&
+				(prev.Verdict == store.DependencyVerdictBlocked || prev.Verdict == store.DependencyVerdictNeedsHuman) &&
+				(result.State.Verdict == store.DependencyVerdictReady || result.State.Verdict == store.DependencyVerdictOverride) {
+				unblocked = append(unblocked, num)
+			}
 		}
 		if cycles[num] != nil {
 			r.eventlog.Log(eventlog.TypeDependencyCycleDetected, repo, num, map[string]any{
@@ -203,7 +209,7 @@ func (r *Resolver) EvaluateOpenIssues(ctx context.Context, repo string, graphVer
 		}
 	}
 
-	return nil
+	return unblocked, nil
 }
 
 func buildResolveResult(
