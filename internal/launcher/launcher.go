@@ -13,6 +13,7 @@ import (
 // Launcher dispatches agent execution to the appropriate Runtime implementation.
 type Launcher struct {
 	runtimes map[string]Runtime
+	manager  *SessionManager
 }
 
 func NewLauncher() *Launcher {
@@ -29,6 +30,10 @@ func (l *Launcher) Register(rt Runtime, aliases ...string) {
 	}
 }
 
+func (l *Launcher) SetSessionManager(manager *SessionManager) {
+	l.manager = manager
+}
+
 func (l *Launcher) Start(ctx context.Context, agent *config.AgentConfig, task *TaskContext) (Session, error) {
 	if agent.Runner == config.RunnerGitHubActions {
 		return newGHASession(agent, task), nil
@@ -36,6 +41,22 @@ func (l *Launcher) Start(ctx context.Context, agent *config.AgentConfig, task *T
 	runtimeName := agent.Runtime
 	if runtimeName == "" {
 		runtimeName = config.RuntimeClaudeCode
+	}
+	if l.manager != nil && task != nil && task.SessionHandle() == nil {
+		handle, err := l.manager.Create(SessionCreateInput{
+			SessionID: task.Session.ID,
+			TaskID:    task.Session.TaskID,
+			Repo:      task.Repo,
+			IssueNum:  task.Issue.Number,
+			AgentName: agent.Name,
+			Runtime:   runtimeName,
+			WorkerID:  task.Session.WorkerID,
+			Attempt:   task.Session.Attempt,
+		})
+		if err != nil {
+			return nil, err
+		}
+		task.SetSessionHandle(handle)
 	}
 	rt, ok := l.runtimes[runtimeName]
 	if !ok {

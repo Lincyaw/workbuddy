@@ -500,6 +500,41 @@ func TestRestartRetention(t *testing.T) {
 	}
 }
 
+func TestLegacyAgentSessionsMigration(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+
+	s1, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore phase 1: %v", err)
+	}
+	if _, err := s1.DB().Exec(`INSERT INTO agent_sessions (session_id, task_id, repo, issue_num, agent_name, summary, raw_path) VALUES ('legacy-1', 'task-1', 'org/repo', 7, 'dev', 'summary', '/tmp/raw')`); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+	if err := s1.Close(); err != nil {
+		t.Fatalf("Close phase 1: %v", err)
+	}
+
+	s2, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore phase 2: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+
+	sess, err := s2.GetSession("legacy-1")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if sess == nil {
+		t.Fatal("expected migrated session")
+	}
+	if sess.Repo != "org/repo" || sess.IssueNum != 7 || sess.AgentName != "dev" {
+		t.Fatalf("unexpected migrated session: %+v", sess)
+	}
+	if sess.Summary != "summary" || sess.RawPath != "/tmp/raw" {
+		t.Fatalf("expected migrated summary/raw path, got %+v", sess)
+	}
+}
+
 // TestListCachedIssueNums verifies filtering of issues vs PRs.
 func TestListCachedIssueNums(t *testing.T) {
 	s := newTestStore(t)

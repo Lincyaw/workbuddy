@@ -88,6 +88,12 @@ func (s *processSession) Run(ctx context.Context, events chan<- launcherevents.E
 	if s.findSession != nil {
 		sessionPath = s.findSession(s.sessionLookupPath())
 	}
+	if handle := s.task.SessionHandle(); handle != nil {
+		_ = handle.WriteStdout(stdout.Bytes())
+		if stderr.Len() > 0 {
+			_ = handle.WriteStderr(stderr.Bytes())
+		}
+	}
 	if stderr.Len() > 0 {
 		emitEvent(events, &seq, s.task.Session.ID, s.task.Session.ID, launcherevents.KindLog, launcherevents.LogPayload{Stream: "stderr", Line: strings.TrimRight(stderr.String(), "\n")}, nil)
 	}
