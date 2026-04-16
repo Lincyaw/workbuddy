@@ -201,7 +201,7 @@ func worktreeBranch(repoDir, wtPath string) string {
 
 // Prune cleans up orphaned worktrees left behind by crashes or unclean shutdowns.
 // It only removes directories that are NOT still registered as valid git worktrees.
-func (m *Manager) Prune() {
+func (m *Manager) Prune() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -211,18 +211,23 @@ func (m *Manager) Prune() {
 	_ = cmd.Run()
 
 	// Build a set of valid worktree paths.
-	validWorktrees := m.listWorktreePaths()
+	validWorktrees, err := m.listWorktreePaths()
+	if err != nil {
+		log.Printf("[workspace] prune: failed to list worktrees, skipping deletion: %v", err)
+		return fmt.Errorf("workspace: prune: list worktrees: %w", err)
+	}
 
 	// Remove any leftover directories under worktreeDir that are no longer valid worktrees.
 	wtDir := filepath.Join(m.baseDir, worktreeDir)
 	entries, err := os.ReadDir(wtDir)
 	if err != nil {
-		return
+		return nil
 	}
 	for _, entry := range entries {
 		if entry.IsDir() {
 			path := filepath.Join(wtDir, entry.Name())
-			if validWorktrees[path] {
+			absPath, _ := filepath.Abs(path)
+			if validWorktrees[absPath] {
 				log.Printf("[workspace] prune: keeping active worktree directory %s", path)
 				continue
 			}
@@ -230,17 +235,18 @@ func (m *Manager) Prune() {
 			_ = os.RemoveAll(path)
 		}
 	}
+	return nil
 }
 
 // listWorktreePaths returns the set of filesystem paths currently registered
 // as git worktrees (including the main repo directory).
-func (m *Manager) listWorktreePaths() map[string]bool {
+func (m *Manager) listWorktreePaths() (map[string]bool, error) {
 	paths := make(map[string]bool)
 	cmd := exec.Command("git", "worktree", "list", "--porcelain")
 	cmd.Dir = m.baseDir
 	out, err := cmd.Output()
 	if err != nil {
-		return paths
+		return nil, err
 	}
 
 	lines := strings.Split(string(out), "\n")
@@ -251,7 +257,7 @@ func (m *Manager) listWorktreePaths() map[string]bool {
 			paths[absPath] = true
 		}
 	}
-	return paths
+	return paths, nil
 }
 
 // shortID returns first 8 chars of a UUID/task ID for readable directory names.

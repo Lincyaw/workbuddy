@@ -488,7 +488,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 
 	// Workspace isolation via git worktrees
 	wsMgr := workspace.NewManager(repoDir)
-	wsMgr.Prune() // clean up orphaned worktrees from prior crashes
+	_ = wsMgr.Prune() // clean up orphaned worktrees from prior crashes
 
 	// Router
 	rt := router.NewRouter(cfg.Agents, reg, st, cfg.Global.Repo, repoDir, taskCh, wsMgr)
