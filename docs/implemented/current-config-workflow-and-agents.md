@@ -39,7 +39,9 @@
 - `description`
 - `triggers`
 - `role`
+- `runner`
 - `runtime`
+- `github_actions`
 - `policy`
 - `prompt`
 - `output_contract`（历史字段，2-agent catalog 不再使用）
@@ -54,11 +56,18 @@
 
 默认行为：
 
+- `runner` 为空时默认走 `local`
 - `runtime` 为空时默认走 `claude-code`
 - `prompt` 存在时 runtime 优先消费 `prompt`
 - `command` 保留为兼容字段，在没有 `prompt` 时继续作为执行入口
 - `output_contract.schema_file` 仍在 loader / launcher 中保留以兼容历史数据，
   但内置的 2 个 agent 都不再声明此字段
+
+当 `runner: github-actions` 时，可选 `github_actions` 字段：
+
+- `workflow`
+- `ref`
+- `poll_interval`
 
 代码：
 

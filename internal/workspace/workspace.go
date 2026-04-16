@@ -246,7 +246,7 @@ func (m *Manager) listWorktreePaths() (map[string]bool, error) {
 	cmd.Dir = m.baseDir
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("git worktree list: %w", err)
 	}
 
 	lines := strings.Split(string(out), "\n")

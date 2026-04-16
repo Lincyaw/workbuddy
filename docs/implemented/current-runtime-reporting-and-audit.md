@@ -38,6 +38,14 @@ type Runtime interface {
 - `internal/launcher/codex.go`
 - `internal/launcher/process.go`
 
+此外，launcher 现在还有一个与 runtime 正交的 runner 选择：
+
+- `local`
+- `github-actions`
+
+其中 `github-actions` runner 会通过 `gh api` 触发 workflow dispatch，
+然后下载 logs/artifacts 并重新组装成 `launcher.Result`。
+
 ## 当前 Runtime 共同行为
 
 当前 runtime 的共同行为是：
@@ -52,6 +60,8 @@ type Runtime interface {
 - `codex` runtime 会实时把 `codex exec --json` 映射成 Event v1
 - Claude prompt 路径会把 `claude --output-format stream-json` 映射成 Event v1
 - 保底 shell one-shot 路径仍只产出最小事件集
+- GitHub Actions runner 不在本机执行 agent 子进程；它把远端 logs/artifacts
+  回收到账户下的 `.workbuddy/sessions/<session>/remote-runner/`
 
 ## 当前 Reporter 行为
 

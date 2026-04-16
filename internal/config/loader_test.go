@@ -348,6 +348,76 @@ func TestNormalizeAgentConfig_CodexAppServerAllowsViaApprover(t *testing.T) {
 	}
 }
 
+func TestNormalizeAgentConfig_DefaultRunnerIsLocal(t *testing.T) {
+	agent := &AgentConfig{
+		Name:    "local-agent",
+		Runtime: RuntimeCodex,
+		Prompt:  "do work",
+		Policy: PolicyConfig{
+			Sandbox:  "workspace-write",
+			Approval: "never",
+		},
+	}
+
+	if _, err := NormalizeAgentConfig(agent); err != nil {
+		t.Fatalf("NormalizeAgentConfig: %v", err)
+	}
+	if agent.Runner != RunnerLocal {
+		t.Fatalf("runner = %q, want %q", agent.Runner, RunnerLocal)
+	}
+}
+
+func TestNormalizeAgentConfig_GitHubActionsDefaults(t *testing.T) {
+	agent := &AgentConfig{
+		Name:    "remote-agent",
+		Runner:  RunnerGitHubActions,
+		Runtime: RuntimeCodex,
+		Prompt:  "do work",
+		Policy: PolicyConfig{
+			Sandbox:  "workspace-write",
+			Approval: "never",
+		},
+	}
+
+	if _, err := NormalizeAgentConfig(agent); err != nil {
+		t.Fatalf("NormalizeAgentConfig: %v", err)
+	}
+	if agent.GitHubActions.Workflow != "workbuddy-remote-runner.yml" {
+		t.Fatalf("workflow = %q", agent.GitHubActions.Workflow)
+	}
+	if agent.GitHubActions.PollInterval != 5*time.Second {
+		t.Fatalf("poll_interval = %s", agent.GitHubActions.PollInterval)
+	}
+}
+
+func TestLoadConfig_InvalidRunner(t *testing.T) {
+	badRunnerAgent := `---
+name: remote-agent
+description: Invalid runner
+triggers:
+  - label: "status:developing"
+    event: labeled
+role: dev
+runner: moon-base
+runtime: codex
+prompt: |
+  hello
+---
+## Agent
+`
+	dir := setupConfigDir(t, map[string]string{
+		"agents/bad.md": badRunnerAgent,
+	})
+
+	_, _, err := LoadConfig(dir)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "invalid runner") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 // Test 2: Missing required field — agent without 'name'.
 func TestLoadConfig_MissingRequiredField(t *testing.T) {
 	agentNoName := `---

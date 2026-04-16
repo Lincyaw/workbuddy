@@ -30,6 +30,9 @@ func (l *Launcher) Register(rt Runtime, aliases ...string) {
 }
 
 func (l *Launcher) Start(ctx context.Context, agent *config.AgentConfig, task *TaskContext) (Session, error) {
+	if agent.Runner == config.RunnerGitHubActions {
+		return newGHASession(agent, task), nil
+	}
 	runtimeName := agent.Runtime
 	if runtimeName == "" {
 		runtimeName = config.RuntimeClaudeCode

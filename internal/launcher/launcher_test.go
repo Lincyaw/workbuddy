@@ -215,6 +215,36 @@ func TestLaunch_Cancel(t *testing.T) {
 	}
 }
 
+func TestStart_GitHubActionsRunnerUsesRemoteSession(t *testing.T) {
+	launcher := NewLauncher()
+	task := newTestTask(t)
+	agent := &config.AgentConfig{
+		Name:    "remote-agent",
+		Runner:  config.RunnerGitHubActions,
+		Runtime: config.RuntimeCodexExec,
+		Prompt:  "remote",
+		GitHubActions: config.GitHubActionsRunnerConfig{
+			Workflow:     "workbuddy-remote-runner.yml",
+			Ref:          "main",
+			PollInterval: time.Millisecond,
+		},
+		Timeout: time.Minute,
+	}
+
+	session, err := launcher.Start(context.Background(), agent, task)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = session.Close() }()
+	remote, ok := session.(*ghaSession)
+	if !ok {
+		t.Fatalf("session type = %T, want *ghaSession", session)
+	}
+	if remote.client == nil {
+		t.Fatal("expected GitHub Actions client")
+	}
+}
+
 // Test 5: Meta parse success — WORKBUDDY_META block is extracted from stdout
 func TestLaunch_MetaParseSuccess(t *testing.T) {
 	launcher := NewLauncher()
