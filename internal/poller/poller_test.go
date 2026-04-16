@@ -297,6 +297,41 @@ func TestRateLimitBackoff(t *testing.T) {
 	}
 }
 
+func TestRateLimitDoesNotClassifyNonRateLimitPermissionError(t *testing.T) {
+	gh := &mockGHReader{
+		issuesErr: fmt.Errorf("HTTP 403: must have permission to perform this action"),
+	}
+	st := testStore(t)
+	p := NewPoller(gh, st, "owner/repo", time.Hour)
+
+	p.poll(context.Background())
+	if p.Backoff() != 0 {
+		t.Errorf("expected permission error to not set backoff, got %s", p.Backoff())
+	}
+}
+
+func TestRateLimitBackoffResetsOnSuccess(t *testing.T) {
+	gh := &mockGHReader{
+		issuesErr: fmt.Errorf("HTTP 403: rate limit exceeded"),
+	}
+	st := testStore(t)
+	p := NewPoller(gh, st, "owner/repo", time.Hour)
+
+	p.poll(context.Background())
+	if p.Backoff() != 60*time.Second {
+		t.Fatalf("expected initial backoff after rate limit, got %s", p.Backoff())
+	}
+
+	gh.issuesErr = nil
+	gh.prs = []PR{
+		{Number: 1, URL: "https://github.com/owner/repo/pull/1", Branch: "main", State: "open"},
+	}
+	p.poll(context.Background())
+	if p.Backoff() != 0 {
+		t.Fatalf("expected backoff to reset after successful poll, got %s", p.Backoff())
+	}
+}
+
 func TestGHErrorContinues(t *testing.T) {
 	gh := &mockGHReader{
 		issuesErr: fmt.Errorf("network timeout"),

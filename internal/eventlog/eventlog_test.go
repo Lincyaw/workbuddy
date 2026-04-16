@@ -140,3 +140,32 @@ func TestConcurrentWrites(t *testing.T) {
 		t.Fatalf("expected %d events, got %d", expected, len(events))
 	}
 }
+
+func TestTypeRateLimitInAllEventTypes(t *testing.T) {
+	found := false
+	for _, t := range AllEventTypes {
+		if t == TypeRateLimit {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("TypeRateLimit is missing from AllEventTypes")
+	}
+}
+
+func TestWriteRateLimitEvent(t *testing.T) {
+	logger := newTestLogger(t)
+	logger.Log(TypeRateLimit, "owner/repo", 17, map[string]string{"source": "poller"})
+
+	events, err := logger.Query(EventFilter{Type: TypeRateLimit, Repo: "owner/repo", IssueNum: 17})
+	if err != nil {
+		t.Fatalf("Query rate limit event: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 rate_limit event, got %d", len(events))
+	}
+	if events[0].Type != TypeRateLimit {
+		t.Fatalf("expected type %q got %q", TypeRateLimit, events[0].Type)
+	}
+}

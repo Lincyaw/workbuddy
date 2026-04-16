@@ -16,6 +16,7 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/audit"
 	"github.com/Lincyaw/workbuddy/internal/config"
+	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/launcher"
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 	"github.com/Lincyaw/workbuddy/internal/poller"
@@ -169,6 +170,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 
 	client := workerclient.New(opts.coordinatorURL, opts.token, nil)
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
+	rep.SetEventRecorder(eventlog.NewEventLogger(localStore))
 	auditor := audit.NewAuditor(localStore, opts.sessionsDir)
 
 	var ctx context.Context
@@ -284,7 +286,7 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 
 	launchCtx := buildRemoteTaskContext(task, reader, workDir)
 	sessionID := launchCtx.Session.ID
-	if err := rep.ReportStarted(task.Repo, task.IssueNum, task.AgentName, sessionID, workerID); err != nil {
+	if err := rep.ReportStarted(taskCtx, task.Repo, task.IssueNum, task.AgentName, sessionID, workerID); err != nil {
 		log.Printf("[worker] report started failed: %v", err)
 	}
 
@@ -354,7 +356,7 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 	}); err != nil {
 		return fmt.Errorf("worker: submit result: %w", err)
 	}
-	if err := rep.Report(task.Repo, task.IssueNum, task.AgentName, result, sessionID, workerID, 0, workflowMaxRetries(cfg, task.Workflow), ""); err != nil {
+	if err := rep.Report(taskCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, workerID, 0, workflowMaxRetries(cfg, task.Workflow), ""); err != nil {
 		log.Printf("[worker] report failed: %v", err)
 	}
 	return nil

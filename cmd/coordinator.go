@@ -377,7 +377,9 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	depResolver := dependency.NewResolver(st, ghReader, evlog)
 	rt := router.NewRouter(cfg.Agents, reg, st, cfg.Global.Repo, mustRepoRoot(), nil, nil, false)
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
+	rep.SetEventRecorder(evlog)
 	p := poller.NewPoller(ghReader, st, cfg.Global.Repo, cfg.Global.PollInterval)
+	p.SetEventRecorder(evlog)
 
 	var ctx context.Context
 	var cancel context.CancelFunc
@@ -390,6 +392,9 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	}
 	defer cancel()
+
+	// Optional startup rate-limit budget check; best-effort and non-fatal.
+	go runRateLimitBudgetCheck(ctx, "coordinator", cfg.Global.Repo)
 
 	api := &fullCoordinatorServer{
 		rootCtx:      ctx,

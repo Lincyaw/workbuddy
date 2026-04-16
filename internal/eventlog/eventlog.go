@@ -12,21 +12,22 @@ import (
 
 // Supported event types.
 const (
-	TypePoll                   = "poll"
-	TypeTransition             = "transition"
-	TypeDispatch               = "dispatch"
-	TypeCompleted              = "completed"
-	TypeError                  = "error"
-	TypeReport                 = "report"
-	TypeRetryLimit             = "retry_limit"
-	TypeWorkerRegistered       = "worker_registered"
-	TypeWorkerOffline          = "worker_offline"
-	TypeStateEntry             = "state_entry"
-	TypeErrorMultiWorkflow     = "error_multi_workflow"
-	TypeCycleLimitReached      = "cycle_limit_reached"
-	TypeTransitionToFailed     = "transition_to_failed"
-	TypeStuckDetected          = "stuck_detected"
-	TypeDispatchSkippedInflight = "dispatch_skipped_inflight"
+	TypePoll                        = "poll"
+	TypeTransition                  = "transition"
+	TypeDispatch                    = "dispatch"
+	TypeCompleted                   = "completed"
+	TypeError                       = "error"
+	TypeReport                      = "report"
+	TypeRetryLimit                  = "retry_limit"
+	TypeWorkerRegistered            = "worker_registered"
+	TypeWorkerOffline               = "worker_offline"
+	TypeStateEntry                  = "state_entry"
+	TypeErrorMultiWorkflow          = "error_multi_workflow"
+	TypeCycleLimitReached           = "cycle_limit_reached"
+	TypeTransitionToFailed          = "transition_to_failed"
+	TypeStuckDetected               = "stuck_detected"
+	TypeDispatchSkippedInflight     = "dispatch_skipped_inflight"
+	TypeRateLimit                   = "rate_limit"
 	TypeDependencyVerdictChanged    = "dependency_verdict_changed"
 	TypeDependencyCycleDetected     = "dependency_cycle_detected"
 	TypeDependencyOverrideActivated = "dependency_override_activated"
@@ -50,6 +51,7 @@ var AllEventTypes = []string{
 	TypeTransitionToFailed,
 	TypeStuckDetected,
 	TypeDispatchSkippedInflight,
+	TypeRateLimit,
 	TypeDependencyVerdictChanged,
 	TypeDependencyCycleDetected,
 	TypeDependencyOverrideActivated,

@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/ghutil"
 	"github.com/Lincyaw/workbuddy/internal/launcher"
 )
 
@@ -77,7 +79,7 @@ func (g *GHCLIReactionManager) authenticatedLogin(ctx context.Context) (string, 
 // without creating a duplicate).
 //
 // blocked=false → fetch all reactions on the issue, filter for `content ==
-// "confused"` authored by the bot's own login, and DELETE each one.
+// confused` authored by the bot's own login, and DELETE each one.
 func (g *GHCLIReactionManager) SetBlockedReaction(ctx context.Context, repo string, issueNum int, blocked bool) error {
 	endpoint := fmt.Sprintf("repos/%s/issues/%d/reactions", repo, issueNum)
 	if blocked {
@@ -130,12 +132,29 @@ func (g *GHCLIReactionManager) SetBlockedReaction(ctx context.Context, repo stri
 	return nil
 }
 
+// EventRecorder captures lightweight event records.
+type EventRecorder interface {
+	Log(eventType, repo string, issueNum int, payload interface{})
+}
+
 // Reporter writes execution reports as GitHub Issue comments.
 type Reporter struct {
 	gh        GHCommentWriter
 	reactions ReactionManager
 	baseURL   string // e.g. "http://localhost:8080", empty to omit session links
+	eventlog  EventRecorder
 }
+
+var (
+	// rateLimitRetryDelays is overridden in tests to keep assertions fast.
+	rateLimitRetryDelays = []time.Duration{
+		30 * time.Second,
+		60 * time.Second,
+		90 * time.Second,
+	}
+	// rateLimitRetryLimit is the maximum number of retries after the first attempt.
+	rateLimitRetryLimit = 3
+)
 
 // NewReporter creates a Reporter with the given GH comment writer. The
 // reaction manager defaults to a GHCLIReactionManager; callers may override
@@ -147,6 +166,11 @@ func NewReporter(gh GHCommentWriter) *Reporter {
 // SetReactionManager replaces the default ReactionManager (used by tests).
 func (r *Reporter) SetReactionManager(m ReactionManager) {
 	r.reactions = m
+}
+
+// SetEventRecorder sets the optional EventRecorder.
+func (r *Reporter) SetEventRecorder(logger EventRecorder) {
+	r.eventlog = logger
 }
 
 // SetBlockedReaction is a thin pass-through to the configured ReactionManager.
@@ -164,24 +188,36 @@ func (r *Reporter) SetBaseURL(baseURL string) {
 }
 
 // ReportStarted posts an "Agent Started" comment with a session link before execution begins.
-func (r *Reporter) ReportStarted(repo string, issueNum int, agentName, sessionID, workerID string) error {
+func (r *Reporter) ReportStarted(ctx context.Context, repo string, issueNum int, agentName, sessionID, workerID string) error {
 	var sessionURL string
 	if r.baseURL != "" {
 		sessionURL = r.baseURL + "/sessions/" + sessionID
 	}
 	body := FormatStartedReport(agentName, sessionID, workerID, sessionURL, time.Now())
-	return r.gh.WriteComment(repo, issueNum, body)
+	return r.writeWithRateLimitRetry(ctx, repo, issueNum, "report_started", func() error {
+		return r.gh.WriteComment(repo, issueNum, body)
+	})
 }
 
-func (r *Reporter) ReportNeedsHuman(repo string, issueNum int, labelLine string) error {
+// ReportNeedsHuman posts a needs-human recommendation comment for a transition.
+func (r *Reporter) ReportNeedsHuman(ctx context.Context, repo string, issueNum int, labelLine string) error {
 	body := FormatNeedsHumanReport(labelLine, time.Now())
-	return r.gh.WriteComment(repo, issueNum, body)
+	return r.writeWithRateLimitRetry(ctx, repo, issueNum, "needs_human", func() error {
+		return r.gh.WriteComment(repo, issueNum, body)
+	})
 }
 
 // Report formats and posts an agent execution report to the issue.
-func (r *Reporter) Report(repo string, issueNum int, agentName string, result *launcher.Result,
-	sessionID, workerID string, retryCount, maxRetries int, labelLine string) error {
-
+func (r *Reporter) Report(
+	ctx context.Context,
+	repo string,
+	issueNum int,
+	agentName string,
+	result *launcher.Result,
+	sessionID, workerID string,
+	retryCount, maxRetries int,
+	labelLine string,
+) error {
 	status := "success"
 	var errorDetail string
 	if result.ExitCode != 0 {
@@ -236,5 +272,67 @@ func (r *Reporter) Report(repo string, issueNum int, agentName string, result *l
 	}
 
 	body := FormatReportAt(data, time.Now())
-	return r.gh.WriteComment(repo, issueNum, body)
+	return r.writeWithRateLimitRetry(ctx, repo, issueNum, "report", func() error {
+		return r.gh.WriteComment(repo, issueNum, body)
+	})
+}
+
+func (r *Reporter) writeWithRateLimitRetry(ctx context.Context, repo string, issueNum int, source string, writeFn func() error) error {
+	if writeFn == nil {
+		return nil
+	}
+	for attempt := 0; attempt <= rateLimitRetryLimit; attempt++ {
+		if ctx != nil && ctx.Err() != nil {
+			return ctx.Err()
+		}
+		err := writeFn()
+		if err == nil {
+			if r.eventlog != nil {
+				r.eventlog.Log(eventlog.TypeReport, repo, issueNum, map[string]any{
+					"source": source,
+					"status": "success",
+				})
+			}
+			return nil
+		}
+		if !ghutil.IsRateLimit(err) {
+			return err
+		}
+		r.logRateLimit(source, repo, issueNum, err)
+		if attempt >= rateLimitRetryLimit {
+			return err
+		}
+		delayIdx := attempt
+		if len(rateLimitRetryDelays) == 0 {
+			continue
+		}
+		if delayIdx >= len(rateLimitRetryDelays) {
+			delayIdx = len(rateLimitRetryDelays) - 1
+		}
+		delay := rateLimitRetryDelays[delayIdx]
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			if ctx == nil {
+				<-timer.C
+			} else {
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return ctx.Err()
+				case <-timer.C:
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (r *Reporter) logRateLimit(source, repo string, issueNum int, err error) {
+	if r.eventlog == nil || err == nil {
+		return
+	}
+	r.eventlog.Log(eventlog.TypeRateLimit, repo, issueNum, map[string]any{
+		"source": source,
+		"error":  ghutil.RedactTokens(err.Error()),
+	})
 }

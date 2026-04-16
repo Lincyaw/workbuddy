@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/ghutil"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
@@ -98,6 +100,7 @@ type Poller struct {
 	repo       string
 	interval   time.Duration
 	events     chan ChangeEvent
+	eventlog   EventRecorder
 	backoff    time.Duration
 	maxBackoff time.Duration
 }
@@ -114,9 +117,21 @@ func NewPoller(gh GHReader, st *store.Store, repo string, interval time.Duration
 		repo:       repo,
 		interval:   interval,
 		events:     make(chan ChangeEvent, 256),
+		eventlog:   nil,
 		backoff:    0,
 		maxBackoff: 15 * time.Minute,
 	}
+}
+
+// EventRecorder receives lightweight event records from the poller.
+type EventRecorder interface {
+	Log(eventType, repo string, issueNum int, payload interface{})
+}
+
+// SetEventRecorder sets the optional event recorder. When nil, rate-limit events
+// are still handled but not persisted.
+func (p *Poller) SetEventRecorder(r EventRecorder) {
+	p.eventlog = r
 }
 
 // Events returns the read-only channel of change events.
@@ -170,7 +185,8 @@ func (p *Poller) poll(ctx context.Context) {
 	// --- Issues ---
 	issues, err := p.gh.ListIssues(p.repo)
 	if err != nil {
-		if isRateLimit(err) {
+		if ghutil.IsRateLimit(err) {
+			p.logRateLimitEvent("issues", err)
 			p.applyBackoff()
 		} else {
 			log.Printf("[poller] error listing issues for %s: %v", p.repo, err)
@@ -188,13 +204,15 @@ func (p *Poller) poll(ctx context.Context) {
 	// --- PRs ---
 	prs, err := p.gh.ListPRs(p.repo)
 	if err != nil {
-		if isRateLimit(err) {
+		if ghutil.IsRateLimit(err) {
+			p.logRateLimitEvent("prs", err)
 			p.applyBackoff()
 		} else {
 			log.Printf("[poller] error listing PRs for %s: %v", p.repo, err)
 		}
 		return
 	}
+	p.ResetBackoff()
 
 	for _, pr := range prs {
 		if ctx.Err() != nil {
@@ -364,11 +382,15 @@ func (p *Poller) emit(ctx context.Context, ev ChangeEvent) {
 // Rate limit / backoff
 // ---------------------------------------------------------------------------
 
-func isRateLimit(err error) bool {
-	msg := err.Error()
-	return strings.Contains(msg, "rate limit") ||
-		strings.Contains(msg, "403") ||
-		strings.Contains(msg, "429")
+func (p *Poller) logRateLimitEvent(scope string, err error) {
+	if p.eventlog == nil || err == nil {
+		return
+	}
+	p.eventlog.Log(eventlog.TypeRateLimit, p.repo, 0, map[string]any{
+		"source": "poller",
+		"scope":  scope,
+		"error":  ghutil.RedactTokens(err.Error()),
+	})
 }
 
 func (p *Poller) applyBackoff() {
