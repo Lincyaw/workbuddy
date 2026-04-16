@@ -266,7 +266,7 @@ func buildResolveResult(
 						ok = true
 					} else {
 						if ghutil.IsRateLimit(err) {
-							log.Printf("[dependency] rate limit while reading %s#%d for %d: %v", dep.Repo, dep.IssueNum, issue.Number, err)
+							log.Printf("[dependency] rate limit while reading %s#%d for %d: %v", dep.Repo, dep.IssueNum, issue.Number, ghutil.RedactTokens(err.Error()))
 							if eventRecorder != nil {
 								eventRecorder.Log(eventlog.TypeRateLimit, repo, issue.Number, map[string]any{
 									"source": "dependency_resolver",

@@ -1,9 +1,12 @@
 package dependency
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
@@ -150,6 +153,46 @@ func TestResolverSkipsRateLimitedDependencyRead(t *testing.T) {
 	}
 	if len(evs) == 0 {
 		t.Fatal("expected rate limit event to be recorded")
+	}
+}
+
+func TestResolverSkipsRateLimitedDependencyReadRedactsTokenInLog(t *testing.T) {
+	st := newTestStore(t)
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     "owner/repo",
+		IssueNum: 3,
+		Labels:   `["status:developing"]`,
+		Body:     "```yaml\nworkbuddy:\n  depends_on:\n    - \"#2\"\n```",
+		State:    "open",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := &fakeReaderWithErrors{
+		errors: map[int]error{
+			2: fmt.Errorf("HTTP 403: rate limit exceeded: token ghp_12345678901234567890"),
+		},
+	}
+
+	var out bytes.Buffer
+	oldOutput := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&out)
+	log.SetFlags(log.LstdFlags)
+	defer func() {
+		log.SetOutput(oldOutput)
+		log.SetFlags(oldFlags)
+	}()
+
+	resolver := NewResolver(st, reader, nil)
+	_, err := resolver.EvaluateOpenIssues(context.Background(), "owner/repo", 1)
+	if err != nil {
+		t.Fatalf("EvaluateOpenIssues: %v", err)
+	}
+
+	logged := out.String()
+	if strings.Contains(logged, "ghp_12345678901234567890") {
+		t.Fatalf("expected token to be redacted in log output: %q", logged)
 	}
 }
 
