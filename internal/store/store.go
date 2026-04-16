@@ -426,6 +426,7 @@ func (s *Store) QueryTasks(status string) ([]TaskRecord, error) {
 }
 
 // QueryTasksFiltered returns tasks matching the given filter.
+// When no status filter is set, completed tasks are excluded by default.
 func (s *Store) QueryTasksFiltered(filter TaskFilter) ([]TaskRecord, error) {
 	const selectTasks = `SELECT
 		tq.id, tq.repo, tq.issue_num, tq.agent_name, ic.labels, tq.role, tq.runtime, tq.workflow, tq.state,
@@ -443,6 +444,9 @@ func (s *Store) QueryTasksFiltered(filter TaskFilter) ([]TaskRecord, error) {
 	if filter.Status != "" {
 		query += ` AND tq.status = ?`
 		args = append(args, filter.Status)
+	} else {
+		query += ` AND tq.status <> ?`
+		args = append(args, "completed")
 	}
 	query += ` ORDER BY tq.created_at`
 

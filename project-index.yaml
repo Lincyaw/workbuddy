@@ -623,7 +623,7 @@ requirements:
       and metrics. Consumed by the audit UI and external monitoring.
     priority: P2
     version: v0.3.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-012-1: GET /api/v1/status 返回当前状态（活跃 session 数、Worker 数、最近 poll 时间）"
       - "AC-012-2: GET /api/v1/sessions 返回 JSON session 列表，支持分页"
@@ -633,8 +633,13 @@ requirements:
       - "AC-012-6: GET /api/v1/workers 返回 Worker 列表和状态"
       - "AC-012-7: 所有响应使用 application/json"
       - "AC-012-8: 集成测试：验证各端点 JSON schema"
-    code: []
-    tests: []
+    code:
+      - internal/auditapi/handler.go
+      - cmd/serve.go
+      - cmd/coordinator.go
+      - internal/store/store.go
+    tests:
+      - internal/auditapi/handler_test.go
     deps: [REQ-011]
 
   # ============================================================

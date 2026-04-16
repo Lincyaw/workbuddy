@@ -18,6 +18,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/auditapi"
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/coordinator"
 	"github.com/Lincyaw/workbuddy/internal/dependency"
@@ -404,6 +405,9 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", api.handleHealth)
+	dashboardAPI := auditapi.NewHandler(st)
+	dashboardAPI.SetSessionsDir(filepath.Join(filepath.Dir(opts.dbPath), "sessions"))
+	dashboardAPI.RegisterDashboard(mux)
 	mux.Handle("/api/v1/workers/register", api.wrapAuth(http.HandlerFunc(api.handleRegisterWorker)))
 	mux.Handle("/api/v1/tasks/poll", api.wrapAuth(http.HandlerFunc(api.handlePollTask)))
 	mux.Handle("/api/v1/tasks/", api.wrapAuth(http.HandlerFunc(api.handleTaskAction)))
@@ -482,6 +486,7 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 					return
 				}
 				if ev.Type == poller.EventPollCycleDone {
+					evlog.Log(poller.EventPollCycleDone, ev.Repo, 0, map[string]any{"source": "poller"})
 					if !depsResolvedThisCycle {
 						runDependencyMaintenance(ctx)
 					}
