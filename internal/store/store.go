@@ -3,6 +3,7 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -131,6 +132,7 @@ func (s *Store) createTables() error {
 		`CREATE TABLE IF NOT EXISTS workers (
 			id TEXT PRIMARY KEY,
 			repo TEXT NOT NULL,
+			repos_json TEXT NOT NULL DEFAULT '[]',
 			roles TEXT NOT NULL,
 			hostname TEXT,
 			status TEXT NOT NULL DEFAULT 'online',
@@ -139,6 +141,14 @@ func (s *Store) createTables() error {
 			token_revoked_at DATETIME,
 			last_heartbeat DATETIME DEFAULT CURRENT_TIMESTAMP,
 			registered_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE TABLE IF NOT EXISTS repo_registrations (
+			repo TEXT PRIMARY KEY,
+			environment TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'active',
+			config_json TEXT NOT NULL DEFAULT '{}',
+			registered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS transition_counts (
 			repo TEXT NOT NULL,
@@ -245,6 +255,9 @@ func (s *Store) createTables() error {
 	}
 	if _, err := s.db.Exec(`ALTER TABLE workers ADD COLUMN token_kid TEXT`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("store: alter workers add token_kid: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE workers ADD COLUMN repos_json TEXT NOT NULL DEFAULT '[]'`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("store: alter workers add repos_json: %w", err)
 	}
 	if _, err := s.db.Exec(`ALTER TABLE workers ADD COLUMN token_hash TEXT`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("store: alter workers add token_hash: %w", err)
@@ -362,6 +375,22 @@ func taskLeaseOffset(lease time.Duration) string {
 		seconds = 1
 	}
 	return fmt.Sprintf("+%d seconds", seconds)
+}
+
+func jsonArrayContains(raw string, want string) bool {
+	if strings.TrimSpace(want) == "" {
+		return false
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(raw), &values); err != nil {
+		return false
+	}
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func scanTaskRecord(scan func(dest ...any) error) (TaskRecord, error) {
@@ -565,10 +594,21 @@ func (s *Store) ReleaseTask(taskID, workerID string) (bool, error) {
 // ClaimNextTask assigns the next dispatchable task to workerID. If the same
 // worker repeats the request with the same non-empty claimToken before the
 // lease expires, the previously claimed task is returned.
-func (s *Store) ClaimNextTask(workerID string, roles []string, claimToken string, lease time.Duration) (*TaskRecord, error) {
+func (s *Store) ClaimNextTask(workerID string, roles []string, repos []string, claimToken string, lease time.Duration) (*TaskRecord, error) {
 	if lease <= 0 {
 		lease = 30 * time.Second
 	}
+	for attempt := 0; attempt < 5; attempt++ {
+		task, err := s.claimNextTaskOnce(workerID, roles, repos, claimToken, lease)
+		if err == nil || !isSQLiteBusyError(err) {
+			return task, err
+		}
+		time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+	}
+	return s.claimNextTaskOnce(workerID, roles, repos, claimToken, lease)
+}
+
+func (s *Store) claimNextTaskOnce(workerID string, roles []string, repos []string, claimToken string, lease time.Duration) (*TaskRecord, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("store: begin claim tx: %w", err)
@@ -602,6 +642,16 @@ func (s *Store) ClaimNextTask(workerID string, roles []string, claimToken string
 		conds = append(conds, "role = ?")
 		roleArgs = append(roleArgs, role)
 	}
+	repoConds := make([]string, 0, len(repos))
+	repoArgs := make([]any, 0, len(repos))
+	for _, repo := range repos {
+		repo = strings.TrimSpace(repo)
+		if repo == "" {
+			continue
+		}
+		repoConds = append(repoConds, "repo = ?")
+		repoArgs = append(repoArgs, repo)
+	}
 	query := `SELECT
 		id, repo, issue_num, agent_name, NULL, role, runtime, workflow, state,
 		worker_id, claim_token, status, lease_expires_at, acked_at, heartbeat_at,
@@ -613,6 +663,10 @@ func (s *Store) ClaimNextTask(workerID string, roles []string, claimToken string
 	if len(conds) > 0 {
 		query += ` AND (` + strings.Join(conds, " OR ") + `)`
 		args = append(args, roleArgs...)
+	}
+	if len(repoConds) > 0 {
+		query += ` AND (` + strings.Join(repoConds, " OR ") + `)`
+		args = append(args, repoArgs...)
 	}
 	query += ` ORDER BY created_at, id LIMIT 1`
 
@@ -655,6 +709,16 @@ func (s *Store) ClaimNextTask(workerID string, roles []string, claimToken string
 		return nil, fmt.Errorf("store: commit claim: %w", err)
 	}
 	return &task, nil
+}
+
+func isSQLiteBusyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "database table is locked") ||
+		strings.Contains(msg, "sqlite_busy")
 }
 
 func (s *Store) ensureTaskOwnership(tx *sql.Tx, taskID, workerID string) (*TaskRecord, error) {
@@ -793,15 +857,19 @@ func (s *Store) CompleteTask(taskID, workerID string, exitCode int, sessionRefs 
 
 // InsertWorker registers a worker.
 func (s *Store) InsertWorker(w WorkerRecord) error {
+	if strings.TrimSpace(w.ReposJSON) == "" {
+		w.ReposJSON = "[]"
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO workers (id, repo, roles, hostname, status)
-		 VALUES (?, ?, ?, ?, ?)
+		`INSERT INTO workers (id, repo, repos_json, roles, hostname, status)
+		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		 repo = excluded.repo,
+		 repos_json = excluded.repos_json,
 		 roles = excluded.roles,
 		 hostname = excluded.hostname,
 		 status = excluded.status`,
-		w.ID, w.Repo, w.Roles, w.Hostname, w.Status,
+		w.ID, w.Repo, w.ReposJSON, w.Roles, w.Hostname, w.Status,
 	)
 	if err != nil {
 		return fmt.Errorf("store: insert worker: %w", err)
@@ -811,13 +879,7 @@ func (s *Store) InsertWorker(w WorkerRecord) error {
 
 // QueryWorkers returns workers filtered by repo (empty = all).
 func (s *Store) QueryWorkers(repo string) ([]WorkerRecord, error) {
-	var rows *sql.Rows
-	var err error
-	if repo == "" {
-		rows, err = s.db.Query(`SELECT id, repo, roles, hostname, status, last_heartbeat, registered_at FROM workers ORDER BY id`)
-	} else {
-		rows, err = s.db.Query(`SELECT id, repo, roles, hostname, status, last_heartbeat, registered_at FROM workers WHERE repo = ? ORDER BY id`, repo)
-	}
+	rows, err := s.db.Query(`SELECT id, repo, repos_json, roles, hostname, status, last_heartbeat, registered_at FROM workers ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("store: query workers: %w", err)
 	}
@@ -827,11 +889,14 @@ func (s *Store) QueryWorkers(repo string) ([]WorkerRecord, error) {
 	for rows.Next() {
 		var w WorkerRecord
 		var hb, ra string
-		if err := rows.Scan(&w.ID, &w.Repo, &w.Roles, &w.Hostname, &w.Status, &hb, &ra); err != nil {
+		if err := rows.Scan(&w.ID, &w.Repo, &w.ReposJSON, &w.Roles, &w.Hostname, &w.Status, &hb, &ra); err != nil {
 			return nil, fmt.Errorf("store: scan worker: %w", err)
 		}
 		w.LastHeartbeat, _ = ParseTimestamp(hb, "worker.last_heartbeat")
 		w.RegisteredAt, _ = ParseTimestamp(ra, "worker.registered_at")
+		if repo != "" && w.Repo != repo && !jsonArrayContains(w.ReposJSON, repo) {
+			continue
+		}
 		out = append(out, w)
 	}
 	return out, rows.Err()
@@ -865,6 +930,102 @@ func (s *Store) UpdateWorkerStatus(workerID, status string) error {
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return fmt.Errorf("store: update worker status: worker %q not found", workerID)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Repo registrations
+// ---------------------------------------------------------------------------
+
+// UpsertRepoRegistration inserts or updates a repo registration.
+func (s *Store) UpsertRepoRegistration(rec RepoRegistrationRecord) error {
+	if strings.TrimSpace(rec.Status) == "" {
+		rec.Status = "active"
+	}
+	if strings.TrimSpace(rec.ConfigJSON) == "" {
+		rec.ConfigJSON = "{}"
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO repo_registrations (repo, environment, status, config_json)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT(repo) DO UPDATE SET
+		 environment = excluded.environment,
+		 status = excluded.status,
+		 config_json = excluded.config_json,
+		 updated_at = CURRENT_TIMESTAMP`,
+		rec.Repo, rec.Environment, rec.Status, rec.ConfigJSON,
+	)
+	if err != nil {
+		return fmt.Errorf("store: upsert repo registration: %w", err)
+	}
+	return nil
+}
+
+// GetRepoRegistration loads a repo registration by repo slug.
+func (s *Store) GetRepoRegistration(repo string) (*RepoRegistrationRecord, error) {
+	var rec RepoRegistrationRecord
+	var registeredAt, updatedAt string
+	err := s.db.QueryRow(
+		`SELECT repo, environment, status, config_json, registered_at, updated_at
+		 FROM repo_registrations WHERE repo = ?`,
+		repo,
+	).Scan(&rec.Repo, &rec.Environment, &rec.Status, &rec.ConfigJSON, &registeredAt, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: get repo registration: %w", err)
+	}
+	rec.RegisteredAt, _ = ParseTimestamp(registeredAt, "repo_registration.registered_at")
+	rec.UpdatedAt, _ = ParseTimestamp(updatedAt, "repo_registration.updated_at")
+	return &rec, nil
+}
+
+// ListRepoRegistrations returns all repo registrations ordered by repo.
+func (s *Store) ListRepoRegistrations() ([]RepoRegistrationRecord, error) {
+	rows, err := s.db.Query(
+		`SELECT repo, environment, status, config_json, registered_at, updated_at
+		 FROM repo_registrations ORDER BY repo`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: list repo registrations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []RepoRegistrationRecord
+	for rows.Next() {
+		var rec RepoRegistrationRecord
+		var registeredAt, updatedAt string
+		if err := rows.Scan(&rec.Repo, &rec.Environment, &rec.Status, &rec.ConfigJSON, &registeredAt, &updatedAt); err != nil {
+			return nil, fmt.Errorf("store: scan repo registration: %w", err)
+		}
+		rec.RegisteredAt, _ = ParseTimestamp(registeredAt, "repo_registration.registered_at")
+		rec.UpdatedAt, _ = ParseTimestamp(updatedAt, "repo_registration.updated_at")
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+// DeleteRepoRegistration removes the registration for the given repo.
+func (s *Store) DeleteRepoRegistration(repo string) error {
+	_, err := s.db.Exec(`DELETE FROM repo_registrations WHERE repo = ?`, repo)
+	if err != nil {
+		return fmt.Errorf("store: delete repo registration: %w", err)
+	}
+	return nil
+}
+
+// FailPendingTasksForRepo marks all pending/running tasks for a repo as failed.
+func (s *Store) FailPendingTasksForRepo(repo string) error {
+	_, err := s.db.Exec(
+		`UPDATE task_queue
+		 SET status = ?, exit_code = 1, completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		 WHERE repo = ? AND status IN (?, ?)`,
+		TaskStatusFailed, repo, TaskStatusPending, TaskStatusRunning,
+	)
+	if err != nil {
+		return fmt.Errorf("store: fail pending tasks for repo: %w", err)
 	}
 	return nil
 }

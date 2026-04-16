@@ -118,6 +118,21 @@ func TestCreateAndReadWrite(t *testing.T) {
 	if workers[0].Status != "offline" {
 		t.Fatalf("expected offline, got %s", workers[0].Status)
 	}
+	if err := s.UpsertRepoRegistration(RepoRegistrationRecord{
+		Repo:        "org/repo",
+		Environment: "test",
+		Status:      "active",
+		ConfigJSON:  `{"repo":"org/repo"}`,
+	}); err != nil {
+		t.Fatalf("UpsertRepoRegistration: %v", err)
+	}
+	regs, err := s.ListRepoRegistrations()
+	if err != nil {
+		t.Fatalf("ListRepoRegistrations: %v", err)
+	}
+	if len(regs) != 1 || regs[0].Repo != "org/repo" {
+		t.Fatalf("unexpected repo registrations: %+v", regs)
+	}
 
 	// --- Transition Counts ---
 	cnt, err := s.IncrementTransition("org/repo", 1, "reviewing", "developing")
@@ -326,7 +341,7 @@ func TestTaskClaimLifecycle(t *testing.T) {
 		t.Fatalf("InsertTask: %v", err)
 	}
 
-	task, err := s.ClaimNextTask("worker-a", []string{"dev"}, "claim-1", 30*time.Second)
+	task, err := s.ClaimNextTask("worker-a", []string{"dev"}, []string{"org/repo"}, "claim-1", 30*time.Second)
 	if err != nil {
 		t.Fatalf("ClaimNextTask: %v", err)
 	}
@@ -334,7 +349,7 @@ func TestTaskClaimLifecycle(t *testing.T) {
 		t.Fatalf("unexpected claimed task: %+v", task)
 	}
 
-	sameTask, err := s.ClaimNextTask("worker-a", []string{"dev"}, "claim-1", 30*time.Second)
+	sameTask, err := s.ClaimNextTask("worker-a", []string{"dev"}, []string{"org/repo"}, "claim-1", 30*time.Second)
 	if err != nil {
 		t.Fatalf("ClaimNextTask idempotent: %v", err)
 	}
@@ -342,7 +357,7 @@ func TestTaskClaimLifecycle(t *testing.T) {
 		t.Fatalf("idempotent claim returned %+v, want %q", sameTask, task.ID)
 	}
 
-	none, err := s.ClaimNextTask("worker-b", []string{"dev"}, "", 30*time.Second)
+	none, err := s.ClaimNextTask("worker-b", []string{"dev"}, []string{"other/repo"}, "", 30*time.Second)
 	if err != nil {
 		t.Fatalf("ClaimNextTask other worker: %v", err)
 	}
@@ -383,7 +398,7 @@ func TestTaskOwnershipConflicts(t *testing.T) {
 		t.Fatalf("InsertTask: %v", err)
 	}
 
-	task, err := s.ClaimNextTask("worker-a", []string{"review"}, "claim-review", 30*time.Second)
+	task, err := s.ClaimNextTask("worker-a", []string{"review"}, []string{"org/repo"}, "claim-review", 30*time.Second)
 	if err != nil {
 		t.Fatalf("ClaimNextTask: %v", err)
 	}

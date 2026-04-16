@@ -1258,6 +1258,45 @@ requirements:
       - internal/diagnose/diagnose_test.go
     deps: [REQ-034, REQ-024]
 
+  - id: REQ-042
+    title: Multi-repo with dynamic registration model
+    description: >
+      Add coordinator-managed multi-repo support where repositories push their
+      normalized config to the coordinator via API, each registered repo gets
+      an isolated poller/state-machine/router runtime, workers declare the set
+      of repos they may serve, and task claims stay scoped to those bindings.
+      Keep `workbuddy serve` backward-compatible with the existing single-repo
+      config model while introducing `workbuddy repo register` for the dynamic
+      registration path.
+    priority: P1
+    version: v0.2.0
+    status: tested
+    acceptance_criteria:
+      - "AC-042-1: Worker for repo A does NOT receive tasks for repo B"
+      - "AC-042-2: Per-repo agent config used correctly for dispatch"
+      - "AC-042-3: Re-registration is idempotent (no duplicate pollers)"
+      - "AC-042-4: Deregistration stops poller and fails pending tasks"
+      - "AC-042-5: `workbuddy repo register` CLI registers and poller starts"
+      - "AC-042-6: Worker binding to unregistered repo returns 400"
+      - "AC-042-7: With `--auth`, unauthenticated registration returns 401"
+      - "AC-042-8: `workbuddy serve` backward compat — existing tests pass"
+      - "AC-042-9: `go build && go vet && go test` all green"
+    code:
+      - cmd/coordinator.go
+      - cmd/repo.go
+      - cmd/repo_runtime.go
+      - internal/config/loader.go
+      - internal/coordinator/http/handler.go
+      - internal/registry/registry.go
+      - internal/store/store.go
+      - internal/store/types.go
+    tests:
+      - cmd/coordinator_test.go
+      - cmd/multirepo_test.go
+      - cmd/serve_test.go
+      - internal/store/store_test.go
+    deps: [REQ-025, REQ-027, REQ-028]
+
   - id: REQ-044
     title: Prometheus metrics endpoint
     description: >

@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,7 +20,6 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/alertbus"
 	"github.com/Lincyaw/workbuddy/internal/auditapi"
 	"github.com/Lincyaw/workbuddy/internal/config"
-	"github.com/Lincyaw/workbuddy/internal/dependency"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/metrics"
 	"github.com/Lincyaw/workbuddy/internal/notifier"
@@ -29,7 +27,6 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
 	"github.com/Lincyaw/workbuddy/internal/router"
-	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/tasknotify"
 	"github.com/spf13/cobra"
@@ -97,11 +94,11 @@ var coordinatorTokenRevokeCmd = &cobra.Command{
 func init() {
 	coordinatorCmd.Flags().String("db", ".workbuddy/workbuddy.db", "SQLite database path")
 	coordinatorCmd.Flags().String("listen", "127.0.0.1:8081", "Coordinator listen address")
-	coordinatorCmd.Flags().String("config-dir", ".github/workbuddy", "Configuration directory")
-	coordinatorCmd.Flags().Int("port", 0, "Coordinator listen port")
-	coordinatorCmd.Flags().Duration("poll-interval", 0, "GitHub poll interval")
-	coordinatorCmd.Flags().Bool("auth", false, "Require Authorization: Bearer token for worker API calls")
 	coordinatorCmd.Flags().Bool("loopback-only", false, "Allow auth-free task endpoints for loopback-only dev mode")
+	coordinatorCmd.Flags().String("config-dir", "", "Optional bootstrap config directory for single-repo compatibility")
+	coordinatorCmd.Flags().Duration("poll-interval", defaultPollInterval, "GitHub poll interval for managed repos")
+	coordinatorCmd.Flags().Int("port", 8081, "Coordinator API port")
+	coordinatorCmd.Flags().Bool("auth", false, "Require WORKBUDDY_AUTH_TOKEN for worker and repo registration APIs")
 
 	coordinatorTokenCreateCmd.Flags().String("db", ".workbuddy/workbuddy.db", "SQLite database path")
 	coordinatorTokenCreateCmd.Flags().String("worker-id", "", "Worker ID")
@@ -130,7 +127,7 @@ func runCoordinatorCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runCoordinatorWithOpts(opts, nil)
+	return runCoordinatorWithOpts(opts, nil, cmd.Context())
 }
 
 func parseCoordinatorFlags(cmd *cobra.Command) (*coordinatorOpts, error) {
@@ -138,9 +135,9 @@ func parseCoordinatorFlags(cmd *cobra.Command) (*coordinatorOpts, error) {
 	listenAddr, _ := cmd.Flags().GetString("listen")
 	loopbackOnly, _ := cmd.Flags().GetBool("loopback-only")
 	configDir, _ := cmd.Flags().GetString("config-dir")
-	port, _ := cmd.Flags().GetInt("port")
 	pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
-	auth, _ := cmd.Flags().GetBool("auth")
+	port, _ := cmd.Flags().GetInt("port")
+	authEnabled, _ := cmd.Flags().GetBool("auth")
 	if strings.TrimSpace(listenAddr) == "" {
 		return nil, fmt.Errorf("coordinator: --listen is required")
 	}
@@ -151,10 +148,10 @@ func parseCoordinatorFlags(cmd *cobra.Command) (*coordinatorOpts, error) {
 		dbPath:       dbPath,
 		listenAddr:   listenAddr,
 		loopbackOnly: loopbackOnly,
-		configDir:    strings.TrimSpace(configDir),
 		port:         port,
 		pollInterval: pollInterval,
-		auth:         auth,
+		configDir:    strings.TrimSpace(configDir),
+		auth:         authEnabled,
 	}, nil
 }
 
@@ -256,16 +253,14 @@ const (
 )
 
 type fullCoordinatorServer struct {
-	rootCtx      context.Context
-	store        *store.Store
-	registry     *registry.Registry
-	stateMachine *statemachine.StateMachine
-	eventlog     *eventlog.EventLogger
-	taskHub      *tasknotify.Hub
-	agents       map[string]*config.AgentConfig
-	repo         string
-	authEnabled  bool
-	authToken    string
+	rootCtx     context.Context
+	store       *store.Store
+	registry    *registry.Registry
+	eventlog    *eventlog.EventLogger
+	taskHub     *tasknotify.Hub
+	pollers     *pollerManager
+	authEnabled bool
+	authToken   string
 }
 
 type workerRegisterRequest struct {
@@ -287,6 +282,22 @@ type taskPollResponse struct {
 	Roles     []string `json:"roles,omitempty"`
 }
 
+type repoRegisterRequest struct {
+	Repo        string                   `json:"repo"`
+	Environment string                   `json:"environment,omitempty"`
+	Agents      []*config.AgentConfig    `json:"agents"`
+	Workflows   []*config.WorkflowConfig `json:"workflows"`
+}
+
+type repoStatusResponse struct {
+	Repo         string    `json:"repo"`
+	Environment  string    `json:"environment"`
+	Status       string    `json:"status"`
+	PollerStatus string    `json:"poller_status"`
+	RegisteredAt time.Time `json:"registered_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
 type taskResultRequest struct {
 	WorkerID      string   `json:"worker_id"`
 	Status        string   `json:"status"`
@@ -305,27 +316,32 @@ type taskReleaseRequest struct {
 // runCoordinatorWithOpts starts a full coordinator (poller + state machine + router + HTTP API).
 // It is the backbone for integration tests that pair a worker with a coordinator.
 func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, parentCtx ...context.Context) error {
-	cfg, warnings, err := config.LoadConfig(opts.configDir)
-	if err != nil {
-		return fmt.Errorf("coordinator: load config: %w", err)
+	var bootstrapCfg *config.FullConfig
+	if strings.TrimSpace(opts.configDir) != "" {
+		cfg, warnings, err := config.LoadConfig(opts.configDir)
+		if err != nil {
+			return fmt.Errorf("coordinator: load config: %w", err)
+		}
+		for _, w := range warnings {
+			log.Printf("[coordinator] warning: %s", w)
+		}
+		bootstrapCfg = cfg
 	}
-	for _, w := range warnings {
-		log.Printf("[coordinator] warning: %s", w)
+
+	port := opts.port
+	if bootstrapCfg != nil && bootstrapCfg.Global.Port > 0 {
+		port = bootstrapCfg.Global.Port
 	}
-	if cfg.Global.Repo == "" {
-		return fmt.Errorf("coordinator: config must specify repo")
+	if port <= 0 {
+		port = defaultPort
 	}
-	if opts.pollInterval > 0 {
-		cfg.Global.PollInterval = opts.pollInterval
+
+	pollInterval := opts.pollInterval
+	if bootstrapCfg != nil && bootstrapCfg.Global.PollInterval > 0 {
+		pollInterval = bootstrapCfg.Global.PollInterval
 	}
-	if cfg.Global.PollInterval <= 0 {
-		cfg.Global.PollInterval = defaultPollInterval
-	}
-	if opts.port > 0 {
-		cfg.Global.Port = opts.port
-	}
-	if cfg.Global.Port <= 0 {
-		cfg.Global.Port = defaultPort
+	if pollInterval <= 0 {
+		pollInterval = defaultPollInterval
 	}
 
 	authToken := strings.TrimSpace(os.Getenv("WORKBUDDY_AUTH_TOKEN"))
@@ -353,15 +369,9 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	}
 
 	evlog := eventlog.NewEventLogger(st)
-	reg := registry.NewRegistry(st, cfg.Global.PollInterval)
-	dispatchCh := make(chan statemachine.DispatchRequest, dispatchChanSize)
-	sm := statemachine.NewStateMachine(cfg.Workflows, st, dispatchCh, evlog, alertBus)
-	depResolver := dependency.NewResolver(st, ghReader, evlog, alertBus)
-	rt := router.NewRouter(cfg.Agents, reg, st, cfg.Global.Repo, mustRepoRoot(), nil, nil, false)
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
 	rep.SetEventRecorder(evlog)
-	p := poller.NewPoller(ghReader, st, cfg.Global.Repo, cfg.Global.PollInterval)
-	p.SetEventRecorder(evlog)
+	reg := registry.NewRegistry(st, pollInterval)
 
 	var ctx context.Context
 	var cancel context.CancelFunc
@@ -374,26 +384,46 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	}
 	defer cancel()
-	not, err := notifier.New(cfg.Notifications, alertBus, taskHub, evlog)
+
+	var notifCfg config.NotificationsConfig
+	if bootstrapCfg != nil {
+		notifCfg = bootstrapCfg.Notifications
+	}
+	not, err := notifier.New(notifCfg, alertBus, taskHub, evlog)
 	if err != nil {
 		return fmt.Errorf("coordinator: init notifier: %w", err)
 	}
 	not.Start(ctx)
 
 	// Optional startup rate-limit budget check; best-effort and non-fatal.
-	go runRateLimitBudgetCheck(ctx, "coordinator", cfg.Global.Repo)
+	if bootstrapCfg != nil && strings.TrimSpace(bootstrapCfg.Global.Repo) != "" {
+		go runRateLimitBudgetCheck(ctx, "coordinator", bootstrapCfg.Global.Repo)
+	}
 
 	api := &fullCoordinatorServer{
-		rootCtx:      ctx,
-		store:        st,
-		registry:     reg,
-		stateMachine: sm,
-		eventlog:     evlog,
-		taskHub:      taskHub,
-		agents:       cfg.Agents,
-		repo:         cfg.Global.Repo,
-		authEnabled:  opts.auth,
-		authToken:    authToken,
+		rootCtx:     ctx,
+		store:       st,
+		registry:    reg,
+		eventlog:    evlog,
+		taskHub:     taskHub,
+		pollers:     newPollerManager(ctx, st, reg, evlog, alertBus, ghReader, rep, mustRepoRoot(), pollInterval),
+		authEnabled: opts.auth,
+		authToken:   authToken,
+	}
+	if err := api.pollers.loadExisting(); err != nil {
+		return fmt.Errorf("coordinator: load existing registrations: %w", err)
+	}
+	if bootstrapCfg != nil && strings.TrimSpace(bootstrapCfg.Global.Repo) != "" {
+		rec, err := buildRepoRegistrationRecord(buildRepoRegistrationPayload(bootstrapCfg))
+		if err != nil {
+			return fmt.Errorf("coordinator: build bootstrap repo registration: %w", err)
+		}
+		if err := st.UpsertRepoRegistration(rec); err != nil {
+			return fmt.Errorf("coordinator: bootstrap repo registration: %w", err)
+		}
+		if err := api.pollers.StartOrUpdate(rec); err != nil {
+			return fmt.Errorf("coordinator: start bootstrap repo runtime: %w", err)
+		}
 	}
 
 	mux := http.NewServeMux()
@@ -402,12 +432,15 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	dashboardAPI := auditapi.NewHandler(st)
 	dashboardAPI.SetSessionsDir(filepath.Join(filepath.Dir(opts.dbPath), "sessions"))
 	dashboardAPI.RegisterDashboard(mux)
+	mux.Handle("/api/v1/repos/register", api.wrapAuth(http.HandlerFunc(api.handleRegisterRepo)))
+	mux.Handle("/api/v1/repos/", api.wrapAuth(http.HandlerFunc(api.handleRepoByPath)))
+	mux.Handle("/api/v1/repos", api.wrapAuth(http.HandlerFunc(api.handleListRepos)))
 	mux.Handle("/api/v1/workers/register", api.wrapAuth(http.HandlerFunc(api.handleRegisterWorker)))
 	mux.Handle("/api/v1/tasks/poll", api.wrapAuth(http.HandlerFunc(api.handlePollTask)))
 	mux.Handle("/api/v1/tasks/", api.wrapAuth(http.HandlerFunc(api.handleTaskAction)))
 
 	srv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Global.Port),
+		Addr:    fmt.Sprintf(":%d", port),
 		Handler: mux,
 	}
 
@@ -418,107 +451,6 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 		defer wg.Done()
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("[coordinator] HTTP server error: %v", err)
-		}
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := p.Run(ctx); err != nil {
-			log.Printf("[coordinator] poller error: %v", err)
-		}
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		var depsResolvedThisCycle bool
-		var depGraphVersion int64
-		runDependencyMaintenance := func(runCtx context.Context) {
-			depGraphVersion++
-			unblockedIssues, err := depResolver.EvaluateOpenIssues(runCtx, cfg.Global.Repo, depGraphVersion)
-			if err != nil {
-				log.Printf("[coordinator] dependency resolver error: %v", err)
-				return
-			}
-			for _, issueNum := range unblockedIssues {
-				if delErr := st.DeleteIssueCache(cfg.Global.Repo, issueNum); delErr != nil {
-					log.Printf("[coordinator] dependency unblock cache-invalidate #%d: %v", issueNum, delErr)
-				} else {
-					log.Printf("[coordinator] dependency unblocked #%d — cache invalidated for redispatch", issueNum)
-				}
-			}
-			caches, err := st.ListIssueCaches(cfg.Global.Repo)
-			if err != nil {
-				log.Printf("[coordinator] dependency reaction list-caches error: %v", err)
-				return
-			}
-			for _, cached := range caches {
-				if cached.State != "open" {
-					continue
-				}
-				state, err := st.QueryIssueDependencyState(cached.Repo, cached.IssueNum)
-				if err != nil {
-					log.Printf("[coordinator] dependency reaction query state %s#%d: %v", cached.Repo, cached.IssueNum, err)
-					continue
-				}
-				if state == nil {
-					continue
-				}
-				wantBlocked := state.Verdict == store.DependencyVerdictBlocked || state.Verdict == store.DependencyVerdictNeedsHuman
-				if wantBlocked == state.LastReactionBlocked {
-					continue
-				}
-				if err := rep.SetBlockedReaction(runCtx, cached.Repo, cached.IssueNum, wantBlocked); err != nil {
-					log.Printf("[coordinator] dependency reaction set %s#%d blocked=%v: %v", cached.Repo, cached.IssueNum, wantBlocked, err)
-					continue
-				}
-				if err := st.MarkDependencyReactionApplied(cached.Repo, cached.IssueNum, wantBlocked); err != nil {
-					log.Printf("[coordinator] dependency reaction mark %s#%d: %v", cached.Repo, cached.IssueNum, err)
-				}
-			}
-		}
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case ev, ok := <-p.Events():
-				if !ok {
-					return
-				}
-				if ev.Type == poller.EventPollCycleDone {
-					evlog.Log(poller.EventPollCycleDone, ev.Repo, 0, map[string]any{"source": "poller"})
-					if !depsResolvedThisCycle {
-						runDependencyMaintenance(ctx)
-					}
-					sm.CheckAllStuck(ev.Repo)
-					depsResolvedThisCycle = false
-					sm.ResetDedup()
-					continue
-				}
-				if !depsResolvedThisCycle {
-					runDependencyMaintenance(ctx)
-					depsResolvedThisCycle = true
-				}
-				if err := sm.HandleEvent(ctx, statemachine.ChangeEvent{
-					Type:     ev.Type,
-					Repo:     ev.Repo,
-					IssueNum: ev.IssueNum,
-					Labels:   ev.Labels,
-					Detail:   ev.Detail,
-				}); err != nil {
-					log.Printf("[coordinator] state machine error: %v", err)
-				}
-			}
-		}
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := rt.Run(ctx, dispatchCh); err != nil {
-			log.Printf("[coordinator] router error: %v", err)
 		}
 	}()
 
@@ -573,10 +505,112 @@ func (s *fullCoordinatorServer) wrapAuth(next http.Handler) http.Handler {
 }
 
 func (s *fullCoordinatorServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	coordWriteJSON(w, http.StatusOK, map[string]string{
+	statuses, err := s.pollers.ListStatuses()
+	if err != nil {
+		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	coordWriteJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
-		"repo":   s.repo,
+		"repos":  len(statuses),
 	})
+}
+
+func (s *fullCoordinatorServer) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		coordWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req repoRegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	req.Repo = strings.TrimSpace(req.Repo)
+	if req.Repo == "" {
+		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "repo is required"})
+		return
+	}
+
+	payload := repoRegistrationPayload{
+		Repo:        req.Repo,
+		Environment: strings.TrimSpace(req.Environment),
+		Agents:      req.Agents,
+		Workflows:   req.Workflows,
+	}
+	rec, err := buildRepoRegistrationRecord(&payload)
+	if err != nil {
+		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	prev, err := s.store.GetRepoRegistration(req.Repo)
+	if err != nil {
+		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := s.store.UpsertRepoRegistration(rec); err != nil {
+		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := s.pollers.StartOrUpdate(rec); err != nil {
+		if prev != nil {
+			if restoreErr := s.store.UpsertRepoRegistration(*prev); restoreErr != nil {
+				coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("%v (rollback failed: %v)", err, restoreErr)})
+				return
+			}
+		} else {
+			if deleteErr := s.store.DeleteRepoRegistration(req.Repo); deleteErr != nil {
+				coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("%v (rollback failed: %v)", err, deleteErr)})
+				return
+			}
+		}
+		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	coordWriteJSON(w, http.StatusOK, map[string]string{"status": "registered"})
+}
+
+func (s *fullCoordinatorServer) handleListRepos(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		coordWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	statuses, err := s.pollers.ListStatuses()
+	if err != nil {
+		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	resp := make([]repoStatusResponse, 0, len(statuses))
+	for _, status := range statuses {
+		resp = append(resp, repoStatusResponse{
+			Repo:         status.Registration.Repo,
+			Environment:  status.Registration.Environment,
+			Status:       status.Registration.Status,
+			PollerStatus: status.PollerStatus,
+			RegisteredAt: status.Registration.RegisteredAt,
+			UpdatedAt:    status.Registration.UpdatedAt,
+		})
+	}
+	coordWriteJSON(w, http.StatusOK, resp)
+}
+
+func (s *fullCoordinatorServer) handleRepoByPath(w http.ResponseWriter, r *http.Request) {
+	repo := strings.TrimPrefix(r.URL.Path, "/api/v1/repos/")
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodDelete:
+		if err := s.pollers.Deregister(repo); err != nil {
+			coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		coordWriteJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	default:
+		coordWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+	}
 }
 
 func (s *fullCoordinatorServer) handleRegisterWorker(w http.ResponseWriter, r *http.Request) {
@@ -602,7 +636,18 @@ func (s *fullCoordinatorServer) handleRegisterWorker(w http.ResponseWriter, r *h
 		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "worker_id, repo, and roles are required"})
 		return
 	}
-	if err := s.registry.Register(req.WorkerID, req.Repo, req.Roles, req.Hostname); err != nil {
+	for _, repo := range req.Repos {
+		registered, err := s.pollers.IsRegistered(repo)
+		if err != nil {
+			coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if !registered {
+			coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("repo %q is not registered", repo)})
+			return
+		}
+	}
+	if err := s.registry.RegisterWithRepos(req.WorkerID, req.Repo, req.Repos, req.Roles, req.Hostname); err != nil {
 		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -644,7 +689,10 @@ func (s *fullCoordinatorServer) handlePollTask(w http.ResponseWriter, r *http.Re
 
 	for {
 		task, err := s.claimNextTask(worker)
-		if err != nil {
+		switch {
+		case err == nil:
+		case errors.Is(err, store.ErrTaskClaimConflict):
+		default:
 			coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
@@ -729,7 +777,7 @@ func (s *fullCoordinatorServer) handleTaskResult(w http.ResponseWriter, r *http.
 		IssueNum:  task.IssueNum,
 		AgentName: task.AgentName,
 	}, status, exitCode, time.Now(), time.Now())
-	s.stateMachine.MarkAgentCompleted(task.Repo, task.IssueNum, task.ID, task.AgentName, exitCode, req.CurrentLabels)
+	s.pollers.MarkAgentCompleted(task.Repo, task.IssueNum, task.ID, task.AgentName, exitCode, req.CurrentLabels)
 	s.eventlog.Log(eventlog.TypeCompleted, task.Repo, task.IssueNum, map[string]any{
 		"task_id":    task.ID,
 		"worker_id":  req.WorkerID,
@@ -811,42 +859,28 @@ func (s *fullCoordinatorServer) claimNextTask(worker *store.WorkerRecord) (*task
 	if err := json.Unmarshal([]byte(worker.Roles), &roles); err != nil {
 		return nil, fmt.Errorf("unmarshal worker roles: %w", err)
 	}
-	pending, err := s.store.QueryTasks(store.TaskStatusPending)
-	if err != nil {
+	var repos []string
+	if err := json.Unmarshal([]byte(worker.ReposJSON), &repos); err != nil || len(repos) == 0 {
+		repos = []string{worker.Repo}
+	}
+	task, err := s.store.ClaimNextTask(worker.ID, roles, repos, "", defaultLongPollTimeout)
+	if err != nil || task == nil {
 		return nil, err
 	}
-	for _, task := range pending {
-		if task.Repo != worker.Repo {
-			continue
-		}
-		agent, ok := s.agents[task.AgentName]
-		if !ok {
-			continue
-		}
-		if !slices.Contains(roles, agent.Role) {
-			continue
-		}
-		claimed, err := s.store.ClaimTask(task.ID, worker.ID)
-		if err != nil {
-			return nil, err
-		}
-		if !claimed {
-			continue
-		}
-		s.eventlog.Log(eventlog.TypeDispatch, task.Repo, task.IssueNum, map[string]any{
-			"task_id":    task.ID,
-			"worker_id":  worker.ID,
-			"agent_name": task.AgentName,
-		})
-		return &taskPollResponse{
-			TaskID:    task.ID,
-			Repo:      task.Repo,
-			IssueNum:  task.IssueNum,
-			AgentName: task.AgentName,
-			Roles:     append([]string(nil), roles...),
-		}, nil
-	}
-	return nil, nil
+	s.eventlog.Log(eventlog.TypeDispatch, task.Repo, task.IssueNum, map[string]any{
+		"task_id":    task.ID,
+		"worker_id":  worker.ID,
+		"agent_name": task.AgentName,
+	})
+	return &taskPollResponse{
+		TaskID:    task.ID,
+		Repo:      task.Repo,
+		IssueNum:  task.IssueNum,
+		AgentName: task.AgentName,
+		Workflow:  task.Workflow,
+		State:     task.State,
+		Roles:     append([]string(nil), roles...),
+	}, nil
 }
 
 func parseLongPollTimeout(raw string) time.Duration {

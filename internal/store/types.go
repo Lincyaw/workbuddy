@@ -40,11 +40,22 @@ type TaskRecord struct {
 type WorkerRecord struct {
 	ID            string
 	Repo          string
+	ReposJSON     string
 	Roles         string // JSON array
 	Hostname      string
 	Status        string // online, offline
 	LastHeartbeat time.Time
 	RegisteredAt  time.Time
+}
+
+// RepoRegistrationRecord stores the coordinator-side configuration pushed by a repo.
+type RepoRegistrationRecord struct {
+	Repo         string
+	Environment  string
+	Status       string
+	ConfigJSON   string
+	RegisteredAt time.Time
+	UpdatedAt    time.Time
 }
 
 // TransitionCount tracks retry counts for back-edges.
