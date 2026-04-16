@@ -15,6 +15,7 @@ const (
 	TypePoll                        = "poll"
 	TypeTransition                  = "transition"
 	TypeDispatch                    = "dispatch"
+	TypeTokenUsage                  = "token_usage"
 	TypeCompleted                   = "completed"
 	TypeError                       = "error"
 	TypeReport                      = "report"
@@ -39,6 +40,7 @@ var AllEventTypes = []string{
 	TypePoll,
 	TypeTransition,
 	TypeDispatch,
+	TypeTokenUsage,
 	TypeCompleted,
 	TypeError,
 	TypeReport,

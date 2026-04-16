@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -77,5 +78,24 @@ func TestLoopbackModeBypassesAuth(t *testing.T) {
 	}
 	if task != nil {
 		t.Fatalf("expected nil task (no content), got %+v", task)
+	}
+}
+
+func TestMetricsEndpoint(t *testing.T) {
+	st := newTestServerStore(t)
+	srv := httptest.NewServer(NewServer(st, ServerOptions{}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body=%s", resp.StatusCode, body)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "text/plain; version=0.0.4" {
+		t.Fatalf("content type = %q, want %q", got, "text/plain; version=0.0.4")
 	}
 }

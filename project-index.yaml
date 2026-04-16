@@ -1258,6 +1258,38 @@ requirements:
       - internal/diagnose/diagnose_test.go
     deps: [REQ-034, REQ-024]
 
+  - id: REQ-044
+    title: Prometheus metrics endpoint
+    description: >
+      Expose runtime and operational telemetry for scraping by Prometheus from
+      existing SQLite state, without adding external dependencies.
+    priority: P1
+    version: v0.2.0
+    status: tested
+    acceptance_criteria:
+      - "AC-044-1: GET /metrics returns 200 with Content-Type: text/plain; version=0.0.4"
+      - "AC-044-2: After task completion, workbuddy_events_total{type=\"completed\",repo=\"...\"} increments"
+      - "AC-044-3: Token usage aggregates to workbuddy_tokens_total{repo,kind}"
+      - "AC-044-4: workbuddy_tasks_active{status=\"running\",repo=\"...\"} matches live count"
+      - "AC-044-5: workbuddy_workers_online/total includes registered workers by repo"
+      - "AC-044-6: workbuddy_stuck_issues detects stale intermediate issues without active tasks"
+      - "AC-044-7: Workload scrape with 10k+ events completes in <500ms"
+      - "AC-044-8: go build && go vet && go test -count=1 pass with metrics endpoint coverage"
+    code:
+      - internal/metrics/handler.go
+      - cmd/serve.go
+      - cmd/coordinator.go
+      - internal/coordinator/server.go
+      - internal/eventlog/eventlog.go
+      - internal/store/store.go
+    tests:
+      - internal/metrics/handler_test.go
+      - cmd/serve_test.go
+      - internal/coordinator/server_test.go
+    related_docs:
+      - docs/implemented/pipeline-observability-and-diagnosis.md
+    deps: [REQ-009, REQ-025, REQ-024]
+
   - id: REQ-032
     title: CLI - recover command
     description: >
