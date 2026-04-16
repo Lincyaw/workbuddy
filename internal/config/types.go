@@ -24,6 +24,32 @@ type PolicyConfig struct {
 	Timeout  time.Duration `yaml:"timeout"`
 }
 
+// PermissionsConfig controls subprocess capability boundaries used by the launcher.
+type PermissionsConfig struct {
+	GitHub    GitHubPermissionsConfig     `yaml:"github"`
+	FS        FileSystemPermissionsConfig `yaml:"fs"`
+	Resources ResourceLimitsConfig        `yaml:"resources"`
+}
+
+// GitHubPermissionsConfig identifies which token environment variable should be
+// treated as the scoped PAT for a subprocess.
+type GitHubPermissionsConfig struct {
+	Token string `yaml:"token"`
+}
+
+// FileSystemPermissionsConfig declares filesystem write scope. Enforcement is
+// deferred to v0.5.0; v0.4.0 keeps schema support and event emission.
+type FileSystemPermissionsConfig struct {
+	Write string `yaml:"write"`
+}
+
+// ResourceLimitsConfig holds optional resource caps for future enforcement.
+// Enforcement is deferred to v0.5.0.
+type ResourceLimitsConfig struct {
+	MaxMemoryMB   int `yaml:"max_memory_mb"`
+	MaxCPUPercent int `yaml:"max_cpu_percent"`
+}
+
 // OutputContractConfig describes a structured-output contract for an agent.
 type OutputContractConfig struct {
 	SchemaFile string `yaml:"schema_file"`
@@ -48,6 +74,7 @@ type AgentConfig struct {
 	Command        string                    `yaml:"command"`
 	Prompt         string                    `yaml:"prompt"`
 	Policy         PolicyConfig              `yaml:"policy"`
+	Permissions    PermissionsConfig         `yaml:"permissions"`
 	GitHubActions  GitHubActionsRunnerConfig `yaml:"github_actions"`
 	OutputContract OutputContractConfig      `yaml:"output_contract"`
 	Timeout        time.Duration             `yaml:"timeout"`

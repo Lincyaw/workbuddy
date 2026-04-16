@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -45,7 +44,7 @@ func (s *processSession) Run(ctx context.Context, events chan<- launcherevents.E
 	if s.task.WorkDir != "" {
 		cmd.Dir = s.task.WorkDir
 	}
-	cmd.Env = append(os.Environ(), buildEnvVars(s.task)...)
+	cmd.Env = buildScopedEnv(s.agent, s.task)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = 10 * time.Second
@@ -56,6 +55,7 @@ func (s *processSession) Run(ctx context.Context, events chan<- launcherevents.E
 
 	start := time.Now()
 	var seq uint64
+	emitPermissionEvent(events, &seq, s.task.Session.ID, s.task.Session.ID, s.agent)
 	emitEvent(events, &seq, s.task.Session.ID, s.task.Session.ID, launcherevents.KindTurnStarted, launcherevents.TurnStartedPayload{TurnID: s.task.Session.ID}, nil)
 	runErr := cmd.Run()
 	duration := time.Since(start)

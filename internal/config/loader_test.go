@@ -286,6 +286,34 @@ func TestLoadConfig_NormalParse(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_AgentWithoutPermissions_UsesDefaults(t *testing.T) {
+	dir := setupConfigDir(t, map[string]string{
+		"config.yaml":              validGlobalConfig,
+		"agents/dev-agent.md":      validAgent,
+		"workflows/feature-dev.md": validWorkflow,
+	})
+
+	cfg, warnings, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.Agents) != 1 {
+		t.Fatalf("len(agents) = %d, want 1", len(cfg.Agents))
+	}
+	_ = warnings
+
+	agent := cfg.Agents["dev-agent"]
+	if agent == nil {
+		t.Fatal("dev-agent not loaded")
+	}
+	if got := agent.Permissions.GitHub.Token; got != "" {
+		t.Fatalf("permissions.github.token = %q, want empty", got)
+	}
+	if got := agent.Permissions.FS.Write; got != "" {
+		t.Fatalf("permissions.fs.write = %q, want empty (default handled at runtime)", got)
+	}
+}
+
 func TestNormalizeAgentConfig_RejectsUnsupportedCodexExecApproval(t *testing.T) {
 	agent := &AgentConfig{
 		Name:    "codex-agent",
