@@ -1284,3 +1284,34 @@ requirements:
       - cmd/recover_test.go
       - internal/recover/recover_test.go
     deps: []
+
+  - id: REQ-045
+    title: Agent permission isolation via scoped PATs
+    description: >
+      Isolate agent subprocesses from host GitHub credentials by supporting
+      declarative permission declarations and scoped PAT injection. Host tokens
+      must be removed before launch; scoped tokens are injected by role. Future
+      work will extend this with filesystem and resource isolation.
+    priority: P2
+    version: v0.4.0
+    status: tested
+    acceptance_criteria:
+      - "AC-045-1: Dev-agent subprocess has GH_TOKEN set to scoped PAT, host token absent"
+      - "AC-045-2: Missing scoped token logs warning and does not abort launch"
+      - "AC-045-3: buildScopedEnv strips all GH token variants from subprocess env"
+      - "AC-045-4: Permission event emitted with agent name and role; token value never logged"
+      - "AC-045-5: Agent configs without permissions field continue to work unchanged"
+      - "AC-045-6: processSession.Run and Claude stream path both use buildScopedEnv"
+      - "AC-045-7: go build && go vet && go test ./... are green"
+    code:
+      - internal/config/types.go
+      - internal/config/loader_test.go
+      - internal/launcher/process.go
+      - internal/launcher/claude_stream.go
+      - internal/launcher/codex.go
+      - internal/launcher/permissions.go
+      - internal/launcher/events/permission.go
+    tests:
+      - internal/launcher/permissions_test.go
+      - internal/config/loader_test.go
+    deps: []

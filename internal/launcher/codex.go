@@ -99,7 +99,10 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 	if s.task.WorkDir != "" {
 		cmd.Dir = s.task.WorkDir
 	}
-	cmd.Env = append(os.Environ(), buildEnvVars(s.task)...)
+	cmd.Env = buildScopedEnv(s.agent, s.task)
+	var seq uint64
+	mapper := newCodexEventMapper(s.task.Session.ID)
+	emitPermissionEvent(events, &seq, s.task.Session.ID, mapper.effectiveTurnID(), s.agent)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = 10 * time.Second
@@ -140,9 +143,7 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 
 	var stdoutBuf bytes.Buffer
 	var stderrBuf bytes.Buffer
-	var seq uint64
 	var scanErr error
-	mapper := newCodexEventMapper(s.task.Session.ID)
 	var wg sync.WaitGroup
 
 	wg.Add(1)

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -207,7 +206,7 @@ func (s *processSession) runClaudeStream(ctx context.Context, timeout time.Durat
 	if s.task.WorkDir != "" {
 		cmd.Dir = s.task.WorkDir
 	}
-	cmd.Env = append(os.Environ(), buildEnvVars(s.task)...)
+	cmd.Env = buildScopedEnv(s.agent, s.task)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = 10 * time.Second
@@ -229,6 +228,7 @@ func (s *processSession) runClaudeStream(ctx context.Context, timeout time.Durat
 	var stderr bytes.Buffer
 	var seq uint64
 	mapper := newClaudeStreamEventMapper(s.task.Session.ID)
+	emitPermissionEvent(events, &seq, s.task.Session.ID, mapper.effectiveTurnID(), s.agent)
 
 	var wg sync.WaitGroup
 	var stdoutErr error
