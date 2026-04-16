@@ -500,7 +500,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	var wsMgr *workspace.Manager
 	if !opts.coordinatorAPI {
 		wsMgr = workspace.NewManager(repoDir)
-		wsMgr.Prune() // clean up orphaned worktrees from prior crashes
+		_ = wsMgr.Prune() // clean up orphaned worktrees from prior crashes
 	}
 
 	// Router
