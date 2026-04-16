@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,6 +43,21 @@ type EventRecorder interface {
 // if a label hasn't changed after an agent completes.
 const StuckTimeout = 5 * time.Minute
 
+const defaultJoinStrategy = config.JoinAllPassed
+
+type dispatchGroup struct {
+	workflow string
+	state    string
+	join     string
+	agents   map[string]struct{}
+
+	dispatchedAgents map[string]struct{}
+	completedTaskIDs map[string]struct{}
+	completedAgents  map[string]struct{}
+	successAgents    map[string]struct{}
+	failedAgents     map[string]struct{}
+}
+
 // StateMachine evaluates Poller events against workflow definitions,
 // manages transitions, detects cycles, and dispatches agent tasks.
 type StateMachine struct {
@@ -55,13 +71,13 @@ type StateMachine struct {
 
 	// inflightMu protects inflight map.
 	inflightMu sync.Mutex
-	// inflight tracks issues that have a running agent. key: "repo#issueNum"
-	inflight map[string]bool
+	// inflight tracks active dispatch groups per issue. key: "repo#issueNum"
+	inflight map[string]*dispatchGroup
 
 	// stuckTimeout configurable for tests; defaults to StuckTimeout.
 	stuckTimeout time.Duration
 
-	// completionTimes tracks when an agent finished for stuck detection.
+	// completionTimes tracks when a completed state is eligible for stuck detection.
 	// key: "repo#issueNum" → (completionTime, labelsAtCompletion)
 	completionMu    sync.Mutex
 	completionTimes map[string]completionRecord
@@ -90,7 +106,7 @@ func NewStateMachine(
 		store:           st,
 		dispatch:        dispatch,
 		eventlog:        eventlog,
-		inflight:        make(map[string]bool),
+		inflight:        make(map[string]*dispatchGroup),
 		stuckTimeout:    StuckTimeout,
 		completionTimes: make(map[string]completionRecord),
 		workflowManager: workflowManager,
@@ -176,28 +192,46 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 		return nil
 	}
 
-	// State-entry detection: dispatch the agent if:
+	// State-entry detection: dispatch the state agents if:
 	// 1. label_added matches the current state's enter_label (label just changed), OR
-	// 2. issue_created and the issue already has a state label with an agent (first seen)
+	// 2. issue_created and the issue already has a state label with agents (first seen)
 	stateEntryDetected := (event.Type == poller.EventLabelAdded && event.Detail == currentState.EnterLabel) ||
 		(event.Type == poller.EventIssueCreated)
-	if stateEntryDetected && currentState.Agent != "" {
-		log.Printf("[statemachine] state entry detected: %s#%d entered %q, dispatching agent %q",
-			event.Repo, event.IssueNum, currentStateName, currentState.Agent)
+	if stateEntryDetected && sm.stateHasAgents(currentState) {
+		log.Printf("[statemachine] state entry detected: %s#%d entered %q, dispatching agents %q",
+			event.Repo, event.IssueNum, currentStateName, sm.stateAgents(currentState))
 		sm.eventlog.Log(eventlog.TypeStateEntry, event.Repo, event.IssueNum,
-			map[string]string{"state": currentStateName, "agent": currentState.Agent})
+			map[string]interface{}{
+				"state":  currentStateName,
+				"agents": append([]string(nil), sm.stateAgents(currentState)...),
+				"join":   currentState.Join,
+			})
 
-		// Clear any stale inflight flag: if the label changed, the previous agent's
-		// work is done (it was the one that changed the label). The worker goroutine
+		// Clear any stale inflight group: if a label_added event triggers state entry,
+		// the previous agent's work is done (it changed the label). The worker goroutine
 		// may not have called MarkAgentCompleted yet due to a race condition.
-		issueKey := fmt.Sprintf("%s#%d", event.Repo, event.IssueNum)
+		issueKey := sm.issueKey(event.Repo, event.IssueNum)
 		sm.inflightMu.Lock()
-		delete(sm.inflight, issueKey)
+		if existing, ok := sm.inflight[issueKey]; ok && existing.state != currentStateName {
+			log.Printf("[statemachine] clearing prior inflight group for %s (was state=%q, now=%q)", issueKey, existing.state, currentStateName)
+			delete(sm.inflight, issueKey)
+		}
 		sm.inflightMu.Unlock()
 
-		return sm.DispatchAgent(ctx, event.Repo, event.IssueNum, currentState.Agent, wf.Name, currentStateName)
+		return sm.dispatchStateAgents(ctx, event.Repo, event.IssueNum, wf.Name, currentStateName, currentState)
 	}
 
+	if !stateEntryDetected {
+		_, err := sm.evaluateTransitions(ctx, wf, event, currentStateName, currentState)
+		return err
+	}
+
+	return nil
+}
+
+// evaluateTransitions evaluates transitions for the given state and event.
+// It returns true if any transition was taken, or an error if transition bookkeeping fails.
+func (sm *StateMachine) evaluateTransitions(ctx context.Context, wf *config.WorkflowConfig, event ChangeEvent, currentStateName string, currentState *config.State) (bool, error) {
 	// Build evaluation context.
 	evalCtx := &EvalContext{
 		EventType:     event.Type,
@@ -232,7 +266,7 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 		if isBackEdge {
 			count, err := sm.store.IncrementTransition(event.Repo, event.IssueNum, currentStateName, targetStateName)
 			if err != nil {
-				return fmt.Errorf("statemachine: increment transition: %w", err)
+				return false, fmt.Errorf("statemachine: increment transition: %w", err)
 			}
 
 			maxRetries := wf.MaxRetries
@@ -251,20 +285,20 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 				// we record the event. In v0.1.0, we still record the intent.
 				sm.eventlog.Log(eventlog.TypeTransitionToFailed, event.Repo, event.IssueNum,
 					map[string]interface{}{"from": currentStateName, "rejected_to": targetStateName, "needs_human": true})
-				return nil
+				return false, nil
 			}
 		} else {
 			// Not a back-edge, but still record the transition for history.
 			_, err := sm.store.IncrementTransition(event.Repo, event.IssueNum, currentStateName, targetStateName)
 			if err != nil {
-				return fmt.Errorf("statemachine: increment transition: %w", err)
+				return false, fmt.Errorf("statemachine: increment transition: %w", err)
 			}
 		}
 
 		// Persist the workflow state transition.
 		if sm.workflowManager != nil {
 			if _, err := sm.workflowManager.Advance(event.Repo, event.IssueNum, wf.Name, currentStateName, targetStateName, currentState.Agent); err != nil {
-				return fmt.Errorf("statemachine: persist workflow transition: %w", err)
+				return false, fmt.Errorf("statemachine: persist workflow transition: %w", err)
 			}
 		}
 
@@ -272,18 +306,18 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 		sm.eventlog.Log(eventlog.TypeTransition, event.Repo, event.IssueNum,
 			map[string]string{"from": currentStateName, "to": targetStateName})
 
-		// If the target state has an agent, dispatch it.
-		if targetState.Agent != "" {
-			if err := sm.DispatchAgent(ctx, event.Repo, event.IssueNum, targetState.Agent, wf.Name, targetStateName); err != nil {
-				return err
+		// If the target state has agents, dispatch them.
+		if sm.stateHasAgents(targetState) {
+			if err := sm.dispatchStateAgents(ctx, event.Repo, event.IssueNum, wf.Name, targetStateName, targetState); err != nil {
+				return true, err
 			}
 		}
 
 		// Only process the first matching transition.
-		return nil
+		return true, nil
 	}
 
-	return nil
+	return false, nil
 }
 
 func (sm *StateMachine) ensureWorkflowInstance(workflowName, repo string, issueNum int, currentState string) error {
@@ -294,9 +328,13 @@ func (sm *StateMachine) ensureWorkflowInstance(workflowName, repo string, issueN
 	return err
 }
 
-// DispatchAgent sends a dispatch request for the given agent, respecting the inflight mutex.
+// DispatchAgent sends a dispatch request for the given agent, respecting in-flight group locking.
 func (sm *StateMachine) DispatchAgent(ctx context.Context, repo string, issueNum int, agentName, workflow, state string) error {
-	issueKey := fmt.Sprintf("%s#%d", repo, issueNum)
+	return sm.dispatchSingleAgent(ctx, repo, issueNum, agentName, workflow, state)
+}
+
+func (sm *StateMachine) dispatchSingleAgent(ctx context.Context, repo string, issueNum int, agentName, workflow, state string) error {
+	issueKey := sm.issueKey(repo, issueNum)
 
 	depState, err := sm.store.QueryIssueDependencyState(repo, issueNum)
 	if err != nil {
@@ -310,16 +348,44 @@ func (sm *StateMachine) DispatchAgent(ctx context.Context, repo string, issueNum
 		return nil
 	}
 
-	// Execution mutex: don't dispatch if agent is already running.
 	sm.inflightMu.Lock()
-	if sm.inflight[issueKey] {
-		sm.inflightMu.Unlock()
-		sm.eventlog.Log(eventlog.TypeDispatchSkippedInflight, repo, issueNum,
-			map[string]string{"agent": agentName, "reason": "agent already running"})
-		return nil
+	if existing, ok := sm.inflight[issueKey]; ok {
+		if existing.workflow != workflow || existing.state != state {
+			sm.inflightMu.Unlock()
+			sm.eventlog.Log(eventlog.TypeDispatchSkippedInflight, repo, issueNum,
+				map[string]string{"agent": agentName, "reason": "different state/workflow already running", "state": state, "workflow": workflow})
+			return nil
+		}
+		// Same workflow+state: block if this agent was already dispatched.
+		if _, dispatched := existing.dispatchedAgents[agentName]; dispatched {
+			sm.inflightMu.Unlock()
+			sm.eventlog.Log(eventlog.TypeDispatchSkippedInflight, repo, issueNum,
+				map[string]string{"agent": agentName, "reason": "agent already running", "state": state, "workflow": workflow})
+			return nil
+		}
+		existing.dispatchedAgents[agentName] = struct{}{}
+	} else {
+		// Create a single-agent inflight group to prevent duplicate dispatches.
+		sm.inflight[issueKey] = &dispatchGroup{
+			workflow:         workflow,
+			state:            state,
+			join:             defaultJoinStrategy,
+			agents:           map[string]struct{}{agentName: {}},
+			dispatchedAgents: map[string]struct{}{agentName: {}},
+			completedTaskIDs: make(map[string]struct{}),
+			completedAgents:  make(map[string]struct{}),
+			successAgents:    make(map[string]struct{}),
+			failedAgents:     make(map[string]struct{}),
+		}
 	}
-	sm.inflight[issueKey] = true
 	sm.inflightMu.Unlock()
+
+	// log dispatch in workflow history.
+	sm.eventlog.Log(eventlog.TypeDispatch, repo, issueNum, map[string]any{
+		"agent_name": agentName,
+		"workflow":   workflow,
+		"state":      state,
+	})
 
 	req := DispatchRequest{
 		Repo:      repo,
@@ -331,13 +397,80 @@ func (sm *StateMachine) DispatchAgent(ctx context.Context, repo string, issueNum
 	select {
 	case sm.dispatch <- req:
 	case <-ctx.Done():
-		// Context cancelled; undo the inflight flag since we never dispatched.
-		sm.inflightMu.Lock()
-		delete(sm.inflight, issueKey)
-		sm.inflightMu.Unlock()
 		return ctx.Err()
 	}
 	return nil
+}
+
+func (sm *StateMachine) dispatchStateAgents(ctx context.Context, repo string, issueNum int, workflow, state string, stateDef *config.State) error {
+	agents := sm.stateAgents(stateDef)
+	if len(agents) == 0 {
+		return nil
+	}
+
+	depState, err := sm.store.QueryIssueDependencyState(repo, issueNum)
+	if err != nil {
+		return fmt.Errorf("statemachine: query dependency state: %w", err)
+	}
+	if depState != nil && (depState.Verdict == store.DependencyVerdictBlocked || depState.Verdict == store.DependencyVerdictNeedsHuman) {
+		sm.eventlog.Log(eventlog.TypeDispatchBlockedByDependency, repo, issueNum, map[string]string{
+			"verdict": depState.Verdict,
+			"agent":   agents[0],
+		})
+		return nil
+	}
+
+	issueKey := sm.issueKey(repo, issueNum)
+	join := strings.TrimSpace(stateDef.Join)
+	if join == "" {
+		join = defaultJoinStrategy
+	}
+
+	group := &dispatchGroup{
+		workflow:         workflow,
+		state:            state,
+		join:             join,
+		agents:           make(map[string]struct{}, len(agents)),
+		dispatchedAgents: make(map[string]struct{}, len(agents)),
+		completedTaskIDs: make(map[string]struct{}),
+		completedAgents:  make(map[string]struct{}),
+		successAgents:    make(map[string]struct{}),
+		failedAgents:     make(map[string]struct{}),
+	}
+	for _, a := range agents {
+		group.agents[a] = struct{}{}
+	}
+
+	sm.inflightMu.Lock()
+	if existing, ok := sm.inflight[issueKey]; ok {
+		if existing.workflow != workflow || existing.state != state {
+			sm.inflightMu.Unlock()
+			sm.eventlog.Log(eventlog.TypeDispatchSkippedInflight, repo, issueNum,
+				map[string]string{"state": state, "reason": "agent already running", "workflow": workflow})
+			return nil
+		}
+		sm.inflightMu.Unlock()
+		sm.eventlog.Log(eventlog.TypeDispatchSkippedInflight, repo, issueNum,
+			map[string]string{"state": state, "reason": "agent already running", "workflow": workflow})
+		return nil
+	} else {
+		sm.inflight[issueKey] = group
+		sm.inflightMu.Unlock()
+	}
+
+	dispatchErr := error(nil)
+	for _, agent := range agents {
+		if err := sm.dispatchSingleAgent(ctx, repo, issueNum, agent, workflow, state); err != nil {
+			dispatchErr = err
+			break
+		}
+	}
+	if dispatchErr != nil {
+		sm.inflightMu.Lock()
+		delete(sm.inflight, issueKey)
+		sm.inflightMu.Unlock()
+	}
+	return dispatchErr
 }
 
 // findCurrentState returns the state name and State whose enter_label matches
@@ -375,15 +508,155 @@ func (sm *StateMachine) isBackEdge(repo string, issueNum int, targetState string
 }
 
 // MarkAgentCompleted should be called when an agent execution finishes.
-// It clears the inflight flag and records the completion time for stuck detection.
-func (sm *StateMachine) MarkAgentCompleted(repo string, issueNum int, currentLabels []string) {
-	issueKey := fmt.Sprintf("%s#%d", repo, issueNum)
+// It clears inflight group state and records completion time for stuck detection
+// when the group can no longer progress.
+func (sm *StateMachine) MarkAgentCompleted(repo string, issueNum int, taskID, agentName string, exitCode int, currentLabels []string) {
+	issueKey := sm.issueKey(repo, issueNum)
 
 	sm.inflightMu.Lock()
-	delete(sm.inflight, issueKey)
+	group := sm.inflight[issueKey]
+	if group == nil {
+		sm.inflightMu.Unlock()
+		sm.recordStuckCandidate(issueKey, currentLabels)
+		sm.logCompletionEvent(repo, issueNum, taskID, agentName, exitCode)
+		return
+	}
+
+	taskKey := strings.TrimSpace(taskID)
+	if taskKey != "" {
+		if _, seen := group.completedTaskIDs[taskKey]; seen {
+			sm.inflightMu.Unlock()
+			sm.logCompletionEvent(repo, issueNum, taskID, agentName, exitCode)
+			return
+		}
+		group.completedTaskIDs[taskKey] = struct{}{}
+	}
+
+	// Verify agent belongs to this dispatch group.
+	if _, belongs := group.agents[agentName]; !belongs {
+		sm.inflightMu.Unlock()
+		log.Printf("[statemachine] warning: agent %q completed for %s but is not in inflight group, skipping update", agentName, issueKey)
+		sm.logCompletionEvent(repo, issueNum, taskID, agentName, exitCode)
+		return
+	}
+
+	agentCompletedAlready := false
+	if _, seen := group.completedAgents[agentName]; seen {
+		agentCompletedAlready = true
+	}
+
+	if !agentCompletedAlready {
+		group.completedAgents[agentName] = struct{}{}
+		if exitCode == 0 {
+			group.successAgents[agentName] = struct{}{}
+		} else {
+			group.failedAgents[agentName] = struct{}{}
+		}
+	}
+
+	join := strings.TrimSpace(group.join)
+	if join == "" {
+		join = defaultJoinStrategy
+	}
+
+	shouldAdvance := false
+	passed := false
+	switch join {
+	case config.JoinAnyPassed:
+		if !agentCompletedAlready && exitCode == 0 {
+			if len(group.successAgents) > 0 {
+				shouldAdvance = true
+				passed = true
+			}
+		}
+		if !shouldAdvance && len(group.completedAgents) >= len(group.agents) {
+			shouldAdvance = true
+			passed = false
+		}
+	case config.JoinAllPassed:
+		if !agentCompletedAlready && exitCode != 0 {
+			shouldAdvance = true
+			passed = false
+		}
+		if len(group.completedAgents) >= len(group.agents) {
+			shouldAdvance = true
+			if len(group.failedAgents) == 0 {
+				passed = true
+			} else {
+				passed = false
+			}
+		}
+	default:
+		if len(group.completedAgents) >= len(group.agents) {
+			shouldAdvance = true
+			passed = len(group.failedAgents) == 0
+		}
+	}
+
+	if shouldAdvance {
+		delete(sm.inflight, issueKey)
+	}
 	sm.inflightMu.Unlock()
 
-	labelsJSON, _ := json.Marshal(currentLabels)
+	sm.logCompletionEvent(repo, issueNum, taskID, agentName, exitCode)
+
+	if shouldAdvance {
+		if !passed {
+			sm.eventlog.Log(eventlog.TypeTransitionToFailed, repo, issueNum,
+				map[string]interface{}{"state": group.state, "issue": issueNum, "join": join})
+		}
+		if passed {
+			// Evaluate the next transition only when this group is complete.
+			if transitioned := sm.evaluateCompletionTransitions(context.Background(), repo, issueNum, group.workflow, group.state, currentLabels); !transitioned {
+				sm.recordStuckCandidate(issueKey, currentLabels)
+			}
+		} else {
+			sm.recordStuckCandidate(issueKey, currentLabels)
+		}
+	}
+}
+
+// evaluateCompletionTransitions replays transition evaluation using current labels
+// and completion event semantics.
+func (sm *StateMachine) evaluateCompletionTransitions(ctx context.Context, repo string, issueNum int, workflowName, sourceState string, currentLabels []string) bool {
+	event := ChangeEvent{Type: poller.EventLabelAdded, Repo: repo, IssueNum: issueNum, Labels: currentLabels}
+	matched := sm.findMatchingWorkflows(event)
+	if len(matched) != 1 {
+		return false
+	}
+	if matched[0].Name != workflowName {
+		return false
+	}
+	wf := matched[0]
+	currentState := wf.States[sourceState]
+	if currentState == nil {
+		return false
+	}
+
+	for _, label := range currentLabels {
+		event.Detail = label
+		wasTransitioned, err := sm.evaluateTransitions(ctx, wf, event, sourceState, currentState)
+		if err != nil {
+			log.Printf("[statemachine] completion transition failed: %v", err)
+			return false
+		}
+		if wasTransitioned {
+			return true
+		}
+	}
+	return false
+}
+
+func (sm *StateMachine) logCompletionEvent(repo string, issueNum int, taskID, agentName string, exitCode int) {
+	sm.eventlog.Log(eventlog.TypeCompleted, repo, issueNum, map[string]any{
+		"task_id":    taskID,
+		"agent_name": agentName,
+		"exit_code":  exitCode,
+	})
+}
+
+func (sm *StateMachine) recordStuckCandidate(issueKey string, labels []string) {
+	labelsJSON, _ := json.Marshal(labels)
 	sm.completionMu.Lock()
 	sm.completionTimes[issueKey] = completionRecord{
 		at:     time.Now(),
@@ -395,7 +668,7 @@ func (sm *StateMachine) MarkAgentCompleted(repo string, issueNum int, currentLab
 // CheckStuck examines issues whose agents completed but labels haven't changed.
 // Should be called periodically (e.g. each poll cycle).
 func (sm *StateMachine) CheckStuck(repo string, issueNum int, currentLabels []string) {
-	issueKey := fmt.Sprintf("%s#%d", repo, issueNum)
+	issueKey := sm.issueKey(repo, issueNum)
 
 	sm.completionMu.Lock()
 	rec, exists := sm.completionTimes[issueKey]
@@ -428,10 +701,29 @@ func (sm *StateMachine) CheckStuck(repo string, issueNum int, currentLabels []st
 	}
 }
 
-// IsInflight returns true if an agent is currently running for the given issue.
+// IsInflight returns true if an agent state group is currently running for the given issue.
 func (sm *StateMachine) IsInflight(repo string, issueNum int) bool {
-	issueKey := fmt.Sprintf("%s#%d", repo, issueNum)
+	issueKey := sm.issueKey(repo, issueNum)
 	sm.inflightMu.Lock()
 	defer sm.inflightMu.Unlock()
-	return sm.inflight[issueKey]
+	_, ok := sm.inflight[issueKey]
+	return ok
+}
+
+func (sm *StateMachine) stateAgents(state *config.State) []string {
+	if len(state.Agents) > 0 {
+		return state.Agents
+	}
+	if state.Agent == "" {
+		return nil
+	}
+	return []string{state.Agent}
+}
+
+func (sm *StateMachine) stateHasAgents(state *config.State) bool {
+	return len(sm.stateAgents(state)) > 0
+}
+
+func (sm *StateMachine) issueKey(repo string, issueNum int) string {
+	return fmt.Sprintf("%s#%d", repo, issueNum)
 }

@@ -847,7 +847,7 @@ func skipTaskForClosedIssue(task router.WorkerTask, deps *workerDeps) {
 		if deps.store != nil {
 			labels = fetchCachedLabels(deps.store, task.Repo, task.IssueNum)
 		}
-		deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, labels)
+		deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, task.TaskID, task.AgentName, 1, labels)
 	}
 }
 
@@ -901,7 +901,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 			log.Printf("[worker] failed to update task status: %v", err)
 		}
 		publishTaskCompletion(deps.taskHub, task, store.TaskStatusFailed, 1, startedAt, time.Now().UTC())
-		deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, fetchCachedLabels(deps.store, task.Repo, task.IssueNum))
+		deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, task.TaskID, task.AgentName, 1, fetchCachedLabels(deps.store, task.Repo, task.IssueNum))
 		go func() {
 			timer := time.NewTimer(60 * time.Second)
 			defer timer.Stop()
@@ -1008,7 +1008,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 				log.Printf("[worker] failed to update task status: %v", err)
 			}
 			publishTaskCompletion(deps.taskHub, task, store.TaskStatusFailed, 1, startedAt, time.Now().UTC())
-			deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, completionLabels)
+			deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, task.TaskID, task.AgentName, 1, completionLabels)
 			go func() {
 				timer := time.NewTimer(60 * time.Second)
 				defer timer.Stop()
@@ -1071,7 +1071,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	}
 
 	// Mark agent completed in state machine
-	deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, completionLabels)
+	deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, task.TaskID, task.AgentName, result.ExitCode, completionLabels)
 	publishTaskCompletion(deps.taskHub, task, status, result.ExitCode, startedAt, time.Now().UTC())
 }
 

@@ -697,15 +697,24 @@ requirements:
       in parallel. Collect all results before evaluating next transition.
     priority: P2
     version: v0.3.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-015-1: workflow state 支持 agents (列表) 字段"
       - "AC-015-2: 多 agent 并发路由到不同 Worker"
       - "AC-015-3: 支持 join 策略：all_passed / any_passed"
       - "AC-015-4: 所有 agent 完成后再评估下一个 transition"
       - "AC-015-5: 单元测试：2 agent 并行、全部成功、部分失败 3 种场景"
-    code: []
-    tests: []
+    code:
+      - internal/config/types.go
+      - internal/config/loader.go
+      - internal/statemachine/statemachine.go
+      - cmd/serve.go
+      - cmd/coordinator.go
+    tests:
+      - internal/config/loader_test.go
+      - internal/statemachine/statemachine_test.go
+      - cmd/serve_test.go
+      - cmd/worker_test.go
     deps: [REQ-014]
 
   - id: REQ-016

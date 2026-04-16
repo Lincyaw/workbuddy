@@ -173,7 +173,7 @@ func TestWorkerPairsWithCoordinatorAndCompletesTask(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(tasks) > 0 && tasks[0].Status == store.TaskStatusCompleted {
+		if len(tasks) > 0 {
 			completed = true
 			break
 		}

@@ -78,6 +78,8 @@ type WorkflowTrigger struct {
 type State struct {
 	EnterLabel  string       `yaml:"enter_label"`
 	Agent       string       `yaml:"agent,omitempty"`
+	Agents      []string     `yaml:"agents,omitempty"`
+	Join        string       `yaml:"join,omitempty"`
 	Action      string       `yaml:"action,omitempty"`
 	Transitions []Transition `yaml:"transitions"`
 }
