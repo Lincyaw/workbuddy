@@ -16,6 +16,45 @@ type GlobalConfig struct {
 	Port         int           `yaml:"port"`
 }
 
+// NotificationsConfig controls external notification routing.
+type NotificationsConfig struct {
+	Enabled      bool          `yaml:"enabled"`
+	InstanceName string        `yaml:"instance_name"`
+	DedupWindow  time.Duration `yaml:"dedup_window"`
+	BatchWindow  time.Duration `yaml:"batch_window"`
+	Success      bool          `yaml:"success"`
+
+	Slack    *WebhookChannelConfig  `yaml:"slack"`
+	Feishu   *WebhookChannelConfig  `yaml:"feishu"`
+	Telegram *TelegramChannelConfig `yaml:"telegram"`
+	SMTP     *SMTPChannelConfig     `yaml:"smtp"`
+}
+
+// WebhookChannelConfig defines webhook delivery options for Slack/Feishu.
+type WebhookChannelConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	WebhookURLEnv string `yaml:"webhook_url_env"`
+}
+
+// TelegramChannelConfig defines Telegram Bot API delivery options.
+type TelegramChannelConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	BotTokenEnv string `yaml:"bot_token_env"`
+	ChatIDEnv   string `yaml:"chat_id_env"`
+	ParseMode   string `yaml:"parse_mode"`
+}
+
+// SMTPChannelConfig defines SMTP/SMTPS delivery options.
+type SMTPChannelConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	HostEnv     string `yaml:"host_env"`
+	PortEnv     string `yaml:"port_env"`
+	UsernameEnv string `yaml:"username_env"`
+	PasswordEnv string `yaml:"password_env"`
+	FromEnv     string `yaml:"from_env"`
+	ToEnv       string `yaml:"to_env"`
+}
+
 // PolicyConfig defines runtime-neutral execution policy knobs.
 type PolicyConfig struct {
 	Sandbox  string        `yaml:"sandbox"`
@@ -124,7 +163,8 @@ type StatesBlock struct {
 
 // FullConfig holds all loaded configuration.
 type FullConfig struct {
-	Global    GlobalConfig
-	Agents    map[string]*AgentConfig
-	Workflows map[string]*WorkflowConfig
+	Global        GlobalConfig `yaml:",inline"`
+	Agents        map[string]*AgentConfig
+	Workflows     map[string]*WorkflowConfig
+	Notifications NotificationsConfig `yaml:"notifications"`
 }

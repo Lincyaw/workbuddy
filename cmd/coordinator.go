@@ -18,17 +18,20 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/alertbus"
 	"github.com/Lincyaw/workbuddy/internal/auditapi"
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/dependency"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/metrics"
+	"github.com/Lincyaw/workbuddy/internal/notifier"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
 	"github.com/Lincyaw/workbuddy/internal/router"
 	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
+	"github.com/Lincyaw/workbuddy/internal/tasknotify"
 	"github.com/spf13/cobra"
 )
 
@@ -258,6 +261,7 @@ type fullCoordinatorServer struct {
 	registry     *registry.Registry
 	stateMachine *statemachine.StateMachine
 	eventlog     *eventlog.EventLogger
+	taskHub      *tasknotify.Hub
 	agents       map[string]*config.AgentConfig
 	repo         string
 	authEnabled  bool
@@ -338,9 +342,11 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	}
 	defer func() { _ = st.Close() }()
 
-	if err := recoverTasks(st); err != nil {
+	alertBus := alertbus.NewBus(64)
+	if err := recoverTasks(st, alertBus); err != nil {
 		log.Printf("[coordinator] warning: recovery failed: %v", err)
 	}
+	taskHub := tasknotify.NewHub()
 
 	if ghReader == nil {
 		ghReader = &GHCLIReader{}
@@ -349,8 +355,8 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	evlog := eventlog.NewEventLogger(st)
 	reg := registry.NewRegistry(st, cfg.Global.PollInterval)
 	dispatchCh := make(chan statemachine.DispatchRequest, dispatchChanSize)
-	sm := statemachine.NewStateMachine(cfg.Workflows, st, dispatchCh, evlog)
-	depResolver := dependency.NewResolver(st, ghReader, evlog)
+	sm := statemachine.NewStateMachine(cfg.Workflows, st, dispatchCh, evlog, alertBus)
+	depResolver := dependency.NewResolver(st, ghReader, evlog, alertBus)
 	rt := router.NewRouter(cfg.Agents, reg, st, cfg.Global.Repo, mustRepoRoot(), nil, nil, false)
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
 	rep.SetEventRecorder(evlog)
@@ -368,6 +374,11 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	}
 	defer cancel()
+	not, err := notifier.New(cfg.Notifications, alertBus, taskHub, evlog)
+	if err != nil {
+		return fmt.Errorf("coordinator: init notifier: %w", err)
+	}
+	not.Start(ctx)
 
 	// Optional startup rate-limit budget check; best-effort and non-fatal.
 	go runRateLimitBudgetCheck(ctx, "coordinator", cfg.Global.Repo)
@@ -378,6 +389,7 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 		registry:     reg,
 		stateMachine: sm,
 		eventlog:     evlog,
+		taskHub:      taskHub,
 		agents:       cfg.Agents,
 		repo:         cfg.Global.Repo,
 		authEnabled:  opts.auth,
@@ -480,6 +492,7 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 					if !depsResolvedThisCycle {
 						runDependencyMaintenance(ctx)
 					}
+					sm.CheckAllStuck(ev.Repo)
 					depsResolvedThisCycle = false
 					sm.ResetDedup()
 					continue
@@ -710,6 +723,12 @@ func (s *fullCoordinatorServer) handleTaskResult(w http.ResponseWriter, r *http.
 	if status != store.TaskStatusCompleted {
 		exitCode = 1
 	}
+	publishTaskCompletion(s.taskHub, router.WorkerTask{
+		TaskID:    task.ID,
+		Repo:      task.Repo,
+		IssueNum:  task.IssueNum,
+		AgentName: task.AgentName,
+	}, status, exitCode, time.Now(), time.Now())
 	s.stateMachine.MarkAgentCompleted(task.Repo, task.IssueNum, task.ID, task.AgentName, exitCode, req.CurrentLabels)
 	s.eventlog.Log(eventlog.TypeCompleted, task.Repo, task.IssueNum, map[string]any{
 		"task_id":    task.ID,

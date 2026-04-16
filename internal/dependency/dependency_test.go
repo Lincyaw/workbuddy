@@ -129,7 +129,7 @@ func TestResolverSkipsRateLimitedDependencyRead(t *testing.T) {
 		},
 	}
 	logger := eventlog.NewEventLogger(st)
-	resolver := NewResolver(st, reader, logger)
+	resolver := NewResolver(st, reader, logger, nil)
 
 	unblocked, err := resolver.EvaluateOpenIssues(context.Background(), "owner/repo", 1)
 	if err != nil {
@@ -184,7 +184,7 @@ func TestResolverSkipsRateLimitedDependencyReadRedactsTokenInLog(t *testing.T) {
 		log.SetFlags(oldFlags)
 	}()
 
-	resolver := NewResolver(st, reader, nil)
+	resolver := NewResolver(st, reader, nil, nil)
 	_, err := resolver.EvaluateOpenIssues(context.Background(), "owner/repo", 1)
 	if err != nil {
 		t.Fatalf("EvaluateOpenIssues: %v", err)
@@ -297,7 +297,7 @@ func TestResolverEvaluateOpenIssuesPersistsVerdictIdempotently(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resolver := NewResolver(st, &fakeReader{}, eventlog.NewEventLogger(st))
+	resolver := NewResolver(st, &fakeReader{}, eventlog.NewEventLogger(st), nil)
 	if _, err := resolver.EvaluateOpenIssues(context.Background(), "owner/repo", 1); err != nil {
 		t.Fatalf("EvaluateOpenIssues: %v", err)
 	}
@@ -344,7 +344,7 @@ func TestResolverEvaluateSkipsInvalidRefsInDB(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	resolver := NewResolver(st, &fakeReader{}, eventlog.NewEventLogger(st))
+	resolver := NewResolver(st, &fakeReader{}, eventlog.NewEventLogger(st), nil)
 	if _, err := resolver.EvaluateOpenIssues(context.Background(), "owner/repo", 1); err != nil {
 		t.Fatalf("EvaluateOpenIssues: %v", err)
 	}

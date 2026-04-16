@@ -5,3 +5,33 @@ environment: dev          # dev | staging | prod
 repo: Lincyaw/workbuddy
 poll_interval: 30s
 port: 8090                # HTTP audit server port
+
+notifications:
+  enabled: true
+  instance_name: default
+  dedup_window: 5m
+  batch_window: 0s
+  success: false
+
+  # Credentials are env var names, never values.
+  slack:
+    enabled: false
+    webhook_url_env: WORKBUDDY_SLACK_WEBHOOK_URL
+
+  feishu:
+    enabled: false
+    webhook_url_env: WORKBUDDY_FEISHU_WEBHOOK_URL
+
+  telegram:
+    enabled: false
+    bot_token_env: WORKBUDDY_TELEGRAM_BOT_TOKEN
+    chat_id_env: WORKBUDDY_TELEGRAM_CHAT_ID
+
+  smtp:
+    enabled: false
+    host_env: WORKBUDDY_SMTP_HOST
+    port_env: WORKBUDDY_SMTP_PORT
+    username_env: WORKBUDDY_SMTP_USERNAME
+    password_env: WORKBUDDY_SMTP_PASSWORD
+    from_env: WORKBUDDY_SMTP_FROM
+    to_env: WORKBUDDY_SMTP_TO

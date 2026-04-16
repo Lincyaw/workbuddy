@@ -23,13 +23,45 @@
 - `environment`
 - `poll_interval`
 - `port`
+- `notifications`
 
 代码：
 
 - `.github/workbuddy/config.yaml`
 - `internal/config/types.go`
+- `internal/config/loader.go`
 
-仓库样例 `.github/workbuddy/config.yaml` 也只保留这四个顶层字段，作为当前 loader schema 的示例。
+仓库样例 `.github/workbuddy/config.yaml` 还包含 `notifications` 配置块（用于告警路由），并在该块内包含四个可选通道的开关与环境变量名。
+
+## 当前告警（notifications）配置
+
+`notifications` 顶层字段用于配置告警总开关、实例名、去重窗口、批量窗口与告警渠道：
+
+- `enabled`：总开关（默认 `false`；开启时才会执行外发）
+- `instance_name`：告警实例标识
+- `dedup_window`：同一 `(repo, issue_num, event_kind)` 的去重窗口
+- `batch_window`：批量窗口（`0s` 时关闭批量，默认不批量）
+- `success`：是否通知成功任务（默认 `false`）
+
+渠道字段（均为环境变量名，仅存 `xxx_env`）：
+
+- `slack.webhook_url_env`
+- `feishu.webhook_url_env`
+- `telegram.bot_token_env`
+- `telegram.chat_id_env`
+- `smtp.host_env`
+- `smtp.port_env`
+- `smtp.username_env`
+- `smtp.password_env`
+- `smtp.from_env`
+- `smtp.to_env`
+
+代码：
+
+- `internal/config/types.go`
+- `.github/workbuddy/config.yaml`
+- `internal/notifier/notifier.go`
+- `internal/config/loader.go`
 
 ## 当前 Agent Schema
 

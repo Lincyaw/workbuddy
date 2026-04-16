@@ -1347,3 +1347,39 @@ requirements:
       - internal/launcher/permissions_test.go
       - internal/config/loader_test.go
     deps: []
+
+  - id: REQ-039
+    title: Failure notification system
+    description: >
+      Automatically notify operators when pipeline failures or stuck states are detected.
+      Notifications are delivered through configurable channels with retry,
+      deduplication, and non-blocking delivery semantics.
+    priority: P1
+    version: v0.2.0
+    status: tested
+    acceptance_criteria:
+      - "AC-039-1: Slack webhook delivery is触发于失败事件（HTTP 测试服务成功接收）"
+      - "AC-039-2: 同一时间窗口内重复告警被 dedup 抑制（基于 repo/issue_num/event_kind）"
+      - "AC-039-3: 发送重试具备指数退避，最多 3 次（5s, 10s, 20s）"
+      - "AC-039-4: 重试耗尽后记录 TypeNotificationFailed 到 events 表"
+      - "AC-039-5: 告警日志与消息不包含 webhook 全量 URL，仅记录主机级地址"
+      - "AC-039-6: 非 HTTPS webhook URL 在启动时拒绝"
+      - "AC-039-7: notifications.enabled=false 时禁止所有外部发送"
+      - "AC-039-8: 告警投递使用缓冲队列和 worker 池，发送链路不阻塞主流程（低层级事件发布不等待发送）"
+    code:
+      - .github/workbuddy/config.yaml
+      - cmd/coordinator.go
+      - cmd/serve.go
+      - internal/alertbus/alertbus.go
+      - internal/dependency/dependency.go
+      - internal/notifier/notifier.go
+      - internal/statemachine/statemachine.go
+      - internal/tasknotify/hub.go
+    tests:
+      - internal/config/loader_test.go
+      - internal/notifier/notifier_test.go
+      - internal/tasknotify/hub_test.go
+      - cmd/serve_test.go
+    related_docs:
+      - docs/implemented/current-config-workflow-and-agents.md
+    deps: [REQ-001, REQ-003, REQ-031, REQ-037]

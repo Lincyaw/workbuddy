@@ -71,9 +71,15 @@ func LoadConfig(configDir string) (*FullConfig, []Warning, error) {
 
 	globalPath := filepath.Join(configDir, "config.yaml")
 	if data, err := os.ReadFile(globalPath); err == nil {
-		if err := yaml.Unmarshal(data, &cfg.Global); err != nil {
+		var fileCfg struct {
+			GlobalConfig  `yaml:",inline"`
+			Notifications NotificationsConfig `yaml:"notifications"`
+		}
+		if err := yaml.Unmarshal(data, &fileCfg); err != nil {
 			return nil, nil, fmt.Errorf("config: %s: %w", globalPath, err)
 		}
+		cfg.Global = fileCfg.GlobalConfig
+		cfg.Notifications = fileCfg.Notifications
 	}
 
 	agentsDir := filepath.Join(configDir, "agents")
