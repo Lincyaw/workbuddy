@@ -467,3 +467,49 @@ func TestWALMode(t *testing.T) {
 		t.Fatalf("expected WAL mode, got %q", mode)
 	}
 }
+
+func TestWorkerTokenLifecycle(t *testing.T) {
+	s := newTestStore(t)
+
+	issued, err := s.IssueWorkerToken("worker-1", "owner/repo", []string{"dev"}, "host1")
+	if err != nil {
+		t.Fatalf("IssueWorkerToken: %v", err)
+	}
+	if issued.KID == "" || issued.Token == "" {
+		t.Fatalf("issued token missing fields: %+v", issued)
+	}
+
+	auth, err := s.AuthenticateWorkerToken(issued.Token)
+	if err != nil {
+		t.Fatalf("AuthenticateWorkerToken: %v", err)
+	}
+	if auth.WorkerID != "worker-1" || auth.KID != issued.KID {
+		t.Fatalf("unexpected auth record: %+v", auth)
+	}
+
+	listed, err := s.ListWorkerTokens("owner/repo")
+	if err != nil {
+		t.Fatalf("ListWorkerTokens: %v", err)
+	}
+	if len(listed) != 1 || listed[0].WorkerID != "worker-1" || listed[0].KID != issued.KID {
+		t.Fatalf("unexpected token records: %+v", listed)
+	}
+	if listed[0].RevokedAt != nil {
+		t.Fatalf("token should be active: %+v", listed[0])
+	}
+
+	if err := s.RevokeWorkerToken("worker-1", issued.KID); err != nil {
+		t.Fatalf("RevokeWorkerToken: %v", err)
+	}
+	if _, err := s.AuthenticateWorkerToken(issued.Token); err == nil {
+		t.Fatal("expected revoked token auth to fail")
+	}
+
+	listed, err = s.ListWorkerTokens("owner/repo")
+	if err != nil {
+		t.Fatalf("ListWorkerTokens after revoke: %v", err)
+	}
+	if listed[0].RevokedAt == nil {
+		t.Fatalf("expected revoked timestamp after revoke: %+v", listed[0])
+	}
+}

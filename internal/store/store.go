@@ -110,6 +110,9 @@ func (s *Store) createTables() error {
 			roles TEXT NOT NULL,
 			hostname TEXT,
 			status TEXT NOT NULL DEFAULT 'online',
+			token_kid TEXT,
+			token_hash TEXT,
+			token_revoked_at DATETIME,
 			last_heartbeat DATETIME DEFAULT CURRENT_TIMESTAMP,
 			registered_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -170,6 +173,15 @@ func (s *Store) createTables() error {
 	}
 	if _, err := s.db.Exec(`ALTER TABLE issue_cache ADD COLUMN body TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("store: alter issue_cache add body: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE workers ADD COLUMN token_kid TEXT`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("store: alter workers add token_kid: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE workers ADD COLUMN token_hash TEXT`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("store: alter workers add token_hash: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE workers ADD COLUMN token_revoked_at DATETIME`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("store: alter workers add token_revoked_at: %w", err)
 	}
 	// Forward-migrate any pre-existing issue_dependency_state rows: drop the
 	// old managed-comment anchor columns by adding the new reaction column if
@@ -292,7 +304,13 @@ func (s *Store) UpdateTaskStatus(taskID, status string) error {
 // InsertWorker registers a worker.
 func (s *Store) InsertWorker(w WorkerRecord) error {
 	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO workers (id, repo, roles, hostname, status) VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO workers (id, repo, roles, hostname, status)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		 repo = excluded.repo,
+		 roles = excluded.roles,
+		 hostname = excluded.hostname,
+		 status = excluded.status`,
 		w.ID, w.Repo, w.Roles, w.Hostname, w.Status,
 	)
 	if err != nil {
