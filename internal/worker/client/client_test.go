@@ -77,13 +77,13 @@ func TestClientRun_TaskLifecycleAgainstFakeCoordinator(t *testing.T) {
 		t.Fatalf("Run error = %v, want context canceled", err)
 	}
 
-	if coord.registers != 1 {
-		t.Fatalf("registers = %d, want 1", coord.registers)
+	if coord.Registers() != 1 {
+		t.Fatalf("registers = %d, want 1", coord.Registers())
 	}
-	if !coord.acked["task-1"] {
+	if !coord.Acked("task-1") {
 		t.Fatal("task was not acked")
 	}
-	if got := coord.heartbeats["task-1"]; got < 1 {
+	if got := coord.Heartbeats("task-1"); got < 1 {
 		t.Fatalf("heartbeats = %d, want >= 1", got)
 	}
 	if result.Result.ExitCode != 0 {
@@ -95,8 +95,9 @@ func TestClientRun_TaskLifecycleAgainstFakeCoordinator(t *testing.T) {
 	if result.Result.Meta["pr_url"] != "https://example.test/pr/46" {
 		t.Fatalf("pr_url = %q", result.Result.Meta["pr_url"])
 	}
-	if runtime.executedTask == nil || runtime.executedTask.Context.Session.ID != "session-task-1" {
-		t.Fatalf("launcher did not receive expected task context: %+v", runtime.executedTask)
+	executedTask := runtime.ExecutedTask()
+	if executedTask == nil || executedTask.Context.Session.ID != "session-task-1" {
+		t.Fatalf("launcher did not receive expected task context: %+v", executedTask)
 	}
 }
 
@@ -368,6 +369,24 @@ func (c *fakeCoordinator) handler() http.Handler {
 	return mux
 }
 
+func (c *fakeCoordinator) Registers() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.registers
+}
+
+func (c *fakeCoordinator) Acked(taskID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.acked[taskID]
+}
+
+func (c *fakeCoordinator) Heartbeats(taskID string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.heartbeats[taskID]
+}
+
 func (c *fakeCoordinator) waitForResult(t *testing.T, timeout time.Duration) SubmitResultRequest {
 	t.Helper()
 	select {
@@ -396,6 +415,12 @@ type fakeRuntime struct {
 	err          error
 	mu           sync.Mutex
 	executedTask *Task
+}
+
+func (r *fakeRuntime) ExecutedTask() *Task {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.executedTask
 }
 
 func (r *fakeRuntime) Name() string { return "fake-runtime" }
