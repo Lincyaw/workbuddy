@@ -233,6 +233,23 @@ func setupFakeGHCLI(t *testing.T) {
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+func waitForHealth(t *testing.T, port int) {
+	t.Helper()
+	addr := fmt.Sprintf("http://localhost:%d/health", port)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(addr)
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("coordinator did not become healthy at %s", addr)
+}
+
 func newWorkerTestDeps(t *testing.T, rt *mockRuntime, readers ...issueLabelReader) (*workerDeps, *store.Store) {
 	t.Helper()
 	setupFakeGHCLI(t)

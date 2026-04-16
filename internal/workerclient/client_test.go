@@ -2,42 +2,114 @@ package workerclient
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
-func TestClientAddsBearerTokenToTaskEndpoints(t *testing.T) {
-	var headers []string
+func TestClientSendsBearerTokenOnEveryCall(t *testing.T) {
+	var authCalls atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		headers = append(headers, r.Header.Get("Authorization"))
+		if got := r.Header.Get("Authorization"); got != "Bearer secret-token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		authCalls.Add(1)
+		switch r.URL.Path {
+		case "/api/v1/workers/register":
+			w.WriteHeader(http.StatusCreated)
+		case "/api/v1/tasks/poll":
+			_ = json.NewEncoder(w).Encode(Task{TaskID: "task-1", Repo: "owner/repo", IssueNum: 7, AgentName: "dev-agent"})
+		case "/api/v1/tasks/task-1/heartbeat":
+			w.WriteHeader(http.StatusNoContent)
+		case "/api/v1/tasks/task-1/result":
+			w.WriteHeader(http.StatusOK)
+		case "/api/v1/tasks/task-1/release":
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "secret-token", srv.Client())
+	ctx := context.Background()
+	if err := client.Register(ctx, RegisterRequest{WorkerID: "worker-1", Repo: "owner/repo", Roles: []string{"dev"}}); err != nil {
+		t.Fatal(err)
+	}
+	task, err := client.PollTask(ctx, "worker-1", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task == nil || task.TaskID != "task-1" {
+		t.Fatalf("unexpected task: %+v", task)
+	}
+	if err := client.Heartbeat(ctx, task.TaskID, HeartbeatRequest{WorkerID: "worker-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SubmitResult(ctx, task.TaskID, ResultRequest{WorkerID: "worker-1", Status: "completed"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ReleaseTask(ctx, task.TaskID, ReleaseRequest{WorkerID: "worker-1", Reason: "shutdown"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := authCalls.Load(); got != 5 {
+		t.Fatalf("auth calls = %d, want 5", got)
+	}
+}
+
+func TestClientPollTaskReturnsNilOnNoContent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer srv.Close()
 
-	client := New(srv.URL, "kid.secret", srv.Client())
-
-	check := func(resp *http.Response, err error) {
-		t.Helper()
-		if err != nil {
-			t.Fatalf("request failed: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode != http.StatusNoContent {
-			t.Fatalf("status = %d", resp.StatusCode)
-		}
+	client := New(srv.URL, "", srv.Client())
+	task, err := client.PollTask(context.Background(), "worker-1", time.Second)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	check(client.PollTask(context.Background(), "worker-1", 0))
-	check(client.Heartbeat(context.Background(), "task-1"))
-	check(client.SubmitResult(context.Background(), "task-1", map[string]string{"status": "ok"}))
-
-	if len(headers) != 3 {
-		t.Fatalf("expected 3 requests, got %d", len(headers))
+	if task != nil {
+		t.Fatalf("expected nil task, got %+v", task)
 	}
-	for i, header := range headers {
-		if header != "Bearer kid.secret" {
-			t.Fatalf("header[%d] = %q", i, header)
+}
+
+func TestClientReturnsUnauthorized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "bad-token", srv.Client())
+	err := client.Register(context.Background(), RegisterRequest{WorkerID: "worker-1", Repo: "owner/repo", Roles: []string{"dev"}})
+	if err == nil {
+		t.Fatal("expected unauthorized error")
+	}
+	if err != ErrUnauthorized {
+		t.Fatalf("err = %v, want %v", err, ErrUnauthorized)
+	}
+}
+
+func TestClientRetriesTransientFailures(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":"temporary"}`))
+			return
 		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "", srv.Client())
+	client.maxBackoff = 10 * time.Millisecond
+	if err := client.Register(context.Background(), RegisterRequest{WorkerID: "worker-1", Repo: "owner/repo", Roles: []string{"dev"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("calls = %d, want 2", got)
 	}
 }
