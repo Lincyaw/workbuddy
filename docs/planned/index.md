@@ -7,14 +7,10 @@
 | 主题 | 目标 | 基线代码 | 依赖前置 |
 | --- | --- | --- | --- |
 | Long-lived runtime / pooling | 为长驻 runtime 增加 per-repo 生命周期、连接复用与 idle 回收 | `internal/launcher/`, `cmd/serve.go` | 现有 one-shot Session 抽象已完成 |
-| 迁移路径 | 控制 v0.1.x 到 v0.2.x 的重构顺序 | `internal/launcher/`, `internal/config/`, `internal/audit/` | 上述全部 |
-| 分布式拓扑与 CLI | 从单进程 `serve` 演进到 coordinator/worker 分离 | `cmd/`, `internal/router/`, `internal/registry/` | 独立，不依赖上述 |
-| Pipeline 可观测性与诊断 | 将 pipeline-monitor skill 中高频手动操作下沉为 CLI 一等公民 | `cmd/status.go`, `internal/audit/http.go`, `internal/store/` | REQ-019 (status), REQ-024 (store) |
+
 ## 文档列表
 
-- `docs/planned/distributed-topology-and-cli.md`
-- `docs/planned/runtime-migration-plan.md`
-- `docs/planned/pipeline-observability-and-diagnosis.md`
+（当前无活跃的 planned 文档——原有的 distributed-topology-and-cli、runtime-migration-plan、pipeline-observability-and-diagnosis 均已落地，迁移至 `docs/implemented/`。）
 
 ## 维护规则
 

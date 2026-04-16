@@ -6,30 +6,34 @@
 
 | 主题 | 结论 | 主要代码 |
 | --- | --- | --- |
-| 运行形态 | 当前只有 `workbuddy serve` 单进程模式可用 | `cmd/serve.go` |
-| 执行模型 | Router 通过 channel 派发给内嵌 worker，runtime 已升级为 `Start(...) -> Session.Run(...)`，并保留 `Launch(...)` 兼容包装 | `internal/router/router.go`, `internal/launcher/types.go`, `internal/launcher/process.go` |
+| 运行形态 | `workbuddy serve`（单机）和 `workbuddy coordinator` + `workbuddy worker`（分布式）两种模式 | `cmd/serve.go`, `cmd/coordinator.go`, `cmd/worker.go` |
+| 执行模型 | Router 通过 channel（v0.1.0）或 HTTP 长轮询（v0.2.0）派发给 Worker，runtime 已升级为 `Start(...) -> Session.Run(...)`，并保留 `Launch(...)` 兼容包装 | `internal/router/router.go`, `internal/launcher/types.go`, `internal/launcher/process.go` |
 | 配置模型 | 使用 `.github/workbuddy/` 下的 Markdown + YAML frontmatter | `internal/config/loader.go`, `internal/config/types.go` |
 | 工作流模型 | 以 issue label 为主驱动；Go 侧记录 retry/failure intent，agent 通过 `gh issue edit` 推进状态 | `internal/statemachine/statemachine.go`, `internal/store/store.go`, `.github/workbuddy/workflows/*.md` |
-| Issue 依赖 | 已支持 `workbuddy.depends_on` 解析、本地 verdict/queue、dispatch hard gate、以及 schedule-driven dependency resolver agent | `cmd/serve.go`, `internal/dependency/`, `internal/store/`, `internal/statemachine/`, `internal/router/`, `.github/workbuddy/agents/dependency-resolver-agent.md` |
-| 可观测性 | 已有 SQLite、event log、Event Schema v1 session artifact、session audit、`/sessions` Web UI | `internal/store/`, `internal/eventlog/`, `internal/launcher/`, `internal/audit/`, `internal/webui/` |
+| Issue 依赖 | 已支持 `workbuddy.depends_on` 解析、本地 verdict/queue、dispatch hard gate、以及 😕 反应信号 | `cmd/serve.go`, `internal/dependency/`, `internal/store/`, `internal/statemachine/`, `internal/router/` |
+| 可观测性 | SQLite、event log、Event Schema v1 session artifact、session audit、`/sessions` Web UI、CLI 诊断工具 | `internal/store/`, `internal/eventlog/`, `internal/launcher/`, `internal/audit/`, `internal/webui/`, `cmd/status.go`, `cmd/diagnose.go` |
 | 工作区隔离 | 已支持每任务 git worktree 隔离 | `internal/workspace/workspace.go` |
+| 分布式通信 | Coordinator HTTP API + Worker 长轮询 + 共享密钥认证 | `internal/coordinator/http/`, `internal/workerclient/`, `internal/coordinator/server.go` |
 
 ## 文档列表
 
 | 文档 | 说明 | 主要代码 |
 | --- | --- | --- |
-| `docs/implemented/current-architecture.md` | 当前系统形态、主链路、GH call boundary 和 retry/failure 事实 | `cmd/serve.go`, `internal/router/router.go`, `internal/statemachine/statemachine.go`, `internal/store/store.go` |
-| `docs/implemented/current-config-workflow-and-agents.md` | 当前 config/agent/workflow schema 与触发行为 | `internal/config/`, `.github/workbuddy/agents/`, `.github/workbuddy/workflows/` |
-| `docs/implemented/agent-schema-vnext.md` | agent schema vNext 的兼容边界、policy/prompt/output_contract 与校验行为 | `internal/config/`, `internal/launcher/`, `.github/workbuddy/agents/` |
-| `docs/implemented/agent-catalog.md` | 仓库样例当前已登记的 agent catalog 与各自 schema/output contract | `.github/workbuddy/agents/`, `internal/config/loader.go` |
-| `docs/implemented/current-runtime-reporting-and-audit.md` | 当前 launcher、reporter、audit、sessions UI 行为 | `internal/launcher/`, `internal/reporter/`, `internal/audit/`, `internal/webui/` |
-| `docs/implemented/remote-runner-github-actions.md` | GitHub Actions remote runner 的 agent config、dispatch/poll 行为和 artifact contract | `internal/config/`, `internal/launcher/`, `.github/workflows/workbuddy-remote-runner.yml` |
-| `docs/implemented/runtime-session-architecture.md` | 当前 Runtime.Start -> Session.Run 主链路，以及 post-Run label validation 行为 | `cmd/serve.go`, `internal/launcher/`, `internal/labelcheck/`, `internal/reporter/`, `internal/audit/` |
-| `docs/implemented/event-schema-v1.md` | 当前 Event Schema v1 合同、runtime 映射、artifact 消费路径 | `internal/launcher/events/`, `internal/launcher/codex.go`, `internal/launcher/claude_stream.go`, `cmd/serve.go`, `internal/audit/`, `internal/webui/` |
-| `docs/implemented/current-persistence-and-workspace.md` | 当前存储、事件日志、worker registry、worktree 隔离 | `internal/store/`, `internal/eventlog/`, `internal/registry/`, `internal/workspace/` |
-| `docs/implemented/artifact-layout.md` | 当前 session artifact 位于仓库根 `.workbuddy/sessions/`，不会随 worktree 清理丢失 | `cmd/serve.go`, `cmd/run.go`, `internal/launcher/`, `internal/router/router.go`, `internal/audit/` |
-| `docs/implemented/issue-dependencies.md` | 当前 issue dependency 声明、resolver/store/queue、dispatch gate 与 dependency-resolver agent 行为 | `cmd/serve.go`, `internal/dependency/`, `internal/store/`, `internal/statemachine/`, `internal/router/`, `.github/workbuddy/agents/dependency-resolver-agent.md` |
-| `docs/implemented/audit-http-server.md` | 当前 REQ-011 审计 HTTP 端点：`/events`、`/issues/:repo/:num/state`、`/sessions/:id` JSON | `cmd/serve.go`, `internal/auditapi/`, `internal/webui/`, `internal/store/` |
+| `current-architecture.md` | 当前系统形态、主链路、GH call boundary 和 retry/failure 事实 | `cmd/serve.go`, `internal/router/`, `internal/statemachine/`, `internal/store/` |
+| `current-config-workflow-and-agents.md` | 当前 config/agent/workflow schema 与触发行为 | `internal/config/`, `.github/workbuddy/agents/`, `.github/workbuddy/workflows/` |
+| `agent-schema-vnext.md` | agent schema vNext 的兼容边界、policy/prompt/output_contract 与校验行为 | `internal/config/`, `internal/launcher/`, `.github/workbuddy/agents/` |
+| `agent-catalog.md` | 2-agent catalog（dev-agent, review-agent）与各自 schema/output contract | `.github/workbuddy/agents/`, `internal/config/loader.go` |
+| `current-runtime-reporting-and-audit.md` | launcher、reporter、audit、sessions UI 行为 | `internal/launcher/`, `internal/reporter/`, `internal/audit/`, `internal/webui/` |
+| `remote-runner-github-actions.md` | GitHub Actions remote runner 的 agent config、dispatch/poll 行为 | `internal/config/`, `internal/launcher/`, `.github/workflows/` |
+| `runtime-session-architecture.md` | Runtime.Start → Session.Run 主链路，post-Run label validation | `cmd/serve.go`, `internal/launcher/`, `internal/labelcheck/`, `internal/reporter/`, `internal/audit/` |
+| `event-schema-v1.md` | Event Schema v1 合同、runtime 映射、artifact 消费路径 | `internal/launcher/events/`, `internal/launcher/codex.go`, `internal/launcher/claude_stream.go` |
+| `current-persistence-and-workspace.md` | 存储、事件日志、worker registry、worktree 隔离 | `internal/store/`, `internal/eventlog/`, `internal/registry/`, `internal/workspace/` |
+| `artifact-layout.md` | session artifact 位于仓库根 `.workbuddy/sessions/` | `cmd/serve.go`, `cmd/run.go`, `internal/launcher/`, `internal/audit/` |
+| `issue-dependencies.md` | issue dependency 声明、verdict、dispatch gate、😕 反应信号 | `cmd/serve.go`, `internal/dependency/`, `internal/store/`, `internal/statemachine/` |
+| `audit-http-server.md` | REQ-011 审计 HTTP 端点：/events、/issues/.../state、/sessions/:id | `cmd/serve.go`, `internal/auditapi/`, `internal/webui/` |
+| `distributed-topology-and-cli.md` | Coordinator/Worker 分布式拓扑、全部 CLI 命令列表、HTTP API | `cmd/coordinator.go`, `cmd/worker.go`, `internal/coordinator/http/` |
+| `runtime-migration-plan.md` | Runtime/Session 迁移完成状态、command deprecation 路线 | `internal/launcher/types.go`, `internal/launcher/process.go` |
+| `pipeline-observability-and-diagnosis.md` | status --tasks/--events/--watch、cache-invalidate、diagnose | `cmd/status.go`, `cmd/diagnose.go`, `cmd/cache_invalidate.go` |
 
 ## 维护规则
 

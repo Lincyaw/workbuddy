@@ -117,11 +117,8 @@ documentation:
     - path: docs/planned/index.md
       bucket: planned
       status: maintained
-      related_code:
-        - internal/launcher/types.go
-        - internal/config/types.go
-        - cmd/root.go
-      notes: Future-state design map.
+      related_code: []
+      notes: Future-state design map. All prior planned docs have been implemented and migrated to docs/implemented/.
 
     - path: docs/implemented/runtime-session-architecture.md
       bucket: implemented
@@ -159,42 +156,56 @@ documentation:
         - internal/config/types.go
       notes: Repository sample config materializes the 2-agent catalog (dev-agent, review-agent) as concrete vNext agent definitions with prompt, policy, and output_contract metadata. Runtime (claude-code | codex) is an agent-config field, not a separate agent variant.
 
-    - path: docs/planned/distributed-topology-and-cli.md
-      bucket: planned
-      status: proposed
+    - path: docs/implemented/distributed-topology-and-cli.md
+      bucket: implemented
+      status: maintained
       related_code:
-        - cmd/root.go
-        - cmd/serve.go
-        - internal/router/router.go
-        - internal/registry/registry.go
-      notes: Planned distributed coordinator/worker topology and future CLI surface.
+        - cmd/coordinator.go
+        - cmd/worker.go
+        - cmd/init.go
+        - cmd/status.go
+        - cmd/run.go
+        - cmd/validate.go
+        - cmd/logs.go
+        - cmd/recover.go
+        - cmd/cache_invalidate.go
+        - cmd/diagnose.go
+        - internal/coordinator/http/handler.go
+        - internal/workerclient/client.go
+        - internal/coordinator/server.go
+      notes: Distributed coordinator/worker topology fully implemented with HTTP long-polling, shared-secret auth, and complete CLI surface (REQ-017~022, REQ-025~029, REQ-032~037).
 
-    - path: docs/planned/runtime-migration-plan.md
-      bucket: planned
-      status: proposed
+    - path: docs/implemented/runtime-migration-plan.md
+      bucket: implemented
+      status: maintained
       related_code:
         - internal/launcher/types.go
+        - internal/launcher/process.go
+        - internal/launcher/events/
+        - internal/launcher/output_contract.go
+        - internal/labelcheck/labelcheck.go
         - internal/config/types.go
-        - internal/audit/audit.go
-        - internal/reporter/reporter.go
-      notes: Phased migration path from one-shot runtime to session-oriented runtime.
+      notes: Runtime/Session migration completed — Launch→Start/Session, Event Schema v1, agent schema extensions (policy/prompt/output_contract), label validation all landed. Long-lived runtime remains future work.
 
-    - path: docs/planned/pipeline-observability-and-diagnosis.md
-      bucket: planned
-      status: proposed
+    - path: docs/implemented/pipeline-observability-and-diagnosis.md
+      bucket: implemented
+      status: maintained
       related_code:
         - cmd/status.go
+        - cmd/cache_invalidate.go
+        - cmd/diagnose.go
+        - internal/diagnose/diagnose.go
+        - internal/tasknotify/hub.go
         - internal/audit/http.go
         - internal/store/store.go
-        - .claude/skills/pipeline-monitor/SKILL.md
       notes: >
-        Pipeline observability plan: status --tasks, status --events, status --watch (SSE),
-        cache-invalidate, diagnose. Replaces pipeline-monitor skill shell recipes with
-        structured CLI commands. REQ-033 through REQ-037.
+        Pipeline observability fully implemented: status --tasks (REQ-033), status --events (REQ-035),
+        status --watch SSE (REQ-036), cache-invalidate (REQ-034), diagnose (REQ-037).
+        All CLI commands tested and operational.
 
     - path: docs/implemented/issue-dependencies.md
       bucket: implemented
-      status: current
+      status: maintained
       related_code:
         - cmd/serve.go
         - internal/dependency/dependency.go

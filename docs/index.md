@@ -37,12 +37,13 @@
 - `docs/implemented/artifact-layout.md`
 - `docs/implemented/issue-dependencies.md`
 - `docs/implemented/audit-http-server.md`
+- `docs/implemented/distributed-topology-and-cli.md`
+- `docs/implemented/runtime-migration-plan.md`
+- `docs/implemented/pipeline-observability-and-diagnosis.md`
 
 ### Planned
 
 - `docs/planned/index.md`
-- `docs/planned/distributed-topology-and-cli.md`
-- `docs/planned/runtime-migration-plan.md`
 
 ### Mismatch
 
