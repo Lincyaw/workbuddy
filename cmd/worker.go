@@ -295,7 +295,7 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 	defer func() { _ = session.Close() }()
 
 	eventsCh := make(chan launcherevents.Event, 64)
-	eventsPath, waitEvents := streamSessionEvents(sessionsDir, launchCtx, eventsCh)
+	eventsPath, waitEvents := streamSessionEvents(launchCtx, eventsCh)
 	result, runErr := session.Run(taskCtx, eventsCh)
 	close(eventsCh)
 	if waitErr := waitEvents(); waitErr != nil {

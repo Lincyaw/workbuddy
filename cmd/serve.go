@@ -909,6 +909,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 		return
 	}
 	var result *launcher.Result
+	var runErr error
 	defer func() { _ = session.Close() }()
 	defer func() {
 		if handle := task.Context.SessionHandle(); handle != nil {
@@ -932,7 +933,6 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 
 	eventsCh := make(chan launcherevents.Event, 64)
 	eventsPath, waitEvents := streamSessionEvents(task.Context, eventsCh)
-	var runErr error
 	result, runErr = session.Run(taskCtx, eventsCh)
 	close(eventsCh)
 	waitErr := waitEvents()
