@@ -98,6 +98,43 @@ func buildRepoRegistrationPayload(cfg *config.FullConfig) *repoRegistrationPaylo
 	return payload
 }
 
+func buildRepoRegistrationRecord(payload *repoRegistrationPayload) (store.RepoRegistrationRecord, error) {
+	if payload == nil {
+		return store.RepoRegistrationRecord{}, fmt.Errorf("repo registration payload is required")
+	}
+
+	candidate := &repoRegistrationPayload{
+		Repo:        strings.TrimSpace(payload.Repo),
+		Environment: strings.TrimSpace(payload.Environment),
+		Agents:      payload.Agents,
+		Workflows:   payload.Workflows,
+	}
+	configJSON, err := json.Marshal(candidate)
+	if err != nil {
+		return store.RepoRegistrationRecord{}, fmt.Errorf("marshal registration config: %w", err)
+	}
+
+	rec := store.RepoRegistrationRecord{
+		Repo:        candidate.Repo,
+		Environment: candidate.Environment,
+		Status:      "active",
+		ConfigJSON:  string(configJSON),
+	}
+	cfg, err := decodeRepoRegistrationConfig(rec)
+	if err != nil {
+		return store.RepoRegistrationRecord{}, err
+	}
+
+	normalizedPayload := buildRepoRegistrationPayload(cfg)
+	configJSON, err = json.Marshal(normalizedPayload)
+	if err != nil {
+		return store.RepoRegistrationRecord{}, fmt.Errorf("marshal normalized registration config: %w", err)
+	}
+	rec.Environment = normalizedPayload.Environment
+	rec.ConfigJSON = string(configJSON)
+	return rec, nil
+}
+
 func decodeRepoRegistrationConfig(rec store.RepoRegistrationRecord) (*config.FullConfig, error) {
 	var payload repoRegistrationPayload
 	if err := json.Unmarshal([]byte(rec.ConfigJSON), &payload); err != nil {
@@ -169,6 +206,11 @@ func (pm *pollerManager) StartOrUpdate(rec store.RepoRegistrationRecord) error {
 		return err
 	}
 
+	p := poller.NewPoller(pm.ghReader, pm.store, rec.Repo, pm.pollInterval)
+	if err := p.PreCheck(); err != nil {
+		return err
+	}
+
 	if err := pm.stopRepo(rec.Repo); err != nil {
 		return err
 	}
@@ -186,12 +228,6 @@ func (pm *pollerManager) StartOrUpdate(rec store.RepoRegistrationRecord) error {
 		dispatchCh:   dispatchCh,
 		cancel:       cancel,
 		done:         make(chan struct{}),
-	}
-
-	p := poller.NewPoller(pm.ghReader, pm.store, rec.Repo, pm.pollInterval)
-	if err := p.PreCheck(); err != nil {
-		cancel()
-		return err
 	}
 
 	var wg sync.WaitGroup

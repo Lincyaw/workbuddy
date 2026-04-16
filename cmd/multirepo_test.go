@@ -22,6 +22,7 @@ import (
 type repoAwareGHReader struct {
 	mu           sync.Mutex
 	issuesByRepo map[string][]poller.Issue
+	accessErrs   map[string]error
 }
 
 func (r *repoAwareGHReader) ListIssues(repo string) ([]poller.Issue, error) {
@@ -34,8 +35,13 @@ func (r *repoAwareGHReader) ListPRs(string) ([]poller.PR, error) {
 	return nil, nil
 }
 
-func (r *repoAwareGHReader) CheckRepoAccess(string) error {
-	return nil
+func (r *repoAwareGHReader) CheckRepoAccess(repo string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.accessErrs == nil {
+		return nil
+	}
+	return r.accessErrs[strings.TrimSpace(repo)]
 }
 
 func (r *repoAwareGHReader) ReadIssue(repo string, issueNum int) (poller.IssueDetails, error) {
@@ -151,6 +157,51 @@ func mustRegistrationRequest(t *testing.T, configDir string) repoRegisterRequest
 	}
 }
 
+func waitForPendingTasks(t *testing.T, dbPath string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		st, err := store.NewStore(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tasks, err := st.QueryTasks(store.TaskStatusPending)
+		_ = st.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(tasks) >= want {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("expected at least %d pending tasks", want)
+}
+
+func waitForRepoStatus(t *testing.T, client *http.Client, url, repo, wantStatus string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		resp := getCoordinator(t, client, url, "")
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("list repos status = %d", resp.StatusCode)
+		}
+		var repos []repoStatusResponse
+		if err := json.NewDecoder(resp.Body).Decode(&repos); err != nil {
+			_ = resp.Body.Close()
+			t.Fatalf("decode repos: %v", err)
+		}
+		_ = resp.Body.Close()
+		for _, status := range repos {
+			if status.Repo == repo && status.PollerStatus == wantStatus {
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("repo %s did not reach poller status %s", repo, wantStatus)
+}
+
 func TestCoordinatorMultiRepoRegistrationIsolationAndDeregister(t *testing.T) {
 	repoA := "owner/repo-a"
 	repoB := "owner/repo-b"
@@ -189,27 +240,7 @@ func TestCoordinatorMultiRepoRegistrationIsolationAndDeregister(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 
-	var tasksReady bool
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		st, err := store.NewStore(dbPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		tasks, err := st.QueryTasks(store.TaskStatusPending)
-		_ = st.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(tasks) >= 2 {
-			tasksReady = true
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if !tasksReady {
-		t.Fatal("expected both repos to dispatch tasks")
-	}
+	waitForPendingTasks(t, dbPath, 2)
 
 	reRegister := postCoordinatorJSON(t, client, fmt.Sprintf("http://localhost:%d/api/v1/repos/register", port), "", mustRegistrationRequest(t, configA))
 	if reRegister.StatusCode != http.StatusOK {
@@ -366,6 +397,72 @@ func TestCoordinatorRepoRegistrationAuthRequired(t *testing.T) {
 	}
 }
 
+func TestCoordinatorRegisterRepoRollsBackOnStartupFailure(t *testing.T) {
+	repo := "owner/failing-repo"
+	configDir := setupNamedConfigDir(t, repo, "dev-agent-fail", "workflow-fail")
+	port := getFreePort(t)
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runCoordinatorWithOpts(&coordinatorOpts{
+			port:         port,
+			pollInterval: 50 * time.Millisecond,
+			dbPath:       dbPath,
+		}, &repoAwareGHReader{
+			accessErrs: map[string]error{
+				repo: fmt.Errorf("no access"),
+			},
+		}, ctx)
+	}()
+	waitForHealth(t, port)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp := postCoordinatorJSON(t, client, fmt.Sprintf("http://localhost:%d/api/v1/repos/register", port), "", mustRegistrationRequest(t, configDir))
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("register failing repo status = %d, want 500", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := st.GetRepoRegistration(repo)
+	_ = st.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec != nil {
+		t.Fatalf("repo registration persisted after startup failure: %+v", rec)
+	}
+
+	listResp := getCoordinator(t, client, fmt.Sprintf("http://localhost:%d/api/v1/repos", port), "")
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("list repos status = %d", listResp.StatusCode)
+	}
+	var repos []repoStatusResponse
+	if err := json.NewDecoder(listResp.Body).Decode(&repos); err != nil {
+		t.Fatalf("decode repos: %v", err)
+	}
+	_ = listResp.Body.Close()
+	if len(repos) != 0 {
+		t.Fatalf("repos after failed registration = %+v, want empty", repos)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("coordinator: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("coordinator did not exit")
+	}
+}
+
 func TestRepoRegisterCLI(t *testing.T) {
 	configDir := setupNamedConfigDir(t, "owner/cli-repo", "dev-agent-cli", "workflow-cli")
 
@@ -394,6 +491,69 @@ func TestRepoRegisterCLI(t *testing.T) {
 	}
 	if got.Repo != "owner/cli-repo" || len(got.Agents) != 1 || len(got.Workflows) != 1 {
 		t.Fatalf("unexpected request payload: %+v", got)
+	}
+}
+
+func TestRepoRegisterCLIStartsPollerOnCoordinator(t *testing.T) {
+	repo := "owner/cli-live-repo"
+	configDir := setupNamedConfigDir(t, repo, "dev-agent-cli-live", "workflow-cli-live")
+	port := getFreePort(t)
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	gh := &repoAwareGHReader{
+		issuesByRepo: map[string][]poller.Issue{
+			repo: {{Number: 31, Title: "CLI", State: "open", Body: "body-cli", Labels: []string{"workbuddy", "status:developing"}}},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runCoordinatorWithOpts(&coordinatorOpts{
+			port:         port,
+			pollInterval: 50 * time.Millisecond,
+			dbPath:       dbPath,
+		}, gh, ctx)
+	}()
+	waitForHealth(t, port)
+
+	payload, err := runRepoRegister(context.Background(), &repoRegisterOpts{
+		coordinator: fmt.Sprintf("http://localhost:%d", port),
+		configDir:   configDir,
+		timeout:     5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("runRepoRegister: %v", err)
+	}
+	if payload.Repo != repo {
+		t.Fatalf("payload repo = %q, want %q", payload.Repo, repo)
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	waitForRepoStatus(t, client, fmt.Sprintf("http://localhost:%d/api/v1/repos", port), repo, "running")
+	waitForPendingTasks(t, dbPath, 1)
+
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := st.GetRepoRegistration(repo)
+	_ = st.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec == nil {
+		t.Fatal("expected repo registration to be stored")
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("coordinator: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("coordinator did not exit")
 	}
 }
 

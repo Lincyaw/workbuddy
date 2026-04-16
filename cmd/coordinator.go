@@ -414,16 +414,9 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 		return fmt.Errorf("coordinator: load existing registrations: %w", err)
 	}
 	if bootstrapCfg != nil && strings.TrimSpace(bootstrapCfg.Global.Repo) != "" {
-		payload := buildRepoRegistrationPayload(bootstrapCfg)
-		configJSON, err := json.Marshal(payload)
+		rec, err := buildRepoRegistrationRecord(buildRepoRegistrationPayload(bootstrapCfg))
 		if err != nil {
-			return fmt.Errorf("coordinator: marshal bootstrap config: %w", err)
-		}
-		rec := store.RepoRegistrationRecord{
-			Repo:        bootstrapCfg.Global.Repo,
-			Environment: bootstrapCfg.Global.Environment,
-			Status:      "active",
-			ConfigJSON:  string(configJSON),
+			return fmt.Errorf("coordinator: build bootstrap repo registration: %w", err)
 		}
 		if err := st.UpsertRepoRegistration(rec); err != nil {
 			return fmt.Errorf("coordinator: bootstrap repo registration: %w", err)
@@ -545,19 +538,14 @@ func (s *fullCoordinatorServer) handleRegisterRepo(w http.ResponseWriter, r *htt
 		Agents:      req.Agents,
 		Workflows:   req.Workflows,
 	}
-	configJSON, err := json.Marshal(payload)
+	rec, err := buildRepoRegistrationRecord(&payload)
 	if err != nil {
-		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "marshal config failed"})
+		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	rec := store.RepoRegistrationRecord{
-		Repo:        req.Repo,
-		Environment: payload.Environment,
-		Status:      "active",
-		ConfigJSON:  string(configJSON),
-	}
-	if _, err := decodeRepoRegistrationConfig(rec); err != nil {
-		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+	prev, err := s.store.GetRepoRegistration(req.Repo)
+	if err != nil {
+		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	if err := s.store.UpsertRepoRegistration(rec); err != nil {
@@ -565,6 +553,17 @@ func (s *fullCoordinatorServer) handleRegisterRepo(w http.ResponseWriter, r *htt
 		return
 	}
 	if err := s.pollers.StartOrUpdate(rec); err != nil {
+		if prev != nil {
+			if restoreErr := s.store.UpsertRepoRegistration(*prev); restoreErr != nil {
+				coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("%v (rollback failed: %v)", err, restoreErr)})
+				return
+			}
+		} else {
+			if deleteErr := s.store.DeleteRepoRegistration(req.Repo); deleteErr != nil {
+				coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("%v (rollback failed: %v)", err, deleteErr)})
+				return
+			}
+		}
 		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
