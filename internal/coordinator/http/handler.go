@@ -33,6 +33,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 type claimRequest struct {
 	WorkerID       string   `json:"worker_id"`
 	Roles          []string `json:"roles"`
+	Repos          []string `json:"repos,omitempty"`
 	IdempotencyKey string   `json:"idempotency_key"`
 	LongPollSecs   int      `json:"long_poll_seconds"`
 	LeaseSecs      int      `json:"lease_seconds"`
@@ -131,7 +132,7 @@ func (h *Handler) handleClaim(w http.ResponseWriter, r *http.Request) {
 	defer ticker.Stop()
 
 	for {
-		task, err := h.store.ClaimNextTask(req.WorkerID, req.Roles, req.IdempotencyKey, lease)
+		task, err := h.store.ClaimNextTask(req.WorkerID, req.Roles, req.Repos, req.IdempotencyKey, lease)
 		switch {
 		case err == nil && task != nil:
 			writeJSON(w, http.StatusOK, taskToResponse(task))

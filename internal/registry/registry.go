@@ -28,16 +28,26 @@ func NewRegistry(s *store.Store, pollInterval time.Duration) *Registry {
 // Register adds a worker to the registry.
 // roles is stored as a JSON array string in the DB.
 func (r *Registry) Register(id, repo string, roles []string, hostname string) error {
+	return r.RegisterWithRepos(id, repo, []string{repo}, roles, hostname)
+}
+
+// RegisterWithRepos adds a worker to the registry with explicit repo bindings.
+func (r *Registry) RegisterWithRepos(id, repo string, repos []string, roles []string, hostname string) error {
 	rolesJSON, err := json.Marshal(roles)
 	if err != nil {
 		return fmt.Errorf("registry: marshal roles: %w", err)
 	}
+	reposJSON, err := json.Marshal(repos)
+	if err != nil {
+		return fmt.Errorf("registry: marshal repos: %w", err)
+	}
 	return r.store.InsertWorker(store.WorkerRecord{
-		ID:       id,
-		Repo:     repo,
-		Roles:    string(rolesJSON),
-		Hostname: hostname,
-		Status:   "online",
+		ID:        id,
+		Repo:      repo,
+		ReposJSON: string(reposJSON),
+		Roles:     string(rolesJSON),
+		Hostname:  hostname,
+		Status:    "online",
 	})
 }
 

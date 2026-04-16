@@ -122,6 +122,11 @@ func LoadConfig(configDir string) (*FullConfig, []Warning, error) {
 	return cfg, warnings, nil
 }
 
+// ValidateWorkflowRegistration validates a workflow map for registration payloads.
+func ValidateWorkflowRegistration(workflows map[string]*WorkflowConfig) error {
+	return validateWorkflowTriggerConflicts(workflows)
+}
+
 // parseFrontmatter splits a Markdown file into YAML frontmatter and body.
 func parseFrontmatter(data []byte) (frontmatter []byte, body string, err error) {
 	content := string(data)
