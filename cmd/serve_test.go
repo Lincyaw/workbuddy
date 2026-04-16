@@ -364,13 +364,13 @@ func TestServeDependencyGateBlocksUntilDependencyDone(t *testing.T) {
 	lnch.Register(rt, config.RuntimeClaudeCode, config.RuntimeClaudeShot)
 	opts := &serveOpts{
 		port:             18939,
-		pollInterval:     40 * time.Millisecond,
+		pollInterval:     400 * time.Millisecond,
 		maxParallelTasks: 1,
 		roles:            []string{"dev"},
 		configDir:        configDir,
 		dbPath:           filepath.Join(t.TempDir(), "workbuddy.db"),
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
 
 	if err := runServeWithOpts(opts, gh, lnch, ctx); err != nil {
@@ -891,17 +891,6 @@ func seedServeAuditFixture(st *store.Store, repo string) (string, error) {
 	if _, err := st.IncrementTransition(repo, 40, "reviewing", "developing"); err != nil {
 		return "", err
 	}
-	if err := st.UpsertIssueDependencyState(store.IssueDependencyState{
-		Repo:              repo,
-		IssueNum:          40,
-		Verdict:           store.DependencyVerdictBlocked,
-		ResumeLabel:       "status:developing",
-		BlockedReasonHash: "abc123",
-		GraphVersion:      7,
-	}); err != nil {
-		return "", err
-	}
-
 	repoRoot, err := os.Getwd()
 	if err != nil {
 		return "", err

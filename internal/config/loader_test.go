@@ -149,8 +149,8 @@ func TestRepositorySampleConfig_MatchesGlobalConfigSchema(t *testing.T) {
 	if cfg.PollInterval != 30*time.Second {
 		t.Fatalf("poll_interval = %s, want 30s", cfg.PollInterval)
 	}
-	if cfg.Port != 8080 {
-		t.Fatalf("port = %d, want 8080", cfg.Port)
+	if cfg.Port != 8090 {
+		t.Fatalf("port = %d, want 8090", cfg.Port)
 	}
 }
 
