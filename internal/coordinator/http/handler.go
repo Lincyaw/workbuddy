@@ -203,6 +203,10 @@ func (h *Handler) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, getErr.Error())
 			return
 		}
+		if task == nil {
+			writeError(w, http.StatusNotFound, "task not found")
+			return
+		}
 		writeJSON(w, http.StatusOK, taskToResponse(task))
 	case errors.Is(err, store.ErrTaskNotFound):
 		writeError(w, http.StatusNotFound, err.Error())

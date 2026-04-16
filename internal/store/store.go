@@ -290,6 +290,7 @@ func scanTaskRecord(scan func(dest ...any) error) (TaskRecord, error) {
 	var t TaskRecord
 	var createdAt, updatedAt string
 	var leaseExpiresAt, ackedAt, heartbeatAt, completedAt sql.NullString
+	var workerID, claimToken sql.NullString
 	if err := scan(
 		&t.ID,
 		&t.Repo,
@@ -299,8 +300,8 @@ func scanTaskRecord(scan func(dest ...any) error) (TaskRecord, error) {
 		&t.Runtime,
 		&t.Workflow,
 		&t.State,
-		&t.WorkerID,
-		&t.ClaimToken,
+		&workerID,
+		&claimToken,
 		&t.Status,
 		&leaseExpiresAt,
 		&ackedAt,
@@ -312,6 +313,12 @@ func scanTaskRecord(scan func(dest ...any) error) (TaskRecord, error) {
 		&updatedAt,
 	); err != nil {
 		return TaskRecord{}, err
+	}
+	if workerID.Valid {
+		t.WorkerID = workerID.String
+	}
+	if claimToken.Valid {
+		t.ClaimToken = claimToken.String
 	}
 	t.CreatedAt, _ = parseTimestamp(createdAt, "task.created_at")
 	t.UpdatedAt, _ = parseTimestamp(updatedAt, "task.updated_at")
@@ -392,7 +399,7 @@ func (s *Store) GetTask(taskID string) (*TaskRecord, error) {
 	t, err := scanTaskRecord(row.Scan)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil
+			return nil, ErrTaskNotFound
 		}
 		return nil, fmt.Errorf("store: get task: %w", err)
 	}
@@ -583,16 +590,20 @@ func (s *Store) AckTask(taskID, workerID string, lease time.Duration) error {
 	if _, err := s.ensureTaskOwnership(tx, taskID, workerID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(
+	res, err := tx.Exec(
 		`UPDATE task_queue
 		 SET acked_at = COALESCE(acked_at, CURRENT_TIMESTAMP),
 		     heartbeat_at = CURRENT_TIMESTAMP,
 		     lease_expires_at = datetime('now', ?),
 		     updated_at = CURRENT_TIMESTAMP
-		 WHERE id = ?`,
-		taskLeaseOffset(lease), taskID,
-	); err != nil {
+		 WHERE id = ? AND worker_id = ?`,
+		taskLeaseOffset(lease), taskID, workerID,
+	)
+	if err != nil {
 		return fmt.Errorf("store: ack task: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrTaskNotClaimedByWorker
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("store: commit ack: %w", err)
@@ -613,15 +624,21 @@ func (s *Store) HeartbeatTask(taskID, workerID string, lease time.Duration) erro
 	if _, err := s.ensureTaskOwnership(tx, taskID, workerID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(
+	res, err := tx.Exec(
 		`UPDATE task_queue
 		 SET heartbeat_at = CURRENT_TIMESTAMP,
 		     lease_expires_at = datetime('now', ?),
 		     updated_at = CURRENT_TIMESTAMP
-		 WHERE id = ?`,
-		taskLeaseOffset(lease), taskID,
-	); err != nil {
+		 WHERE id = ? AND worker_id = ?
+		   AND lease_expires_at IS NOT NULL
+		   AND lease_expires_at > CURRENT_TIMESTAMP`,
+		taskLeaseOffset(lease), taskID, workerID,
+	)
+	if err != nil {
 		return fmt.Errorf("store: heartbeat task: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("store: heartbeat task: task %s is no longer owned by worker %s or lease has expired", taskID, workerID)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("store: commit heartbeat: %w", err)
@@ -646,14 +663,21 @@ func (s *Store) CompleteTask(taskID, workerID string, exitCode int, sessionRefs 
 	if exitCode != 0 {
 		status = TaskStatusFailed
 	}
-	if _, err := tx.Exec(
+	res, err := tx.Exec(
 		`UPDATE task_queue
 		 SET status = ?, exit_code = ?, session_refs = ?, completed_at = CURRENT_TIMESTAMP,
 		     heartbeat_at = CURRENT_TIMESTAMP, lease_expires_at = NULL, updated_at = CURRENT_TIMESTAMP
-		 WHERE id = ?`,
-		status, exitCode, sessionRefs, taskID,
-	); err != nil {
+		 WHERE id = ? AND worker_id = ?
+		   AND status NOT IN (?, ?)
+		   AND lease_expires_at IS NOT NULL
+		   AND lease_expires_at > CURRENT_TIMESTAMP`,
+		status, exitCode, sessionRefs, taskID, workerID, TaskStatusCompleted, TaskStatusFailed,
+	)
+	if err != nil {
 		return fmt.Errorf("store: complete task: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errors.New("store: complete task: task is no longer owned by worker or lease expired")
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("store: commit complete: %w", err)
