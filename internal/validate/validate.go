@@ -9,10 +9,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Lincyaw/workbuddy/internal/config"
 	"gopkg.in/yaml.v3"
 )
-
-const failedStateName = "failed"
 
 var yamlLineErrorRe = regexp.MustCompile(`line (\d+):`)
 
@@ -405,7 +404,7 @@ func validateWorkflowGraph(wf *workflowDoc) []Diagnostic {
 	walk(entry)
 
 	for _, stateName := range wf.StateOrder {
-		if stateName == failedStateName {
+		if stateName == config.StateNameFailed {
 			continue
 		}
 		if visited[stateName] {
@@ -420,7 +419,7 @@ func validateWorkflowGraph(wf *workflowDoc) []Diagnostic {
 	}
 
 	if hasFallbackEdge {
-		failed, ok := wf.States[failedStateName]
+		failed, ok := wf.States[config.StateNameFailed]
 		if !ok || len(failed.Transitions) != 0 {
 			line := wf.NameLine
 			if ok && failed.Line > 0 {
@@ -429,7 +428,7 @@ func validateWorkflowGraph(wf *workflowDoc) []Diagnostic {
 			diags = append(diags, Diagnostic{
 				Path:    wf.Path,
 				Line:    line,
-				Message: fmt.Sprintf("workflow %q contains fallback edges and requires a terminal %q state", wf.Name, failedStateName),
+				Message: fmt.Sprintf("workflow %q contains fallback edges and requires a terminal %q state", wf.Name, config.StateNameFailed),
 			})
 		}
 	}
