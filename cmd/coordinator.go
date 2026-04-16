@@ -374,7 +374,7 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	dispatchCh := make(chan statemachine.DispatchRequest, dispatchChanSize)
 	sm := statemachine.NewStateMachine(cfg.Workflows, st, dispatchCh, evlog)
 	depResolver := dependency.NewResolver(st, ghReader, evlog)
-	rt := router.NewRouter(cfg.Agents, reg, st, cfg.Global.Repo, mustRepoRoot(), nil, nil)
+	rt := router.NewRouter(cfg.Agents, reg, st, cfg.Global.Repo, mustRepoRoot(), nil, nil, false)
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
 	p := poller.NewPoller(ghReader, st, cfg.Global.Repo, cfg.Global.PollInterval)
 

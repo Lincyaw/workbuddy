@@ -14,14 +14,25 @@ type Event struct {
 
 // TaskRecord represents a task in the task_queue table.
 type TaskRecord struct {
-	ID        string
-	Repo      string
-	IssueNum  int
-	AgentName string
-	WorkerID  string
-	Status    string // pending, running, completed, failed, timeout
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID             string
+	Repo           string
+	IssueNum       int
+	AgentName      string
+	Role           string
+	Runtime        string
+	Workflow       string
+	State          string
+	WorkerID       string
+	ClaimToken     string
+	Status         string // pending, running, completed, failed, timeout
+	LeaseExpiresAt time.Time
+	AckedAt        time.Time
+	HeartbeatAt    time.Time
+	CompletedAt    time.Time
+	ExitCode       int
+	SessionRefs    string // JSON
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // WorkerRecord represents a registered worker.

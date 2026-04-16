@@ -2,6 +2,9 @@ package router
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -9,6 +12,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
+	"github.com/Lincyaw/workbuddy/internal/workspace"
 )
 
 func newTestStore(t *testing.T) *store.Store {
@@ -41,7 +45,7 @@ func TestRouter_MatchingWorker(t *testing.T) {
 	}
 
 	taskCh := make(chan WorkerTask, 10)
-	r := NewRouter(agents, reg, st, "test/repo", t.TempDir(), taskCh, nil)
+	r := NewRouter(agents, reg, st, "test/repo", t.TempDir(), taskCh, nil, true)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -82,7 +86,7 @@ func TestRouter_AgentNotFound(t *testing.T) {
 	agents := map[string]*config.AgentConfig{} // empty
 
 	taskCh := make(chan WorkerTask, 10)
-	r := NewRouter(agents, reg, st, "test/repo", t.TempDir(), taskCh, nil)
+	r := NewRouter(agents, reg, st, "test/repo", t.TempDir(), taskCh, nil, true)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -124,7 +128,7 @@ func TestRouter_NoMatchingWorker(t *testing.T) {
 	}
 
 	taskCh := make(chan WorkerTask, 10)
-	r := NewRouter(agents, reg, st, "test/repo", t.TempDir(), taskCh, nil)
+	r := NewRouter(agents, reg, st, "test/repo", t.TempDir(), taskCh, nil, true)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -145,4 +149,125 @@ func TestRouter_NoMatchingWorker(t *testing.T) {
 
 	// Task should still be created in store as pending, but not dispatched to channel
 	// (since no worker available and the router just inserts + tries to dispatch)
+}
+
+func TestRouter_PersistOnlyModeLeavesTaskPending(t *testing.T) {
+	st := newTestStore(t)
+	reg := registry.NewRegistry(st, 30*time.Second)
+
+	agents := map[string]*config.AgentConfig{
+		"dev-agent": {
+			Name:    "dev-agent",
+			Role:    "dev",
+			Runtime: "codex-exec",
+			Command: "echo hello",
+		},
+	}
+
+	r := NewRouter(agents, reg, st, "test/repo", t.TempDir(), nil, nil, false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	dispatchCh := make(chan statemachine.DispatchRequest, 1)
+	dispatchCh <- statemachine.DispatchRequest{
+		Repo:      "test/repo",
+		IssueNum:  2,
+		AgentName: "dev-agent",
+		Workflow:  "default",
+		State:     "developing",
+	}
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	_ = r.Run(ctx, dispatchCh)
+
+	tasks, err := st.QueryTasks(store.TaskStatusPending)
+	if err != nil {
+		t.Fatalf("QueryTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("pending tasks = %d, want 1", len(tasks))
+	}
+	if tasks[0].Role != "dev" || tasks[0].Runtime != "codex-exec" || tasks[0].Workflow != "default" || tasks[0].State != "developing" {
+		t.Fatalf("unexpected persisted task: %+v", tasks[0])
+	}
+}
+
+func TestRouter_PersistOnlyModeDoesNotCreateWorktree(t *testing.T) {
+	st := newTestStore(t)
+	reg := registry.NewRegistry(st, 30*time.Second)
+	repoRoot := initGitRepo(t)
+	wsMgr := workspace.NewManager(repoRoot)
+
+	agents := map[string]*config.AgentConfig{
+		"dev-agent": {
+			Name:    "dev-agent",
+			Role:    "dev",
+			Runtime: "codex-exec",
+			Command: "echo hello",
+		},
+	}
+
+	r := NewRouter(agents, reg, st, "test/repo", repoRoot, nil, wsMgr, false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	dispatchCh := make(chan statemachine.DispatchRequest, 1)
+	dispatchCh <- statemachine.DispatchRequest{
+		Repo:      "test/repo",
+		IssueNum:  41,
+		AgentName: "dev-agent",
+		Workflow:  "default",
+		State:     "developing",
+	}
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	_ = r.Run(ctx, dispatchCh)
+
+	if _, err := os.Stat(filepath.Join(repoRoot, ".workbuddy", "worktrees", "issue-41")); !os.IsNotExist(err) {
+		t.Fatalf("coordinator mode should not create a worktree, stat err = %v", err)
+	}
+}
+
+func initGitRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s: %v", args, out, err)
+		}
+	}
+
+	readme := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(readme, []byte("test repo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add: %s: %v", out, err)
+	}
+	cmd = exec.Command("git", "commit", "-m", "init")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %s: %v", out, err)
+	}
+
+	return dir
 }

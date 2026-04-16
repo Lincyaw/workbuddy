@@ -19,6 +19,7 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/audit"
 	"github.com/Lincyaw/workbuddy/internal/config"
+	coordinatorhttp "github.com/Lincyaw/workbuddy/internal/coordinator/http"
 	"github.com/Lincyaw/workbuddy/internal/dependency"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/labelcheck"
@@ -96,6 +97,7 @@ type serveOpts struct {
 	roles            []string
 	configDir        string
 	dbPath           string
+	coordinatorAPI   bool
 }
 
 // issueTaskLocks serializes tasks for the same repo+issue. Entries are
@@ -370,6 +372,7 @@ func init() {
 	serveCmd.Flags().StringSlice("roles", []string{"dev", "test", "review"}, "Worker roles")
 	serveCmd.Flags().String("config-dir", ".github/workbuddy", "Configuration directory")
 	serveCmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "SQLite database path")
+	serveCmd.Flags().Bool("coordinator-api", false, "Expose coordinator task claim API and persist tasks for remote workers")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -390,6 +393,7 @@ func parseServeFlags(cmd *cobra.Command) (*serveOpts, error) {
 	roles, _ := cmd.Flags().GetStringSlice("roles")
 	configDir, _ := cmd.Flags().GetString("config-dir")
 	dbPath, _ := cmd.Flags().GetString("db-path")
+	coordinatorAPI, _ := cmd.Flags().GetBool("coordinator-api")
 	if maxParallelTasks <= 0 {
 		return nil, fmt.Errorf("serve: --max-parallel-tasks must be > 0")
 	}
@@ -401,6 +405,7 @@ func parseServeFlags(cmd *cobra.Command) (*serveOpts, error) {
 		roles:            roles,
 		configDir:        configDir,
 		dbPath:           dbPath,
+		coordinatorAPI:   coordinatorAPI,
 	}, nil
 }
 
@@ -463,15 +468,20 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	sessionsDir := filepath.Join(repoDir, ".workbuddy", "sessions")
 	auditor := audit.NewAuditor(st, sessionsDir)
 
-	// Register embedded worker
-	workerID, err := reg.RegisterEmbedded(cfg.Global.Repo, opts.roles)
-	if err != nil {
-		return fmt.Errorf("serve: register embedded worker: %w", err)
+	var workerID string
+	if !opts.coordinatorAPI {
+		workerID, err = reg.RegisterEmbedded(cfg.Global.Repo, opts.roles)
+		if err != nil {
+			return fmt.Errorf("serve: register embedded worker: %w", err)
+		}
 	}
 
 	// Channels
 	dispatchCh := make(chan statemachine.DispatchRequest, dispatchChanSize)
-	taskCh := make(chan router.WorkerTask, taskChanSize)
+	var taskCh chan router.WorkerTask
+	if !opts.coordinatorAPI {
+		taskCh = make(chan router.WorkerTask, taskChanSize)
+	}
 
 	// GH Reader (must be initialized before components that use it)
 	if ghReader == nil {
@@ -486,12 +496,15 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	sm := statemachine.NewStateMachine(cfg.Workflows, st, dispatchCh, evlog)
 	depResolver := dependency.NewResolver(st, ghReader, evlog)
 
-	// Workspace isolation via git worktrees
-	wsMgr := workspace.NewManager(repoDir)
-	_ = wsMgr.Prune() // clean up orphaned worktrees from prior crashes
+	// Workspace isolation is only needed for the embedded worker path.
+	var wsMgr *workspace.Manager
+	if !opts.coordinatorAPI {
+		wsMgr = workspace.NewManager(repoDir)
+		_ = wsMgr.Prune() // clean up orphaned worktrees from prior crashes
+	}
 
 	// Router
-	rt := router.NewRouter(cfg.Agents, reg, st, cfg.Global.Repo, repoDir, taskCh, wsMgr)
+	rt := router.NewRouter(cfg.Agents, reg, st, cfg.Global.Repo, repoDir, taskCh, wsMgr, !opts.coordinatorAPI)
 
 	// Launcher
 	lnch := launcherOverride
@@ -536,6 +549,9 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	sessionUI := webui.NewHandler(st)
 	sessionUI.SetSessionsDir(sessionsDir)
 	sessionUI.Register(mux)
+	if opts.coordinatorAPI {
+		coordinatorhttp.NewHandler(st).Register(mux)
+	}
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Global.Port),
 		Handler: mux,
@@ -665,33 +681,36 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 		}
 	}()
 
-	// 9. Start embedded Worker goroutine
-	deps := &workerDeps{
-		launcher:     lnch,
-		auditor:      auditor,
-		reporter:     rep,
-		store:        st,
-		sm:           sm,
-		workerID:     workerID,
-		cfg:          cfg,
-		wsMgr:        wsMgr,
-		runningTasks: runningTasks,
-		closedIssues: closedTracker,
-		sessionsDir:  sessionsDir,
-		issueReader:  labelReader,
-	}
 	workerDone := make(chan struct{})
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer close(workerDone)
-		runEmbeddedWorker(ctx, taskCh, deps, opts.maxParallelTasks)
-	}()
+	if !opts.coordinatorAPI {
+		deps := &workerDeps{
+			launcher:     lnch,
+			auditor:      auditor,
+			reporter:     rep,
+			store:        st,
+			sm:           sm,
+			workerID:     workerID,
+			cfg:          cfg,
+			wsMgr:        wsMgr,
+			runningTasks: runningTasks,
+			closedIssues: closedTracker,
+			sessionsDir:  sessionsDir,
+			issueReader:  labelReader,
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer close(workerDone)
+			runEmbeddedWorker(ctx, taskCh, deps, opts.maxParallelTasks)
+		}()
+	} else {
+		close(workerDone)
+	}
 
 	// Print startup message
 	rolesStr := strings.Join(opts.roles, ",")
-	fmt.Printf("workbuddy serving (repo=%s, roles=[%s], poll=%s, port=%d)\n",
-		cfg.Global.Repo, rolesStr, cfg.Global.PollInterval, cfg.Global.Port)
+	fmt.Printf("workbuddy serving (repo=%s, roles=[%s], poll=%s, port=%d, coordinator_api=%t)\n",
+		cfg.Global.Repo, rolesStr, cfg.Global.PollInterval, cfg.Global.Port, opts.coordinatorAPI)
 
 	// 10. Wait for shutdown signal
 	if sigCh != nil {

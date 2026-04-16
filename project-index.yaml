@@ -488,10 +488,17 @@ requirements:
       - "AC-025-8: POST /api/v1/tasks/:id/release 支持 Worker 在 shutdown 时把已 claim 的 running 任务重新入队"
     code:
       - cmd/coordinator.go
+      - cmd/serve.go
+      - docs/api/coordinator-v1.yaml
+      - internal/coordinator/http/handler.go
       - internal/router/router.go
       - internal/store/store.go
+      - internal/store/types.go
     tests:
       - cmd/coordinator_test.go
+      - internal/coordinator/http/handler_test.go
+      - internal/router/router_test.go
+      - internal/store/store_test.go
     deps: [REQ-023, REQ-024]
 
   - id: REQ-026

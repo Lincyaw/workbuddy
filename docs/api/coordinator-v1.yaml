@@ -1,0 +1,204 @@
+openapi: 3.1.0
+info:
+  title: Workbuddy Coordinator Worker API
+  version: v1
+  description: >
+    Coordinator-side task dispatch API used by remote Workers. Workers long-poll
+    for tasks, acknowledge execution start, send heartbeats, and report
+    completion.
+servers:
+  - url: http://localhost:8080
+paths:
+  /v1/tasks/claim:
+    post:
+      summary: Claim the next dispatchable task
+      description: >
+        Long-poll for a task matching the worker's supported roles. Returns 204
+        when no task becomes available before the requested poll timeout.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClaimTaskRequest'
+      responses:
+        '200':
+          description: Task claimed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '204':
+          description: No task available before poll timeout
+        '400':
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/tasks/{taskId}/ack:
+    post:
+      summary: Acknowledge task start
+      parameters:
+        - $ref: '#/components/parameters/TaskID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkerActionRequest'
+      responses:
+        '200':
+          description: Task acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '404':
+          description: Task not found
+        '409':
+          description: Task is not owned by the worker or already completed
+  /v1/tasks/{taskId}/heartbeat:
+    post:
+      summary: Extend task lease
+      parameters:
+        - $ref: '#/components/parameters/TaskID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkerActionRequest'
+      responses:
+        '200':
+          description: Heartbeat accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '404':
+          description: Task not found
+        '409':
+          description: Task is not owned by the worker or already completed
+  /v1/tasks/{taskId}/complete:
+    post:
+      summary: Report task completion
+      parameters:
+        - $ref: '#/components/parameters/TaskID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompleteTaskRequest'
+      responses:
+        '200':
+          description: Task completion recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '404':
+          description: Task not found
+        '409':
+          description: Task is not owned by the worker or already completed
+components:
+  parameters:
+    TaskID:
+      name: taskId
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    ClaimTaskRequest:
+      type: object
+      required: [worker_id]
+      properties:
+        worker_id:
+          type: string
+        roles:
+          type: array
+          items:
+            type: string
+        idempotency_key:
+          type: string
+          description: >
+            If the same worker retries the claim request with the same key while
+            the lease is active, the coordinator returns the same task.
+        long_poll_seconds:
+          type: integer
+          minimum: 1
+          default: 30
+        lease_seconds:
+          type: integer
+          minimum: 1
+          default: 45
+    WorkerActionRequest:
+      type: object
+      required: [worker_id]
+      properties:
+        worker_id:
+          type: string
+        lease_seconds:
+          type: integer
+          minimum: 1
+          default: 45
+    CompleteTaskRequest:
+      allOf:
+        - $ref: '#/components/schemas/WorkerActionRequest'
+        - type: object
+          properties:
+            exit_code:
+              type: integer
+              default: 0
+            session_refs:
+              type: array
+              items:
+                type: string
+    Task:
+      type: object
+      required:
+        - id
+        - repo
+        - issue_num
+        - agent_name
+        - role
+        - runtime
+        - workflow
+        - state
+        - status
+      properties:
+        id:
+          type: string
+        repo:
+          type: string
+        issue_num:
+          type: integer
+        agent_name:
+          type: string
+        role:
+          type: string
+        runtime:
+          type: string
+        workflow:
+          type: string
+        state:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, completed, failed, timeout]
+        worker_id:
+          type: string
+        exit_code:
+          type: integer
+        session_refs:
+          type: array
+          items:
+            type: string
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
