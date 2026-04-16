@@ -652,6 +652,13 @@ func (s *Store) claimNextTaskOnce(workerID string, roles []string, repos []strin
 		repoConds = append(repoConds, "repo = ?")
 		repoArgs = append(repoArgs, repo)
 	}
+	if len(repoConds) == 0 && len(repos) > 0 {
+		// Caller explicitly provided repos but all were blank — reject.
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("store: commit empty repo claim: %w", err)
+		}
+		return nil, nil
+	}
 	query := `SELECT
 		id, repo, issue_num, agent_name, NULL, role, runtime, workflow, state,
 		worker_id, claim_token, status, lease_expires_at, acked_at, heartbeat_at,

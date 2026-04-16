@@ -439,8 +439,12 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	mux.Handle("/api/v1/tasks/poll", api.wrapAuth(http.HandlerFunc(api.handlePollTask)))
 	mux.Handle("/api/v1/tasks/", api.wrapAuth(http.HandlerFunc(api.handleTaskAction)))
 
+	listenAddr := opts.listenAddr
+	if strings.TrimSpace(listenAddr) == "" {
+		listenAddr = fmt.Sprintf(":%d", port)
+	}
 	srv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
+		Addr:    listenAddr,
 		Handler: mux,
 	}
 

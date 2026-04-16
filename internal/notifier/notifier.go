@@ -382,11 +382,29 @@ func (n *Notifier) deliverBatch(ctx context.Context, events []alertbus.AlertEven
 	}
 }
 
+// pruneStale removes expired entries from the dedup map and resets failure
+// counters for issues whose dedup window has passed. Must be called with n.mu held.
+func (n *Notifier) pruneStale(now time.Time) {
+	for k, exp := range n.dedup {
+		if !now.Before(exp) {
+			delete(n.dedup, k)
+			delete(n.failureCounters, k)
+		}
+	}
+}
+
+const pruneEveryN = 100
+
 func (n *Notifier) shouldDrop(event alertbus.AlertEvent) bool {
 	key := eventDedupKey(event.Repo, event.IssueNum, event.Kind)
 	now := nowFn()
 	n.mu.Lock()
 	defer n.mu.Unlock()
+
+	// Periodically prune stale entries so maps don't grow without bound.
+	if len(n.dedup)%pruneEveryN == 0 && len(n.dedup) > 0 {
+		n.pruneStale(now)
+	}
 
 	if exp, ok := n.dedup[key]; ok && now.Before(exp) {
 		return true
@@ -704,14 +722,20 @@ type smtpSender struct {
 	to       []string
 }
 
-func (s *smtpSender) Send(_ context.Context, message string) error {
+func (s *smtpSender) Send(ctx context.Context, message string) error {
 	addr := net.JoinHostPort(s.host, strconv.Itoa(s.port))
 	subject := "workbuddy notification"
 	messageText := []byte(fmt.Sprintf("To: %s\r\nFrom: %s\r\nSubject: %s\r\n\r\n%s", strings.Join(s.to, ","), s.from, subject, message))
 	auth := smtp.PlainAuth("", s.username, s.password, s.host)
 
+	dialer := &net.Dialer{}
+
 	if s.port == 465 {
-		conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: s.host})
+		tlsDialer := &tls.Dialer{
+			NetDialer: dialer,
+			Config:    &tls.Config{ServerName: s.host},
+		}
+		conn, err := tlsDialer.DialContext(ctx, "tcp", addr)
 		if err != nil {
 			return err
 		}
@@ -727,8 +751,13 @@ func (s *smtpSender) Send(_ context.Context, message string) error {
 		return sendSMTPMail(client, s.from, s.to, messageText)
 	}
 
-	client, err := smtp.Dial(addr)
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
+		return err
+	}
+	client, err := smtp.NewClient(conn, s.host)
+	if err != nil {
+		_ = conn.Close()
 		return err
 	}
 	defer func() { _ = client.Close() }()

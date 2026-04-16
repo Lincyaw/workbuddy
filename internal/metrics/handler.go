@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -396,9 +395,8 @@ func (h *Handler) writeIssueCounters(b *strings.Builder, db *sql.DB, now time.Ti
 	return nil
 }
 
-func promLabel(value, key string) string {
-	_ = key
-	return strconv.Quote(escapePrometheusLabelValue(value))
+func promLabel(value, _ string) string {
+	return fmt.Sprintf(`"%s"`, escapePrometheusLabelValue(value))
 }
 
 func parseEventTimestamp(raw string) (time.Time, bool) {
