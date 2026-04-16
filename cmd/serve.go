@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/audit"
+	"github.com/Lincyaw/workbuddy/internal/auditapi"
 	"github.com/Lincyaw/workbuddy/internal/config"
 	coordinatorhttp "github.com/Lincyaw/workbuddy/internal/coordinator/http"
 	"github.com/Lincyaw/workbuddy/internal/dependency"
@@ -548,6 +549,9 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	})
 
 	audit.NewHTTPHandler(st).Register(mux)
+	dashboardAPI := auditapi.NewHandler(st)
+	dashboardAPI.SetSessionsDir(sessionsDir)
+	dashboardAPI.RegisterDashboard(mux)
 	mux.HandleFunc("/tasks/watch", newTaskWatchHandler(taskHub))
 
 	// Session viewer web UI (also serves JSON via auditapi.BuildSessionResponse)
@@ -643,6 +647,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 				// state. Without this, a label like status:developing that is
 				// re-added after a review bounce-back would be silently dropped.
 				if ev.Type == poller.EventPollCycleDone {
+					evlog.Log(poller.EventPollCycleDone, ev.Repo, 0, map[string]any{"source": "poller"})
 					if !depsResolvedThisCycle {
 						runDependencyMaintenance(ctx)
 					}
