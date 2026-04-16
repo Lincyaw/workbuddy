@@ -603,6 +603,9 @@ func TestDeleteIssueCache(t *testing.T) {
 
 func TestQueryTasksFilteredAndDeleteIssueDependencyState(t *testing.T) {
 	s := newTestStore(t)
+	if err := s.UpsertIssueCache(IssueCache{Repo: "owner/repo", IssueNum: 2, Labels: `["status:reviewing","priority:high"]`, State: "open"}); err != nil {
+		t.Fatalf("UpsertIssueCache: %v", err)
+	}
 	for _, task := range []TaskRecord{
 		{ID: "task-1", Repo: "owner/repo", IssueNum: 1, AgentName: "dev", Status: TaskStatusPending},
 		{ID: "task-2", Repo: "owner/repo", IssueNum: 2, AgentName: "dev", Status: TaskStatusFailed},
@@ -619,6 +622,9 @@ func TestQueryTasksFilteredAndDeleteIssueDependencyState(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].ID != "task-2" {
 		t.Fatalf("unexpected filtered rows: %+v", rows)
+	}
+	if rows[0].Labels != `["status:reviewing","priority:high"]` {
+		t.Fatalf("expected labels join, got %+v", rows[0])
 	}
 
 	if err := s.UpsertIssueDependencyState(IssueDependencyState{Repo: "owner/repo", IssueNum: 9, Verdict: DependencyVerdictReady}); err != nil {

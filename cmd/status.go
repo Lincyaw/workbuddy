@@ -63,16 +63,6 @@ type statusResponse struct {
 	Issues []statusIssue `json:"issues"`
 }
 
-type statusTaskRow struct {
-	ID        string    `json:"id"`
-	Repo      string    `json:"repo"`
-	IssueNum  int       `json:"issue_num"`
-	AgentName string    `json:"agent_name"`
-	Status    string    `json:"status"`
-	WorkerID  string    `json:"worker_id,omitempty"`
-	UpdatedAt time.Time `json:"updated_at"`
-}
-
 type statusEventRow struct {
 	ID       int64           `json:"id"`
 	TS       time.Time       `json:"ts"`
@@ -279,20 +269,13 @@ func runStatusTasks(ctx context.Context, opts *statusOpts, client *statusClient,
 		return err
 	}
 
-	rows := make([]statusTaskRow, 0, len(tasks))
+	rows := make([]store.TaskRecord, 0, len(tasks))
 	for _, task := range tasks {
 		if task.Status == store.TaskStatusCompleted {
 			continue
 		}
-		rows = append(rows, statusTaskRow{
-			ID:        task.ID,
-			Repo:      task.Repo,
-			IssueNum:  task.IssueNum,
-			AgentName: task.AgentName,
-			Status:    task.Status,
-			WorkerID:  task.WorkerID,
-			UpdatedAt: task.UpdatedAt.UTC(),
-		})
+		task.UpdatedAt = task.UpdatedAt.UTC()
+		rows = append(rows, task)
 	}
 	if opts.jsonOut {
 		enc := json.NewEncoder(stdout)
@@ -561,7 +544,7 @@ func renderStatusTable(w io.Writer, resp statusResponse) {
 	_ = tw.Flush()
 }
 
-func renderTaskTable(w io.Writer, rows []statusTaskRow) {
+func renderTaskTable(w io.Writer, rows []store.TaskRecord) {
 	if len(rows) == 0 {
 		_, _ = fmt.Fprintln(w, "No tasks found.")
 		return

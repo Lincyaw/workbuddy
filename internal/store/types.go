@@ -18,6 +18,7 @@ type TaskRecord struct {
 	Repo           string
 	IssueNum       int
 	AgentName      string
+	Labels         string
 	Role           string
 	Runtime        string
 	Workflow       string

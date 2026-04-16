@@ -347,12 +347,13 @@ func scanTaskRecord(scan func(dest ...any) error) (TaskRecord, error) {
 	var t TaskRecord
 	var createdAt, updatedAt string
 	var leaseExpiresAt, ackedAt, heartbeatAt, completedAt sql.NullString
-	var workerID, claimToken sql.NullString
+	var workerID, claimToken, labels sql.NullString
 	if err := scan(
 		&t.ID,
 		&t.Repo,
 		&t.IssueNum,
 		&t.AgentName,
+		&labels,
 		&t.Role,
 		&t.Runtime,
 		&t.Workflow,
@@ -376,6 +377,9 @@ func scanTaskRecord(scan func(dest ...any) error) (TaskRecord, error) {
 	}
 	if claimToken.Valid {
 		t.ClaimToken = claimToken.String
+	}
+	if labels.Valid {
+		t.Labels = labels.String
 	}
 	t.CreatedAt, _ = parseTimestamp(createdAt, "task.created_at")
 	t.UpdatedAt, _ = parseTimestamp(updatedAt, "task.updated_at")
@@ -424,21 +428,23 @@ func (s *Store) QueryTasks(status string) ([]TaskRecord, error) {
 // QueryTasksFiltered returns tasks matching the given filter.
 func (s *Store) QueryTasksFiltered(filter TaskFilter) ([]TaskRecord, error) {
 	const selectTasks = `SELECT
-		id, repo, issue_num, agent_name, role, runtime, workflow, state,
-		worker_id, claim_token, status, lease_expires_at, acked_at, heartbeat_at,
-		completed_at, exit_code, session_refs, created_at, updated_at
-		FROM task_queue`
+		tq.id, tq.repo, tq.issue_num, tq.agent_name, ic.labels, tq.role, tq.runtime, tq.workflow, tq.state,
+		tq.worker_id, tq.claim_token, tq.status, tq.lease_expires_at, tq.acked_at, tq.heartbeat_at,
+		tq.completed_at, tq.exit_code, tq.session_refs, tq.created_at, tq.updated_at
+		FROM task_queue tq
+		LEFT JOIN issue_cache ic
+		  ON ic.repo = tq.repo AND ic.issue_num = tq.issue_num`
 	query := selectTasks + ` WHERE 1=1`
 	args := make([]any, 0, 2)
 	if filter.Repo != "" {
-		query += ` AND repo = ?`
+		query += ` AND tq.repo = ?`
 		args = append(args, filter.Repo)
 	}
 	if filter.Status != "" {
-		query += ` AND status = ?`
+		query += ` AND tq.status = ?`
 		args = append(args, filter.Status)
 	}
-	query += ` ORDER BY created_at`
+	query += ` ORDER BY tq.created_at`
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -460,10 +466,13 @@ func (s *Store) QueryTasksFiltered(filter TaskFilter) ([]TaskRecord, error) {
 // GetTask loads a task by ID.
 func (s *Store) GetTask(taskID string) (*TaskRecord, error) {
 	row := s.db.QueryRow(`SELECT
-		id, repo, issue_num, agent_name, role, runtime, workflow, state,
-		worker_id, claim_token, status, lease_expires_at, acked_at, heartbeat_at,
-		completed_at, exit_code, session_refs, created_at, updated_at
-		FROM task_queue WHERE id = ?`, taskID)
+		tq.id, tq.repo, tq.issue_num, tq.agent_name, ic.labels, tq.role, tq.runtime, tq.workflow, tq.state,
+		tq.worker_id, tq.claim_token, tq.status, tq.lease_expires_at, tq.acked_at, tq.heartbeat_at,
+		tq.completed_at, tq.exit_code, tq.session_refs, tq.created_at, tq.updated_at
+		FROM task_queue tq
+		LEFT JOIN issue_cache ic
+		  ON ic.repo = tq.repo AND ic.issue_num = tq.issue_num
+		WHERE tq.id = ?`, taskID)
 	t, err := scanTaskRecord(row.Scan)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -543,7 +552,7 @@ func (s *Store) ClaimNextTask(workerID string, roles []string, claimToken string
 
 	if claimToken != "" {
 		row := tx.QueryRow(`SELECT
-			id, repo, issue_num, agent_name, role, runtime, workflow, state,
+			id, repo, issue_num, agent_name, NULL, role, runtime, workflow, state,
 			worker_id, claim_token, status, lease_expires_at, acked_at, heartbeat_at,
 			completed_at, exit_code, session_refs, created_at, updated_at
 			FROM task_queue
@@ -569,7 +578,7 @@ func (s *Store) ClaimNextTask(workerID string, roles []string, claimToken string
 		roleArgs = append(roleArgs, role)
 	}
 	query := `SELECT
-		id, repo, issue_num, agent_name, role, runtime, workflow, state,
+		id, repo, issue_num, agent_name, NULL, role, runtime, workflow, state,
 		worker_id, claim_token, status, lease_expires_at, acked_at, heartbeat_at,
 		completed_at, exit_code, session_refs, created_at, updated_at
 		FROM task_queue
@@ -625,7 +634,7 @@ func (s *Store) ClaimNextTask(workerID string, roles []string, claimToken string
 
 func (s *Store) ensureTaskOwnership(tx *sql.Tx, taskID, workerID string) (*TaskRecord, error) {
 	row := tx.QueryRow(`SELECT
-		id, repo, issue_num, agent_name, role, runtime, workflow, state,
+		id, repo, issue_num, agent_name, NULL, role, runtime, workflow, state,
 		worker_id, claim_token, status, lease_expires_at, acked_at, heartbeat_at,
 		completed_at, exit_code, session_refs, created_at, updated_at
 		FROM task_queue WHERE id = ?`, taskID)

@@ -20,11 +20,12 @@ func newDiagnoseStore(t *testing.T) *store.Store {
 
 func TestAnalyze(t *testing.T) {
 	now := time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC)
+	agentTimeouts := map[string]time.Duration{"dev-agent": 60 * time.Minute}
 
 	t.Run("stuck issue positive", func(t *testing.T) {
 		st := newDiagnoseStore(t)
 		seedDiagnoseIssue(t, st, 1, "status:developing", now.Add(-2*time.Hour))
-		findings, err := Analyze(st, "owner/repo", now)
+		findings, err := analyzeWithTimeouts(st, "owner/repo", now, agentTimeouts)
 		if err != nil {
 			t.Fatalf("Analyze: %v", err)
 		}
@@ -37,7 +38,7 @@ func TestAnalyze(t *testing.T) {
 		if err := st.InsertTask(store.TaskRecord{ID: "task-2", Repo: "owner/repo", IssueNum: 2, AgentName: "dev-agent", Status: store.TaskStatusRunning}); err != nil {
 			t.Fatalf("InsertTask: %v", err)
 		}
-		findings, err := Analyze(st, "owner/repo", now)
+		findings, err := analyzeWithTimeouts(st, "owner/repo", now, agentTimeouts)
 		if err != nil {
 			t.Fatalf("Analyze: %v", err)
 		}
@@ -50,7 +51,7 @@ func TestAnalyze(t *testing.T) {
 		if err := st.UpsertIssueDependencyState(store.IssueDependencyState{Repo: "owner/repo", IssueNum: 3, Verdict: store.DependencyVerdictReady}); err != nil {
 			t.Fatalf("UpsertIssueDependencyState: %v", err)
 		}
-		findings, err := Analyze(st, "owner/repo", now)
+		findings, err := analyzeWithTimeouts(st, "owner/repo", now, agentTimeouts)
 		if err != nil {
 			t.Fatalf("Analyze: %v", err)
 		}
@@ -63,7 +64,7 @@ func TestAnalyze(t *testing.T) {
 		if err := st.UpsertIssueDependencyState(store.IssueDependencyState{Repo: "owner/repo", IssueNum: 4, Verdict: store.DependencyVerdictBlocked}); err != nil {
 			t.Fatalf("UpsertIssueDependencyState: %v", err)
 		}
-		findings, err := Analyze(st, "owner/repo", now)
+		findings, err := analyzeWithTimeouts(st, "owner/repo", now, agentTimeouts)
 		if err != nil {
 			t.Fatalf("Analyze: %v", err)
 		}
@@ -75,10 +76,10 @@ func TestAnalyze(t *testing.T) {
 		if err := st.InsertTask(store.TaskRecord{ID: "task-5", Repo: "owner/repo", IssueNum: 5, AgentName: "dev-agent", Status: store.TaskStatusRunning}); err != nil {
 			t.Fatalf("InsertTask: %v", err)
 		}
-		if _, err := st.DB().Exec(`UPDATE task_queue SET updated_at = ? WHERE id = ?`, now.Add(-2*time.Hour).Format("2006-01-02 15:04:05"), "task-5"); err != nil {
+		if _, err := st.DB().Exec(`UPDATE task_queue SET updated_at = ? WHERE id = ?`, now.Add(-(2*time.Hour + time.Minute)).Format("2006-01-02 15:04:05"), "task-5"); err != nil {
 			t.Fatalf("update task: %v", err)
 		}
-		findings, err := Analyze(st, "owner/repo", now)
+		findings, err := analyzeWithTimeouts(st, "owner/repo", now, agentTimeouts)
 		if err != nil {
 			t.Fatalf("Analyze: %v", err)
 		}
@@ -93,7 +94,7 @@ func TestAnalyze(t *testing.T) {
 		if _, err := st.DB().Exec(`UPDATE task_queue SET updated_at = ? WHERE id = ?`, now.Format("2006-01-02 15:04:05"), "task-6"); err != nil {
 			t.Fatalf("update task: %v", err)
 		}
-		findings, err := Analyze(st, "owner/repo", now)
+		findings, err := analyzeWithTimeouts(st, "owner/repo", now, agentTimeouts)
 		if err != nil {
 			t.Fatalf("Analyze: %v", err)
 		}
@@ -107,7 +108,7 @@ func TestAnalyze(t *testing.T) {
 				t.Fatalf("InsertTask: %v", err)
 			}
 		}
-		findings, err := Analyze(st, "owner/repo", now)
+		findings, err := analyzeWithTimeouts(st, "owner/repo", now, agentTimeouts)
 		if err != nil {
 			t.Fatalf("Analyze: %v", err)
 		}
@@ -125,11 +126,26 @@ func TestAnalyze(t *testing.T) {
 		if err := st.InsertTask(store.TaskRecord{ID: "task-8c", Repo: "owner/repo", IssueNum: 8, AgentName: "dev-agent", Status: store.TaskStatusFailed}); err != nil {
 			t.Fatalf("InsertTask: %v", err)
 		}
-		findings, err := Analyze(st, "owner/repo", now)
+		findings, err := analyzeWithTimeouts(st, "owner/repo", now, agentTimeouts)
 		if err != nil {
 			t.Fatalf("Analyze: %v", err)
 		}
 		assertFinding(t, findings, KindRepeatedFailure, 8, false)
+	})
+
+	t.Run("orphaned task negative when agent timeout is longer", func(t *testing.T) {
+		st := newDiagnoseStore(t)
+		if err := st.InsertTask(store.TaskRecord{ID: "task-9", Repo: "owner/repo", IssueNum: 9, AgentName: "dev-agent", Status: store.TaskStatusRunning}); err != nil {
+			t.Fatalf("InsertTask: %v", err)
+		}
+		if _, err := st.DB().Exec(`UPDATE task_queue SET updated_at = ? WHERE id = ?`, now.Add(-3*time.Hour).Format("2006-01-02 15:04:05"), "task-9"); err != nil {
+			t.Fatalf("update task: %v", err)
+		}
+		findings, err := analyzeWithTimeouts(st, "owner/repo", now, map[string]time.Duration{"dev-agent": 2 * time.Hour})
+		if err != nil {
+			t.Fatalf("Analyze: %v", err)
+		}
+		assertFinding(t, findings, KindOrphanedTask, 9, false)
 	})
 }
 

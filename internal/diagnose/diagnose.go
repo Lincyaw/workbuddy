@@ -3,10 +3,13 @@ package diagnose
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
@@ -19,8 +22,9 @@ const (
 	KindOrphanedTask     = "orphaned_task"
 	KindRepeatedFailure  = "repeated_failure"
 
-	stuckThreshold    = time.Hour
-	orphanedThreshold = 60 * time.Minute
+	stuckThreshold       = time.Hour
+	defaultAgentTimeout  = 60 * time.Minute
+	defaultOrphanedAfter = 2 * defaultAgentTimeout
 )
 
 type Finding struct {
@@ -35,6 +39,14 @@ type Finding struct {
 }
 
 func Analyze(st *store.Store, repo string, now time.Time) ([]Finding, error) {
+	agentTimeouts, err := loadAgentTimeouts("")
+	if err != nil {
+		return nil, err
+	}
+	return analyzeWithTimeouts(st, repo, now, agentTimeouts)
+}
+
+func analyzeWithTimeouts(st *store.Store, repo string, now time.Time, agentTimeouts map[string]time.Duration) ([]Finding, error) {
 	caches, err := listIssueCaches(st, repo)
 	if err != nil {
 		return nil, err
@@ -64,11 +76,11 @@ func Analyze(st *store.Store, repo string, now time.Time) ([]Finding, error) {
 		}
 		active, err := st.HasAnyActiveTask(cache.Repo, cache.IssueNum)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("diagnose: active task lookup for %s#%d: %w", cache.Repo, cache.IssueNum, err)
 		}
 		depState, err := st.QueryIssueDependencyState(cache.Repo, cache.IssueNum)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("diagnose: dependency state lookup for %s#%d: %w", cache.Repo, cache.IssueNum, err)
 		}
 		lastEventAt, ok := latestEvent[issueKey(cache.Repo, cache.IssueNum)]
 		if ok && !active && now.Sub(lastEventAt) > stuckThreshold {
@@ -99,6 +111,7 @@ func Analyze(st *store.Store, repo string, now time.Time) ([]Finding, error) {
 		if repo != "" && task.Repo != repo {
 			continue
 		}
+		orphanedThreshold := orphanedThresholdForTask(task, agentTimeouts)
 		if task.Status == store.TaskStatusRunning && now.Sub(task.UpdatedAt) > orphanedThreshold {
 			findings = append(findings, Finding{
 				Kind:         KindOrphanedTask,
@@ -142,6 +155,64 @@ func Analyze(st *store.Store, repo string, now time.Time) ([]Finding, error) {
 		return findings[i].Kind < findings[j].Kind
 	})
 	return findings, nil
+}
+
+func loadAgentTimeouts(configDir string) (map[string]time.Duration, error) {
+	if strings.TrimSpace(configDir) == "" {
+		resolved, err := findConfigDir()
+		if err != nil {
+			return nil, err
+		}
+		configDir = resolved
+	}
+	if configDir == "" {
+		return map[string]time.Duration{}, nil
+	}
+	cfg, _, err := config.LoadConfig(configDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]time.Duration{}, nil
+		}
+		return nil, fmt.Errorf("diagnose: load config: %w", err)
+	}
+	timeouts := make(map[string]time.Duration, len(cfg.Agents))
+	for name, agent := range cfg.Agents {
+		if agent.Timeout > 0 {
+			timeouts[name] = agent.Timeout
+		}
+	}
+	return timeouts, nil
+}
+
+func findConfigDir() (string, error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("diagnose: getwd: %w", err)
+	}
+	dir := wd
+	for {
+		candidate := filepath.Join(dir, ".github", "workbuddy")
+		info, err := os.Stat(candidate)
+		if err == nil && info.IsDir() {
+			return candidate, nil
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return "", fmt.Errorf("diagnose: stat config dir: %w", err)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", nil
+		}
+		dir = parent
+	}
+}
+
+func orphanedThresholdForTask(task store.TaskRecord, agentTimeouts map[string]time.Duration) time.Duration {
+	timeout := defaultAgentTimeout
+	if d, ok := agentTimeouts[task.AgentName]; ok && d > 0 {
+		timeout = d
+	}
+	return 2 * timeout
 }
 
 func listIssueCaches(st *store.Store, repo string) ([]store.IssueCache, error) {

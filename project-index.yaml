@@ -1090,6 +1090,7 @@ requirements:
       - cmd/status.go
       - internal/audit/http.go
       - internal/store/store.go
+      - internal/store/types.go
     tests:
       - cmd/status_test.go
       - internal/store/store_test.go
@@ -1208,8 +1209,11 @@ requirements:
     code:
       - cmd/cache_invalidate.go
       - cmd/diagnose.go
+      - internal/config/loader.go
+      - internal/config/types.go
       - internal/diagnose/diagnose.go
       - internal/store/store.go
+      - internal/store/types.go
     tests:
       - cmd/cache_invalidate_test.go
       - cmd/diagnose_test.go

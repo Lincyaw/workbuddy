@@ -1,10 +1,10 @@
 package cmd
 
 import (
-	"errors"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -177,7 +177,7 @@ func TestRunStatusWithOpts_Integration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("runStatusWithOpts: %v", err)
 		}
-		var rows []statusTaskRow
+		var rows []store.TaskRecord
 		if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
 			t.Fatalf("unmarshal tasks json: %v", err)
 		}
@@ -186,6 +186,9 @@ func TestRunStatusWithOpts_Integration(t *testing.T) {
 		}
 		if rows[0].Repo != "owner/repo" {
 			t.Fatalf("repo filter not applied: %+v", rows[0])
+		}
+		if rows[0].Labels == "" {
+			t.Fatalf("expected task labels joined from issue_cache: %+v", rows[0])
 		}
 	})
 
@@ -206,6 +209,29 @@ func TestRunStatusWithOpts_Integration(t *testing.T) {
 			if !strings.Contains(got, want) {
 				t.Fatalf("events output missing %q:\n%s", want, got)
 			}
+		}
+	})
+
+	t.Run("events empty", func(t *testing.T) {
+		empty := newStatusTestStore(t)
+		mux := http.NewServeMux()
+		audit.NewHTTPHandler(empty).Register(mux)
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		client := &statusClient{baseURL: srv.URL, http: srv.Client()}
+		var out bytes.Buffer
+		err := runStatusWithOpts(context.Background(), &statusOpts{
+			repo:    "owner/repo",
+			events:  true,
+			baseURL: srv.URL,
+			now:     func() time.Time { return time.Now().UTC() },
+		}, client, &out)
+		if err != nil {
+			t.Fatalf("runStatusWithOpts: %v", err)
+		}
+		if strings.TrimSpace(out.String()) != "No events found." {
+			t.Fatalf("unexpected empty events output: %q", out.String())
 		}
 	})
 
