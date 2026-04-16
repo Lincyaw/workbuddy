@@ -68,7 +68,7 @@ func NewStore(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("store: create dir: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, fmt.Errorf("store: open db: %w", err)
 	}

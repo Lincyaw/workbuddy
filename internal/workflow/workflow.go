@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -240,6 +241,7 @@ func mustParseTime(raw string) time.Time {
 			return t
 		}
 	}
+	log.Printf("[workflow] warning: failed to parse timestamp %q", raw)
 	return time.Time{}
 }
 
