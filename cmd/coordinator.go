@@ -22,6 +22,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/dependency"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/metrics"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
@@ -385,6 +386,7 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", api.handleHealth)
+	metrics.NewHandler(st).Register(mux)
 	dashboardAPI := auditapi.NewHandler(st)
 	dashboardAPI.SetSessionsDir(filepath.Join(filepath.Dir(opts.dbPath), "sessions"))
 	dashboardAPI.RegisterDashboard(mux)

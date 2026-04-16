@@ -27,6 +27,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/labelcheck"
 	"github.com/Lincyaw/workbuddy/internal/launcher"
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
+	"github.com/Lincyaw/workbuddy/internal/metrics"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
@@ -555,6 +556,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	})
 
 	audit.NewHTTPHandler(st).Register(mux)
+	metrics.NewHandler(st).Register(mux)
 	dashboardAPI := auditapi.NewHandler(st)
 	dashboardAPI.SetSessionsDir(sessionsDir)
 	dashboardAPI.RegisterDashboard(mux)
@@ -965,6 +967,9 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	waitErr := waitEvents()
 	if waitErr != nil {
 		log.Printf("[worker] event capture failed: %v", waitErr)
+	}
+	if result != nil && result.TokenUsage != nil && deps.store != nil {
+		eventlog.NewEventLogger(deps.store).Log(eventlog.TypeTokenUsage, task.Repo, task.IssueNum, result.TokenUsage)
 	}
 	if result != nil && eventsPath != "" && waitErr == nil {
 		// Prefer the normalized Event Schema v1 artifact as the session's

@@ -627,6 +627,87 @@ func TestServe_HealthEndpoint(t *testing.T) {
 	}
 }
 
+func TestServe_MetricsEndpoint(t *testing.T) {
+	repo := "owner/test-repo"
+	configDir := setupTestConfigDir(t, repo)
+	dbPath := filepath.Join(t.TempDir(), "metrics.db")
+	port := getFreePort(t)
+
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := seedServeMetricsFixture(st, repo); err != nil {
+		_ = st.Close()
+		t.Fatalf("seedServeMetricsFixture: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close seed store: %v", err)
+	}
+
+	gh := &mockGHReader{}
+	mockRT := &mockRuntime{name: "claude-code"}
+	lnch := launcher.NewLauncher()
+	lnch.Register(mockRT)
+
+	opts := &serveOpts{
+		port:         port,
+		pollInterval: 5 * time.Second,
+		roles:        []string{"dev"},
+		configDir:    configDir,
+		dbPath:       dbPath,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runServeWithOpts(opts, gh, lnch, ctx)
+	}()
+	waitForHealth(t, port)
+
+	resp, err := http.Get(fmt.Sprintf("http://localhost:%d/metrics", port))
+	if err != nil {
+		cancel()
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body=%s", resp.StatusCode, body)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "text/plain; version=0.0.4" {
+		t.Fatalf("content type = %q, want %q", got, "text/plain; version=0.0.4")
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	if !strings.Contains(string(body), `workbuddy_events_total{repo="owner/test-repo",type="dispatch"}`) {
+		t.Fatalf("missing dispatch metric: %s", body)
+	}
+	if !strings.Contains(string(body), `workbuddy_tokens_total{kind="input",repo="owner/test-repo"} 42`) {
+		t.Fatalf("missing token metric: %s", body)
+	}
+	if !strings.Contains(string(body), `workbuddy_tasks_active{repo="owner/test-repo"`) {
+		t.Fatalf("missing tasks_active metric: %s", body)
+	}
+	if !strings.Contains(string(body), `workbuddy_workers_total{repo="owner/test-repo"`) {
+		t.Fatalf("missing workers metric: %s", body)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("serve returned error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve did not exit")
+	}
+}
+
 func TestServe_AuditEndpoints(t *testing.T) {
 	repo := "owner/test-repo"
 	configDir := setupTestConfigDir(t, repo)
@@ -918,6 +999,41 @@ func seedServeAuditFixture(st *store.Store, repo string) (string, error) {
 		return "", err
 	}
 	return rawPath, nil
+}
+
+func seedServeMetricsFixture(st *store.Store, repo string) error {
+	logger := eventlog.NewEventLogger(st)
+	logger.Log(eventlog.TypeDispatch, repo, 10, map[string]any{"agent": "dev-agent"})
+	logger.Log(eventlog.TypeCompleted, repo, 10, map[string]any{"agent": "dev-agent"})
+	logger.Log(eventlog.TypeTokenUsage, repo, 10, map[string]any{
+		"input":  42,
+		"output": 4,
+		"cached": 0,
+		"total":  46,
+	})
+	if err := st.InsertWorker(store.WorkerRecord{
+		ID:       "metric-worker",
+		Repo:     repo,
+		Roles:    `["dev"]`,
+		Hostname: "metric-host",
+		Status:   "online",
+	}); err != nil {
+		return err
+	}
+	if err := st.InsertTask(store.TaskRecord{
+		ID:        "task-running-metrics",
+		Repo:      repo,
+		IssueNum:  10,
+		Status:    store.TaskStatusRunning,
+		AgentName: "dev-agent",
+	}); err != nil {
+		return err
+	}
+	if _, err := st.IncrementTransition(repo, 10, "developing", "reviewing"); err != nil {
+		return err
+	}
+	_, err := st.IncrementTransition(repo, 10, "developing", "reviewing")
+	return err
 }
 
 // TestRunningTasks_RegisterCancelRemove verifies the RunningTasks registry.

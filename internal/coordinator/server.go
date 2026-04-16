@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/metrics"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
@@ -45,6 +46,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/health", s.handleHealth)
+	metrics.NewHandler(s.store).Register(s.mux)
 	s.mux.Handle("/api/v1/tasks/poll", s.requireWorkerAuth(http.HandlerFunc(s.handleTaskPoll)))
 	s.mux.Handle("/api/v1/tasks/", s.requireWorkerAuth(http.HandlerFunc(s.handleTaskMutation)))
 }
