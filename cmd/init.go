@@ -100,7 +100,11 @@ func initDirs() []string {
 
 func initFiles(repo string) ([]scaffoldFile, error) {
 	configBuf := bytes.Buffer{}
-	if err := template.Must(template.New("config").Parse(initConfigTemplate)).Execute(&configBuf, struct {
+	tmpl, err := template.New("config").Parse(initConfigTemplate)
+	if err != nil {
+		return nil, fmt.Errorf("init: parse config.yaml template: %w", err)
+	}
+	if err := tmpl.Execute(&configBuf, struct {
 		Repo string
 	}{Repo: repo}); err != nil {
 		return nil, fmt.Errorf("init: render config.yaml: %w", err)
