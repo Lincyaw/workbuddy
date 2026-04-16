@@ -13,6 +13,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/store"
+	"github.com/Lincyaw/workbuddy/internal/workflow"
 )
 
 // fakeRecorder collects events for assertions.
@@ -145,6 +146,17 @@ func TestNormalTransition(t *testing.T) {
 		}
 	default:
 		t.Error("expected dispatch request, got none")
+	}
+
+	instances, err := workflow.NewManager(sm.store.DB()).QueryByRepoIssue("test/repo", 1)
+	if err != nil {
+		t.Fatalf("workflow query: %v", err)
+	}
+	if len(instances) != 1 {
+		t.Fatalf("expected 1 workflow instance, got %d", len(instances))
+	}
+	if instances[0].CurrentState != "reviewing" {
+		t.Fatalf("expected current state reviewing, got %q", instances[0].CurrentState)
 	}
 }
 

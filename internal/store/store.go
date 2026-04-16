@@ -68,7 +68,7 @@ func NewStore(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("store: create dir: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, fmt.Errorf("store: open db: %w", err)
 	}
@@ -148,6 +148,27 @@ func (s *Store) createTables() error {
 			count INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (repo, issue_num, from_state, to_state)
 		)`,
+		`CREATE TABLE IF NOT EXISTS workflow_instances (
+			id TEXT PRIMARY KEY,
+			workflow_name TEXT NOT NULL,
+			repo TEXT NOT NULL,
+			issue_num INTEGER NOT NULL,
+			current_state TEXT NOT NULL DEFAULT '',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE (repo, issue_num, workflow_name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS workflow_transitions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			workflow_instance_id TEXT NOT NULL,
+			from_state TEXT NOT NULL,
+			to_state TEXT NOT NULL,
+			trigger_agent TEXT NOT NULL DEFAULT '',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (workflow_instance_id) REFERENCES workflow_instances(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_workflow_instances_repo_issue ON workflow_instances(repo, issue_num)`,
+		`CREATE INDEX IF NOT EXISTS idx_workflow_transitions_instance ON workflow_transitions(workflow_instance_id)`,
 		`CREATE TABLE IF NOT EXISTS issue_cache (
 			repo TEXT NOT NULL,
 			issue_num INTEGER NOT NULL,

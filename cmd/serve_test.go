@@ -431,14 +431,23 @@ func newWorkerTestTask(t *testing.T, st *store.Store, repo string, issueNum int,
 func taskStatusesByID(t *testing.T, st *store.Store) map[string]string {
 	t.Helper()
 
-	tasks, err := st.QueryTasks("")
+	activeTasks, err := st.QueryTasks("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	statuses := make(map[string]string, len(tasks))
-	for _, task := range tasks {
+	statuses := make(map[string]string, len(activeTasks))
+	for _, task := range activeTasks {
 		statuses[task.ID] = task.Status
 	}
+
+	completedTasks, err := st.QueryTasks(store.TaskStatusCompleted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range completedTasks {
+		statuses[task.ID] = task.Status
+	}
+
 	return statuses
 }
 
