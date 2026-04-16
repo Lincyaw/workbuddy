@@ -1,6 +1,9 @@
 package cmd
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestParseCoordinatorFlagsRejectsNonLoopbackBypass(t *testing.T) {
 	cmd := coordinatorCmd
@@ -45,5 +48,37 @@ func TestParseCoordinatorFlagsAllowsLoopbackBypass(t *testing.T) {
 				t.Fatal("expected loopbackOnly to be true")
 			}
 		})
+	}
+}
+
+func TestParseCoordinatorFlagsReadsNewOptions(t *testing.T) {
+	cmd := coordinatorCmd
+	cmd.Flags().Set("listen", "127.0.0.1:8081")
+	cmd.Flags().Set("config-dir", " .github/workbuddy/ ")
+	cmd.Flags().Set("port", "8123")
+	cmd.Flags().Set("poll-interval", "42s")
+	cmd.Flags().Set("auth", "true")
+	t.Cleanup(func() {
+		cmd.Flags().Set("config-dir", ".github/workbuddy")
+		cmd.Flags().Set("port", "0")
+		cmd.Flags().Set("poll-interval", "0s")
+		cmd.Flags().Set("auth", "false")
+	})
+
+	opts, err := parseCoordinatorFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseCoordinatorFlags: %v", err)
+	}
+	if got, want := opts.configDir, ".github/workbuddy/"; got != want {
+		t.Fatalf("configDir = %q, want %q", got, want)
+	}
+	if got, want := opts.port, 8123; got != want {
+		t.Fatalf("port = %d, want %d", got, want)
+	}
+	if got, want := opts.pollInterval, 42*time.Second; got != want {
+		t.Fatalf("pollInterval = %s, want %s", got, want)
+	}
+	if !opts.auth {
+		t.Fatal("expected auth to be true")
 	}
 }
