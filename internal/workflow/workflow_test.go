@@ -1,59 +1,36 @@
 package workflow
 
 import (
-	"database/sql"
+	"path/filepath"
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
-func newInMemoryManager(t *testing.T) *Manager {
+func newTestManager(t *testing.T) *Manager {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file::memory:?cache=shared")
+	st, err := store.NewStore(filepath.Join(t.TempDir(), "workbuddy.db"))
 	if err != nil {
-		t.Fatalf("sqlite.Open: %v", err)
+		t.Fatalf("NewStore: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS workflow_instances (
-			id TEXT PRIMARY KEY,
-			workflow_name TEXT NOT NULL,
-			repo TEXT NOT NULL,
-			issue_num INTEGER NOT NULL,
-			current_state TEXT NOT NULL DEFAULT '',
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			UNIQUE (repo, issue_num, workflow_name)
-		)`)
-	if err != nil {
-		t.Fatalf("initialize sqlite schema: %v", err)
-	}
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS workflow_transitions (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			workflow_instance_id TEXT NOT NULL,
-			from_state TEXT NOT NULL,
-			to_state TEXT NOT NULL,
-			trigger_agent TEXT NOT NULL DEFAULT '',
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (workflow_instance_id) REFERENCES workflow_instances(id) ON DELETE CASCADE
-		)`)
-	if err != nil {
-		t.Fatalf("initialize sqlite schema: %v", err)
-	}
-	return NewManager(db)
+	t.Cleanup(func() { _ = st.Close() })
+	return NewManager(st.DB())
 }
 
 func TestCreateWorkflowInstance(t *testing.T) {
-	manager := newInMemoryManager(t)
-	inst, err := manager.CreateIfMissing("owner/repo", 42, "default", "developing")
-	if err != nil {
+	manager := newTestManager(t)
+	if err := manager.CreateIfMissing("owner/repo", 42, "default", "developing"); err != nil {
 		t.Fatalf("CreateIfMissing: %v", err)
 	}
-	if inst == nil {
-		t.Fatal("expected instance")
+	instances, err := manager.QueryByRepoIssue("owner/repo", 42)
+	if err != nil {
+		t.Fatalf("QueryByRepoIssue: %v", err)
 	}
+	if len(instances) != 1 {
+		t.Fatalf("expected 1 instance, got %d", len(instances))
+	}
+	inst := instances[0]
 	if inst.Repo != "owner/repo" || inst.IssueNum != 42 || inst.WorkflowName != "default" || inst.CurrentState != "developing" {
 		t.Fatalf("instance mismatch: %+v", inst)
 	}
@@ -66,14 +43,21 @@ func TestCreateWorkflowInstance(t *testing.T) {
 }
 
 func TestAdvanceState(t *testing.T) {
-	manager := newInMemoryManager(t)
-	if _, err := manager.CreateIfMissing("owner/repo", 7, "default", "developing"); err != nil {
+	manager := newTestManager(t)
+	if err := manager.CreateIfMissing("owner/repo", 7, "default", "developing"); err != nil {
 		t.Fatalf("CreateIfMissing: %v", err)
 	}
-	inst, err := manager.Advance("owner/repo", 7, "default", "developing", "reviewing", "dev-agent")
-	if err != nil {
+	if err := manager.Advance("owner/repo", 7, "default", "developing", "reviewing", "dev-agent"); err != nil {
 		t.Fatalf("Advance: %v", err)
 	}
+	instances, err := manager.QueryByRepoIssue("owner/repo", 7)
+	if err != nil {
+		t.Fatalf("QueryByRepoIssue: %v", err)
+	}
+	if len(instances) != 1 {
+		t.Fatalf("expected 1 instance, got %d", len(instances))
+	}
+	inst := instances[0]
 	if inst.CurrentState != "reviewing" {
 		t.Fatalf("expected current_state=reviewing, got %q", inst.CurrentState)
 	}
@@ -86,20 +70,20 @@ func TestAdvanceState(t *testing.T) {
 }
 
 func TestHistoryOrderingAndAllTransitions(t *testing.T) {
-	manager := newInMemoryManager(t)
-	if _, err := manager.CreateIfMissing("owner/repo", 100, "default", "developing"); err != nil {
+	manager := newTestManager(t)
+	if err := manager.CreateIfMissing("owner/repo", 100, "default", "developing"); err != nil {
 		t.Fatalf("CreateIfMissing: %v", err)
 	}
 
-	if _, err := manager.Advance("owner/repo", 100, "default", "developing", "reviewing", "dev-agent"); err != nil {
+	if err := manager.Advance("owner/repo", 100, "default", "developing", "reviewing", "dev-agent"); err != nil {
 		t.Fatalf("advance1: %v", err)
 	}
 	time.Sleep(5 * time.Millisecond)
-	if _, err := manager.Advance("owner/repo", 100, "default", "reviewing", "testing", "review-agent"); err != nil {
+	if err := manager.Advance("owner/repo", 100, "default", "reviewing", "testing", "review-agent"); err != nil {
 		t.Fatalf("advance2: %v", err)
 	}
 	time.Sleep(5 * time.Millisecond)
-	if _, err := manager.Advance("owner/repo", 100, "default", "testing", "done", "release-agent"); err != nil {
+	if err := manager.Advance("owner/repo", 100, "default", "testing", "done", "release-agent"); err != nil {
 		t.Fatalf("advance3: %v", err)
 	}
 

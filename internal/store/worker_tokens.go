@@ -122,9 +122,9 @@ func (s *Store) ListWorkerTokens(repo string) ([]WorkerTokenRecord, error) {
 		if err := rows.Scan(&rec.WorkerID, &rec.Repo, &rec.Roles, &rec.Hostname, &rec.Status, &rec.KID, &revokedRaw, &regRaw); err != nil {
 			return nil, fmt.Errorf("store: scan worker token: %w", err)
 		}
-		rec.RegisteredAt, _ = parseTimestamp(regRaw, "worker.registered_at")
+		rec.RegisteredAt, _ = ParseTimestamp(regRaw, "worker.registered_at")
 		if revokedRaw.Valid {
-			if ts, ok := parseTimestamp(revokedRaw.String, "worker.token_revoked_at"); ok {
+			if ts, ok := ParseTimestamp(revokedRaw.String, "worker.token_revoked_at"); ok {
 				rec.RevokedAt = &ts
 			}
 		}

@@ -58,6 +58,24 @@ type dispatchGroup struct {
 	failedAgents     map[string]struct{}
 }
 
+func newDispatchGroup(wf, state, join string, agents []string) *dispatchGroup {
+	g := &dispatchGroup{
+		workflow:         wf,
+		state:            state,
+		join:             join,
+		agents:           make(map[string]struct{}, len(agents)),
+		dispatchedAgents: make(map[string]struct{}, len(agents)),
+		completedTaskIDs: make(map[string]struct{}),
+		completedAgents:  make(map[string]struct{}),
+		successAgents:    make(map[string]struct{}),
+		failedAgents:     make(map[string]struct{}),
+	}
+	for _, a := range agents {
+		g.agents[a] = struct{}{}
+	}
+	return g
+}
+
 // StateMachine evaluates Poller events against workflow definitions,
 // manages transitions, detects cycles, and dispatches agent tasks.
 type StateMachine struct {
@@ -297,7 +315,7 @@ func (sm *StateMachine) evaluateTransitions(ctx context.Context, wf *config.Work
 
 		// Persist the workflow state transition.
 		if sm.workflowManager != nil {
-			if _, err := sm.workflowManager.Advance(event.Repo, event.IssueNum, wf.Name, currentStateName, targetStateName, currentState.Agent); err != nil {
+			if err := sm.workflowManager.Advance(event.Repo, event.IssueNum, wf.Name, currentStateName, targetStateName, currentState.Agent); err != nil {
 				return false, fmt.Errorf("statemachine: persist workflow transition: %w", err)
 			}
 		}
@@ -324,29 +342,40 @@ func (sm *StateMachine) ensureWorkflowInstance(workflowName, repo string, issueN
 	if sm.workflowManager == nil {
 		return nil
 	}
-	_, err := sm.workflowManager.CreateIfMissing(repo, issueNum, workflowName, currentState)
-	return err
+	return sm.workflowManager.CreateIfMissing(repo, issueNum, workflowName, currentState)
 }
 
 // DispatchAgent sends a dispatch request for the given agent, respecting in-flight group locking.
 func (sm *StateMachine) DispatchAgent(ctx context.Context, repo string, issueNum int, agentName, workflow, state string) error {
+	if blocked, err := sm.isBlockedByDependency(repo, issueNum, agentName); err != nil {
+		return err
+	} else if blocked {
+		return nil
+	}
 	return sm.dispatchSingleAgent(ctx, repo, issueNum, agentName, workflow, state)
 }
 
-func (sm *StateMachine) dispatchSingleAgent(ctx context.Context, repo string, issueNum int, agentName, workflow, state string) error {
-	issueKey := sm.issueKey(repo, issueNum)
-
+// isBlockedByDependency checks if the issue is blocked by a dependency.
+// Returns true if blocked (and logs the event), false if ready.
+func (sm *StateMachine) isBlockedByDependency(repo string, issueNum int, agentForLog string) (bool, error) {
 	depState, err := sm.store.QueryIssueDependencyState(repo, issueNum)
 	if err != nil {
-		return fmt.Errorf("statemachine: query dependency state: %w", err)
+		return false, fmt.Errorf("statemachine: query dependency state: %w", err)
 	}
 	if depState != nil && (depState.Verdict == store.DependencyVerdictBlocked || depState.Verdict == store.DependencyVerdictNeedsHuman) {
 		sm.eventlog.Log(eventlog.TypeDispatchBlockedByDependency, repo, issueNum, map[string]string{
 			"verdict": depState.Verdict,
-			"agent":   agentName,
+			"agent":   agentForLog,
 		})
-		return nil
+		return true, nil
 	}
+	return false, nil
+}
+
+// dispatchSingleAgent sends a dispatch request for one agent.
+// Caller must have already checked dependency state.
+func (sm *StateMachine) dispatchSingleAgent(ctx context.Context, repo string, issueNum int, agentName, workflow, state string) error {
+	issueKey := sm.issueKey(repo, issueNum)
 
 	sm.inflightMu.Lock()
 	if existing, ok := sm.inflight[issueKey]; ok {
@@ -360,27 +389,16 @@ func (sm *StateMachine) dispatchSingleAgent(ctx context.Context, repo string, is
 		if _, dispatched := existing.dispatchedAgents[agentName]; dispatched {
 			sm.inflightMu.Unlock()
 			sm.eventlog.Log(eventlog.TypeDispatchSkippedInflight, repo, issueNum,
-				map[string]string{"agent": agentName, "reason": "agent already running", "state": state, "workflow": workflow})
+				map[string]string{"agent": agentName, "reason": "agent already dispatched", "state": state, "workflow": workflow})
 			return nil
 		}
 		existing.dispatchedAgents[agentName] = struct{}{}
 	} else {
 		// Create a single-agent inflight group to prevent duplicate dispatches.
-		sm.inflight[issueKey] = &dispatchGroup{
-			workflow:         workflow,
-			state:            state,
-			join:             defaultJoinStrategy,
-			agents:           map[string]struct{}{agentName: {}},
-			dispatchedAgents: map[string]struct{}{agentName: {}},
-			completedTaskIDs: make(map[string]struct{}),
-			completedAgents:  make(map[string]struct{}),
-			successAgents:    make(map[string]struct{}),
-			failedAgents:     make(map[string]struct{}),
-		}
+		sm.inflight[issueKey] = newDispatchGroup(workflow, state, defaultJoinStrategy, []string{agentName})
 	}
 	sm.inflightMu.Unlock()
 
-	// log dispatch in workflow history.
 	sm.eventlog.Log(eventlog.TypeDispatch, repo, issueNum, map[string]any{
 		"agent_name": agentName,
 		"workflow":   workflow,
@@ -397,80 +415,67 @@ func (sm *StateMachine) dispatchSingleAgent(ctx context.Context, repo string, is
 	select {
 	case sm.dispatch <- req:
 	case <-ctx.Done():
+		// Context cancelled before dispatch sent. Remove this agent from
+		// the group. If no agents were successfully dispatched, clean up
+		// the entire group.
+		sm.inflightMu.Lock()
+		if g, ok := sm.inflight[issueKey]; ok {
+			delete(g.dispatchedAgents, agentName)
+			if len(g.dispatchedAgents) == 0 {
+				delete(sm.inflight, issueKey)
+			}
+		}
+		sm.inflightMu.Unlock()
 		return ctx.Err()
 	}
 	return nil
 }
 
-func (sm *StateMachine) dispatchStateAgents(ctx context.Context, repo string, issueNum int, workflow, state string, stateDef *config.State) error {
+func (sm *StateMachine) dispatchStateAgents(ctx context.Context, repo string, issueNum int, wfName, state string, stateDef *config.State) error {
 	agents := sm.stateAgents(stateDef)
 	if len(agents) == 0 {
 		return nil
 	}
 
-	depState, err := sm.store.QueryIssueDependencyState(repo, issueNum)
-	if err != nil {
-		return fmt.Errorf("statemachine: query dependency state: %w", err)
-	}
-	if depState != nil && (depState.Verdict == store.DependencyVerdictBlocked || depState.Verdict == store.DependencyVerdictNeedsHuman) {
-		sm.eventlog.Log(eventlog.TypeDispatchBlockedByDependency, repo, issueNum, map[string]string{
-			"verdict": depState.Verdict,
-			"agent":   agents[0],
-		})
+	// Check dependency once for all agents in this state.
+	if blocked, err := sm.isBlockedByDependency(repo, issueNum, agents[0]); err != nil {
+		return err
+	} else if blocked {
 		return nil
 	}
 
 	issueKey := sm.issueKey(repo, issueNum)
-	join := strings.TrimSpace(stateDef.Join)
+	join := stateDef.Join // already normalized by config loader
 	if join == "" {
 		join = defaultJoinStrategy
 	}
 
-	group := &dispatchGroup{
-		workflow:         workflow,
-		state:            state,
-		join:             join,
-		agents:           make(map[string]struct{}, len(agents)),
-		dispatchedAgents: make(map[string]struct{}, len(agents)),
-		completedTaskIDs: make(map[string]struct{}),
-		completedAgents:  make(map[string]struct{}),
-		successAgents:    make(map[string]struct{}),
-		failedAgents:     make(map[string]struct{}),
-	}
-	for _, a := range agents {
-		group.agents[a] = struct{}{}
-	}
+	group := newDispatchGroup(wfName, state, join, agents)
 
 	sm.inflightMu.Lock()
 	if existing, ok := sm.inflight[issueKey]; ok {
-		if existing.workflow != workflow || existing.state != state {
-			sm.inflightMu.Unlock()
-			sm.eventlog.Log(eventlog.TypeDispatchSkippedInflight, repo, issueNum,
-				map[string]string{"state": state, "reason": "agent already running", "workflow": workflow})
-			return nil
+		reason := "same state group already inflight"
+		if existing.workflow != wfName || existing.state != state {
+			reason = "different state/workflow already running"
 		}
 		sm.inflightMu.Unlock()
 		sm.eventlog.Log(eventlog.TypeDispatchSkippedInflight, repo, issueNum,
-			map[string]string{"state": state, "reason": "agent already running", "workflow": workflow})
+			map[string]string{"state": state, "reason": reason, "workflow": wfName})
 		return nil
-	} else {
-		sm.inflight[issueKey] = group
-		sm.inflightMu.Unlock()
 	}
+	sm.inflight[issueKey] = group
+	sm.inflightMu.Unlock()
 
-	dispatchErr := error(nil)
 	for _, agent := range agents {
-		if err := sm.dispatchSingleAgent(ctx, repo, issueNum, agent, workflow, state); err != nil {
-			dispatchErr = err
-			break
+		if err := sm.dispatchSingleAgent(ctx, repo, issueNum, agent, wfName, state); err != nil {
+			// Don't remove the inflight group — agents already dispatched before
+			// this failure are still running and need tracking. Log the error
+			// and let those agents complete normally.
+			log.Printf("[statemachine] partial dispatch failure for %s (agent %s): %v", issueKey, agent, err)
+			return err
 		}
 	}
-	if dispatchErr != nil {
-		sm.inflightMu.Lock()
-		delete(sm.inflight, issueKey)
-		sm.inflightMu.Unlock()
-	}
-	return dispatchErr
+	return nil
 }
 
 // findCurrentState returns the state name and State whose enter_label matches
@@ -554,10 +559,8 @@ func (sm *StateMachine) MarkAgentCompleted(repo string, issueNum int, taskID, ag
 		}
 	}
 
-	join := strings.TrimSpace(group.join)
-	if join == "" {
-		join = defaultJoinStrategy
-	}
+	// group.join is guaranteed normalized by dispatchStateAgents / newDispatchGroup.
+	join := group.join
 
 	shouldAdvance := false
 	passed := false
@@ -601,16 +604,14 @@ func (sm *StateMachine) MarkAgentCompleted(repo string, issueNum int, taskID, ag
 	sm.logCompletionEvent(repo, issueNum, taskID, agentName, exitCode)
 
 	if shouldAdvance {
-		if !passed {
-			sm.eventlog.Log(eventlog.TypeTransitionToFailed, repo, issueNum,
-				map[string]interface{}{"state": group.state, "issue": issueNum, "join": join})
-		}
 		if passed {
 			// Evaluate the next transition only when this group is complete.
 			if transitioned := sm.evaluateCompletionTransitions(context.Background(), repo, issueNum, group.workflow, group.state, currentLabels); !transitioned {
 				sm.recordStuckCandidate(issueKey, currentLabels)
 			}
 		} else {
+			sm.eventlog.Log(eventlog.TypeTransitionToFailed, repo, issueNum,
+				map[string]any{"state": group.state, "issue": issueNum, "join": join})
 			sm.recordStuckCandidate(issueKey, currentLabels)
 		}
 	}

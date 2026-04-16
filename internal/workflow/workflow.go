@@ -5,8 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"time"
+
+	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
 // StateTransition represents one transition in a workflow instance.
@@ -32,13 +33,6 @@ type WorkflowInstance struct {
 // ErrWorkflowInstanceNotFound is returned when requested instance rows do not exist.
 var ErrWorkflowInstanceNotFound = errors.New("workflow instance not found")
 
-var timeLayouts = []string{
-	"2006-01-02 15:04:05",
-	time.RFC3339,
-	"2006-01-02T15:04:05",
-	"2006-01-02T15:04:05Z",
-}
-
 // Manager provides CRUD operations for workflow instances and transitions.
 type Manager struct {
 	db *sql.DB
@@ -53,14 +47,11 @@ func NewManager(db *sql.DB) *Manager {
 // Existing state is preserved if the record already exists.
 func (m *Manager) CreateIfMissing(
 	repo string, issueNum int, workflowName, currentState string,
-) (*WorkflowInstance, error) {
+) error {
 	if m == nil || m.db == nil {
-		return nil, errors.New("workflow manager not initialized")
+		return errors.New("workflow manager not initialized")
 	}
 	id := makeInstanceID(repo, issueNum, workflowName)
-	if currentState == "" {
-		currentState = ""
-	}
 
 	_, err := m.db.Exec(
 		`INSERT INTO workflow_instances (id, workflow_name, repo, issue_num, current_state)
@@ -68,36 +59,34 @@ func (m *Manager) CreateIfMissing(
 		id, workflowName, repo, issueNum, currentState,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("create workflow instance: %w", err)
+		return fmt.Errorf("create workflow instance: %w", err)
 	}
-	return m.getByID(id)
+	return nil
 }
 
 // Advance writes a new transition and updates CurrentState atomically.
-func (m *Manager) Advance(repo string, issueNum int, workflowName, fromState, toState, triggerAgent string) (*WorkflowInstance, error) {
+func (m *Manager) Advance(repo string, issueNum int, workflowName, fromState, toState, triggerAgent string) error {
 	if m == nil || m.db == nil {
-		return nil, errors.New("workflow manager not initialized")
+		return errors.New("workflow manager not initialized")
 	}
 	id := makeInstanceID(repo, issueNum, workflowName)
 
 	tx, err := m.db.Begin()
 	if err != nil {
-		return nil, fmt.Errorf("begin advance tx: %w", err)
+		return fmt.Errorf("begin advance tx: %w", err)
 	}
 	defer func() {
 		_ = tx.Rollback()
 	}()
 
 	now := time.Now().UTC()
-	res, err := tx.Exec(
+	if _, err := tx.Exec(
 		`INSERT INTO workflow_transitions (workflow_instance_id, from_state, to_state, trigger_agent, created_at)
 		 VALUES (?, ?, ?, ?, ?)`,
 		id, fromState, toState, triggerAgent, now.Format(time.RFC3339),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("insert transition: %w", err)
+	); err != nil {
+		return fmt.Errorf("insert transition: %w", err)
 	}
-	_ = res
 
 	result, err := tx.Exec(
 		`UPDATE workflow_instances
@@ -106,20 +95,20 @@ func (m *Manager) Advance(repo string, issueNum int, workflowName, fromState, to
 		toState, now.Format(time.RFC3339), id,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("update workflow instance state: %w", err)
+		return fmt.Errorf("update workflow instance state: %w", err)
 	}
 	rows, err := result.RowsAffected()
 	if err != nil {
-		return nil, fmt.Errorf("rows affected: %w", err)
+		return fmt.Errorf("rows affected: %w", err)
 	}
 	if rows == 0 {
-		return nil, ErrWorkflowInstanceNotFound
+		return ErrWorkflowInstanceNotFound
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit advance tx: %w", err)
+		return fmt.Errorf("commit advance tx: %w", err)
 	}
-	return m.getByID(id)
+	return nil
 }
 
 // QueryByRepoIssue returns all workflow instances for one issue with history.
@@ -149,8 +138,8 @@ func (m *Manager) QueryByRepoIssue(repo string, issueNum int) ([]WorkflowInstanc
 		); err != nil {
 			return nil, fmt.Errorf("scan workflow instance: %w", err)
 		}
-		inst.CreatedAt = mustParseTime(createdAtStr)
-		inst.UpdatedAt = mustParseTime(updatedAtStr)
+		inst.CreatedAt, _ = store.ParseTimestamp(createdAtStr, "workflow.created_at")
+		inst.UpdatedAt, _ = store.ParseTimestamp(updatedAtStr, "workflow.updated_at")
 		inst.History, err = m.queryHistory(inst.ID)
 		if err != nil {
 			return nil, err
@@ -165,10 +154,6 @@ func (m *Manager) QueryByRepoIssue(repo string, issueNum int) ([]WorkflowInstanc
 
 // GetByID loads one WorkflowInstance and its transitions by ID.
 func (m *Manager) GetByID(id string) (*WorkflowInstance, error) {
-	return m.getByID(id)
-}
-
-func (m *Manager) getByID(id string) (*WorkflowInstance, error) {
 	if m == nil || m.db == nil {
 		return nil, errors.New("workflow manager not initialized")
 	}
@@ -212,7 +197,7 @@ func (m *Manager) queryHistory(instanceID string) ([]StateTransition, error) {
 		if err := rows.Scan(&tr.From, &tr.To, &tr.TriggerAgent, &ts); err != nil {
 			return nil, fmt.Errorf("scan workflow transition: %w", err)
 		}
-		tr.Timestamp = mustParseTime(ts)
+		tr.Timestamp, _ = store.ParseTimestamp(ts, "workflow_transition.created_at")
 		history = append(history, tr)
 	}
 	if err := rows.Err(); err != nil {
@@ -230,19 +215,9 @@ func scanInstance(scan func(dest ...any) error) (*WorkflowInstance, error) {
 	); err != nil {
 		return nil, err
 	}
-	record.CreatedAt = mustParseTime(createdAtStr)
-	record.UpdatedAt = mustParseTime(updatedAtStr)
+	record.CreatedAt, _ = store.ParseTimestamp(createdAtStr, "workflow.created_at")
+	record.UpdatedAt, _ = store.ParseTimestamp(updatedAtStr, "workflow.updated_at")
 	return record, nil
-}
-
-func mustParseTime(raw string) time.Time {
-	for _, layout := range timeLayouts {
-		if t, err := time.Parse(layout, raw); err == nil {
-			return t
-		}
-	}
-	log.Printf("[workflow] warning: failed to parse timestamp %q", raw)
-	return time.Time{}
 }
 
 func makeInstanceID(repo string, issueNum int, workflowName string) string {

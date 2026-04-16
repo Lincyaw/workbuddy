@@ -14,10 +14,10 @@ import (
 	_ "modernc.org/sqlite" // sqlite driver
 )
 
-// parseTimestamp attempts to parse a SQLite timestamp string using common formats.
+// ParseTimestamp attempts to parse a SQLite timestamp string using common formats.
 // Returns the parsed time and true on success, or zero time and false on failure
 // (with a warning logged including the field name for debugging).
-func parseTimestamp(raw, fieldName string) (time.Time, bool) {
+func ParseTimestamp(raw, fieldName string) (time.Time, bool) {
 	// SQLite CURRENT_TIMESTAMP may return different formats depending on driver.
 	for _, layout := range []string{
 		"2006-01-02 15:04:05",
@@ -346,7 +346,7 @@ func (s *Store) QueryEvents(repo string) ([]Event, error) {
 		if err := rows.Scan(&ev.ID, &ts, &ev.Type, &ev.Repo, &ev.IssueNum, &ev.Payload); err != nil {
 			return nil, fmt.Errorf("store: scan event: %w", err)
 		}
-		ev.TS, _ = parseTimestamp(ts, "event.ts")
+		ev.TS, _ = ParseTimestamp(ts, "event.ts")
 		out = append(out, ev)
 	}
 	return out, rows.Err()
@@ -402,19 +402,19 @@ func scanTaskRecord(scan func(dest ...any) error) (TaskRecord, error) {
 	if labels.Valid {
 		t.Labels = labels.String
 	}
-	t.CreatedAt, _ = parseTimestamp(createdAt, "task.created_at")
-	t.UpdatedAt, _ = parseTimestamp(updatedAt, "task.updated_at")
+	t.CreatedAt, _ = ParseTimestamp(createdAt, "task.created_at")
+	t.UpdatedAt, _ = ParseTimestamp(updatedAt, "task.updated_at")
 	if leaseExpiresAt.Valid {
-		t.LeaseExpiresAt, _ = parseTimestamp(leaseExpiresAt.String, "task.lease_expires_at")
+		t.LeaseExpiresAt, _ = ParseTimestamp(leaseExpiresAt.String, "task.lease_expires_at")
 	}
 	if ackedAt.Valid {
-		t.AckedAt, _ = parseTimestamp(ackedAt.String, "task.acked_at")
+		t.AckedAt, _ = ParseTimestamp(ackedAt.String, "task.acked_at")
 	}
 	if heartbeatAt.Valid {
-		t.HeartbeatAt, _ = parseTimestamp(heartbeatAt.String, "task.heartbeat_at")
+		t.HeartbeatAt, _ = ParseTimestamp(heartbeatAt.String, "task.heartbeat_at")
 	}
 	if completedAt.Valid {
-		t.CompletedAt, _ = parseTimestamp(completedAt.String, "task.completed_at")
+		t.CompletedAt, _ = ParseTimestamp(completedAt.String, "task.completed_at")
 	}
 	return t, nil
 }
@@ -830,8 +830,8 @@ func (s *Store) QueryWorkers(repo string) ([]WorkerRecord, error) {
 		if err := rows.Scan(&w.ID, &w.Repo, &w.Roles, &w.Hostname, &w.Status, &hb, &ra); err != nil {
 			return nil, fmt.Errorf("store: scan worker: %w", err)
 		}
-		w.LastHeartbeat, _ = parseTimestamp(hb, "worker.last_heartbeat")
-		w.RegisteredAt, _ = parseTimestamp(ra, "worker.registered_at")
+		w.LastHeartbeat, _ = ParseTimestamp(hb, "worker.last_heartbeat")
+		w.RegisteredAt, _ = ParseTimestamp(ra, "worker.registered_at")
 		out = append(out, w)
 	}
 	return out, rows.Err()
@@ -983,7 +983,7 @@ func (s *Store) QueryIssueCache(repo string, issueNum int) (*IssueCache, error) 
 	if err != nil {
 		return nil, fmt.Errorf("store: query issue cache: %w", err)
 	}
-	ic.UpdatedAt, _ = parseTimestamp(updatedAt, "issue_cache.updated_at")
+	ic.UpdatedAt, _ = ParseTimestamp(updatedAt, "issue_cache.updated_at")
 	return &ic, nil
 }
 
@@ -1008,7 +1008,7 @@ func (s *Store) ListIssueCaches(repo string) ([]IssueCache, error) {
 		if err := rows.Scan(&ic.Repo, &ic.IssueNum, &ic.Labels, &ic.Body, &ic.State, &updatedAt); err != nil {
 			return nil, fmt.Errorf("store: scan issue cache: %w", err)
 		}
-		ic.UpdatedAt, _ = parseTimestamp(updatedAt, "issue_cache.updated_at")
+		ic.UpdatedAt, _ = ParseTimestamp(updatedAt, "issue_cache.updated_at")
 		out = append(out, ic)
 	}
 	return out, rows.Err()
@@ -1138,9 +1138,9 @@ func scanSessionRow(scan func(dest ...any) error) (*SessionRecord, error) {
 	); err != nil {
 		return nil, err
 	}
-	record.CreatedAt, _ = parseTimestamp(createdAt, "session.created_at")
+	record.CreatedAt, _ = ParseTimestamp(createdAt, "session.created_at")
 	if closedAt.Valid {
-		record.ClosedAt, _ = parseTimestamp(closedAt.String, "session.closed_at")
+		record.ClosedAt, _ = ParseTimestamp(closedAt.String, "session.closed_at")
 	}
 	return &record, nil
 }
@@ -1377,7 +1377,7 @@ func (s *Store) QueryIssueDependencyState(repo string, issueNum int) (*IssueDepe
 	}
 	state.OverrideActive = overrideActive != 0
 	state.LastReactionBlocked = lastReactionBlocked != 0
-	state.LastEvaluatedAt, _ = parseTimestamp(evaluatedAt, "issue_dependency_state.last_evaluated_at")
+	state.LastEvaluatedAt, _ = ParseTimestamp(evaluatedAt, "issue_dependency_state.last_evaluated_at")
 	return &state, nil
 }
 

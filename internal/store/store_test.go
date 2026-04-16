@@ -410,12 +410,12 @@ func TestParseTimestamp(t *testing.T) {
 		{"", false},
 	}
 	for _, tt := range tests {
-		parsed, ok := parseTimestamp(tt.input, "test")
+		parsed, ok := ParseTimestamp(tt.input, "test")
 		if ok != tt.ok {
-			t.Errorf("parseTimestamp(%q): ok=%v, want %v", tt.input, ok, tt.ok)
+			t.Errorf("ParseTimestamp(%q): ok=%v, want %v", tt.input, ok, tt.ok)
 		}
 		if ok && parsed.IsZero() {
-			t.Errorf("parseTimestamp(%q): returned zero time but ok=true", tt.input)
+			t.Errorf("ParseTimestamp(%q): returned zero time but ok=true", tt.input)
 		}
 	}
 }
