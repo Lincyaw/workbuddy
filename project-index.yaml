@@ -179,6 +179,19 @@ documentation:
         - internal/reporter/reporter.go
       notes: Phased migration path from one-shot runtime to session-oriented runtime.
 
+    - path: docs/planned/pipeline-observability-and-diagnosis.md
+      bucket: planned
+      status: proposed
+      related_code:
+        - cmd/status.go
+        - internal/audit/http.go
+        - internal/store/store.go
+        - .claude/skills/pipeline-monitor/SKILL.md
+      notes: >
+        Pipeline observability plan: status --tasks, status --events, status --watch (SSE),
+        cache-invalidate, diagnose. Replaces pipeline-monitor skill shell recipes with
+        structured CLI commands. REQ-033 through REQ-037.
+
     - path: docs/implemented/issue-dependencies.md
       bucket: implemented
       status: current
@@ -555,23 +568,31 @@ requirements:
   - id: REQ-011
     title: Audit HTTP Server
     description: >
-      HTTP endpoints for inspecting sessions, events, and Workers.
-      Data sourced from SQLite.
+      Read-only HTTP audit server exposing SQLite-backed events, issue state,
+      and session metadata for external tooling.
     priority: P2
     version: v0.2.0
     status: tested
     acceptance_criteria:
-      - "AC-011-1: GET / 返回 dashboard 概览页面"
-      - "AC-011-2: GET /sessions 返回会话列表，支持筛选"
-      - "AC-011-3: GET /sessions/:id 返回会话详情"
-      - "AC-011-4: GET /events 返回事件流，支持筛选"
-      - "AC-011-5: GET /workers 返回 Worker 列表"
-      - "AC-011-6: GET /health 返回健康状态"
-      - "AC-011-7: 所有端点只读"
-      - "AC-011-8: 集成测试：启动 server → 请求各端点 → 验证响应"
-    code: []
-    tests: []
-    deps: [REQ-009, REQ-024]
+      - "AC-011-1: GET /events 支持 repo、issue、type、since 过滤并返回 SQLite 事件日志"
+      - "AC-011-2: GET /issues/:repo/:num/state 返回当前 label state、cycle count、dependency verdict"
+      - "AC-011-3: GET /sessions/:id 返回 session 元数据和 artifact 路径；浏览器 UI 兼容保留"
+      - "AC-011-4: v0.2.0 默认仅绑定 loopback；认证可选，token auth 延后到 REQ-029"
+      - "AC-011-5: docs/ 中记录三个端点并给出示例响应"
+      - "AC-011-6: 集成测试启动 server + SQLite 并验证三个端点"
+      - "AC-011-7: go build、go vet、go test -count=1 全绿"
+    code:
+      - cmd/serve.go
+      - internal/auditapi/handler.go
+      - internal/webui/handler.go
+      - docs/implemented/audit-http-server.md
+      - docs/implemented/index.md
+      - docs/index.md
+    tests:
+      - cmd/serve_test.go
+      - internal/auditapi/handler_test.go
+      - internal/webui/handler_test.go
+    deps: [REQ-009, REQ-024, REQ-029]
 
   - id: REQ-012
     title: Dashboard API
@@ -1021,6 +1042,132 @@ requirements:
       - cmd/serve_test.go
       - docs_consistency_test.go
     deps: [REQ-002, REQ-003, REQ-004, REQ-024]
+
+  # ============================================================
+  # Layer 8: Pipeline Observability & Diagnosis
+  # ============================================================
+
+  - id: REQ-033
+    title: CLI - status --tasks (task queue view)
+    description: >
+      Extend `workbuddy status` with a `--tasks` flag that shows
+      running/pending/failed tasks from the task_queue table,
+      giving operators and monitoring agents structured visibility
+      into what the embedded worker is currently doing.
+    priority: P0
+    version: v0.2.0
+    status: open
+    acceptance_criteria:
+      - "AC-033-1: `workbuddy status --tasks [--repo R] [--json]` 查询 task_queue 中非 completed 的任务并输出表格"
+      - "AC-033-2: 表格列：REPO, ISSUE, AGENT, STATUS, WORKER, UPDATED"
+      - "AC-033-3: --json 输出 JSON 数组，每条包含 id/repo/issue_num/agent_name/status/worker_id/updated_at"
+      - "AC-033-4: 新增 HTTP endpoint `GET /tasks?repo=X&status=Y`，返回 []TaskRecord JSON"
+      - "AC-033-5: --tasks 与 --stuck、--events、--watch 互斥，同时指定时返回明确错误"
+      - "AC-033-6: task_queue 为空时输出 No active tasks 而不是空表格"
+      - "AC-033-7: 单元测试：有任务、空队列、--json 格式、repo 过滤、status 过滤 5 种场景"
+    code: []
+    tests: []
+    deps: [REQ-019, REQ-024]
+
+  - id: REQ-034
+    title: CLI - cache-invalidate command
+    description: >
+      `workbuddy cache-invalidate` deletes issue_cache rows to force
+      the poller to re-discover and re-evaluate specified issues on the
+      next poll cycle. This is the most common manual fix for missed
+      redispatches when dependency verdicts change.
+    priority: P0
+    version: v0.2.0
+    status: open
+    acceptance_criteria:
+      - "AC-034-1: `workbuddy cache-invalidate --repo OWNER/NAME --issue 47,48,49` 删除指定 issue 的 issue_cache 行"
+      - "AC-034-2: 同时重置对应 issue 的 issue_dependency_state 行（清除 verdict，强制下一 cycle 重评估）"
+      - "AC-034-3: 为每个被清除的 issue 记录一条 type=cache_invalidated 事件到 events 表，payload 包含 repo、issue_num、触发来源"
+      - "AC-034-4: 直连 SQLite，不依赖 serve 进程运行；从 config 或 --db-path 获取数据库路径"
+      - "AC-034-5: --repo 和 --issue 均为必填参数，缺少时返回明确错误"
+      - "AC-034-6: issue 在 cache 中不存在时输出 skip 提示（不报错），仍记录事件"
+      - "AC-034-7: 输出每个 issue 的处理结果（deleted/skipped）和总计事件数"
+      - "AC-034-8: 单元测试：正常清除、issue 不存在、有/无 dependency state、events 记录验证 4 种场景"
+    code: []
+    tests: []
+    deps: [REQ-024]
+
+  - id: REQ-035
+    title: CLI - status --events (structured event query)
+    description: >
+      Extend `workbuddy status` with an `--events` flag that queries
+      the events table and renders recent events as a structured table,
+      replacing the need to `tail serve.log` and grep for keywords.
+    priority: P1
+    version: v0.2.0
+    status: open
+    acceptance_criteria:
+      - "AC-035-1: `workbuddy status --events [--repo R] [--since DURATION] [--type TYPE] [--json]` 查询 events 表并输出表格"
+      - "AC-035-2: 表格列：TIME, TYPE, ISSUE, PAYLOAD（payload 截断到 80 字符）"
+      - "AC-035-3: --since 支持相对时间格式（10m, 1h, 24h），转换为绝对时间后传给 HTTP endpoint"
+      - "AC-035-4: --type 过滤事件类型（如 stuck_detected, dispatch_blocked_by_dependency, state_entry）"
+      - "AC-035-5: 默认按时间倒序，最多显示 50 条；--json 无条数限制"
+      - "AC-035-6: --events 与 --tasks、--stuck、--watch 互斥"
+      - "AC-035-7: 单元测试：有事件、空、--since 过滤、--type 过滤、--json 格式 5 种场景"
+    code: []
+    tests: []
+    deps: [REQ-019, REQ-009]
+
+  - id: REQ-036
+    title: CLI - status --watch (blocking wait for task completion)
+    description: >
+      Add a `--watch` flag to `workbuddy status` that blocks until
+      the next task completes, then prints the result and exits.
+      Provides an event-driven blocking primitive for monitoring agents
+      and CI scripts, replacing ScheduleWakeup polling patterns.
+      Implemented via SSE (Server-Sent Events) between serve and CLI.
+    priority: P1
+    version: v0.2.0
+    status: open
+    acceptance_criteria:
+      - "AC-036-1: `workbuddy status --watch [--repo R] [--issue N] [--timeout DURATION]` 阻塞直到匹配的 task 从 running 变为 completed/failed/timeout"
+      - "AC-036-2: 阻塞期间输出 Waiting for task completion...；收到事件后输出一行表格（ISSUE, AGENT, STATUS, DURATION, EXIT）并退出"
+      - "AC-036-3: 退出码约定：completed=0, failed=1, timeout=2, watch 自身超时=3"
+      - "AC-036-4: --issue 限定只等特定 issue 的 task，不指定则等任意 task"
+      - "AC-036-5: --timeout 限定最大等待时间，默认 30m；超时后输出 No task completed within timeout 并以 exit code 3 退出"
+      - "AC-036-6: serve 进程内新增 internal/tasknotify/hub.go，实现 Publish/Subscribe/Unsubscribe；在 executeTask 末尾 Publish TaskEvent"
+      - "AC-036-7: 新增 SSE endpoint GET /tasks/watch?repo=X&issue=N，注册 subscriber，按 repo/issue 过滤，首条匹配事件写 SSE data 后关闭"
+      - "AC-036-8: CLI 端通过标准 HTTP 连接 SSE endpoint，解析 text/event-stream 格式"
+      - "AC-036-9: serve 进程未运行时（连接失败），输出明确错误 Cannot connect to workbuddy server 并 exit 1"
+      - "AC-036-10: --watch 与 --tasks、--events、--stuck 互斥"
+      - "AC-036-11: 单元测试：正常等待并收到完成事件、--issue 过滤、--timeout 超时、serve 不可达 4 种场景"
+      - "AC-036-12: 集成测试：启动 serve + mock agent → CLI --watch 阻塞 → agent 完成 → CLI 收到事件并退出，验证退出码"
+    code: []
+    tests: []
+    deps: [REQ-019, REQ-017]
+
+  - id: REQ-037
+    title: CLI - diagnose command (automated pipeline diagnosis)
+    description: >
+      `workbuddy diagnose` automates the decision tree from the
+      pipeline-monitor skill — detects stuck issues, missed redispatches,
+      orphaned tasks, and repeated failures, then suggests or auto-applies
+      safe fixes (cache invalidation). Replaces manual sqlite3 queries
+      and human judgment for common failure modes.
+    priority: P2
+    version: v0.2.0
+    status: open
+    acceptance_criteria:
+      - "AC-037-1: `workbuddy diagnose [--repo R] [--fix] [--json]` 扫描 task_queue + events + issue_cache + issue_dependency_state 表，输出诊断结果"
+      - "AC-037-2: 检测 stuck issue：中间状态（status:developing/reviewing）+ 无 active task（pending/running）+ 最后事件距今 > 1 hour"
+      - "AC-037-3: 检测 missed redispatch：issue_dependency_state.verdict=ready + 无 active task + issue 仍在中间状态"
+      - "AC-037-4: 检测 orphaned task：task_queue.status=running + updated_at 距今 > 2x agent timeout（默认 60min）"
+      - "AC-037-5: 检测 repeated failure：同一 repo+issue_num+agent_name 在 task_queue 中连续 failed >= 3 条"
+      - "AC-037-6: 每条诊断输出 ISSUE, SEVERITY(warn/error), DIAGNOSIS, SUGGESTED_FIX"
+      - "AC-037-7: --fix 自动执行 cache-invalidate 类修复（stuck 和 missed redispatch），记录 event；对 repeated failure 只报告不修复"
+      - "AC-037-8: --fix 执行的每个修复操作在 events 表记录 type=auto_fix 事件"
+      - "AC-037-9: 直连 SQLite，不依赖 serve 运行"
+      - "AC-037-10: 无诊断问题时输出 Pipeline healthy: no issues detected 并 exit 0；有问题时 exit 1（warn 也算）"
+      - "AC-037-11: 诊断逻辑在 internal/diagnose/ 包中实现，接收 *store.Store + time.Now，纯逻辑无副作用；修复逻辑在 cmd 层调用 cache-invalidate"
+      - "AC-037-12: 单元测试：每种检测项（stuck/missed/orphaned/repeated）各一条正例 + 一条反例；--fix 执行验证"
+    code: []
+    tests: []
+    deps: [REQ-034, REQ-024]
 
   - id: REQ-032
     title: CLI - recover command

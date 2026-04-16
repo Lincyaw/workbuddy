@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/auditapi"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
@@ -22,6 +23,7 @@ import (
 type Handler struct {
 	store        *store.Store
 	sessionsDir  string
+	basePath     string
 	listTmpl     *template.Template
 	detailTmpl   *template.Template
 	notFoundTmpl *template.Template
@@ -38,7 +40,7 @@ func NewHandler(st *store.Store) *Handler {
 		},
 	}
 
-	h := &Handler{store: st}
+	h := &Handler{store: st, basePath: "/sessions"}
 	h.listTmpl = template.Must(template.New("list").Funcs(funcMap).Parse(listHTML))
 	h.detailTmpl = template.Must(template.New("detail").Funcs(funcMap).Parse(detailHTML))
 	h.notFoundTmpl = template.Must(template.New("notfound").Parse(notFoundHTML))
@@ -54,8 +56,18 @@ func (h *Handler) SetSessionsDir(dir string) {
 
 // Register adds the session viewer routes to the given mux.
 func (h *Handler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("/sessions", h.handleList)
-	mux.HandleFunc("/sessions/", h.handleSessionSubpath)
+	h.RegisterAt(mux, h.basePath)
+}
+
+// RegisterAt mounts the session viewer routes under the given base path.
+func (h *Handler) RegisterAt(mux *http.ServeMux, basePath string) {
+	basePath = strings.TrimRight(basePath, "/")
+	if basePath == "" {
+		basePath = "/sessions"
+	}
+	h.basePath = basePath
+	mux.HandleFunc(basePath, h.handleList)
+	mux.HandleFunc(basePath+"/", h.handleSessionSubpath)
 }
 
 // handleList renders the session list page with optional filtering.
@@ -90,9 +102,9 @@ func (h *Handler) handleList(w http.ResponseWriter, r *http.Request) {
 //	/sessions/{id}/events.json    → paginated JSON events
 //	/sessions/{id}/stream         → SSE tail
 func (h *Handler) handleSessionSubpath(w http.ResponseWriter, r *http.Request) {
-	rest := strings.TrimPrefix(r.URL.Path, "/sessions/")
+	rest := strings.TrimPrefix(r.URL.Path, h.basePath+"/")
 	if rest == "" {
-		http.Redirect(w, r, "/sessions", http.StatusFound)
+		http.Redirect(w, r, h.basePath, http.StatusFound)
 		return
 	}
 
@@ -117,9 +129,18 @@ func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request, sessionID
 		return
 	}
 	if sess == nil {
+		if prefersJSON(r) {
+			writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+			return
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusNotFound)
 		_ = h.notFoundTmpl.Execute(w, sessionID)
+		return
+	}
+
+	if prefersJSON(r) {
+		writeJSONStatus(w, http.StatusOK, auditapi.BuildSessionResponse(sess, h.sessionsDir))
 		return
 	}
 
@@ -415,9 +436,20 @@ func isValidSessionID(sessionID string) bool {
 	return true
 }
 
+func prefersJSON(r *http.Request) bool {
+	if r.URL.Query().Get("format") == "json" {
+		return true
+	}
+	return strings.Contains(r.Header.Get("Accept"), "application/json")
+}
 
 func writeJSON(w http.ResponseWriter, v any) {
+	writeJSONStatus(w, http.StatusOK, v)
+}
+
+func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
 

@@ -532,7 +532,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 
 	audit.NewHTTPHandler(st).Register(mux)
 
-	// Session viewer web UI
+	// Session viewer web UI (also serves JSON via auditapi.BuildSessionResponse)
 	sessionUI := webui.NewHandler(st)
 	sessionUI.SetSessionsDir(sessionsDir)
 	sessionUI.Register(mux)

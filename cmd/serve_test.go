@@ -602,6 +602,224 @@ func TestServe_HealthEndpoint(t *testing.T) {
 	}
 }
 
+func TestServe_AuditEndpoints(t *testing.T) {
+	repo := "owner/test-repo"
+	configDir := setupTestConfigDir(t, repo)
+	dbPath := filepath.Join(t.TempDir(), "audit.db")
+	port := 18933
+
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	rawPath, err := seedServeAuditFixture(st, repo)
+	if err != nil {
+		_ = st.Close()
+		t.Fatalf("seedServeAuditFixture: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close seed store: %v", err)
+	}
+
+	gh := &mockGHReader{
+		issues: []poller.Issue{
+			{Number: 40, Title: "audit", State: "open", Labels: []string{"status:reviewing"}, Body: "seed"},
+		},
+	}
+	mockRT := &mockRuntime{name: "claude-code"}
+	lnch := launcher.NewLauncher()
+	lnch.Register(mockRT)
+
+	opts := &serveOpts{
+		port:         port,
+		pollInterval: 5 * time.Second,
+		roles:        []string{"dev"},
+		configDir:    configDir,
+		dbPath:       dbPath,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runServeWithOpts(opts, gh, lnch, ctx)
+	}()
+
+	time.Sleep(500 * time.Millisecond)
+
+	t.Run("events", func(t *testing.T) {
+		resp, err := http.Get(fmt.Sprintf("http://localhost:%d/events?repo=%s&issue=40&type=dispatch", port, repo))
+		if err != nil {
+			t.Fatalf("GET /events: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d", resp.StatusCode)
+		}
+		var body struct {
+			Events []struct {
+				Type    string         `json:"type"`
+				Payload map[string]any `json:"payload"`
+			} `json:"events"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(body.Events) != 1 {
+			t.Fatalf("events = %d, want 1", len(body.Events))
+		}
+		if body.Events[0].Type != "dispatch" {
+			t.Fatalf("type = %q", body.Events[0].Type)
+		}
+		if body.Events[0].Payload["agent"] != "dev-agent" {
+			t.Fatalf("payload = %#v", body.Events[0].Payload)
+		}
+	})
+
+	t.Run("issue state", func(t *testing.T) {
+		resp, err := http.Get(fmt.Sprintf("http://localhost:%d/issues/%s/40/state", port, repo))
+		if err != nil {
+			t.Fatalf("GET /issues/.../state: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d body=%s", resp.StatusCode, body)
+		}
+		var body struct {
+			Repo              string `json:"repo"`
+			IssueNum          int    `json:"issue_num"`
+			CycleCount        int    `json:"cycle_count"`
+			DependencyVerdict string `json:"dependency_verdict"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if body.Repo != repo || body.IssueNum != 40 {
+			t.Fatalf("repo/issue = %s/%d", body.Repo, body.IssueNum)
+		}
+		if body.CycleCount != 1 {
+			t.Fatalf("cycle_count = %d", body.CycleCount)
+		}
+		if body.DependencyVerdict == "" {
+			t.Fatal("dependency_verdict should not be empty")
+		}
+	})
+
+	t.Run("session detail json", func(t *testing.T) {
+		req, err := http.NewRequest("GET", fmt.Sprintf("http://localhost:%d/sessions/session-40?format=json", port), nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET /sessions/session-40: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d", resp.StatusCode)
+		}
+		var body struct {
+			SessionID     string `json:"session_id"`
+			ArtifactPaths struct {
+				EventsV1 string `json:"events_v1"`
+				Raw      string `json:"raw"`
+			} `json:"artifact_paths"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if body.SessionID != "session-40" {
+			t.Fatalf("session_id = %q", body.SessionID)
+		}
+		if !strings.HasSuffix(body.ArtifactPaths.EventsV1, filepath.Join("session-40", "events-v1.jsonl")) {
+			t.Fatalf("events path = %q", body.ArtifactPaths.EventsV1)
+		}
+		if body.ArtifactPaths.Raw != rawPath {
+			t.Fatalf("raw path = %q, want %q", body.ArtifactPaths.Raw, rawPath)
+		}
+	})
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("serve returned error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve did not exit within timeout")
+	}
+}
+
+func seedServeAuditFixture(st *store.Store, repo string) (string, error) {
+	if _, err := st.InsertEvent(store.Event{
+		Type:     "dispatch",
+		Repo:     repo,
+		IssueNum: 40,
+		Payload:  `{"agent":"dev-agent"}`,
+	}); err != nil {
+		return "", err
+	}
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     repo,
+		IssueNum: 40,
+		Labels:   `["status:reviewing","type:feature"]`,
+		State:    "open",
+	}); err != nil {
+		return "", err
+	}
+	if _, err := st.IncrementTransition(repo, 40, "developing", "reviewing"); err != nil {
+		return "", err
+	}
+	if _, err := st.IncrementTransition(repo, 40, "reviewing", "developing"); err != nil {
+		return "", err
+	}
+	if err := st.UpsertIssueDependencyState(store.IssueDependencyState{
+		Repo:              repo,
+		IssueNum:          40,
+		Verdict:           store.DependencyVerdictBlocked,
+		ResumeLabel:       "status:developing",
+		BlockedReasonHash: "abc123",
+		GraphVersion:      7,
+	}); err != nil {
+		return "", err
+	}
+
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	sessionDir := filepath.Join(repoRoot, ".workbuddy", "sessions", "session-40")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(sessionDir, "events-v1.jsonl"), []byte("{\"kind\":\"log\"}\n"), 0o644); err != nil {
+		return "", err
+	}
+	rawPath := filepath.Join(sessionDir, "codex-exec.jsonl")
+	if err := os.WriteFile(rawPath, []byte("{\"type\":\"task_started\"}\n"), 0o644); err != nil {
+		return "", err
+	}
+	if _, err := st.InsertAgentSession(store.AgentSession{
+		SessionID: "session-40",
+		TaskID:    "task-40",
+		Repo:      repo,
+		IssueNum:  40,
+		AgentName: "dev-agent",
+		Summary:   "summary",
+		RawPath:   rawPath,
+	}); err != nil {
+		return "", err
+	}
+	return rawPath, nil
+}
+
 // TestRunningTasks_RegisterCancelRemove verifies the RunningTasks registry.
 func TestRunningTasks_RegisterCancelRemove(t *testing.T) {
 	rt := NewRunningTasks()

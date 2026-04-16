@@ -29,6 +29,7 @@
 | `docs/implemented/current-persistence-and-workspace.md` | 当前存储、事件日志、worker registry、worktree 隔离 | `internal/store/`, `internal/eventlog/`, `internal/registry/`, `internal/workspace/` |
 | `docs/implemented/artifact-layout.md` | 当前 session artifact 位于仓库根 `.workbuddy/sessions/`，不会随 worktree 清理丢失 | `cmd/serve.go`, `cmd/run.go`, `internal/launcher/`, `internal/router/router.go`, `internal/audit/` |
 | `docs/implemented/issue-dependencies.md` | 当前 issue dependency 声明、resolver/store/queue、dispatch gate 与 dependency-resolver agent 行为 | `cmd/serve.go`, `internal/dependency/`, `internal/store/`, `internal/statemachine/`, `internal/router/`, `.github/workbuddy/agents/dependency-resolver-agent.md` |
+| `docs/implemented/audit-http-server.md` | 当前 REQ-011 审计 HTTP 端点：`/events`、`/issues/:repo/:num/state`、`/sessions/:id` JSON | `cmd/serve.go`, `internal/auditapi/`, `internal/webui/`, `internal/store/` |
 
 ## 维护规则
 
