@@ -1,0 +1,2 @@
+date	commit	status	key_indicators	description
+2026-04-16	working	tree-green	REQ-026 tested; go build/vet/test green	Implemented worker HTTP client loop with launcher execution, heartbeat, lifecycle contract test, and reconnect test

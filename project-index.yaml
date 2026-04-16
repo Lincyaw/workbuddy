@@ -471,7 +471,7 @@ requirements:
       Handles registration, long-polling, result submission, and heartbeat.
     priority: P1
     version: v0.2.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-026-1: Register() 向 Coordinator 注册 worker_id + repo + roles"
       - "AC-026-2: PollTask() 长轮询获取任务，无任务时阻塞（最多 timeout 秒）"
@@ -480,8 +480,11 @@ requirements:
       - "AC-026-5: Coordinator 不可达时自动重试（指数退避，最大间隔 60s）"
       - "AC-026-6: 实现与 v0.1.0 channel-based client 相同的接口"
       - "AC-026-7: 单元测试：mock HTTP server 验证各操作"
-    code: []
-    tests: []
+    code:
+      - internal/worker/client/client.go
+      - internal/worker/client/run.go
+    tests:
+      - internal/worker/client/client_test.go
     deps: [REQ-025]
 
   # ============================================================
