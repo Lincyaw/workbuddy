@@ -713,23 +713,25 @@ requirements:
   - id: REQ-019
     title: CLI - status command
     description: >
-      `workbuddy status` — show Coordinator status, Worker list,
-      active sessions, stuck issues, retry warnings.
+      `workbuddy status` — summarize open issues, their current state,
+      cycle count, and dependency verdict by calling the local Audit HTTP server.
     priority: P1
     version: v0.2.0
-    status: pending
+    status: tested
     acceptance_criteria:
-      - "AC-019-1: 显示 Coordinator 状态、数据库大小、已注册 repo 数"
-      - "AC-019-2: 列出已注册 Worker（ID、repo、roles、状态、最近心跳时间）"
-      - "AC-019-3: 列出活跃 session（ID、repo、issue、agent、worker、状态）"
-      - "AC-019-4: --stuck 过滤中间状态 > 1h 的 issue"
-      - "AC-019-5: --workers 只显示 Worker 列表"
-      - "AC-019-6: --json 输出 JSON"
-      - "AC-019-7: 显示 retry warnings（接近 max_retries 的 issue）"
-      - "AC-019-8: 单元测试：有/无 session、Worker 列表、--stuck 过滤"
-    code: []
-    tests: []
-    deps: [REQ-008, REQ-023, REQ-024]
+      - "AC-019-1: cobra 命令 `workbuddy status [--repo OWNER/NAME] [--stuck] [--json]`"
+      - "AC-019-2: 通过 Audit HTTP `GET /events` 收集候选 issue，并调用 `GET /issues/:repo/:num/state` 汇总 current state / cycle count / dependency verdict"
+      - "AC-019-3: 默认输出人类可读表格，按 issue 编号排序，仅展示 open issues"
+      - "AC-019-4: --stuck 仅展示处于中间状态且 1 小时以上无新事件的 issue"
+      - "AC-019-5: --json 输出机器可读 JSON"
+      - "AC-019-6: 集成测试：启动 Audit server + SQLite fixture，断言默认输出、--stuck 过滤、--json"
+    code:
+      - cmd/status.go
+      - cmd/serve.go
+      - internal/audit/http.go
+    tests:
+      - cmd/status_test.go
+    deps: [REQ-011]
 
   - id: REQ-020
     title: CLI - run command
