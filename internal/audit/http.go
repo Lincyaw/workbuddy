@@ -57,6 +57,7 @@ func NewHTTPHandler(st *store.Store) *HTTPHandler {
 func (h *HTTPHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/events", h.handleEvents)
 	mux.HandleFunc("/issues/", h.handleIssueState)
+	mux.HandleFunc("/tasks", h.handleTasks)
 }
 
 func (h *HTTPHandler) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -113,6 +114,24 @@ func (h *HTTPHandler) handleIssueState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSONResponse(w, http.StatusOK, state)
+}
+
+func (h *HTTPHandler) handleTasks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	filter := store.TaskFilter{
+		Repo:   strings.TrimSpace(r.URL.Query().Get("repo")),
+		Status: strings.TrimSpace(r.URL.Query().Get("status")),
+	}
+	tasks, err := h.store.QueryTasksFiltered(filter)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("query tasks: %v", err), http.StatusInternalServerError)
+		return
+	}
+	writeJSONResponse(w, http.StatusOK, tasks)
 }
 
 func (h *HTTPHandler) queryIssueState(repo string, issueNum int) (IssueStateResponse, error) {
@@ -183,10 +202,14 @@ func parseEventFilter(values url.Values) (eventlog.EventFilter, error) {
 	filter.Repo = strings.TrimSpace(values.Get("repo"))
 	filter.Type = strings.TrimSpace(values.Get("type"))
 
-	if raw := strings.TrimSpace(values.Get("issue_num")); raw != "" {
+	rawIssue := strings.TrimSpace(values.Get("issue"))
+	if rawIssue == "" {
+		rawIssue = strings.TrimSpace(values.Get("issue_num"))
+	}
+	if raw := rawIssue; raw != "" {
 		issueNum, err := strconv.Atoi(raw)
 		if err != nil || issueNum <= 0 {
-			return filter, fmt.Errorf("invalid issue_num %q", raw)
+			return filter, fmt.Errorf("invalid issue %q", raw)
 		}
 		filter.IssueNum = issueNum
 	}

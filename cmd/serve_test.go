@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -248,6 +250,16 @@ func waitForHealth(t *testing.T, port int) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("coordinator did not become healthy at %s", addr)
+}
+
+func getFreePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	return ln.Addr().(*net.TCPAddr).Port
 }
 
 func newWorkerTestDeps(t *testing.T, rt *mockRuntime, readers ...issueLabelReader) (*workerDeps, *store.Store) {
@@ -758,6 +770,92 @@ func TestServe_AuditEndpoints(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("serve did not exit within timeout")
+	}
+}
+
+func TestServe_StatusWatchIntegration(t *testing.T) {
+	setupFakeGHCLI(t)
+
+	repo := "owner/watch-repo"
+	configDir := setupTestConfigDir(t, repo)
+	dbPath := filepath.Join(t.TempDir(), "watch.db")
+	port := getFreePort(t)
+	release := make(chan struct{})
+
+	gh := &mockGHReader{
+		issues: []poller.Issue{
+			{Number: 41, Title: "watch", State: "open", Labels: []string{"workbuddy", "status:developing"}, Body: "watch me"},
+		},
+	}
+	mockRT := &mockRuntime{name: "claude-code", resultFn: func(ctx context.Context, _ *config.AgentConfig, _ *launcher.TaskContext) (*launcher.Result, error) {
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return &launcher.Result{ExitCode: 0, Duration: 2 * time.Second, Meta: map[string]string{}}, nil
+	}}
+	lnch := launcher.NewLauncher()
+	lnch.Register(mockRT)
+
+	opts := &serveOpts{
+		port:         port,
+		pollInterval: 20 * time.Millisecond,
+		roles:        []string{"dev"},
+		configDir:    configDir,
+		dbPath:       dbPath,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runServeWithOpts(opts, gh, lnch, ctx)
+	}()
+	waitForHealth(t, port)
+
+	client := &statusClient{
+		baseURL: fmt.Sprintf("http://127.0.0.1:%d", port),
+		http:    &http.Client{Timeout: 5 * time.Second},
+	}
+	var out bytes.Buffer
+	watchErrCh := make(chan error, 1)
+	go func() {
+		watchErrCh <- runStatusWithOpts(context.Background(), &statusOpts{
+			repo:    repo,
+			watch:   true,
+			timeout: 5 * time.Second,
+			baseURL: client.baseURL,
+		}, client, &out)
+	}()
+
+	time.Sleep(150 * time.Millisecond)
+	close(release)
+
+	select {
+	case err := <-watchErrCh:
+		if err != nil {
+			t.Fatalf("runStatusWithOpts: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("watch did not complete")
+	}
+
+	got := out.String()
+	for _, want := range []string{"Waiting for task completion...", "ISSUE", "#41", "completed"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("watch output missing %q:\n%s", want, got)
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("serve returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not exit")
 	}
 }
 

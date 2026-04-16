@@ -54,6 +54,11 @@ type Store struct {
 	db *sql.DB
 }
 
+type TaskFilter struct {
+	Repo   string
+	Status string
+}
+
 // NewStore opens (or creates) the SQLite database at dbPath,
 // creates the parent directory if needed, enables WAL mode,
 // and ensures all tables exist.
@@ -413,18 +418,29 @@ func (s *Store) InsertTask(t TaskRecord) error {
 
 // QueryTasks returns tasks filtered by status (empty string = all).
 func (s *Store) QueryTasks(status string) ([]TaskRecord, error) {
+	return s.QueryTasksFiltered(TaskFilter{Status: status})
+}
+
+// QueryTasksFiltered returns tasks matching the given filter.
+func (s *Store) QueryTasksFiltered(filter TaskFilter) ([]TaskRecord, error) {
 	const selectTasks = `SELECT
 		id, repo, issue_num, agent_name, role, runtime, workflow, state,
 		worker_id, claim_token, status, lease_expires_at, acked_at, heartbeat_at,
 		completed_at, exit_code, session_refs, created_at, updated_at
 		FROM task_queue`
-	var rows *sql.Rows
-	var err error
-	if status == "" {
-		rows, err = s.db.Query(selectTasks + ` ORDER BY created_at`)
-	} else {
-		rows, err = s.db.Query(selectTasks+` WHERE status = ? ORDER BY created_at`, status)
+	query := selectTasks + ` WHERE 1=1`
+	args := make([]any, 0, 2)
+	if filter.Repo != "" {
+		query += ` AND repo = ?`
+		args = append(args, filter.Repo)
 	}
+	if filter.Status != "" {
+		query += ` AND status = ?`
+		args = append(args, filter.Status)
+	}
+	query += ` ORDER BY created_at`
+
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: query tasks: %w", err)
 	}
@@ -1013,9 +1029,12 @@ func (s *Store) UpdateSession(record SessionRecord) error {
 
 func (s *Store) GetSession(sessionID string) (*SessionRecord, error) {
 	row := s.db.QueryRow(
-		`SELECT id, session_id, task_id, repo, issue_num, agent_name, runtime, worker_id, attempt, status,
-		        dir, stdout_path, stderr_path, tool_calls_path, metadata_path, summary, raw_path, created_at, closed_at
-		 FROM sessions WHERE session_id = ?`,
+		`SELECT s.id, s.session_id, s.task_id, s.repo, s.issue_num, s.agent_name, s.runtime, s.worker_id, s.attempt,
+		        COALESCE(t.status, s.status),
+		        s.dir, s.stdout_path, s.stderr_path, s.tool_calls_path, s.metadata_path, s.summary, s.raw_path, s.created_at, s.closed_at
+		 FROM sessions s
+		 LEFT JOIN task_queue t ON t.id = s.task_id
+		 WHERE s.session_id = ?`,
 		sessionID,
 	)
 	record, err := scanSessionRow(row.Scan)
@@ -1029,31 +1048,34 @@ func (s *Store) GetSession(sessionID string) (*SessionRecord, error) {
 }
 
 func (s *Store) ListSessions(f SessionFilter) ([]SessionRecord, error) {
-	q := `SELECT id, session_id, task_id, repo, issue_num, agent_name, runtime, worker_id, attempt, status,
-	             dir, stdout_path, stderr_path, tool_calls_path, metadata_path, summary, raw_path, created_at, closed_at
-	      FROM sessions WHERE 1=1`
+	q := `SELECT s.id, s.session_id, s.task_id, s.repo, s.issue_num, s.agent_name, s.runtime, s.worker_id, s.attempt,
+	             COALESCE(t.status, s.status),
+	             s.dir, s.stdout_path, s.stderr_path, s.tool_calls_path, s.metadata_path, s.summary, s.raw_path, s.created_at, s.closed_at
+	      FROM sessions s
+	      LEFT JOIN task_queue t ON t.id = s.task_id
+	      WHERE 1=1`
 	var args []any
 	if f.Repo != "" {
-		q += " AND repo = ?"
+		q += " AND s.repo = ?"
 		args = append(args, f.Repo)
 	}
 	if f.IssueNum != 0 {
-		q += " AND issue_num = ?"
+		q += " AND s.issue_num = ?"
 		args = append(args, f.IssueNum)
 	}
 	if f.AgentName != "" {
-		q += " AND agent_name = ?"
+		q += " AND s.agent_name = ?"
 		args = append(args, f.AgentName)
 	}
 	if f.WorkerID != "" {
-		q += " AND worker_id = ?"
+		q += " AND s.worker_id = ?"
 		args = append(args, f.WorkerID)
 	}
 	if f.Status != "" {
-		q += " AND status = ?"
+		q += " AND COALESCE(t.status, s.status) = ?"
 		args = append(args, f.Status)
 	}
-	q += " ORDER BY id DESC"
+	q += " ORDER BY s.id DESC"
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: list sessions: %w", err)
@@ -1325,6 +1347,22 @@ func (s *Store) QueryIssueDependencyState(repo string, issueNum int) (*IssueDepe
 	return &state, nil
 }
 
+// DeleteIssueDependencyState removes the dependency verdict cache for one issue.
+func (s *Store) DeleteIssueDependencyState(repo string, issueNum int) (bool, error) {
+	res, err := s.db.Exec(
+		`DELETE FROM issue_dependency_state WHERE repo = ? AND issue_num = ?`,
+		repo, issueNum,
+	)
+	if err != nil {
+		return false, fmt.Errorf("store: delete issue dependency state: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: delete issue dependency state rows affected: %w", err)
+	}
+	return rows > 0, nil
+}
+
 func (s *Store) HasActiveTask(repo string, issueNum int, agentName string) (bool, error) {
 	var count int
 	err := s.db.QueryRow(
@@ -1335,6 +1373,20 @@ func (s *Store) HasActiveTask(repo string, issueNum int, agentName string) (bool
 	).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("store: has active task: %w", err)
+	}
+	return count > 0, nil
+}
+
+func (s *Store) HasAnyActiveTask(repo string, issueNum int) (bool, error) {
+	var count int
+	err := s.db.QueryRow(
+		`SELECT COUNT(1)
+		 FROM task_queue
+		 WHERE repo = ? AND issue_num = ? AND status IN (?, ?)`,
+		repo, issueNum, TaskStatusPending, TaskStatusRunning,
+	).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("store: has any active task: %w", err)
 	}
 	return count > 0, nil
 }

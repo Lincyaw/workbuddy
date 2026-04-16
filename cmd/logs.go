@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -164,6 +165,12 @@ func resolveLogsSession(st *store.Store, repo string, issue, attempt int) (*stor
 	if len(sessions) == 0 {
 		return nil, fmt.Errorf("logs: no sessions found for %s issue #%d", repo, issue)
 	}
+	sort.Slice(sessions, func(i, j int) bool {
+		if sessions[i].CreatedAt.Equal(sessions[j].CreatedAt) {
+			return sessions[i].ID < sessions[j].ID
+		}
+		return sessions[i].CreatedAt.Before(sessions[j].CreatedAt)
+	})
 	if attempt == 0 {
 		session := sessions[len(sessions)-1]
 		return &session, nil
