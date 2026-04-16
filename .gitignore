@@ -20,3 +20,4 @@ notify.json
 # Test output
 coverage.out
 .claude/worktrees/
+.remember

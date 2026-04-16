@@ -116,7 +116,7 @@ Simpler code that maps clearly to requirements > clever abstractions.
 | Test | `go test ./... -count=1` | Run after every change |
 | Vet | `go vet ./...` | Run after every change |
 | Lint | `golangci-lint run ./...` | Config: .golangci.yml |
-| Measure | `python3 ~/.autoharness/domains/softdev/scripts/validate_index.py project-index.yaml` | Compare to baseline |
+| Measure | `python3 ~/.autoharness/scripts/validate_index.py project-index.yaml` | Compare to baseline |
 
 ## Iteration tracking
 
@@ -153,7 +153,7 @@ Every code change MUST keep the index synchronized:
 4. **After refactoring**: update any affected `code`/`tests` paths if files were moved or renamed.
 5. **Never skip**: a code change without the corresponding index update is incomplete work.
 
-Validate with: `python3 ~/.autoharness/domains/softdev/scripts/validate_index.py project-index.yaml`
+Validate with: `python3 ~/.autoharness/scripts/validate_index.py project-index.yaml`
 
 ## Active skills
 

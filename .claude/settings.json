@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.autoharness/core/skill-evolve/scripts/hook_skill_trigger.py",
+            "command": "python3 ~/.autoharness/skills/skill-evolve/scripts/hook_skill_trigger.py",
             "timeout": 5
           }
         ]
