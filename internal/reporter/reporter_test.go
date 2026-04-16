@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/launcher"
 )
 
@@ -14,15 +15,52 @@ type mockGHWriter struct {
 	comments []string
 	failN    int // fail the first N calls
 	calls    int
+	err      error
 }
 
 func (m *mockGHWriter) WriteComment(_ string, _ int, body string) error {
 	m.calls++
 	if m.calls <= m.failN {
-		return fmt.Errorf("mock gh error")
+		if m.err != nil {
+			return m.err
+		}
+		return fmt.Errorf("mock gh error: rate limit exceeded")
 	}
 	m.comments = append(m.comments, body)
 	return nil
+}
+
+type mockEventRecorder struct {
+	events []event
+}
+
+type event struct {
+	eventType string
+	repo      string
+	issueNum  int
+	payload   interface{}
+}
+
+func (m *mockEventRecorder) Log(eventType, repo string, issueNum int, payload interface{}) {
+	m.events = append(m.events, event{eventType: eventType, repo: repo, issueNum: issueNum, payload: payload})
+}
+
+func (m *mockEventRecorder) Has(eventType string) bool {
+	for _, e := range m.events {
+		if e.eventType == eventType {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *mockEventRecorder) findPayload(eventType string) (interface{}, bool) {
+	for _, e := range m.events {
+		if e.eventType == eventType {
+			return e.payload, true
+		}
+	}
+	return nil, false
 }
 
 func TestReport_Success(t *testing.T) {
@@ -36,7 +74,7 @@ func TestReport_Success(t *testing.T) {
 		Meta:     map[string]string{"pr_url": "https://github.com/test/repo/pull/1"},
 	}
 
-	err := r.Report("test/repo", 42, "dev-agent", result, "sess-123", "worker-1", 1, 3, "Label transition: developing -> reviewing (OK)")
+	err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-123", "worker-1", 1, 3, "Label transition: developing -> reviewing (OK)")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -74,7 +112,7 @@ func TestReport_Failure(t *testing.T) {
 		Duration: 2 * time.Second,
 	}
 
-	err := r.Report("test/repo", 42, "dev-agent", result, "sess-456", "worker-1", 0, 3, "")
+	err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-456", "worker-1", 0, 3, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -95,7 +133,7 @@ func TestReport_PrefersLastMessage(t *testing.T) {
 		Duration:    time.Second,
 	}
 
-	if err := r.Report("test/repo", 42, "dev-agent", result, "sess-last", "worker-1", 0, 3, ""); err != nil {
+	if err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-last", "worker-1", 0, 3, ""); err != nil {
 		t.Fatalf("Report: %v", err)
 	}
 	body := gh.comments[0]
@@ -107,25 +145,101 @@ func TestReport_PrefersLastMessage(t *testing.T) {
 	}
 }
 
-func TestReport_RetryOnGHFailure(t *testing.T) {
-	gh := &mockGHWriter{failN: 1} // first call fails, second succeeds
+func TestReport_RetryOnRateLimit(t *testing.T) {
+	gh := &mockGHWriter{failN: 2}
 	r := NewReporter(gh)
+	rec := &mockEventRecorder{}
+	r.SetEventRecorder(rec)
+
+	saved := rateLimitRetryDelays
+	rateLimitRetryDelays = []time.Duration{1 * time.Millisecond}
+	defer func() { rateLimitRetryDelays = saved }()
+	result := &launcher.Result{
+		ExitCode: 0,
+		Stdout:   "ok",
+		Duration: 1 * time.Second,
+	}
+	err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-789", "worker-1", 0, 3, "")
+	if err != nil {
+		t.Fatalf("report should succeed after retries, got: %v", err)
+	}
+	if gh.calls != 3 {
+		t.Fatalf("expected 3 calls with retries, got %d", gh.calls)
+	}
+	if !rec.Has(eventlog.TypeRateLimit) {
+		t.Fatalf("expected rate limit event to be recorded")
+	}
+}
+
+func TestReport_RateLimitPayloadRedactsToken(t *testing.T) {
+	ghWriter := &mockGHWriter{
+		failN: 1,
+		err:   fmt.Errorf("mock gh error: ghp_12345678901234567890: rate limit exceeded"),
+	}
+	r := NewReporter(ghWriter)
+	rec := &mockEventRecorder{}
+	r.SetEventRecorder(rec)
+
+	saved := rateLimitRetryDelays
+	rateLimitRetryDelays = []time.Duration{1 * time.Millisecond}
+	defer func() { rateLimitRetryDelays = saved }()
 
 	result := &launcher.Result{
 		ExitCode: 0,
 		Stdout:   "ok",
 		Duration: 1 * time.Second,
 	}
-
-	// The current reporter.go doesn't retry - it just returns the error.
-	// But let's test the happy path after first failure.
-	err := r.Report("test/repo", 42, "dev-agent", result, "sess-789", "worker-1", 0, 3, "")
-	// First call to gh.WriteComment fails, so Report should return error
-	if err == nil {
-		// If reporter implements retry internally, this is fine
-		if len(gh.comments) != 1 {
-			t.Errorf("expected 1 comment after retry, got %d", len(gh.comments))
+	err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-redact", "worker-1", 0, 3, "")
+	if err != nil {
+		t.Fatalf("report should succeed after retries, got: %v", err)
+	}
+	payload, ok := rec.findPayload(eventlog.TypeRateLimit)
+	if !ok {
+		t.Fatalf("expected rate limit event to be recorded")
+	}
+	p, ok := payload.(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected rate limit payload type: %T", payload)
+	}
+	if p == nil {
+		t.Fatalf("rate limit payload is empty")
+	}
+	if v, ok := p["error"].(string); ok {
+		if strings.Contains(v, "ghp_12345678901234567890") {
+			t.Fatalf("expected token redaction, got %q", v)
 		}
+	}
+}
+
+func TestReport_RetryCancelsWithContext(t *testing.T) {
+	gh := &mockGHWriter{failN: 10}
+	r := NewReporter(gh)
+	saved := rateLimitRetryDelays
+	rateLimitRetryDelays = []time.Duration{10 * time.Millisecond}
+	defer func() { rateLimitRetryDelays = saved }()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(1 * time.Millisecond)
+		cancel()
+	}()
+
+	result := &launcher.Result{
+		ExitCode: 0,
+		Stdout:   "ok",
+		Duration: 1 * time.Second,
+	}
+	err := r.Report(ctx, "test/repo", 42, "dev-agent", result, "sess-cancel", "worker-1", 0, 3, "")
+	if err == nil {
+		t.Fatal("expected report to fail when context canceled")
+	}
+	if err != context.Canceled {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+	if gh.calls == 0 {
+		t.Fatalf("expected at least one write attempt before cancellation")
+	}
+	if gh.calls > 2 {
+		t.Fatalf("expected at most two attempts with prompt cancellation, got %d", gh.calls)
 	}
 }
 
@@ -133,7 +247,7 @@ func TestReportNeedsHuman(t *testing.T) {
 	gh := &mockGHWriter{}
 	r := NewReporter(gh)
 
-	if err := r.ReportNeedsHuman("test/repo", 42, "Label transition: none - needs human review"); err != nil {
+	if err := r.ReportNeedsHuman(context.Background(), "test/repo", 42, "Label transition: none - needs human review"); err != nil {
 		t.Fatalf("ReportNeedsHuman: %v", err)
 	}
 	if len(gh.comments) != 1 {
@@ -181,6 +295,22 @@ func TestSetBlockedReactionDelegatesToManager(t *testing.T) {
 	}
 	if mock.calls[0].repo != "owner/repo" || mock.calls[0].issueNum != 7 {
 		t.Fatalf("call args wrong: %+v", mock.calls[0])
+	}
+}
+
+func TestReportStartedUsesWriter(t *testing.T) {
+	gh := &mockGHWriter{}
+	r := NewReporter(gh)
+
+	err := r.ReportStarted(context.Background(), "test/repo", 42, "dev-agent", "sess-123", "worker-1")
+	if err != nil {
+		t.Fatalf("ReportStarted: %v", err)
+	}
+	if len(gh.comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(gh.comments))
+	}
+	if !strings.Contains(gh.comments[0], "Session ID") {
+		t.Fatalf("expected started report to include session id: %s", gh.comments[0])
 	}
 }
 

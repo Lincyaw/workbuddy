@@ -1,8 +1,12 @@
 package dependency
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"log"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
@@ -17,6 +21,25 @@ type fakeReader struct {
 func (f *fakeReader) ListIssues(string) ([]poller.Issue, error) { return nil, nil }
 
 func (f *fakeReader) ReadIssue(_ string, issueNum int) (poller.IssueDetails, error) {
+	if detail, ok := f.details[issueNum]; ok {
+		return detail, nil
+	}
+	return poller.IssueDetails{}, nil
+}
+
+type fakeReaderWithErrors struct {
+	details map[int]poller.IssueDetails
+	errors  map[int]error
+}
+
+func (f *fakeReaderWithErrors) ListIssues(string) ([]poller.Issue, error) {
+	return nil, nil
+}
+
+func (f *fakeReaderWithErrors) ReadIssue(_ string, issueNum int) (poller.IssueDetails, error) {
+	if err, ok := f.errors[issueNum]; ok && err != nil {
+		return poller.IssueDetails{}, err
+	}
 	if detail, ok := f.details[issueNum]; ok {
 		return detail, nil
 	}
@@ -85,6 +108,91 @@ func TestParseDeclaration(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestResolverSkipsRateLimitedDependencyRead(t *testing.T) {
+	st := newTestStore(t)
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     "owner/repo",
+		IssueNum: 3,
+		Labels:   `["status:developing"]`,
+		Body:     "```yaml\nworkbuddy:\n  depends_on:\n    - \"#2\"\n```",
+		State:    "open",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := &fakeReaderWithErrors{
+		errors: map[int]error{
+			2: fmt.Errorf("HTTP 403: rate limit exceeded"),
+		},
+	}
+	logger := eventlog.NewEventLogger(st)
+	resolver := NewResolver(st, reader, logger)
+
+	unblocked, err := resolver.EvaluateOpenIssues(context.Background(), "owner/repo", 1)
+	if err != nil {
+		t.Fatalf("EvaluateOpenIssues: %v", err)
+	}
+	if len(unblocked) != 0 {
+		t.Fatalf("did not expect any unblocked issues, got: %v", unblocked)
+	}
+
+	state, err := st.QueryIssueDependencyState("owner/repo", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil || state.Verdict != store.DependencyVerdictNeedsHuman {
+		t.Fatalf("expected needs_human verdict, got: %+v", state)
+	}
+
+	evs, err := logger.Query(eventlog.EventFilter{Repo: "owner/repo", IssueNum: 3, Type: eventlog.TypeRateLimit})
+	if err != nil {
+		t.Fatalf("query events: %v", err)
+	}
+	if len(evs) == 0 {
+		t.Fatal("expected rate limit event to be recorded")
+	}
+}
+
+func TestResolverSkipsRateLimitedDependencyReadRedactsTokenInLog(t *testing.T) {
+	st := newTestStore(t)
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     "owner/repo",
+		IssueNum: 3,
+		Labels:   `["status:developing"]`,
+		Body:     "```yaml\nworkbuddy:\n  depends_on:\n    - \"#2\"\n```",
+		State:    "open",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := &fakeReaderWithErrors{
+		errors: map[int]error{
+			2: fmt.Errorf("HTTP 403: rate limit exceeded: token ghp_12345678901234567890"),
+		},
+	}
+
+	var out bytes.Buffer
+	oldOutput := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&out)
+	log.SetFlags(log.LstdFlags)
+	defer func() {
+		log.SetOutput(oldOutput)
+		log.SetFlags(oldFlags)
+	}()
+
+	resolver := NewResolver(st, reader, nil)
+	_, err := resolver.EvaluateOpenIssues(context.Background(), "owner/repo", 1)
+	if err != nil {
+		t.Fatalf("EvaluateOpenIssues: %v", err)
+	}
+
+	logged := out.String()
+	if strings.Contains(logged, "ghp_12345678901234567890") {
+		t.Fatalf("expected token to be redacted in log output: %q", logged)
 	}
 }
 
@@ -160,7 +268,7 @@ func TestBuildResolveResultVerdicts(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := buildResolveResult("owner/repo", tt.issue, tt.decl, 1, tt.cycle, openIssues, closedCache, reader)
+			result := buildResolveResult("owner/repo", tt.issue, tt.decl, 1, tt.cycle, openIssues, closedCache, reader, nil)
 			if result.State.Verdict != tt.want {
 				t.Fatalf("verdict=%q want %q", result.State.Verdict, tt.want)
 			}

@@ -519,9 +519,11 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	// Reporter
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
 	rep.SetBaseURL(fmt.Sprintf("http://localhost:%d", cfg.Global.Port))
+	rep.SetEventRecorder(evlog)
 
 	// Poller
 	p := poller.NewPoller(ghReader, st, cfg.Global.Repo, cfg.Global.PollInterval)
+	p.SetEventRecorder(evlog)
 
 	// Context with signal handling or parent context (for tests)
 	var ctx context.Context
@@ -536,6 +538,10 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	}
 	defer cancel()
+
+	// Optional startup rate-limit budget check; this is best-effort and
+	// intentionally non-fatal for normal startup.
+	go runRateLimitBudgetCheck(ctx, "serve", cfg.Global.Repo)
 
 	var wg sync.WaitGroup
 	taskHub := tasknotify.NewHub()
@@ -898,7 +904,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	task.Context.Session.TaskID = task.TaskID
 	task.Context.Session.WorkerID = deps.workerID
 	task.Context.Session.Attempt = currentAttempt(task, deps.store)
-	if err := deps.reporter.ReportStarted(task.Repo, task.IssueNum, task.AgentName, sessionID, deps.workerID); err != nil {
+	if err := deps.reporter.ReportStarted(taskCtx, task.Repo, task.IssueNum, task.AgentName, sessionID, deps.workerID); err != nil {
 		log.Printf("[worker] report started failed: %v", err)
 	}
 
@@ -999,7 +1005,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 				log.Printf("[worker] label validation audit failed: %v", err)
 			}
 			if validation.NeedsHumanRecommendation() {
-				if err := deps.reporter.ReportNeedsHuman(task.Repo, task.IssueNum, labelSummary); err != nil {
+				if err := deps.reporter.ReportNeedsHuman(taskCtx, task.Repo, task.IssueNum, labelSummary); err != nil {
 					log.Printf("[worker] needs-human recommendation failed: %v", err)
 				}
 			}
@@ -1073,7 +1079,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	}
 
 	// Report to issue
-	if err := deps.reporter.Report(task.Repo, task.IssueNum, task.AgentName, result,
+	if err := deps.reporter.Report(taskCtx, task.Repo, task.IssueNum, task.AgentName, result,
 		sessionID, deps.workerID, retryCount, maxRetries, labelSummary); err != nil {
 		log.Printf("[worker] report failed: %v", err)
 	}

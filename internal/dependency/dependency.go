@@ -10,12 +10,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/ghutil"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"gopkg.in/yaml.v3"
@@ -170,7 +172,7 @@ func (r *Resolver) EvaluateOpenIssues(ctx context.Context, repo string, graphVer
 		default:
 		}
 
-		result := buildResolveResult(repo, issue, parsedDecls[num], graphVersion, cycles[num], openIssues, closedCache, r.reader)
+		result := buildResolveResult(repo, issue, parsedDecls[num], graphVersion, cycles[num], openIssues, closedCache, r.reader, r.eventlog)
 		prev, err := r.store.QueryIssueDependencyState(repo, num)
 		if err != nil {
 			return nil, err
@@ -185,7 +187,7 @@ func (r *Resolver) EvaluateOpenIssues(ctx context.Context, repo string, graphVer
 			return nil, err
 		}
 		verdictChanged := prev == nil || prev.Verdict != result.State.Verdict || prev.BlockedReasonHash != result.State.BlockedReasonHash || prev.OverrideActive != result.State.OverrideActive
-		if verdictChanged {
+		if verdictChanged && r.eventlog != nil {
 			r.eventlog.Log(eventlog.TypeDependencyVerdictChanged, repo, num, map[string]any{
 				"verdict":         result.State.Verdict,
 				"override_active": result.State.OverrideActive,
@@ -197,12 +199,12 @@ func (r *Resolver) EvaluateOpenIssues(ctx context.Context, repo string, graphVer
 				unblocked = append(unblocked, num)
 			}
 		}
-		if cycles[num] != nil {
+		if cycles[num] != nil && r.eventlog != nil {
 			r.eventlog.Log(eventlog.TypeDependencyCycleDetected, repo, num, map[string]any{
 				"cycle_path": cycles[num],
 			})
 		}
-		if result.State.OverrideActive {
+		if result.State.OverrideActive && r.eventlog != nil {
 			r.eventlog.Log(eventlog.TypeDependencyOverrideActivated, repo, num, map[string]any{
 				"resume_label": result.State.ResumeLabel,
 			})
@@ -221,6 +223,7 @@ func buildResolveResult(
 	openIssues map[int]poller.Issue,
 	closedCache map[int]poller.IssueDetails,
 	reader IssueReader,
+	eventRecorder EventRecorder,
 ) ResolveResult {
 	reasons := make([]string, 0)
 	verdict := store.DependencyVerdictReady
@@ -261,6 +264,17 @@ func buildResolveResult(
 						detail = read
 						closedCache[dep.IssueNum] = detail
 						ok = true
+					} else {
+						if ghutil.IsRateLimit(err) {
+							log.Printf("[dependency] rate limit while reading %s#%d for %d: %v", dep.Repo, dep.IssueNum, issue.Number, ghutil.RedactTokens(err.Error()))
+							if eventRecorder != nil {
+								eventRecorder.Log(eventlog.TypeRateLimit, repo, issue.Number, map[string]any{
+									"source": "dependency_resolver",
+									"dep":    dep.Normalized,
+									"error":  ghutil.RedactTokens(err.Error()),
+								})
+							}
+						}
 					}
 				}
 				if ok && detail.State == "closed" && detail.ClosedByLinkedPR {
