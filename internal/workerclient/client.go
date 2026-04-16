@@ -4,21 +4,61 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 )
 
-// Client is the worker-side HTTP client for coordinator task endpoints.
+var ErrUnauthorized = errors.New("workerclient: unauthorized")
+
+const defaultMaxBackoff = 60 * time.Second
+
 type Client struct {
 	baseURL    string
 	token      string
 	httpClient *http.Client
+	maxBackoff time.Duration
 }
 
-// New creates a worker HTTP client.
+type RegisterRequest struct {
+	WorkerID string   `json:"worker_id"`
+	Repo     string   `json:"repo"`
+	Roles    []string `json:"roles"`
+	Runtime  string   `json:"runtime,omitempty"`
+	Repos    []string `json:"repos,omitempty"`
+	Hostname string   `json:"hostname,omitempty"`
+}
+
+type Task struct {
+	TaskID    string   `json:"task_id"`
+	Repo      string   `json:"repo"`
+	IssueNum  int      `json:"issue_num"`
+	AgentName string   `json:"agent_name"`
+	Workflow  string   `json:"workflow,omitempty"`
+	State     string   `json:"state,omitempty"`
+	Roles     []string `json:"roles,omitempty"`
+}
+
+type ResultRequest struct {
+	WorkerID      string   `json:"worker_id"`
+	Status        string   `json:"status"`
+	CurrentLabels []string `json:"current_labels"`
+}
+
+type HeartbeatRequest struct {
+	WorkerID string `json:"worker_id"`
+}
+
+type ReleaseRequest struct {
+	WorkerID string `json:"worker_id"`
+	Reason   string `json:"reason,omitempty"`
+}
+
 func New(baseURL, token string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
@@ -27,51 +67,130 @@ func New(baseURL, token string, httpClient *http.Client) *Client {
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		token:      strings.TrimSpace(token),
 		httpClient: httpClient,
+		maxBackoff: defaultMaxBackoff,
 	}
 }
 
-// PollTask long-polls for the next task.
-func (c *Client) PollTask(ctx context.Context, workerID string, timeout time.Duration) (*http.Response, error) {
-	values := url.Values{}
-	values.Set("worker_id", workerID)
+func (c *Client) Register(ctx context.Context, req RegisterRequest) error {
+	_, err := c.doJSON(ctx, http.MethodPost, "/api/v1/workers/register", req, nil, http.StatusCreated)
+	return err
+}
+
+func (c *Client) PollTask(ctx context.Context, workerID string, timeout time.Duration) (*Task, error) {
+	path := fmt.Sprintf("/api/v1/tasks/poll?worker_id=%s", url.QueryEscape(workerID))
 	if timeout > 0 {
-		values.Set("timeout", timeout.String())
+		path += "&timeout=" + url.QueryEscape(timeout.String())
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v1/tasks/poll?"+values.Encode(), nil)
+	var task Task
+	status, err := c.doJSON(ctx, http.MethodGet, path, nil, &task, http.StatusOK, http.StatusNoContent)
 	if err != nil {
-		return nil, fmt.Errorf("workerclient: build poll request: %w", err)
+		return nil, err
 	}
-	c.applyAuth(req)
-	return c.httpClient.Do(req)
+	if status == http.StatusNoContent {
+		return nil, nil
+	}
+	return &task, nil
 }
 
-// SubmitResult posts task completion data.
-func (c *Client) SubmitResult(ctx context.Context, taskID string, payload any) (*http.Response, error) {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("workerclient: marshal result: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v1/tasks/"+taskID+"/result", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("workerclient: build result request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	c.applyAuth(req)
-	return c.httpClient.Do(req)
+func (c *Client) SubmitResult(ctx context.Context, taskID string, req ResultRequest) error {
+	_, err := c.doJSON(ctx, http.MethodPost, "/api/v1/tasks/"+url.PathEscape(taskID)+"/result", req, nil, http.StatusOK)
+	return err
 }
 
-// Heartbeat notifies the coordinator that a task is still alive.
-func (c *Client) Heartbeat(ctx context.Context, taskID string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v1/tasks/"+taskID+"/heartbeat", nil)
-	if err != nil {
-		return nil, fmt.Errorf("workerclient: build heartbeat request: %w", err)
-	}
-	c.applyAuth(req)
-	return c.httpClient.Do(req)
+func (c *Client) Heartbeat(ctx context.Context, taskID string, req HeartbeatRequest) error {
+	_, err := c.doJSON(ctx, http.MethodPost, "/api/v1/tasks/"+url.PathEscape(taskID)+"/heartbeat", req, nil, http.StatusNoContent)
+	return err
 }
 
-func (c *Client) applyAuth(req *http.Request) {
+func (c *Client) ReleaseTask(ctx context.Context, taskID string, req ReleaseRequest) error {
+	_, err := c.doJSON(ctx, http.MethodPost, "/api/v1/tasks/"+url.PathEscape(taskID)+"/release", req, nil, http.StatusOK, http.StatusNoContent)
+	return err
+}
+
+func (c *Client) doJSON(ctx context.Context, method, path string, body any, out any, okStatuses ...int) (int, error) {
+	backoff := time.Second
+	for {
+		status, err := c.doJSONOnce(ctx, method, path, body, out, okStatuses...)
+		if err == nil {
+			return status, nil
+		}
+		if errors.Is(err, ErrUnauthorized) || !isRetryable(err) || ctx.Err() != nil {
+			return 0, err
+		}
+
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return 0, ctx.Err()
+		case <-timer.C:
+		}
+		backoff *= 2
+		if backoff > c.maxBackoff {
+			backoff = c.maxBackoff
+		}
+	}
+}
+
+func (c *Client) doJSONOnce(ctx context.Context, method, path string, body any, out any, okStatuses ...int) (int, error) {
+	var payload io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return 0, fmt.Errorf("workerclient: marshal %s %s: %w", method, path, err)
+		}
+		payload = bytes.NewReader(data)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, payload)
+	if err != nil {
+		return 0, fmt.Errorf("workerclient: build %s %s: %w", method, path, err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("workerclient: %s %s: %w", method, path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return 0, fmt.Errorf("workerclient: read %s %s: %w", method, path, readErr)
+	}
+
+	for _, want := range okStatuses {
+		if resp.StatusCode == want {
+			if out != nil && len(respBody) > 0 {
+				if err := json.Unmarshal(respBody, out); err != nil {
+					return 0, fmt.Errorf("workerclient: decode %s %s: %w", method, path, err)
+				}
+			}
+			return resp.StatusCode, nil
+		}
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return 0, ErrUnauthorized
+	}
+	if resp.StatusCode >= 500 {
+		return 0, fmt.Errorf("workerclient: server error %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	return 0, fmt.Errorf("workerclient: unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+}
+
+func isRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	return strings.Contains(err.Error(), "server error")
 }

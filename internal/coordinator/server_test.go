@@ -56,14 +56,12 @@ func TestRevokedTokenReturnsUnauthorized(t *testing.T) {
 	defer srv.Close()
 
 	client := workerclient.New(srv.URL, issued.Token, srv.Client())
-	resp, err := client.PollTask(context.Background(), "worker-1", 0)
-	if err != nil {
-		t.Fatalf("PollTask: %v", err)
+	_, err = client.PollTask(context.Background(), "worker-1", 0)
+	if err == nil {
+		t.Fatal("expected PollTask to fail with revoked token")
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	if err != workerclient.ErrUnauthorized {
+		t.Fatalf("err = %v, want %v", err, workerclient.ErrUnauthorized)
 	}
 }
 
@@ -73,13 +71,11 @@ func TestLoopbackModeBypassesAuth(t *testing.T) {
 	defer srv.Close()
 
 	client := workerclient.New(srv.URL, "", srv.Client())
-	resp, err := client.PollTask(context.Background(), "worker-1", 50*time.Millisecond)
+	task, err := client.PollTask(context.Background(), "worker-1", 50*time.Millisecond)
 	if err != nil {
 		t.Fatalf("PollTask: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	if task != nil {
+		t.Fatalf("expected nil task (no content), got %+v", task)
 	}
 }

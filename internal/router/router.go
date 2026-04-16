@@ -112,6 +112,12 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 		return
 	}
 
+	// Distributed coordinator mode persists pending tasks for HTTP workers and
+	// does not need to render an in-process task payload yet.
+	if r.taskChan == nil {
+		return
+	}
+
 	// Fetch issue details via gh CLI for template rendering.
 	issueCtx := launcher.IssueContext{Number: req.IssueNum}
 	if title, body, labels, err := fetchIssueDetails(req.Repo, req.IssueNum); err != nil {

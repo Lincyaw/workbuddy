@@ -270,15 +270,40 @@ func (s *Store) QueryTasks(status string) ([]TaskRecord, error) {
 	var out []TaskRecord
 	for rows.Next() {
 		var t TaskRecord
+		var workerID sql.NullString
 		var createdAt, updatedAt string
-		if err := rows.Scan(&t.ID, &t.Repo, &t.IssueNum, &t.AgentName, &t.WorkerID, &t.Status, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Repo, &t.IssueNum, &t.AgentName, &workerID, &t.Status, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("store: scan task: %w", err)
 		}
+		t.WorkerID = workerID.String
 		t.CreatedAt, _ = parseTimestamp(createdAt, "task.created_at")
 		t.UpdatedAt, _ = parseTimestamp(updatedAt, "task.updated_at")
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// GetTask returns a task by ID, or nil if not found.
+func (s *Store) GetTask(taskID string) (*TaskRecord, error) {
+	var task TaskRecord
+	var workerID sql.NullString
+	var createdAt, updatedAt string
+	err := s.db.QueryRow(
+		`SELECT id, repo, issue_num, agent_name, worker_id, status, created_at, updated_at
+		 FROM task_queue
+		 WHERE id = ?`,
+		taskID,
+	).Scan(&task.ID, &task.Repo, &task.IssueNum, &task.AgentName, &workerID, &task.Status, &createdAt, &updatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: get task: %w", err)
+	}
+	task.WorkerID = workerID.String
+	task.CreatedAt, _ = parseTimestamp(createdAt, "task.created_at")
+	task.UpdatedAt, _ = parseTimestamp(updatedAt, "task.updated_at")
+	return &task, nil
 }
 
 // UpdateTaskStatus updates the status and updated_at of a task.
@@ -295,6 +320,44 @@ func (s *Store) UpdateTaskStatus(taskID, status string) error {
 		return fmt.Errorf("store: update task status: task %q not found", taskID)
 	}
 	return nil
+}
+
+// ClaimTask atomically assigns a pending task to a worker and marks it running.
+// It returns true when the claim succeeded, or false when the task was no longer pending.
+func (s *Store) ClaimTask(taskID, workerID string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE task_queue
+		 SET worker_id = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND status = ?`,
+		workerID, TaskStatusRunning, taskID, TaskStatusPending,
+	)
+	if err != nil {
+		return false, fmt.Errorf("store: claim task: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: claim task rows affected: %w", err)
+	}
+	return rows > 0, nil
+}
+
+// ReleaseTask atomically requeues a running task owned by the given worker.
+// It returns true when the task was released back to pending.
+func (s *Store) ReleaseTask(taskID, workerID string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE task_queue
+		 SET worker_id = NULL, status = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND worker_id = ? AND status = ?`,
+		TaskStatusPending, taskID, workerID, TaskStatusRunning,
+	)
+	if err != nil {
+		return false, fmt.Errorf("store: release task: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: release task rows affected: %w", err)
+	}
+	return rows > 0, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,440 @@
+package cmd
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/Lincyaw/workbuddy/internal/audit"
+	"github.com/Lincyaw/workbuddy/internal/config"
+	"github.com/Lincyaw/workbuddy/internal/launcher"
+	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
+	"github.com/Lincyaw/workbuddy/internal/poller"
+	"github.com/Lincyaw/workbuddy/internal/reporter"
+	"github.com/Lincyaw/workbuddy/internal/store"
+	"github.com/Lincyaw/workbuddy/internal/workerclient"
+	"github.com/spf13/cobra"
+)
+
+const (
+	defaultWorkerPollTimeout      = 30 * time.Second
+	defaultWorkerHeartbeat        = 15 * time.Second
+	defaultWorkerShutdownDeadline = 5 * time.Second
+)
+
+type workerOpts struct {
+	coordinatorURL    string
+	token             string
+	roleCSV           string
+	runtime           string
+	repo              string
+	workerID          string
+	configDir         string
+	workDir           string
+	sessionsDir       string
+	dbPath            string
+	pollTimeout       time.Duration
+	heartbeatInterval time.Duration
+	shutdownTimeout   time.Duration
+}
+
+type workerIssueReader interface {
+	issueLabelReader
+	ReadIssue(repo string, issueNum int) (poller.IssueDetails, error)
+}
+
+var workerCmd = &cobra.Command{
+	Use:   "worker",
+	Short: "Run a standalone Worker that long-polls a Coordinator",
+	Long:  "Start the standalone Worker process, register capabilities with the remote Coordinator, and execute assigned tasks.",
+	RunE:  runWorker,
+}
+
+func init() {
+	workerCmd.Flags().String("coordinator", "", "Coordinator base URL")
+	workerCmd.Flags().String("token", "", "Bearer token for Coordinator authentication")
+	workerCmd.Flags().String("role", "", "Comma-separated worker roles (default: roles from local agent config)")
+	workerCmd.Flags().String("runtime", config.RuntimeClaudeCode, "Worker runtime capability: claude-code or codex")
+	workerCmd.Flags().String("repo", "", "Repository in OWNER/NAME form (default: config.yaml repo)")
+	_ = workerCmd.MarkFlagRequired("coordinator")
+	_ = workerCmd.MarkFlagRequired("token")
+	rootCmd.AddCommand(workerCmd)
+}
+
+func runWorker(cmd *cobra.Command, _ []string) error {
+	opts, err := parseWorkerFlags(cmd)
+	if err != nil {
+		return err
+	}
+	return runWorkerWithOpts(opts, nil, nil)
+}
+
+func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
+	coordinatorURL, _ := cmd.Flags().GetString("coordinator")
+	token, _ := cmd.Flags().GetString("token")
+	roleCSV, _ := cmd.Flags().GetString("role")
+	runtimeName, _ := cmd.Flags().GetString("runtime")
+	repo, _ := cmd.Flags().GetString("repo")
+	return &workerOpts{
+		coordinatorURL:    strings.TrimSpace(coordinatorURL),
+		token:             strings.TrimSpace(token),
+		roleCSV:           roleCSV,
+		runtime:           runtimeName,
+		repo:              strings.TrimSpace(repo),
+		configDir:         ".github/workbuddy",
+		pollTimeout:       defaultWorkerPollTimeout,
+		heartbeatInterval: defaultWorkerHeartbeat,
+		shutdownTimeout:   defaultWorkerShutdownDeadline,
+	}, nil
+}
+
+func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerIssueReader, parentCtx ...context.Context) error {
+	if opts == nil {
+		return fmt.Errorf("worker: options are required")
+	}
+	cfg, warnings, err := config.LoadConfig(opts.configDir)
+	if err != nil {
+		return fmt.Errorf("worker: load config: %w", err)
+	}
+	for _, w := range warnings {
+		log.Printf("[worker] warning: %s", w)
+	}
+
+	repoName := opts.repo
+	if repoName == "" {
+		repoName = strings.TrimSpace(cfg.Global.Repo)
+	}
+	if repoName == "" {
+		return fmt.Errorf("worker: repo is required")
+	}
+
+	workDir := opts.workDir
+	if workDir == "" {
+		workDir, err = os.Getwd()
+		if err != nil {
+			return fmt.Errorf("worker: get working directory: %w", err)
+		}
+	}
+	workDir, err = filepath.Abs(workDir)
+	if err != nil {
+		return fmt.Errorf("worker: resolve working directory: %w", err)
+	}
+
+	if opts.dbPath == "" {
+		opts.dbPath = filepath.Join(workDir, ".workbuddy", "worker.db")
+	}
+	if opts.sessionsDir == "" {
+		opts.sessionsDir = filepath.Join(workDir, ".workbuddy", "sessions")
+	}
+
+	publicRuntime, runtimeAlias, err := normalizeWorkerRuntime(opts.runtime)
+	if err != nil {
+		return err
+	}
+	roles := parseWorkerRoles(opts.roleCSV, cfg.Agents)
+	if len(roles) == 0 {
+		return fmt.Errorf("worker: at least one role is required")
+	}
+
+	workerID := strings.TrimSpace(opts.workerID)
+	if workerID == "" {
+		hostname, _ := os.Hostname()
+		if hostname == "" {
+			hostname = "worker"
+		}
+		workerID = fmt.Sprintf("%s-%d", hostname, os.Getpid())
+	}
+
+	if lnch == nil {
+		lnch = launcher.NewLauncher()
+	}
+	if reader == nil {
+		reader = &GHCLIReader{}
+	}
+
+	localStore, err := store.NewStore(opts.dbPath)
+	if err != nil {
+		return fmt.Errorf("worker: init local store: %w", err)
+	}
+	defer func() { _ = localStore.Close() }()
+
+	client := workerclient.New(opts.coordinatorURL, opts.token, nil)
+	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
+	auditor := audit.NewAuditor(localStore, opts.sessionsDir)
+
+	var ctx context.Context
+	var cancel context.CancelFunc
+	var sigCh chan os.Signal
+	if len(parentCtx) > 0 && parentCtx[0] != nil {
+		ctx, cancel = context.WithCancel(parentCtx[0])
+	} else {
+		ctx, cancel = context.WithCancel(context.Background())
+		sigCh = make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	}
+	defer cancel()
+
+	if sigCh != nil {
+		go func() {
+			select {
+			case sig := <-sigCh:
+				log.Printf("[worker] received signal %s, shutting down...", sig)
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
+
+	if err := client.Register(ctx, workerclient.RegisterRequest{
+		WorkerID: workerID,
+		Repo:     repoName,
+		Roles:    roles,
+		Runtime:  publicRuntime,
+		Repos:    []string{repoName},
+		Hostname: hostnameOrUnknown(),
+	}); err != nil {
+		if errors.Is(err, workerclient.ErrUnauthorized) {
+			return fmt.Errorf("worker: coordinator rejected the provided token")
+		}
+		return fmt.Errorf("worker: register with coordinator: %w", err)
+	}
+
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		task, err := client.PollTask(ctx, workerID, opts.pollTimeout)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+			if errors.Is(err, workerclient.ErrUnauthorized) {
+				return fmt.Errorf("worker: coordinator rejected the provided token")
+			}
+			return fmt.Errorf("worker: poll task: %w", err)
+		}
+		if task == nil {
+			continue
+		}
+		if err := executeRemoteTask(ctx, task, client, cfg, lnch, auditor, rep, reader, workDir, opts.sessionsDir, workerID, runtimeAlias, opts.heartbeatInterval, opts.shutdownTimeout); err != nil {
+			return err
+		}
+	}
+}
+
+func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *workerclient.Client, cfg *config.FullConfig, lnch *launcher.Launcher, auditor *audit.Auditor, rep *reporter.Reporter, reader workerIssueReader, workDir, sessionsDir, workerID, runtimeAlias string, heartbeatInterval, shutdownTimeout time.Duration) error {
+	agentCfg, ok := cfg.Agents[task.AgentName]
+	if !ok {
+		return fmt.Errorf("worker: agent %q not found in local config", task.AgentName)
+	}
+	agentCopy := *agentCfg
+	if runtimeAlias != "" {
+		agentCopy.Runtime = runtimeAlias
+	}
+
+	taskCtx, taskCancel := context.WithCancel(ctx)
+	defer taskCancel()
+
+	var released atomic.Bool
+	releaseDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			releaseCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer cancel()
+			if err := client.ReleaseTask(releaseCtx, task.TaskID, workerclient.ReleaseRequest{WorkerID: workerID, Reason: "worker shutdown"}); err == nil {
+				released.Store(true)
+			}
+			taskCancel()
+		case <-releaseDone:
+		}
+	}()
+	defer close(releaseDone)
+
+	heartbeatStop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(heartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				hbCtx, cancel := context.WithTimeout(context.Background(), heartbeatInterval)
+				err := client.Heartbeat(hbCtx, task.TaskID, workerclient.HeartbeatRequest{WorkerID: workerID})
+				cancel()
+				if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, workerclient.ErrUnauthorized) {
+					log.Printf("[worker] heartbeat failed for task %s: %v", task.TaskID, err)
+				}
+			case <-heartbeatStop:
+				return
+			case <-taskCtx.Done():
+				return
+			}
+		}
+	}()
+	defer close(heartbeatStop)
+
+	launchCtx := buildRemoteTaskContext(task, reader, workDir)
+	sessionID := launchCtx.Session.ID
+	if err := rep.ReportStarted(task.Repo, task.IssueNum, task.AgentName, sessionID, workerID); err != nil {
+		log.Printf("[worker] report started failed: %v", err)
+	}
+
+	session, err := lnch.Start(taskCtx, &agentCopy, launchCtx)
+	if err != nil {
+		return fmt.Errorf("worker: start agent %s: %w", task.AgentName, err)
+	}
+	defer func() { _ = session.Close() }()
+
+	eventsCh := make(chan launcherevents.Event, 64)
+	eventsPath, waitEvents := streamSessionEvents(sessionsDir, launchCtx, eventsCh)
+	result, runErr := session.Run(taskCtx, eventsCh)
+	close(eventsCh)
+	if waitErr := waitEvents(); waitErr != nil {
+		log.Printf("[worker] event capture failed: %v", waitErr)
+	}
+	if result == nil {
+		result = &launcher.Result{
+			ExitCode: 1,
+			Stderr:   runErrString(runErr),
+			Meta:     map[string]string{},
+		}
+	}
+	if result.Meta == nil {
+		result.Meta = map[string]string{}
+	}
+	if eventsPath != "" {
+		if result.RawSessionPath == "" {
+			result.RawSessionPath = result.SessionPath
+		}
+		result.SessionPath = eventsPath
+	}
+	if runErr != nil && result.Stderr == "" {
+		result.Stderr = runErr.Error()
+	}
+	if err := auditor.Capture(sessionID, task.TaskID, task.Repo, task.IssueNum, task.AgentName, result); err != nil {
+		log.Printf("[worker] audit capture failed: %v", err)
+	}
+	if ctx.Err() != nil && !released.Load() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		err := client.ReleaseTask(releaseCtx, task.TaskID, workerclient.ReleaseRequest{WorkerID: workerID, Reason: "worker shutdown"})
+		cancel()
+		if err == nil {
+			released.Store(true)
+		}
+	}
+	if released.Load() {
+		return nil
+	}
+
+	currentLabels, err := snapshotIssueLabels(task.Repo, task.IssueNum, reader)
+	if err != nil {
+		currentLabels = append([]string(nil), launchCtx.Issue.Labels...)
+	}
+
+	status := store.TaskStatusCompleted
+	if runErr != nil || result.ExitCode != 0 {
+		status = store.TaskStatusFailed
+	}
+	if result.Meta["timeout"] == "true" {
+		status = store.TaskStatusTimeout
+	}
+	if err := client.SubmitResult(taskCtx, task.TaskID, workerclient.ResultRequest{
+		WorkerID:      workerID,
+		Status:        status,
+		CurrentLabels: currentLabels,
+	}); err != nil {
+		return fmt.Errorf("worker: submit result: %w", err)
+	}
+	if err := rep.Report(task.Repo, task.IssueNum, task.AgentName, result, sessionID, workerID, 0, workflowMaxRetries(cfg, task.Workflow), ""); err != nil {
+		log.Printf("[worker] report failed: %v", err)
+	}
+	return nil
+}
+
+func buildRemoteTaskContext(task *workerclient.Task, reader workerIssueReader, workDir string) *launcher.TaskContext {
+	issue := launcher.IssueContext{Number: task.IssueNum}
+	if reader != nil {
+		if details, err := reader.ReadIssue(task.Repo, task.IssueNum); err == nil {
+			issue.Body = details.Body
+			issue.Labels = append([]string(nil), details.Labels...)
+		}
+	}
+	return &launcher.TaskContext{
+		Issue:    issue,
+		Repo:     task.Repo,
+		RepoRoot: workDir,
+		WorkDir:  workDir,
+		Session: launcher.SessionContext{
+			ID: fmt.Sprintf("session-%s", task.TaskID),
+		},
+	}
+}
+
+func parseWorkerRoles(raw string, agents map[string]*config.AgentConfig) []string {
+	if strings.TrimSpace(raw) != "" {
+		parts := strings.Split(raw, ",")
+		out := make([]string, 0, len(parts))
+		for _, part := range parts {
+			role := strings.TrimSpace(part)
+			if role == "" || slices.Contains(out, role) {
+				continue
+			}
+			out = append(out, role)
+		}
+		return out
+	}
+	var out []string
+	for _, agent := range agents {
+		if agent == nil || agent.Role == "" || slices.Contains(out, agent.Role) {
+			continue
+		}
+		out = append(out, agent.Role)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func normalizeWorkerRuntime(raw string) (public string, runtimeAlias string, err error) {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "", config.RuntimeClaudeCode:
+		return config.RuntimeClaudeCode, config.RuntimeClaudeCode, nil
+	case config.RuntimeCodex, config.RuntimeCodexExec:
+		return config.RuntimeCodex, config.RuntimeCodexExec, nil
+	default:
+		return "", "", fmt.Errorf("worker: unsupported runtime %q (want claude-code or codex)", raw)
+	}
+}
+
+func hostnameOrUnknown() string {
+	hostname, err := os.Hostname()
+	if err != nil || strings.TrimSpace(hostname) == "" {
+		return "unknown"
+	}
+	return hostname
+}
+
+func workflowMaxRetries(cfg *config.FullConfig, workflow string) int {
+	if cfg == nil || cfg.Workflows == nil {
+		return 3
+	}
+	if wf, ok := cfg.Workflows[workflow]; ok && wf.MaxRetries > 0 {
+		return wf.MaxRetries
+	}
+	return 3
+}
+
+func runErrString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}

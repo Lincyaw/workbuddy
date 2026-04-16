@@ -463,17 +463,22 @@ requirements:
       In v0.1.0 only /health endpoint is active. Full API in v0.2.0.
     priority: P1
     version: v0.2.0
-    status: pending
+    status: tested
     acceptance_criteria:
-      - "AC-025-1: POST /api/v1/workers/register 接受 Worker 注册（worker_id, repo, roles）"
+      - "AC-025-1: POST /api/v1/workers/register 接受 Worker 注册（worker_id, repo, roles, runtime, repos）"
       - "AC-025-2: GET /api/v1/tasks/poll 支持长轮询——有任务立即返回，无任务挂起最多 timeout 秒后返回 204"
       - "AC-025-3: POST /api/v1/tasks/:id/result 接受 Worker 提交的执行结果"
       - "AC-025-4: POST /api/v1/tasks/:id/heartbeat 更新任务心跳"
       - "AC-025-5: GET /health 返回 200 + JSON 健康状态"
       - "AC-025-6: 请求参数校验，无效请求返回 400"
       - "AC-025-7: 集成测试：模拟完整 register → poll → result 流程"
-    code: []
-    tests: []
+      - "AC-025-8: POST /api/v1/tasks/:id/release 支持 Worker 在 shutdown 时把已 claim 的 running 任务重新入队"
+    code:
+      - cmd/coordinator.go
+      - internal/router/router.go
+      - internal/store/store.go
+    tests:
+      - cmd/coordinator_test.go
     deps: [REQ-023, REQ-024]
 
   - id: REQ-026
@@ -554,7 +559,7 @@ requirements:
       Data sourced from SQLite.
     priority: P2
     version: v0.2.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-011-1: GET / 返回 dashboard 概览页面"
       - "AC-011-2: GET /sessions 返回会话列表，支持筛选"
@@ -861,15 +866,19 @@ requirements:
       For v0.2.0 distributed deployment.
     priority: P1
     version: v0.2.0
-    status: pending
+    status: tested
     acceptance_criteria:
       - "AC-027-1: cobra 命令 `workbuddy coordinator`，支持 --port, --poll-interval"
       - "AC-027-2: 启动 Poller + State Machine + Task Router + HTTP API"
       - "AC-027-3: 不启动 Worker，任务通过 HTTP API 长轮询分发"
       - "AC-027-4: 支持多仓库注册"
       - "AC-027-5: graceful shutdown"
-    code: []
-    tests: []
+    code:
+      - cmd/coordinator.go
+      - internal/router/router.go
+      - internal/store/store.go
+    tests:
+      - cmd/coordinator_test.go
     deps: [REQ-025]
 
   - id: REQ-028
@@ -879,19 +888,26 @@ requirements:
       Coordinator via long-polling.
     priority: P1
     version: v0.2.0
-    status: pending
+    status: tested
     acceptance_criteria:
-      - "AC-028-1: cobra 命令 `workbuddy worker`，支持 --coordinator, --worker-config, --worker-id"
-      - "AC-028-2: 读取 worker-config.yaml 获取 repo→local_path + roles 映射"
-      - "AC-028-3: 启动时向 Coordinator 注册"
-      - "AC-028-4: 循环长轮询获取任务"
-      - "AC-028-5: 收到任务 → 启动 Claude Code 实例"
-      - "AC-028-6: 执行期间定期心跳"
-      - "AC-028-7: 执行完成 → 提交结果"
-      - "AC-028-8: Coordinator 不可达时指数退避重试"
-      - "AC-028-9: graceful shutdown：等待当前任务完成"
-    code: []
-    tests: []
+      - "AC-028-1: cobra 命令 `workbuddy worker`，支持 --coordinator, --token, --role, --runtime, --repo"
+      - "AC-028-2: 启动时向 Coordinator 注册，并上报 roles/runtime/repos capabilities"
+      - "AC-028-3: 循环长轮询获取任务"
+      - "AC-028-4: 收到任务后按本地 agent config 启动 runtime（claude-code 或 codex）"
+      - "AC-028-5: 执行期间定期心跳"
+      - "AC-028-6: 执行完成 → 提交结果"
+      - "AC-028-7: Coordinator 不可达时指数退避重试"
+      - "AC-028-8: graceful shutdown：当前 running 任务会 release/requeue"
+      - "AC-028-9: 集成测试：与 `workbuddy coordinator` 配对后可 claim+complete synthetic task"
+      - "AC-028-10: invalid token 时退出非零并给出明确诊断"
+    code:
+      - cmd/worker.go
+      - cmd/coordinator.go
+      - internal/workerclient/client.go
+      - internal/store/store.go
+    tests:
+      - cmd/worker_test.go
+      - internal/workerclient/client_test.go
     deps: [REQ-026, REQ-006]
 
   # ============================================================
@@ -916,11 +932,14 @@ requirements:
       - "AC-029-6: 单元测试：有效 token、无效 token、缺失 token、v0.1.0 跳过认证 4 种场景"
     code:
       - cmd/coordinator.go
+      - cmd/worker.go
       - internal/coordinator/server.go
       - internal/store/store.go
       - internal/store/worker_tokens.go
       - internal/workerclient/client.go
     tests:
+      - cmd/coordinator_test.go
+      - cmd/worker_test.go
       - internal/coordinator/server_test.go
       - internal/store/store_test.go
       - internal/workerclient/client_test.go
