@@ -33,6 +33,11 @@ const (
 	RuntimeCodexServer = "codex-appserver"
 )
 
+const (
+	JoinAllPassed = "all_passed"
+	JoinAnyPassed = "any_passed"
+)
+
 var validRuntimes = map[string]bool{
 	RuntimeClaudeCode:  true,
 	RuntimeClaudeShot:  true,
@@ -349,6 +354,9 @@ func parseWorkflowFile(path string) (*WorkflowConfig, error) {
 	}
 	wf.States = block.States
 
+	if err := normalizeWorkflowStates(fname, &wf); err != nil {
+		return nil, err
+	}
 	if err := validateStates(fname, &wf); err != nil {
 		return nil, err
 	}
@@ -367,6 +375,50 @@ func validateStates(fname string, wf *WorkflowConfig) error {
 			}
 			seen[key] = true
 		}
+	}
+	return nil
+}
+
+func normalizeWorkflowStates(fname string, wf *WorkflowConfig) error {
+	for stateName, state := range wf.States {
+		if state == nil {
+			return fmt.Errorf("config: %s: state %q cannot be nil", fname, stateName)
+		}
+
+		if len(state.Agents) == 0 && strings.TrimSpace(state.Agent) != "" {
+			state.Agents = []string{state.Agent}
+		}
+
+		if len(state.Agents) == 0 {
+			state.Join = ""
+			continue
+		}
+
+		join := strings.TrimSpace(state.Join)
+		if join == "" {
+			join = JoinAllPassed
+		}
+		switch join {
+		case JoinAllPassed, JoinAnyPassed:
+		default:
+			return fmt.Errorf("config: %s: invalid join %q for state %q (expected %q or %q)", fname, join, stateName, JoinAllPassed, JoinAnyPassed)
+		}
+		state.Join = join
+
+		seenAgents := make(map[string]struct{}, len(state.Agents))
+		normalizedAgents := make([]string, 0, len(state.Agents))
+		for _, agent := range state.Agents {
+			agent = strings.TrimSpace(agent)
+			if agent == "" {
+				return fmt.Errorf("config: %s: empty agent name in state %q agents list", fname, stateName)
+			}
+			if _, exists := seenAgents[agent]; exists {
+				return fmt.Errorf("config: %s: duplicate agent %q in state %q", fname, agent, stateName)
+			}
+			seenAgents[agent] = struct{}{}
+			normalizedAgents = append(normalizedAgents, agent)
+		}
+		state.Agents = normalizedAgents
 	}
 	return nil
 }

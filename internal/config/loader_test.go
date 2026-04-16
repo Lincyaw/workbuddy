@@ -69,7 +69,7 @@ max_retries: 5
 ---
 ## Feature Dev
 
-` + "```yaml" + `
+	` + "```yaml" + `
 states:
   developing:
     enter_label: "status:developing"
@@ -548,6 +548,140 @@ func TestLoadConfig_StatesValidation(t *testing.T) {
 	}
 	if reviewing.Agent != "review-agent" {
 		t.Errorf("reviewing agent = %q, want %q", reviewing.Agent, "review-agent")
+	}
+}
+
+func TestLoadConfig_ParallelAgentsAndJoin(t *testing.T) {
+	wf := `---
+name: parallel-wf
+description: Workflow with parallel state
+trigger:
+  issue_label: "type:parallel"
+---
+## Parallel
+
+	` + "```yaml" + `
+states:
+  developing:
+    enter_label: "status:developing"
+    agent: dev-agent
+    transitions:
+      - to: review
+        when: "labeled:status:reviewing"
+  review:
+    enter_label: "status:reviewing"
+    agents:
+      - dev-agent
+      - review-agent
+    join: any_passed
+    transitions:
+      - to: done
+        when: "labeled:status:done"
+  done:
+    enter_label: "status:done"
+` + "```" + `
+`
+	dir := setupConfigDir(t, map[string]string{
+		"agents/dev-agent.md":    validAgent,
+		"agents/review-agent.md": validCodexAgent,
+		"workflows/parallel.md":  wf,
+	})
+
+	cfg, warnings, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
+	}
+	wfParsed, ok := cfg.Workflows["parallel-wf"]
+	if !ok {
+		t.Fatalf("workflow %q not found", "parallel-wf")
+	}
+	review := wfParsed.States["review"]
+	if review == nil {
+		t.Fatalf("state review not found")
+	}
+	if got, want := len(review.Agents), 2; got != want {
+		t.Fatalf("agents count = %d, want %d", got, want)
+	}
+	if review.Join != JoinAnyPassed {
+		t.Fatalf("join = %q, want %q", review.Join, JoinAnyPassed)
+	}
+}
+
+func TestLoadConfig_ParallelLegacyAgentField(t *testing.T) {
+	wf := `---
+name: legacy-wf
+description: Workflow with legacy agent field
+trigger:
+  issue_label: "type:legacy"
+---
+## Legacy
+
+` + "```yaml" + `
+states:
+  developing:
+    enter_label: "status:developing"
+    agent: dev-agent
+` + "```" + `
+`
+	dir := setupConfigDir(t, map[string]string{
+		"agents/dev-agent.md": validAgent,
+		"workflows/legacy.md": wf,
+	})
+
+	cfg, _, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	wfParsed, ok := cfg.Workflows["legacy-wf"]
+	if !ok {
+		t.Fatalf("workflow %q not found", "legacy-wf")
+	}
+	dev := wfParsed.States["developing"]
+	if dev == nil {
+		t.Fatalf("state developing not found")
+	}
+	if got := len(dev.Agents); got != 1 || dev.Agents[0] != "dev-agent" {
+		t.Fatalf("agents = %v, want [dev-agent]", dev.Agents)
+	}
+	if got := dev.Join; got != JoinAllPassed {
+		t.Fatalf("join = %q, want %q", got, JoinAllPassed)
+	}
+}
+
+func TestLoadConfig_InvalidJoinStrategy(t *testing.T) {
+	wf := `---
+name: invalid-join-wf
+description: Workflow with invalid join
+trigger:
+  issue_label: "type:invalid"
+---
+## Invalid Join
+
+` + "```yaml" + `
+states:
+  developing:
+    enter_label: "status:developing"
+    agents:
+      - dev-agent
+      - review-agent
+    join: maybe
+` + "```" + `
+`
+	dir := setupConfigDir(t, map[string]string{
+		"agents/dev-agent.md":    validAgent,
+		"agents/review-agent.md": validCodexAgent,
+		"workflows/invalid.md":   wf,
+	})
+
+	_, _, err := LoadConfig(dir)
+	if err == nil {
+		t.Fatal("expected invalid join error")
+	}
+	if !strings.Contains(err.Error(), "invalid join") {
+		t.Fatalf("error should mention 'invalid join': %v", err)
 	}
 }
 

@@ -716,7 +716,11 @@ func (s *fullCoordinatorServer) handleTaskResult(w http.ResponseWriter, r *http.
 	if err := s.registry.Heartbeat(req.WorkerID); err != nil {
 		log.Printf("[coordinator] worker heartbeat during result failed: %v", err)
 	}
-	s.stateMachine.MarkAgentCompleted(task.Repo, task.IssueNum, req.CurrentLabels)
+	exitCode := 0
+	if status != store.TaskStatusCompleted {
+		exitCode = 1
+	}
+	s.stateMachine.MarkAgentCompleted(task.Repo, task.IssueNum, task.ID, task.AgentName, exitCode, req.CurrentLabels)
 	s.eventlog.Log(eventlog.TypeCompleted, task.Repo, task.IssueNum, map[string]any{
 		"task_id":    task.ID,
 		"worker_id":  req.WorkerID,

@@ -113,6 +113,29 @@ func newTestSM(t *testing.T) (*StateMachine, *fakeRecorder, chan DispatchRequest
 	return sm, rec, dispatch
 }
 
+func newParallelWorkflow(join string) *config.WorkflowConfig {
+	return &config.WorkflowConfig{
+		Name:       "parallel-flow",
+		MaxRetries: 2,
+		Trigger: config.WorkflowTrigger{
+			IssueLabel: "workbuddy",
+		},
+		States: map[string]*config.State{
+			"developing": {
+				EnterLabel: "status:developing",
+				Agents:     []string{"dev-agent", "review-agent"},
+				Join:       join,
+				Transitions: []config.Transition{
+					{To: "done", When: `labeled "status:done"`},
+				},
+			},
+			"done": {
+				EnterLabel: "status:done",
+			},
+		},
+	}
+}
+
 // Test 1: Normal transition (developing → reviewing)
 func TestNormalTransition(t *testing.T) {
 	sm, rec, dispatch := newTestSM(t)
@@ -178,7 +201,7 @@ func TestBackEdgeCount(t *testing.T) {
 	<-dispatch // drain
 
 	// Mark agent complete so inflight is cleared.
-	sm.MarkAgentCompleted("test/repo", 2, []string{"workbuddy", "status:reviewing"})
+	sm.MarkAgentCompleted("test/repo", 2, "task-review-1", "review-agent", 0, []string{"workbuddy", "status:reviewing"})
 	sm.ResetDedup() // new poll cycle
 
 	// Now: reviewing → developing (this is a back-edge since developing was visited).
@@ -248,7 +271,7 @@ func TestRetryLimitFailed(t *testing.T) {
 		t.Fatalf("HandleEvent step 1: %v", err)
 	}
 	<-dispatch
-	sm.MarkAgentCompleted(repo, issueNum, []string{"workbuddy", "status:reviewing"})
+	sm.MarkAgentCompleted(repo, issueNum, "task-review-1", "review-agent", 0, []string{"workbuddy", "status:reviewing"})
 	sm.ResetDedup()
 
 	// Step 2: reviewing → developing (back-edge: "developing" was a source, but
@@ -261,7 +284,7 @@ func TestRetryLimitFailed(t *testing.T) {
 		t.Fatalf("HandleEvent step 2: %v", err)
 	}
 	<-dispatch
-	sm.MarkAgentCompleted(repo, issueNum, []string{"workbuddy", "status:developing"})
+	sm.MarkAgentCompleted(repo, issueNum, "task-dev-1", "dev-agent", 0, []string{"workbuddy", "status:developing"})
 	sm.ResetDedup()
 
 	// Step 3: developing → reviewing. "reviewing" already appeared as target in step 1.
@@ -426,6 +449,142 @@ func TestExecutionMutex(t *testing.T) {
 	}
 }
 
+func TestParallelStateDispatchesAllAgents(t *testing.T) {
+	st := newTestStore(t)
+	rec := &fakeRecorder{}
+	dispatch := make(chan DispatchRequest, 10)
+	sm := NewStateMachine(
+		map[string]*config.WorkflowConfig{"parallel-flow": newParallelWorkflow(config.JoinAllPassed)},
+		st,
+		dispatch,
+		rec,
+	)
+
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
+		Type:     poller.EventIssueCreated,
+		Repo:     "test/repo",
+		IssueNum: 9,
+		Labels:   []string{"workbuddy", "status:developing"},
+	}); err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+
+	agents := make(map[string]struct{}, 2)
+	for i := 0; i < 2; i++ {
+		select {
+		case req := <-dispatch:
+			agents[req.AgentName] = struct{}{}
+		case <-time.After(200 * time.Millisecond):
+			t.Fatalf("expected 2 dispatches, got %d", len(agents))
+		}
+	}
+
+	if _, ok := agents["dev-agent"]; !ok {
+		t.Errorf("expected dev-agent dispatch")
+	}
+	if _, ok := agents["review-agent"]; !ok {
+		t.Errorf("expected review-agent dispatch")
+	}
+}
+
+func TestParallelStateAllPassed_SucceedsWhenAllSuccess(t *testing.T) {
+	st := newTestStore(t)
+	rec := &fakeRecorder{}
+	dispatch := make(chan DispatchRequest, 10)
+	sm := NewStateMachine(
+		map[string]*config.WorkflowConfig{"parallel-flow": newParallelWorkflow(config.JoinAllPassed)},
+		st,
+		dispatch,
+		rec,
+	)
+
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
+		Type:     poller.EventIssueCreated,
+		Repo:     "test/repo",
+		IssueNum: 10,
+		Labels:   []string{"workbuddy", "status:developing"},
+	}); err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+	<-dispatch
+	<-dispatch
+
+	labels := []string{"workbuddy", "status:done"}
+	sm.MarkAgentCompleted("test/repo", 10, "task-dev", "dev-agent", 0, labels)
+	sm.MarkAgentCompleted("test/repo", 10, "task-review", "review-agent", 0, labels)
+
+	transitions := rec.find(eventlog.TypeTransition)
+	if len(transitions) != 1 {
+		t.Fatalf("expected 1 transition after both agents succeed, got %d", len(transitions))
+	}
+}
+
+func TestParallelStateAllPassed_FailsOnPartialFailure(t *testing.T) {
+	st := newTestStore(t)
+	rec := &fakeRecorder{}
+	dispatch := make(chan DispatchRequest, 10)
+	sm := NewStateMachine(
+		map[string]*config.WorkflowConfig{"parallel-flow": newParallelWorkflow(config.JoinAllPassed)},
+		st,
+		dispatch,
+		rec,
+	)
+
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
+		Type:     poller.EventIssueCreated,
+		Repo:     "test/repo",
+		IssueNum: 11,
+		Labels:   []string{"workbuddy", "status:developing"},
+	}); err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+	<-dispatch
+	<-dispatch
+
+	labels := []string{"workbuddy", "status:developing"}
+	sm.MarkAgentCompleted("test/repo", 11, "task-dev", "dev-agent", 0, labels)
+	sm.MarkAgentCompleted("test/repo", 11, "task-review", "review-agent", 1, labels)
+
+	if got := len(rec.find(eventlog.TypeTransitionToFailed)); got != 1 {
+		t.Fatalf("expected 1 transition_to_failed event, got %d", got)
+	}
+	if got := len(rec.find(eventlog.TypeTransition)); got != 0 {
+		t.Fatalf("expected no transition event after failed completion, got %d", got)
+	}
+}
+
+func TestParallelStateAnyPassed_ProgressesOnFirstSuccess(t *testing.T) {
+	st := newTestStore(t)
+	rec := &fakeRecorder{}
+	dispatch := make(chan DispatchRequest, 10)
+	sm := NewStateMachine(
+		map[string]*config.WorkflowConfig{"parallel-flow": newParallelWorkflow(config.JoinAnyPassed)},
+		st,
+		dispatch,
+		rec,
+	)
+
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
+		Type:     poller.EventIssueCreated,
+		Repo:     "test/repo",
+		IssueNum: 12,
+		Labels:   []string{"workbuddy", "status:developing"},
+	}); err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+	<-dispatch
+	<-dispatch
+
+	labels := []string{"workbuddy", "status:done"}
+	sm.MarkAgentCompleted("test/repo", 12, "task-dev", "dev-agent", 0, labels)
+	sm.MarkAgentCompleted("test/repo", 12, "task-review", "review-agent", 1, labels)
+
+	transitions := rec.find(eventlog.TypeTransition)
+	if len(transitions) != 1 {
+		t.Fatalf("expected 1 transition after first success, got %d", len(transitions))
+	}
+}
+
 // Test 8: Stuck detection
 func TestStuckDetection(t *testing.T) {
 	sm, rec, dispatch := newTestSM(t)
@@ -442,7 +601,7 @@ func TestStuckDetection(t *testing.T) {
 
 	// Mark agent completed.
 	labels := []string{"workbuddy", "status:reviewing"}
-	sm.MarkAgentCompleted("test/repo", 8, labels)
+	sm.MarkAgentCompleted("test/repo", 8, "task-review-1", "review-agent", 0, labels)
 
 	// Wait for stuck timeout.
 	time.Sleep(5 * time.Millisecond)
