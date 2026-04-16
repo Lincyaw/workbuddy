@@ -20,7 +20,6 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/auditapi"
 	"github.com/Lincyaw/workbuddy/internal/config"
-	"github.com/Lincyaw/workbuddy/internal/coordinator"
 	"github.com/Lincyaw/workbuddy/internal/dependency"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/poller"
@@ -94,6 +93,10 @@ var coordinatorTokenRevokeCmd = &cobra.Command{
 func init() {
 	coordinatorCmd.Flags().String("db", ".workbuddy/workbuddy.db", "SQLite database path")
 	coordinatorCmd.Flags().String("listen", "127.0.0.1:8081", "Coordinator listen address")
+	coordinatorCmd.Flags().String("config-dir", ".github/workbuddy", "Configuration directory")
+	coordinatorCmd.Flags().Int("port", 0, "Coordinator listen port")
+	coordinatorCmd.Flags().Duration("poll-interval", 0, "GitHub poll interval")
+	coordinatorCmd.Flags().Bool("auth", false, "Require Authorization: Bearer token for worker API calls")
 	coordinatorCmd.Flags().Bool("loopback-only", false, "Allow auth-free task endpoints for loopback-only dev mode")
 
 	coordinatorTokenCreateCmd.Flags().String("db", ".workbuddy/workbuddy.db", "SQLite database path")
@@ -123,49 +126,17 @@ func runCoordinatorCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-
-	st, err := store.NewStore(opts.dbPath)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = st.Close() }()
-
-	handler := coordinator.NewServer(st, coordinator.ServerOptions{
-		LoopbackOnly: opts.loopbackOnly,
-	})
-	srv := &http.Server{
-		Addr:    opts.listenAddr,
-		Handler: handler,
-	}
-
-	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	errCh := make(chan error, 1)
-	go func() {
-		ln, err := net.Listen("tcp", opts.listenAddr)
-		if err != nil {
-			errCh <- err
-			return
-		}
-		errCh <- srv.Serve(ln)
-	}()
-
-	select {
-	case err := <-errCh:
-		if err != nil && err != http.ErrServerClosed {
-			return err
-		}
-		return nil
-	case <-ctx.Done():
-		return srv.Shutdown(context.Background())
-	}
+	return runCoordinatorWithOpts(opts, nil)
 }
 
 func parseCoordinatorFlags(cmd *cobra.Command) (*coordinatorOpts, error) {
 	dbPath, _ := cmd.Flags().GetString("db")
 	listenAddr, _ := cmd.Flags().GetString("listen")
 	loopbackOnly, _ := cmd.Flags().GetBool("loopback-only")
+	configDir, _ := cmd.Flags().GetString("config-dir")
+	port, _ := cmd.Flags().GetInt("port")
+	pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
+	auth, _ := cmd.Flags().GetBool("auth")
 	if strings.TrimSpace(listenAddr) == "" {
 		return nil, fmt.Errorf("coordinator: --listen is required")
 	}
@@ -176,6 +147,10 @@ func parseCoordinatorFlags(cmd *cobra.Command) (*coordinatorOpts, error) {
 		dbPath:       dbPath,
 		listenAddr:   listenAddr,
 		loopbackOnly: loopbackOnly,
+		configDir:    strings.TrimSpace(configDir),
+		port:         port,
+		pollInterval: pollInterval,
+		auth:         auth,
 	}, nil
 }
 
