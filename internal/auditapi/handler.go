@@ -4,6 +4,7 @@ package auditapi
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -16,6 +17,14 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
+
+// badRequestError wraps parameter-validation errors so callers can distinguish
+// them from backend/DB errors returned by queryEvents.
+type badRequestError struct {
+	msg string
+}
+
+func (e *badRequestError) Error() string { return e.msg }
 
 // Handler serves the JSON audit API.
 type Handler struct {
@@ -180,7 +189,7 @@ type sessionDetailResponse struct {
 
 type metricsResponse struct {
 	SuccessRate     float64        `json:"success_rate"`
-	AvgDuration     float64        `json:"avg_duration"`
+	AvgDuration     float64        `json:"avg_duration_seconds"`
 	RetryRate       float64        `json:"retry_rate"`
 	AgentExecutions map[string]int `json:"agent_executions"`
 }
@@ -198,7 +207,12 @@ type workerResponse struct {
 func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 	events, filter, err := h.queryEvents(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		var bre *badRequestError
+		if errors.As(err, &bre) {
+			writeError(w, http.StatusBadRequest, err.Error())
+		} else {
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 
@@ -262,7 +276,7 @@ func (h *Handler) handleAPISession(w http.ResponseWriter, r *http.Request) {
 	}
 	sessionID := strings.TrimPrefix(r.URL.Path, "/api/v1/sessions/")
 	if !isValidSessionID(sessionID) || strings.Contains(sessionID, "/") {
-		http.NotFound(w, r)
+		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
 	record, err := h.store.GetSession(sessionID)
@@ -289,7 +303,12 @@ func (h *Handler) handleAPIEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	events, _, err := h.queryEvents(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		var bre *badRequestError
+		if errors.As(err, &bre) {
+			writeError(w, http.StatusBadRequest, err.Error())
+		} else {
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 	resp := make([]eventResponse, 0, len(events))
@@ -458,7 +477,7 @@ func (h *Handler) queryEvents(r *http.Request) ([]store.Event, eventlog.EventFil
 	if issueStr := strings.TrimSpace(q.Get("issue")); issueStr != "" {
 		issueNum, err := strconv.Atoi(issueStr)
 		if err != nil {
-			return nil, filter, fmt.Errorf("invalid issue query parameter")
+			return nil, filter, &badRequestError{"invalid issue query parameter"}
 		}
 		filter.IssueNum = issueNum
 	}
@@ -466,7 +485,7 @@ func (h *Handler) queryEvents(r *http.Request) ([]store.Event, eventlog.EventFil
 	if sinceStr := strings.TrimSpace(q.Get("since")); sinceStr != "" {
 		since, err := time.Parse(time.RFC3339, sinceStr)
 		if err != nil {
-			return nil, filter, fmt.Errorf("invalid since query parameter; use RFC3339")
+			return nil, filter, &badRequestError{"invalid since query parameter; use RFC3339"}
 		}
 		filter.Since = &since
 	}
@@ -474,7 +493,7 @@ func (h *Handler) queryEvents(r *http.Request) ([]store.Event, eventlog.EventFil
 	if untilStr := strings.TrimSpace(q.Get("until")); untilStr != "" {
 		until, err := time.Parse(time.RFC3339, untilStr)
 		if err != nil {
-			return nil, filter, fmt.Errorf("invalid until query parameter; use RFC3339")
+			return nil, filter, &badRequestError{"invalid until query parameter; use RFC3339"}
 		}
 		filter.Until = &until
 	}
