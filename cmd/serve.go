@@ -913,7 +913,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	defer func() {
 		if handle := task.Context.SessionHandle(); handle != nil {
 			status := store.TaskStatusCompleted
-			if err != nil || resultExitCode(result) != 0 {
+			if runErr != nil || resultExitCode(result) != 0 {
 				status = store.TaskStatusFailed
 			}
 			if result != nil && result.Meta != nil && result.Meta["timeout"] == "true" {
@@ -932,7 +932,8 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 
 	eventsCh := make(chan launcherevents.Event, 64)
 	eventsPath, waitEvents := streamSessionEvents(task.Context, eventsCh)
-	result, err = session.Run(taskCtx, eventsCh)
+	var runErr error
+	result, runErr = session.Run(taskCtx, eventsCh)
 	close(eventsCh)
 	waitErr := waitEvents()
 	if waitErr != nil {
@@ -987,8 +988,8 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	} else {
 		log.Printf("[worker] label validation skipped: label snapshots unavailable for %s#%d", task.Repo, task.IssueNum)
 	}
-	if err != nil {
-		log.Printf("[worker] agent %s failed: %v", task.AgentName, err)
+	if runErr != nil {
+		log.Printf("[worker] agent %s failed: %v", task.AgentName, runErr)
 		if result == nil {
 			if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
 				log.Printf("[worker] failed to update task status: %v", err)
@@ -1017,7 +1018,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 
 	// Determine task status
 	status := store.TaskStatusCompleted
-	if err != nil || result.ExitCode != 0 {
+	if runErr != nil || result.ExitCode != 0 {
 		status = store.TaskStatusFailed
 	}
 	if result.Meta != nil && result.Meta["timeout"] == "true" {

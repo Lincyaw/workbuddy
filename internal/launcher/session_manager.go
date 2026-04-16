@@ -185,7 +185,8 @@ func (h *ManagedSession) Close(status string) error {
 			return err
 		}
 		if record == nil {
-			return h.manager.store.UpdateSession(h.record)
+			_, err := h.manager.store.CreateSession(h.record)
+			return err
 		}
 		record.Status = h.record.Status
 		record.ClosedAt = h.record.ClosedAt

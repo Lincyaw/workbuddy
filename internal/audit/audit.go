@@ -430,6 +430,9 @@ func truncate(s string, maxLen int) string {
 }
 
 func copyFile(src, dst string) error {
+	if src == dst {
+		return nil
+	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err
