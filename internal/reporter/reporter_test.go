@@ -15,10 +15,12 @@ type mockVerifier struct {
 	result *VerificationResult
 	err    error
 	calls  int
+	inputs []VerificationInput
 }
 
-func (m *mockVerifier) Verify(_ context.Context, _ string, _ int, _ string) (*VerificationResult, error) {
+func (m *mockVerifier) Verify(_ context.Context, _ string, _ int, input VerificationInput) (*VerificationResult, error) {
 	m.calls++
+	m.inputs = append(m.inputs, input)
 	return m.result, m.err
 }
 
@@ -159,6 +161,8 @@ func TestReport_PrefersLastMessage(t *testing.T) {
 func TestReportWithVerification_Partial(t *testing.T) {
 	gh := &mockGHWriter{}
 	r := NewReporter(gh)
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
 	v := &mockVerifier{
 		result: &VerificationResult{
 			Partial: true,
@@ -184,6 +188,12 @@ func TestReportWithVerification_Partial(t *testing.T) {
 	}
 	if v.calls != 1 {
 		t.Fatalf("expected verifier to be called once, got %d", v.calls)
+	}
+	if len(v.inputs) != 1 {
+		t.Fatalf("expected verifier input, got %d", len(v.inputs))
+	}
+	if v.inputs[0].StartedAt != now.Add(-time.Second) || v.inputs[0].EndedAt != now {
+		t.Fatalf("unexpected run window: %+v", v.inputs[0])
 	}
 	body := gh.comments[0]
 	if !strings.Contains(body, "Partial") {
@@ -224,6 +234,36 @@ func TestReportVerified_UsesProvidedVerification(t *testing.T) {
 	body := gh.comments[0]
 	if !strings.Contains(body, "label not found") {
 		t.Fatalf("expected provided verification detail in report: %s", body)
+	}
+}
+
+func TestReporterVerify_UsesRunWindow(t *testing.T) {
+	r := NewReporter(&mockGHWriter{})
+	now := time.Date(2026, 4, 17, 13, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	v := &mockVerifier{result: &VerificationResult{}}
+	r.SetVerifier(v)
+
+	result := &launcher.Result{
+		ExitCode:    0,
+		LastMessage: "I posted a review comment on PR #4",
+		Duration:    90 * time.Second,
+	}
+
+	if _, err := r.Verify(context.Background(), "test/repo", 42, result); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if v.calls != 1 {
+		t.Fatalf("expected verifier to be called once, got %d", v.calls)
+	}
+	if got := v.inputs[0].Output; got != result.LastMessage {
+		t.Fatalf("output = %q, want %q", got, result.LastMessage)
+	}
+	if got := v.inputs[0].StartedAt; got != now.Add(-90*time.Second) {
+		t.Fatalf("startedAt = %s, want %s", got, now.Add(-90*time.Second))
+	}
+	if got := v.inputs[0].EndedAt; got != now {
+		t.Fatalf("endedAt = %s, want %s", got, now)
 	}
 }
 

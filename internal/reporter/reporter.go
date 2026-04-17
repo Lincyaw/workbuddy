@@ -144,6 +144,7 @@ type Reporter struct {
 	baseURL   string // e.g. "http://localhost:8080", empty to omit session links
 	eventlog  EventRecorder
 	verifier  ClaimVerifier
+	now       func() time.Time
 }
 
 var (
@@ -161,7 +162,7 @@ var (
 // reaction manager defaults to a GHCLIReactionManager; callers may override
 // it via SetReactionManager (e.g., tests).
 func NewReporter(gh GHCommentWriter) *Reporter {
-	return &Reporter{gh: gh, reactions: &GHCLIReactionManager{}}
+	return &Reporter{gh: gh, reactions: &GHCLIReactionManager{}, now: time.Now}
 }
 
 // SetReactionManager replaces the default ReactionManager (used by tests).
@@ -203,7 +204,12 @@ func (r *Reporter) Verify(ctx context.Context, repo string, issueNum int, result
 	if output == "" {
 		output = result.Stdout
 	}
-	return r.verifier.Verify(ctx, repo, issueNum, output)
+	finishedAt := r.now()
+	return r.verifier.Verify(ctx, repo, issueNum, VerificationInput{
+		Output:    output,
+		StartedAt: finishedAt.Add(-result.Duration),
+		EndedAt:   finishedAt,
+	})
 }
 
 // ReportStarted posts an "Agent Started" comment with a session link before execution begins.
@@ -313,7 +319,12 @@ func (r *Reporter) report(
 		if output == "" {
 			output = result.Stdout
 		}
-		vRes, vErr := r.verifier.Verify(ctx, repo, issueNum, output)
+		finishedAt := r.now()
+		vRes, vErr := r.verifier.Verify(ctx, repo, issueNum, VerificationInput{
+			Output:    output,
+			StartedAt: finishedAt.Add(-result.Duration),
+			EndedAt:   finishedAt,
+		})
 		if vErr != nil {
 			if r.eventlog != nil {
 				r.eventlog.Log(eventlog.TypeError, repo, issueNum, map[string]any{

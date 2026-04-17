@@ -39,10 +39,17 @@ type VerificationResult struct {
 	Checks  []ClaimCheck
 }
 
+// VerificationInput describes the agent output and run window that produced it.
+type VerificationInput struct {
+	Output    string
+	StartedAt time.Time
+	EndedAt   time.Time
+}
+
 // ClaimVerifier inspects agent output for claims about external side-effects
 // and verifies them against the live GitHub / git state.
 type ClaimVerifier interface {
-	Verify(ctx context.Context, repo string, issueNum int, output string) (*VerificationResult, error)
+	Verify(ctx context.Context, repo string, issueNum int, input VerificationInput) (*VerificationResult, error)
 }
 
 // GHClaimVerifier implements ClaimVerifier using the gh CLI and git.
@@ -52,6 +59,8 @@ type GHClaimVerifier struct {
 	login      string
 	loginErr   error
 }
+
+const commentTimestampSkew = 2 * time.Minute
 
 // NewGHClaimVerifier creates a GHClaimVerifier that shells out to gh/git.
 func NewGHClaimVerifier() *GHClaimVerifier {
@@ -82,13 +91,14 @@ var (
 	labelAddedPattern     = regexp.MustCompile(`(?i)(?:added|flipped\b.*?to)\b.*?status:([a-zA-Z0-9_-]+)`)
 	labelRemovedPattern   = regexp.MustCompile(`(?i)removed\b.*?status:([a-zA-Z0-9_-]+)`)
 	prCreatedPattern      = regexp.MustCompile(`(?i)(?:created|opened)\b.*?pr\b.*?#?(\d+)`)
-	branchPushedPattern   = regexp.MustCompile(`(?i)(?:pushed|created)\b.*?branch\b(\S+)`)
-	fileCreatedPattern    = regexp.MustCompile(`(?i)(?:created|added)\b.*?file\b(\S+)`)
+	branchPushedPattern   = regexp.MustCompile("(?i)(?:pushed|created)\\b.*?branch\\b\\s+([`\"']?\\S+[`\"']?)")
+	fileCreatedPattern    = regexp.MustCompile("(?i)(?:created|added)\\b.*?file\\b\\s+([`\"']?\\S+[`\"']?)")
 )
 
 // Verify scans agent output for known claim patterns and runs the
 // corresponding gh/git checks.
-func (v *GHClaimVerifier) Verify(ctx context.Context, repo string, issueNum int, output string) (*VerificationResult, error) {
+func (v *GHClaimVerifier) Verify(ctx context.Context, repo string, issueNum int, input VerificationInput) (*VerificationResult, error) {
+	output := strings.TrimSpace(input.Output)
 	if strings.TrimSpace(output) == "" {
 		return &VerificationResult{}, nil
 	}
@@ -97,12 +107,12 @@ func (v *GHClaimVerifier) Verify(ctx context.Context, repo string, issueNum int,
 
 	for _, m := range commentOnPRPattern.FindAllStringSubmatch(output, -1) {
 		prNum, _ := strconv.Atoi(m[1])
-		checks = append(checks, v.verifyCommentOnPR(ctx, repo, prNum))
+		checks = append(checks, v.verifyCommentOnPR(ctx, repo, prNum, input))
 	}
 
 	for _, m := range commentOnIssuePattern.FindAllStringSubmatch(output, -1) {
 		num, _ := strconv.Atoi(m[1])
-		checks = append(checks, v.verifyCommentOnIssue(ctx, repo, num))
+		checks = append(checks, v.verifyCommentOnIssue(ctx, repo, num, input))
 	}
 
 	labelClaims := false
@@ -124,11 +134,11 @@ func (v *GHClaimVerifier) Verify(ctx context.Context, repo string, issueNum int,
 	}
 
 	for _, m := range branchPushedPattern.FindAllStringSubmatch(output, -1) {
-		checks = append(checks, v.verifyBranchPushed(ctx, repo, m[1]))
+		checks = append(checks, v.verifyBranchPushed(ctx, repo, normalizeClaimToken(m[1])))
 	}
 
 	for _, m := range fileCreatedPattern.FindAllStringSubmatch(output, -1) {
-		checks = append(checks, v.verifyFileCreated(ctx, repo, m[1]))
+		checks = append(checks, v.verifyFileCreated(ctx, repo, normalizeClaimToken(m[1])))
 	}
 
 	partial := false
@@ -149,7 +159,7 @@ type ghComment struct {
 	Body      string    `json:"body"`
 }
 
-func (v *GHClaimVerifier) verifyCommentOnPR(ctx context.Context, repo string, prNum int) ClaimCheck {
+func (v *GHClaimVerifier) verifyCommentOnPR(ctx context.Context, repo string, prNum int, input VerificationInput) ClaimCheck {
 	claim := fmt.Sprintf("posted comment on PR #%d", prNum)
 	login, err := v.authenticatedLogin(ctx)
 	if err != nil {
@@ -172,13 +182,13 @@ func (v *GHClaimVerifier) verifyCommentOnPR(ctx context.Context, repo string, pr
 	if login != "" && last.Author.Login != login {
 		return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: fmt.Sprintf("most recent comment author is %s, expected %s", last.Author.Login, login), OK: false}
 	}
-	if time.Since(last.CreatedAt) > 30*time.Minute {
-		return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: fmt.Sprintf("most recent comment by %s is too old (%s)", last.Author.Login, last.CreatedAt.Format(time.RFC3339)), OK: false}
+	if !commentWithinRunWindow(last.CreatedAt, input) {
+		return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: fmt.Sprintf("most recent comment by %s is outside this run window (%s)", last.Author.Login, last.CreatedAt.Format(time.RFC3339)), OK: false}
 	}
 	return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: fmt.Sprintf("recent comment by %s at %s", last.Author.Login, last.CreatedAt.Format(time.RFC3339)), OK: true}
 }
 
-func (v *GHClaimVerifier) verifyCommentOnIssue(ctx context.Context, repo string, issueNum int) ClaimCheck {
+func (v *GHClaimVerifier) verifyCommentOnIssue(ctx context.Context, repo string, issueNum int, input VerificationInput) ClaimCheck {
 	claim := fmt.Sprintf("posted comment on issue #%d", issueNum)
 	login, err := v.authenticatedLogin(ctx)
 	if err != nil {
@@ -201,8 +211,8 @@ func (v *GHClaimVerifier) verifyCommentOnIssue(ctx context.Context, repo string,
 	if login != "" && last.Author.Login != login {
 		return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: fmt.Sprintf("most recent comment author is %s, expected %s", last.Author.Login, login), OK: false}
 	}
-	if time.Since(last.CreatedAt) > 30*time.Minute {
-		return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: fmt.Sprintf("most recent comment by %s is too old (%s)", last.Author.Login, last.CreatedAt.Format(time.RFC3339)), OK: false}
+	if !commentWithinRunWindow(last.CreatedAt, input) {
+		return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: fmt.Sprintf("most recent comment by %s is outside this run window (%s)", last.Author.Login, last.CreatedAt.Format(time.RFC3339)), OK: false}
 	}
 	return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: fmt.Sprintf("recent comment by %s at %s", last.Author.Login, last.CreatedAt.Format(time.RFC3339)), OK: true}
 }
@@ -320,4 +330,25 @@ func (v *GHClaimVerifier) verifyFileCreated(ctx context.Context, repo string, pa
 		}
 	}
 	return ClaimCheck{Type: ClaimFileCreated, Claim: claim, Actual: "file not in last commit", OK: false}
+}
+
+func normalizeClaimToken(raw string) string {
+	return strings.Trim(strings.TrimSpace(raw), "`\"'.,:;)]}")
+}
+
+func commentWithinRunWindow(createdAt time.Time, input VerificationInput) bool {
+	if createdAt.IsZero() {
+		return false
+	}
+	end := input.EndedAt
+	start := input.StartedAt
+	if end.IsZero() {
+		end = time.Now()
+	}
+	if start.IsZero() {
+		start = end.Add(-30 * time.Minute)
+	}
+	start = start.Add(-commentTimestampSkew)
+	end = end.Add(commentTimestampSkew)
+	return !createdAt.Before(start) && !createdAt.After(end)
 }
