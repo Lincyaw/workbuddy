@@ -1,0 +1,293 @@
+package reporter
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os/exec"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// ClaimType identifies the category of a side-effect claim.
+type ClaimType string
+
+const (
+	ClaimCommentPR    ClaimType = "comment_pr"
+	ClaimCommentIssue ClaimType = "comment_issue"
+	ClaimLabels       ClaimType = "labels"
+	ClaimPRCreated    ClaimType = "pr_created"
+	ClaimBranchPushed ClaimType = "branch_pushed"
+	ClaimFileCreated  ClaimType = "file_created"
+)
+
+// ClaimCheck records a single claim and its verified reality.
+type ClaimCheck struct {
+	Type   ClaimType
+	Claim  string
+	Actual string
+	OK     bool
+}
+
+// VerificationResult is the outcome of scanning an agent output for claims
+// and verifying each one against the actual world state.
+type VerificationResult struct {
+	Partial bool
+	Checks  []ClaimCheck
+}
+
+// ClaimVerifier inspects agent output for claims about external side-effects
+// and verifies them against the live GitHub / git state.
+type ClaimVerifier interface {
+	Verify(ctx context.Context, repo string, issueNum int, output string) (*VerificationResult, error)
+}
+
+// GHClaimVerifier implements ClaimVerifier using the gh CLI and git.
+type GHClaimVerifier struct {
+	runCommand func(ctx context.Context, name string, args ...string) ([]byte, error)
+}
+
+// NewGHClaimVerifier creates a GHClaimVerifier that shells out to gh/git.
+func NewGHClaimVerifier() *GHClaimVerifier {
+	return &GHClaimVerifier{
+		runCommand: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			cmd := exec.CommandContext(ctx, name, args...)
+			return cmd.CombinedOutput()
+		},
+	}
+}
+
+var (
+	commentOnPRPattern    = regexp.MustCompile(`(?i)(?:posted|added|wrote)\b.*?comment\b.*?on\b.*?pr\b.*?#?(\b\d+\b)`)
+	commentOnIssuePattern = regexp.MustCompile(`(?i)(?:posted|added|wrote)\b.*?comment\b.*?on\b.*?issue\b.*?#?(\b\d+\b)`)
+	labelUpdatePattern    = regexp.MustCompile(`(?i)(?:updated|changed|flipped)\b.*?(?:the\b)?.*?labels`)
+	labelAddedPattern     = regexp.MustCompile(`(?i)(?:added|flipped\b.*?to)\b.*?status:([a-zA-Z0-9_-]+)`)
+	labelRemovedPattern   = regexp.MustCompile(`(?i)removed\b.*?status:([a-zA-Z0-9_-]+)`)
+	prCreatedPattern      = regexp.MustCompile(`(?i)(?:created|opened)\b.*?pr\b.*?#?(\d+)`)
+	branchPushedPattern   = regexp.MustCompile(`(?i)(?:pushed|created)\b.*?branch\b(\S+)`)
+	fileCreatedPattern    = regexp.MustCompile(`(?i)(?:created|added)\b.*?file\b(\S+)`)
+)
+
+// Verify scans agent output for known claim patterns and runs the
+// corresponding gh/git checks.
+func (v *GHClaimVerifier) Verify(ctx context.Context, repo string, issueNum int, output string) (*VerificationResult, error) {
+	if strings.TrimSpace(output) == "" {
+		return &VerificationResult{}, nil
+	}
+
+	var checks []ClaimCheck
+
+	for _, m := range commentOnPRPattern.FindAllStringSubmatch(output, -1) {
+		prNum, _ := strconv.Atoi(m[1])
+		checks = append(checks, v.verifyCommentOnPR(ctx, repo, prNum))
+	}
+
+	for _, m := range commentOnIssuePattern.FindAllStringSubmatch(output, -1) {
+		num, _ := strconv.Atoi(m[1])
+		checks = append(checks, v.verifyCommentOnIssue(ctx, repo, num))
+	}
+
+	labelClaims := false
+	for _, m := range labelAddedPattern.FindAllStringSubmatch(output, -1) {
+		labelClaims = true
+		checks = append(checks, v.verifyLabelPresent(ctx, repo, issueNum, "status:"+m[1]))
+	}
+	for _, m := range labelRemovedPattern.FindAllStringSubmatch(output, -1) {
+		labelClaims = true
+		checks = append(checks, v.verifyLabelAbsent(ctx, repo, issueNum, "status:"+m[1]))
+	}
+	if !labelClaims && labelUpdatePattern.MatchString(output) {
+		checks = append(checks, v.verifyLabelsGeneric(ctx, repo, issueNum))
+	}
+
+	for _, m := range prCreatedPattern.FindAllStringSubmatch(output, -1) {
+		prNum, _ := strconv.Atoi(m[1])
+		checks = append(checks, v.verifyPRCreated(ctx, repo, prNum))
+	}
+
+	for _, m := range branchPushedPattern.FindAllStringSubmatch(output, -1) {
+		checks = append(checks, v.verifyBranchPushed(ctx, repo, m[1]))
+	}
+
+	for _, m := range fileCreatedPattern.FindAllStringSubmatch(output, -1) {
+		checks = append(checks, v.verifyFileCreated(ctx, repo, m[1]))
+	}
+
+	partial := false
+	for _, c := range checks {
+		if !c.OK {
+			partial = true
+			break
+		}
+	}
+	return &VerificationResult{Partial: partial, Checks: checks}, nil
+}
+
+type ghComment struct {
+	Author struct {
+		Login string `json:"login"`
+	} `json:"author"`
+	CreatedAt time.Time `json:"createdAt"`
+	Body      string    `json:"body"`
+}
+
+func (v *GHClaimVerifier) verifyCommentOnPR(ctx context.Context, repo string, prNum int) ClaimCheck {
+	claim := fmt.Sprintf("posted comment on PR #%d", prNum)
+	out, err := v.runCommand(ctx, "gh", "pr", "view", strconv.Itoa(prNum), "--repo", repo, "--json", "comments")
+	if err != nil {
+		return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: fmt.Sprintf("gh error: %s", string(out)), OK: false}
+	}
+	var payload struct {
+		Comments []ghComment `json:"comments"`
+	}
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: fmt.Sprintf("parse error: %v", err), OK: false}
+	}
+	if len(payload.Comments) == 0 {
+		return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: "no comments on PR", OK: false}
+	}
+	last := payload.Comments[len(payload.Comments)-1]
+	if time.Since(last.CreatedAt) > 30*time.Minute {
+		return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: fmt.Sprintf("most recent comment by %s is too old (%s)", last.Author.Login, last.CreatedAt.Format(time.RFC3339)), OK: false}
+	}
+	return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: fmt.Sprintf("recent comment by %s at %s", last.Author.Login, last.CreatedAt.Format(time.RFC3339)), OK: true}
+}
+
+func (v *GHClaimVerifier) verifyCommentOnIssue(ctx context.Context, repo string, issueNum int) ClaimCheck {
+	claim := fmt.Sprintf("posted comment on issue #%d", issueNum)
+	out, err := v.runCommand(ctx, "gh", "issue", "view", strconv.Itoa(issueNum), "--repo", repo, "--json", "comments")
+	if err != nil {
+		return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: fmt.Sprintf("gh error: %s", string(out)), OK: false}
+	}
+	var payload struct {
+		Comments []ghComment `json:"comments"`
+	}
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: fmt.Sprintf("parse error: %v", err), OK: false}
+	}
+	if len(payload.Comments) == 0 {
+		return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: "no comments on issue", OK: false}
+	}
+	last := payload.Comments[len(payload.Comments)-1]
+	if time.Since(last.CreatedAt) > 30*time.Minute {
+		return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: fmt.Sprintf("most recent comment by %s is too old (%s)", last.Author.Login, last.CreatedAt.Format(time.RFC3339)), OK: false}
+	}
+	return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: fmt.Sprintf("recent comment by %s at %s", last.Author.Login, last.CreatedAt.Format(time.RFC3339)), OK: true}
+}
+
+func (v *GHClaimVerifier) verifyLabelPresent(ctx context.Context, repo string, issueNum int, label string) ClaimCheck {
+	claim := fmt.Sprintf("added %s", label)
+	out, err := v.runCommand(ctx, "gh", "issue", "view", strconv.Itoa(issueNum), "--repo", repo, "--json", "labels")
+	if err != nil {
+		return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("gh error: %s", string(out)), OK: false}
+	}
+	var payload struct {
+		Labels []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+	}
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("parse error: %v", err), OK: false}
+	}
+	for _, l := range payload.Labels {
+		if l.Name == label {
+			return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("label present: %s", label), OK: true}
+		}
+	}
+	var names []string
+	for _, l := range payload.Labels {
+		names = append(names, l.Name)
+	}
+	return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("label not found in current labels: %s", strings.Join(names, ", ")), OK: false}
+}
+
+func (v *GHClaimVerifier) verifyLabelAbsent(ctx context.Context, repo string, issueNum int, label string) ClaimCheck {
+	claim := fmt.Sprintf("removed %s", label)
+	out, err := v.runCommand(ctx, "gh", "issue", "view", strconv.Itoa(issueNum), "--repo", repo, "--json", "labels")
+	if err != nil {
+		return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("gh error: %s", string(out)), OK: false}
+	}
+	var payload struct {
+		Labels []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+	}
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("parse error: %v", err), OK: false}
+	}
+	for _, l := range payload.Labels {
+		if l.Name == label {
+			return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("label still present: %s", label), OK: false}
+		}
+	}
+	return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("label absent: %s", label), OK: true}
+}
+
+func (v *GHClaimVerifier) verifyLabelsGeneric(ctx context.Context, repo string, issueNum int) ClaimCheck {
+	claim := "updated labels"
+	out, err := v.runCommand(ctx, "gh", "issue", "view", strconv.Itoa(issueNum), "--repo", repo, "--json", "labels")
+	if err != nil {
+		return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("gh error: %s", string(out)), OK: false}
+	}
+	var payload struct {
+		Labels []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+	}
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("parse error: %v", err), OK: false}
+	}
+	var names []string
+	for _, l := range payload.Labels {
+		names = append(names, l.Name)
+	}
+	return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("current labels: %s", strings.Join(names, ", ")), OK: true}
+}
+
+func (v *GHClaimVerifier) verifyPRCreated(ctx context.Context, repo string, prNum int) ClaimCheck {
+	claim := fmt.Sprintf("created PR #%d", prNum)
+	out, err := v.runCommand(ctx, "gh", "pr", "view", strconv.Itoa(prNum), "--repo", repo, "--json", "state,headRefName")
+	if err != nil {
+		return ClaimCheck{Type: ClaimPRCreated, Claim: claim, Actual: fmt.Sprintf("gh error: %s", string(out)), OK: false}
+	}
+	var pr struct {
+		State       string `json:"state"`
+		HeadRefName string `json:"headRefName"`
+	}
+	if err := json.Unmarshal(out, &pr); err != nil {
+		return ClaimCheck{Type: ClaimPRCreated, Claim: claim, Actual: fmt.Sprintf("parse error: %v", err), OK: false}
+	}
+	if pr.State != "OPEN" && pr.State != "open" {
+		return ClaimCheck{Type: ClaimPRCreated, Claim: claim, Actual: fmt.Sprintf("PR state is %s", pr.State), OK: false}
+	}
+	return ClaimCheck{Type: ClaimPRCreated, Claim: claim, Actual: fmt.Sprintf("PR exists, state=%s, branch=%s", pr.State, pr.HeadRefName), OK: true}
+}
+
+func (v *GHClaimVerifier) verifyBranchPushed(ctx context.Context, repo string, branch string) ClaimCheck {
+	claim := fmt.Sprintf("pushed branch %s", branch)
+	out, err := v.runCommand(ctx, "git", "ls-remote", "origin", branch)
+	if err != nil {
+		return ClaimCheck{Type: ClaimBranchPushed, Claim: claim, Actual: fmt.Sprintf("git error: %s", string(out)), OK: false}
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		return ClaimCheck{Type: ClaimBranchPushed, Claim: claim, Actual: "branch not found on origin", OK: false}
+	}
+	return ClaimCheck{Type: ClaimBranchPushed, Claim: claim, Actual: fmt.Sprintf("branch exists on origin: %s", strings.TrimSpace(string(out))), OK: true}
+}
+
+func (v *GHClaimVerifier) verifyFileCreated(ctx context.Context, repo string, path string) ClaimCheck {
+	claim := fmt.Sprintf("created file %s", path)
+	out, err := v.runCommand(ctx, "git", "log", "-1", "--name-only", "--format=")
+	if err != nil {
+		return ClaimCheck{Type: ClaimFileCreated, Claim: claim, Actual: fmt.Sprintf("git error: %s", string(out)), OK: false}
+	}
+	files := strings.Split(string(out), "\n")
+	for _, f := range files {
+		if strings.TrimSpace(f) == path {
+			return ClaimCheck{Type: ClaimFileCreated, Claim: claim, Actual: fmt.Sprintf("file found in last commit: %s", path), OK: true}
+		}
+	}
+	return ClaimCheck{Type: ClaimFileCreated, Claim: claim, Actual: "file not in last commit", OK: false}
+}

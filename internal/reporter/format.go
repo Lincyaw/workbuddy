@@ -12,18 +12,19 @@ const maxOutputLines = 200
 
 // ReportData holds the inputs for formatting an execution report.
 type ReportData struct {
-	AgentName   string
-	Status      string // "success", "failure", "timeout", "retry-limit"
-	Duration    time.Duration
-	SessionID   string
-	WorkerID    string
-	RetryCount  int
-	MaxRetries  int
-	Output      string // combined stdout/stderr
-	PRLink      string // optional PR URL
-	ErrorDetail string // optional error message
-	SessionURL  string // optional URL to session detail page
-	LabelLine   string // optional label validation summary
+	AgentName    string
+	Status       string // "success", "partial", "failure", "timeout", "retry-limit"
+	Duration     time.Duration
+	SessionID    string
+	WorkerID     string
+	RetryCount   int
+	MaxRetries   int
+	Output       string // combined stdout/stderr
+	PRLink       string // optional PR URL
+	ErrorDetail  string // optional error message
+	SessionURL   string // optional URL to session detail page
+	LabelLine    string // optional label validation summary
+	Verification *VerificationResult
 }
 
 // statusBadge returns a Markdown status badge string.
@@ -31,6 +32,8 @@ func statusBadge(status string) string {
 	switch status {
 	case "success":
 		return "**Status**: :white_check_mark: Success"
+	case "partial":
+		return "**Status**: :warning: Partial (claimed side-effects not verified)"
 	case "failure":
 		return "**Status**: :x: Failure"
 	case "timeout":
@@ -83,7 +86,22 @@ func FormatReportAt(d ReportData, ts time.Time) string {
 		b.WriteString("\n\n")
 	}
 
-	// Error detail for failure/timeout/retry-limit
+	// Verification claim vs. reality table
+	if d.Verification != nil && len(d.Verification.Checks) > 0 {
+		b.WriteString("### Claim Verification\n\n")
+		b.WriteString("| Claim | Actual | Status |\n")
+		b.WriteString("|-------|--------|--------|\n")
+		for _, c := range d.Verification.Checks {
+			status := ":white_check_mark:"
+			if !c.OK {
+				status = ":x:"
+			}
+			fmt.Fprintf(&b, "| %s | %s | %s |\n", c.Claim, c.Actual, status)
+		}
+		b.WriteString("\n")
+	}
+
+	// Error detail for failure/timeout/retry-limit/partial
 	if d.ErrorDetail != "" {
 		b.WriteString("### Error\n\n")
 		b.WriteString("```\n")

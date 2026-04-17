@@ -1646,3 +1646,32 @@ requirements:
       - internal/poller/poller_test.go
       - internal/security/security_test.go
     deps: [REQ-001, REQ-017, REQ-027]
+
+  - id: REQ-051
+    title: Agent claim verification against external side-effects
+    description: >
+      After a codex agent exits cleanly, verify any claim about external
+      side-effects (posted comments, updated labels, created PRs, pushed
+      branches, created files) before reporting success. If claims fail
+      verification, report status as Partial and treat the run as failed
+      for state-machine retry/escalation purposes.
+    priority: P0
+    version: v0.2.0
+    status: tested
+    acceptance_criteria:
+      - "AC-051-1: Reporter runs a verify pass after agent exit, before posting the agent-report comment"
+      - "AC-051-2: For each recognized claim pattern, reporter runs the corresponding gh/git verify"
+      - "AC-051-3: If any claim fails verification, the agent-report comment is marked Partial with a table of claim vs. reality"
+      - "AC-051-4: State machine treats Partial the same as a failed agent for retry/escalation purposes (does not auto-flip labels as though Success)"
+      - "AC-051-5: Unit tests cover successful run with all claims verified (-> Success), successful-exit-but-comment-missing (-> Partial), successful-exit-but-labels-not-flipped (-> Partial)"
+    code:
+      - internal/reporter/verify.go
+      - internal/reporter/reporter.go
+      - internal/reporter/format.go
+      - cmd/serve.go
+      - cmd/worker.go
+    tests:
+      - internal/reporter/verify_test.go
+      - internal/reporter/reporter_test.go
+      - internal/reporter/format_test.go
+    deps: [REQ-005, REQ-006, REQ-024]
