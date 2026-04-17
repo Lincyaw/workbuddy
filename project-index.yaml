@@ -1541,7 +1541,7 @@ requirements:
       the existing serial behavior.
     priority: P1
     version: v0.2.0
-    status: implemented
+    status: tested
     acceptance_criteria:
       - "AC-047-1: --concurrency flag is available on workerCmd, default=1"
       - "AC-047-2: concurrency=1 behaves identically to pre-change serial loop"

@@ -70,6 +70,7 @@ func LoadConfig(configDir string) (*FullConfig, []Warning, error) {
 	var warnings []Warning
 
 	globalPath := filepath.Join(configDir, "config.yaml")
+	operatorExplicit := false
 	if data, err := os.ReadFile(globalPath); err == nil {
 		var fileCfg struct {
 			GlobalConfig  `yaml:",inline"`
@@ -84,11 +85,18 @@ func LoadConfig(configDir string) (*FullConfig, []Warning, error) {
 		cfg.Operator = fileCfg.Operator
 		cfg.Worker = fileCfg.Worker
 		cfg.Notifications = fileCfg.Notifications
+
+		// Check if the operator key was explicitly present in the YAML.
+		var rawKeys map[string]any
+		_ = yaml.Unmarshal(data, &rawKeys)
+		if _, ok := rawKeys["operator"]; ok {
+			operatorExplicit = true
+		}
 	}
 
 	applyWorkerDefaults(&cfg.Worker)
 
-	applyOperatorDefaults(&cfg.Operator)
+	applyOperatorDefaults(&cfg.Operator, operatorExplicit)
 
 	agentsDir := filepath.Join(configDir, "agents")
 	if entries, err := os.ReadDir(agentsDir); err == nil {
@@ -142,11 +150,14 @@ func applyWorkerDefaults(cfg *WorkerConfig) {
 	}
 }
 
-func applyOperatorDefaults(cfg *OperatorConfig) {
+func applyOperatorDefaults(cfg *OperatorConfig, explicit bool) {
 	if cfg == nil {
 		return
 	}
-	if !cfg.Enabled && cfg.CheckInterval == 0 && cfg.DedupWindow == 0 && strings.TrimSpace(cfg.InboxDir) == "" {
+	// Only default Enabled to true when the operator section was entirely
+	// absent from config.yaml.  When the key is present (even with just
+	// "enabled: false"), respect the explicit value.
+	if !explicit && !cfg.Enabled && cfg.CheckInterval == 0 && cfg.DedupWindow == 0 && strings.TrimSpace(cfg.InboxDir) == "" {
 		cfg.Enabled = true
 	}
 	if cfg.CheckInterval <= 0 {
