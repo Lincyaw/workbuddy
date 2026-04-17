@@ -123,6 +123,7 @@ func TestRepositorySampleConfig_MatchesGlobalConfigSchema(t *testing.T) {
 	expectedKeys := map[string]struct{}{
 		"environment":   {},
 		"operator":      {},
+		"worker":        {},
 		"poll_interval": {},
 		"port":          {},
 		"repo":          {},

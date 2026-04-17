@@ -74,6 +74,7 @@ func LoadConfig(configDir string) (*FullConfig, []Warning, error) {
 		var fileCfg struct {
 			GlobalConfig  `yaml:",inline"`
 			Operator      OperatorConfig      `yaml:"operator"`
+			Worker        WorkerConfig        `yaml:"worker"`
 			Notifications NotificationsConfig `yaml:"notifications"`
 		}
 		if err := yaml.Unmarshal(data, &fileCfg); err != nil {
@@ -81,8 +82,11 @@ func LoadConfig(configDir string) (*FullConfig, []Warning, error) {
 		}
 		cfg.Global = fileCfg.GlobalConfig
 		cfg.Operator = fileCfg.Operator
+		cfg.Worker = fileCfg.Worker
 		cfg.Notifications = fileCfg.Notifications
 	}
+
+	applyWorkerDefaults(&cfg.Worker)
 
 	applyOperatorDefaults(&cfg.Operator)
 
@@ -124,6 +128,18 @@ func LoadConfig(configDir string) (*FullConfig, []Warning, error) {
 	warnings = append(warnings, checkAgentLabelConsistency(cfg)...)
 
 	return cfg, warnings, nil
+}
+
+func applyWorkerDefaults(cfg *WorkerConfig) {
+	if cfg == nil {
+		return
+	}
+	if cfg.StaleInference.IdleThreshold <= 0 {
+		cfg.StaleInference.IdleThreshold = 10 * time.Minute
+	}
+	if cfg.StaleInference.CheckInterval <= 0 {
+		cfg.StaleInference.CheckInterval = 30 * time.Second
+	}
 }
 
 func applyOperatorDefaults(cfg *OperatorConfig) {

@@ -1553,3 +1553,31 @@ requirements:
     tests:
       - cmd/worker_test.go
     deps: [REQ-025]
+
+  - id: REQ-048
+    title: Stale agent inference detector
+    description: >
+      Auto-kill hung codex/claude processes that produce no JSONL output
+      and have no child processes for a configurable idle threshold.
+      Runs as a watchdog goroutine alongside each agent task in the worker.
+    priority: P1
+    version: v0.2.0
+    status: tested
+    acceptance_criteria:
+      - "AC-048-1: Watchdog goroutine monitors event flow during session.Run()"
+      - "AC-048-2: If no events received and no child processes for > idle_threshold, cancel the agent via context cancellation"
+      - "AC-048-3: Config supports worker.stale_inference.enabled, idle_threshold (default 10m), check_interval (default 30s)"
+      - "AC-048-4: Config parsed from .github/workbuddy/config.yaml worker section"
+      - "AC-048-5: Watchdog disabled when worker.stale_inference.enabled=false"
+      - "AC-048-6: Unit tests cover stale detection, healthy process, boundary conditions, EventTracker, and Watch cancellation"
+      - "AC-048-7: go build && go vet && go test pass with watchdog coverage"
+    code:
+      - cmd/worker.go
+      - internal/config/types.go
+      - internal/config/loader.go
+      - internal/staleinference/watchdog.go
+      - .github/workbuddy/config.yaml
+    tests:
+      - internal/staleinference/watchdog_test.go
+      - internal/config/loader_test.go
+    deps: [REQ-006]
