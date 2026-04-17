@@ -5,15 +5,47 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/registry"
+	"github.com/Lincyaw/workbuddy/internal/reporter"
 	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/workspace"
 )
+
+type mockCommentWriter struct {
+	comments []string
+}
+
+func (m *mockCommentWriter) WriteComment(_ string, _ int, body string) error {
+	m.comments = append(m.comments, body)
+	return nil
+}
+
+func setupFakeGHCLI(t *testing.T) {
+	t.Helper()
+	fakeBin := t.TempDir()
+	ghPath := filepath.Join(fakeBin, "gh")
+	script := `#!/bin/sh
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  echo '{"title":"Issue","body":"body","labels":[{"name":"workbuddy"}],"comments":[]}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  echo '[]'
+  exit 0
+fi
+echo '{}'
+`
+	if err := os.WriteFile(ghPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
 
 func newTestStore(t *testing.T) *store.Store {
 	t.Helper()
@@ -235,6 +267,71 @@ func TestRouter_PersistOnlyModeDoesNotCreateWorktree(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(repoRoot, ".workbuddy", "worktrees", "issue-41")); !os.IsNotExist(err) {
 		t.Fatalf("coordinator mode should not create a worktree, stat err = %v", err)
+	}
+}
+
+func TestRouter_WorktreeFailureFailsTaskAndComments(t *testing.T) {
+	setupFakeGHCLI(t)
+
+	st := newTestStore(t)
+	reg := registry.NewRegistry(st, 30*time.Second)
+	taskCh := make(chan WorkerTask, 1)
+	comments := &mockCommentWriter{}
+	repoRoot := initGitRepo(t)
+	wtPath := filepath.Join(repoRoot, ".workbuddy", "worktrees", "issue-5")
+	if err := os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(wtPath, []byte("not a worktree"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	r := NewRouter(
+		map[string]*config.AgentConfig{
+			"dev-agent": {
+				Name:    "dev-agent",
+				Role:    "dev",
+				Runtime: "claude-code",
+				Command: "echo hello",
+			},
+		},
+		reg,
+		st,
+		"test/repo",
+		repoRoot,
+		taskCh,
+		workspace.NewManager(repoRoot),
+		true,
+	)
+	r.SetReporter(reporter.NewReporter(comments))
+
+	r.handleDispatch(context.Background(), statemachine.DispatchRequest{
+		Repo:      "test/repo",
+		IssueNum:  5,
+		AgentName: "dev-agent",
+		Workflow:  "default",
+		State:     "developing",
+	})
+
+	select {
+	case task := <-taskCh:
+		t.Fatalf("unexpected dispatched task: %+v", task)
+	default:
+	}
+
+	tasks, err := st.QueryTasks(store.TaskStatusFailed)
+	if err != nil {
+		t.Fatalf("QueryTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("failed tasks = %d, want 1", len(tasks))
+	}
+
+	if len(comments.comments) != 1 {
+		t.Fatalf("comment count = %d, want 1", len(comments.comments))
+	}
+	if !strings.Contains(comments.comments[0], "not a valid worktree") {
+		t.Fatalf("comment missing worktree error: %s", comments.comments[0])
 	}
 }
 

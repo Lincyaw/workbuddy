@@ -375,12 +375,14 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 				log.Printf("[worker] failed to report worktree failure: %v", rerr)
 			}
 			cancel()
-			// Submit a failed result so the state machine knows.
-			submitCtx, cancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(shutdownTimeout))
-			_ = client.SubmitResult(submitCtx, task.TaskID, workerclient.ResultRequest{
+			// Requeue the claimed task so it can be retried after the worktree issue is fixed.
+			releaseCtx, cancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(shutdownTimeout))
+			if rerr := client.ReleaseTask(releaseCtx, task.TaskID, workerclient.ReleaseRequest{
 				WorkerID: workerID,
-				Status:   store.TaskStatusFailed,
-			})
+				Reason:   fmt.Sprintf("worktree setup failed: %v", err),
+			}); rerr != nil {
+				log.Printf("[worker] failed to release task after worktree setup failure: %v", rerr)
+			}
 			cancel()
 			return fmt.Errorf("worker: worktree setup failed for issue #%d: %w", task.IssueNum, err)
 		}

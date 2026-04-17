@@ -1893,9 +1893,9 @@ requirements:
     acceptance_criteria:
       - "AC-058-1: workspace.Manager.Create runs `git worktree prune` before every `git worktree add`"
       - "AC-058-2: When target worktree path exists, is on the expected branch, and has no uncommitted changes, it is reused (no error)"
-      - "AC-058-3: When target worktree path exists but is on the wrong branch or has uncommitted changes, Create returns a loud error and the task is returned to the queue"
+      - "AC-058-3: When target worktree path exists but is on the wrong branch or has uncommitted changes, Create returns a loud error and remote worker tasks are released back to the queue"
       - "AC-058-4: When `git worktree add` fails for any reason, Create returns a loud error and NEVER falls back to CWD"
-      - "AC-058-5: Remote worker (cmd/worker.go) reports worktree failures on the issue as a user-visible comment via Reporter and submits a failed result to the coordinator"
+      - "AC-058-5: Remote worker (cmd/worker.go) reports worktree failures on the issue as a user-visible comment via Reporter and releases the claimed task back to the coordinator queue"
       - "AC-058-6: Embedded router (internal/router/router.go) reports worktree failures on the issue as a user-visible comment via Reporter and updates the task status to failed"
       - "AC-058-7: Unit tests cover stale metadata + prune rescue, existing-clean reuse, existing-dirty refuse, and stale-add failure"
     code:
@@ -1905,4 +1905,6 @@ requirements:
       - cmd/serve.go
     tests:
       - internal/workspace/workspace_test.go
+      - cmd/worker_test.go
+      - internal/router/router_test.go
     deps: [REQ-028, REQ-017]

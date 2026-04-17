@@ -26,6 +26,22 @@ import (
 	"github.com/spf13/cobra"
 )
 
+type failingWorkspaceManager struct {
+	err error
+}
+
+func (m *failingWorkspaceManager) Create(_ int, _ string) (string, error) {
+	return "", m.err
+}
+
+func (m *failingWorkspaceManager) Remove(string) error {
+	return nil
+}
+
+func (m *failingWorkspaceManager) Prune() error {
+	return nil
+}
+
 // initGitRepo creates a bare-minimum git repo in a temp directory for worker tests
 // that need workspace isolation.
 func initGitRepo(t *testing.T) string {
@@ -868,6 +884,102 @@ func TestExecuteRemoteTaskStopsHeartbeatAfterKilledProcess(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if heartbeatCount.Load() != afterRun {
 		t.Fatalf("heartbeat goroutine kept running after process exit: before=%d after=%d", afterRun, heartbeatCount.Load())
+	}
+}
+
+func TestExecuteRemoteTaskRequeuesWorktreeSetupFailure(t *testing.T) {
+	var (
+		releaseReq   workerclient.ReleaseRequest
+		releaseCount int
+		resultCount  int
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/release"):
+			releaseCount++
+			if err := json.NewDecoder(r.Body).Decode(&releaseReq); err != nil {
+				t.Fatalf("decode release: %v", err)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/result"):
+			resultCount++
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	cfg := &config.FullConfig{
+		Agents: map[string]*config.AgentConfig{
+			"dev-agent": {
+				Name:    "dev-agent",
+				Role:    "dev",
+				Runtime: config.RuntimeClaudeCode,
+				Command: "echo hello",
+			},
+		},
+	}
+	task := &workerclient.Task{
+		TaskID:    "task-worktree-fail",
+		Repo:      "owner/test-repo",
+		IssueNum:  14,
+		AgentName: "dev-agent",
+		Workflow:  "workflow",
+	}
+	reader := &mockGHReader{
+		issues: []poller.Issue{
+			{Number: 14, Body: "body", Labels: []string{"workbuddy", "status:developing"}},
+		},
+		labelSnapshots: [][]string{
+			{"workbuddy", "status:developing"},
+		},
+	}
+	comments := &mockCommentWriter{}
+	rep := reporter.NewReporter(comments)
+	auditor := audit.NewAuditor(nil, filepath.Join(t.TempDir(), "sessions"))
+	client := workerclient.New(server.URL, "", server.Client())
+	wsErr := errors.New("missing but already registered worktree")
+
+	err := executeRemoteTask(
+		context.Background(),
+		task,
+		client,
+		cfg,
+		launcher.NewLauncher(),
+		auditor,
+		rep,
+		reader,
+		t.TempDir(),
+		filepath.Join(t.TempDir(), "sessions"),
+		"worker-1",
+		"",
+		20*time.Millisecond,
+		200*time.Millisecond,
+		&failingWorkspaceManager{err: wsErr},
+	)
+	if err == nil || !strings.Contains(err.Error(), "worktree setup failed") {
+		t.Fatalf("executeRemoteTask error = %v, want worktree setup failure", err)
+	}
+	if releaseCount != 1 {
+		t.Fatalf("release count = %d, want 1", releaseCount)
+	}
+	if resultCount != 0 {
+		t.Fatalf("result count = %d, want 0", resultCount)
+	}
+	if releaseReq.WorkerID != "worker-1" {
+		t.Fatalf("release worker_id = %q, want worker-1", releaseReq.WorkerID)
+	}
+	if !strings.Contains(releaseReq.Reason, wsErr.Error()) {
+		t.Fatalf("release reason = %q, want to contain %q", releaseReq.Reason, wsErr.Error())
+	}
+
+	allComments := comments.Comments()
+	if len(allComments) != 1 {
+		t.Fatalf("comment count = %d, want 1", len(allComments))
+	}
+	if !strings.Contains(allComments[0], wsErr.Error()) {
+		t.Fatalf("comment missing worktree error: %s", allComments[0])
 	}
 }
 
