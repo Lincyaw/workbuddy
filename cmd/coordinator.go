@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/alertbus"
+	"github.com/Lincyaw/workbuddy/internal/audit"
 	"github.com/Lincyaw/workbuddy/internal/auditapi"
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
@@ -429,6 +430,12 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", api.handleHealth)
 	metrics.NewHandler(st).Register(mux)
+	readOnlyAudit := audit.NewHTTPHandler(st)
+	readOnlyAuditMux := http.NewServeMux()
+	readOnlyAudit.Register(readOnlyAuditMux)
+	mux.Handle("/events", api.wrapAuth(readOnlyAuditMux))
+	mux.Handle("/tasks", api.wrapAuth(readOnlyAuditMux))
+	mux.Handle("/issues/", api.wrapAuth(readOnlyAuditMux))
 	dashboardAPI := auditapi.NewHandler(st)
 	dashboardAPI.SetSessionsDir(filepath.Join(filepath.Dir(opts.dbPath), "sessions"))
 	dashboardAPI.RegisterDashboard(mux)
