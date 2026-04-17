@@ -592,6 +592,21 @@ func TestParseStatusFlags_CoordinatorRepos(t *testing.T) {
 	}
 }
 
+func TestParseStatusFlags_CoordinatorTokenFromEnv(t *testing.T) {
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", "env-token")
+
+	cmd := newStatusFlagCommand()
+	_ = cmd.Flags().Set("coordinator", "http://127.0.0.1:8091")
+
+	opts, err := parseStatusFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseStatusFlags: %v", err)
+	}
+	if opts.token != "env-token" {
+		t.Fatalf("token = %q", opts.token)
+	}
+}
+
 func TestParseStatusFlags_CoordinatorMutualExclusion(t *testing.T) {
 	for _, flag := range []string{"stuck", "tasks", "events", "watch"} {
 		cmd := newStatusFlagCommand()

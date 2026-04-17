@@ -47,13 +47,13 @@ var repoListCmd = &cobra.Command{
 }
 
 func init() {
-	repoRegisterCmd.Flags().String("coordinator", "http://127.0.0.1:8081", "Coordinator base URL")
-	repoRegisterCmd.Flags().String("token", "", "Bearer token for coordinator auth (defaults to WORKBUDDY_AUTH_TOKEN)")
+	repoRegisterCmd.Flags().String("coordinator", "", "Coordinator base URL")
+	repoRegisterCmd.Flags().StringP("token", "t", "", "Bearer token for coordinator auth (defaults to WORKBUDDY_AUTH_TOKEN)")
 	repoRegisterCmd.Flags().String("config-dir", ".github/workbuddy", "Workbuddy config directory")
 	repoRegisterCmd.Flags().Duration("timeout", 15*time.Second, "HTTP timeout")
 	repoCmd.AddCommand(repoRegisterCmd)
 
-	repoListCmd.Flags().String("coordinator", "http://127.0.0.1:8081", "Coordinator base URL")
+	repoListCmd.Flags().String("coordinator", "", "Coordinator base URL")
 	repoListCmd.Flags().StringP("token", "t", "", "Bearer token for coordinator auth (defaults to WORKBUDDY_AUTH_TOKEN)")
 	repoListCmd.Flags().Bool("json", false, "Emit machine-readable JSON")
 	repoListCmd.Flags().Duration("timeout", 15*time.Second, "HTTP timeout")

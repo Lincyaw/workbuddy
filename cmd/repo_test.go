@@ -36,11 +36,45 @@ func TestParseRepoListFlags(t *testing.T) {
 	}
 }
 
+func TestParseRepoListFlags_TokenFromEnv(t *testing.T) {
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", "env-token")
+
+	cmd := newRepoListFlagCommand()
+	_ = cmd.Flags().Set("coordinator", "http://127.0.0.1:8091")
+
+	opts, err := parseRepoListFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseRepoListFlags: %v", err)
+	}
+	if opts.token != "env-token" {
+		t.Fatalf("token = %q", opts.token)
+	}
+}
+
 func TestParseRepoListFlags_RequiresCoordinator(t *testing.T) {
 	cmd := newRepoListFlagCommand()
 	_, err := parseRepoListFlags(cmd)
 	if err == nil || !strings.Contains(err.Error(), "--coordinator is required") {
 		t.Fatalf("expected coordinator required error, got %v", err)
+	}
+}
+
+func TestParseRepoRegisterFlags_TokenFromEnv(t *testing.T) {
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", "env-token")
+
+	cmd := &cobra.Command{Use: "register"}
+	cmd.Flags().String("coordinator", "", "")
+	cmd.Flags().StringP("token", "t", "", "")
+	cmd.Flags().String("config-dir", ".github/workbuddy", "")
+	cmd.Flags().Duration("timeout", 15*time.Second, "")
+	_ = cmd.Flags().Set("coordinator", "http://127.0.0.1:8091")
+
+	opts, err := parseRepoRegisterFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseRepoRegisterFlags: %v", err)
+	}
+	if opts.token != "env-token" {
+		t.Fatalf("token = %q", opts.token)
 	}
 }
 
