@@ -84,6 +84,8 @@ func LoadConfig(configDir string) (*FullConfig, []Warning, error) {
 		cfg.Notifications = fileCfg.Notifications
 	}
 
+	applyOperatorDefaults(&cfg.Operator)
+
 	agentsDir := filepath.Join(configDir, "agents")
 	if entries, err := os.ReadDir(agentsDir); err == nil {
 		for _, e := range entries {
@@ -122,6 +124,24 @@ func LoadConfig(configDir string) (*FullConfig, []Warning, error) {
 	warnings = append(warnings, checkAgentLabelConsistency(cfg)...)
 
 	return cfg, warnings, nil
+}
+
+func applyOperatorDefaults(cfg *OperatorConfig) {
+	if cfg == nil {
+		return
+	}
+	if !cfg.Enabled && cfg.CheckInterval == 0 && cfg.DedupWindow == 0 && strings.TrimSpace(cfg.InboxDir) == "" {
+		cfg.Enabled = true
+	}
+	if cfg.CheckInterval <= 0 {
+		cfg.CheckInterval = 60 * time.Second
+	}
+	if cfg.DedupWindow <= 0 {
+		cfg.DedupWindow = 5 * time.Minute
+	}
+	if strings.TrimSpace(cfg.InboxDir) == "" {
+		cfg.InboxDir = "~/.workbuddy/operator/inbox"
+	}
 }
 
 // ValidateWorkflowRegistration validates a workflow map for registration payloads.

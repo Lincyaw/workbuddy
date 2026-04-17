@@ -8,6 +8,9 @@ port: 8090                # HTTP audit server port
 
 operator:
   enabled: true
+  check_interval: 60s
+  dedup_window: 5m
+  inbox_dir: ~/.workbuddy/operator/inbox
 
 notifications:
   enabled: true

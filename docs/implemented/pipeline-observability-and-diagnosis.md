@@ -6,6 +6,13 @@
 
 将原 `pipeline-monitor` skill 中的高频手动操作下沉为 CLI 一等公民，提供结构化的 pipeline 观测和自动诊断能力。对应 REQ-033 ~ REQ-037。
 
+当前还补充了进程内 operator detector：
+
+- `internal/operator/detector.go` 周期扫描 `task_queue`、`issue_cache`、`workers`
+- 命中规则后把结构化 alert 持久化到 `events(type=alert)`
+- 同时写入 `~/.workbuddy/operator/inbox/*.json`
+- 可通过 `GET /api/v1/alerts?since=<rfc3339>&severity=warn` 查看最近告警
+
 ## CLI 工具
 
 ### status --tasks（REQ-033）
@@ -81,6 +88,8 @@ workbuddy diagnose [--repo R] [--fix] [--json]
 - `cmd/status.go` — status 命令及 --tasks/--events/--watch 子模式
 - `cmd/cache_invalidate.go` — cache-invalidate 命令
 - `cmd/diagnose.go` — diagnose 命令
+- `internal/operator/detector.go` — 进程内自愈告警 detector
 - `internal/diagnose/diagnose.go` — 诊断逻辑（纯逻辑，无副作用）
 - `internal/tasknotify/hub.go` — SSE Pub/Sub hub
 - `internal/audit/http.go` — /tasks、/events HTTP 端点
+- `internal/auditapi/handler.go` — `/api/v1/alerts` dashboard API

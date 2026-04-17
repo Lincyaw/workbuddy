@@ -35,6 +35,7 @@ const (
 	TypeDispatchBlockedByDependency = "dispatch_blocked_by_dependency"
 	TypeNotificationFailed          = "notification_failed"
 	TypeOperatorInvoked             = "operator_invoked"
+	TypeAlert                       = "alert"
 )
 
 // AllEventTypes lists every recognised event type.
@@ -62,6 +63,7 @@ var AllEventTypes = []string{
 	TypeDispatchBlockedByDependency,
 	TypeNotificationFailed,
 	TypeOperatorInvoked,
+	TypeAlert,
 }
 
 // EventFilter specifies optional criteria for querying events.

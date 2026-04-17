@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/operator"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
@@ -66,6 +67,7 @@ func (h *Handler) RegisterDashboard(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/sessions", h.handleAPISessions)
 	mux.HandleFunc("/api/v1/sessions/", h.handleAPISession)
 	mux.HandleFunc("/api/v1/events", h.handleAPIEvents)
+	mux.HandleFunc("/api/v1/alerts", h.handleAPIAlerts)
 	mux.HandleFunc("/api/v1/metrics", h.handleAPIMetrics)
 	mux.HandleFunc("/api/v1/workers", h.handleAPIWorkers)
 }
@@ -325,6 +327,24 @@ func (h *Handler) handleAPIEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func (h *Handler) handleAPIAlerts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	alerts, err := h.queryAlerts(r)
+	if err != nil {
+		var bre *badRequestError
+		if errors.As(err, &bre) {
+			writeError(w, http.StatusBadRequest, err.Error())
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to query alerts")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, alerts)
+}
+
 func (h *Handler) handleAPIMetrics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -503,6 +523,39 @@ func (h *Handler) queryEvents(r *http.Request) ([]store.Event, eventlog.EventFil
 		return nil, filter, fmt.Errorf("failed to query events")
 	}
 	return events, filter, nil
+}
+
+func (h *Handler) queryAlerts(r *http.Request) ([]operator.Alert, error) {
+	filter := eventlog.EventFilter{Type: eventlog.TypeAlert}
+	if sinceStr := strings.TrimSpace(r.URL.Query().Get("since")); sinceStr != "" {
+		since, err := time.Parse(time.RFC3339, sinceStr)
+		if err != nil {
+			return nil, &badRequestError{"invalid since query parameter; use RFC3339"}
+		}
+		filter.Since = &since
+	}
+
+	severity := strings.TrimSpace(r.URL.Query().Get("severity"))
+	if severity != "" && severity != operator.SeverityInfo && severity != operator.SeverityWarn && severity != operator.SeverityError {
+		return nil, &badRequestError{"invalid severity query parameter; use info|warn|error"}
+	}
+
+	events, err := h.events.Query(filter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query alerts")
+	}
+	alerts := make([]operator.Alert, 0, len(events))
+	for _, event := range events {
+		var alert operator.Alert
+		if err := json.Unmarshal([]byte(event.Payload), &alert); err != nil {
+			continue
+		}
+		if severity != "" && alert.Severity != severity {
+			continue
+		}
+		alerts = append(alerts, alert)
+	}
+	return alerts, nil
 }
 
 func (h *Handler) queryStatus() (statusResponse, error) {

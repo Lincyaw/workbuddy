@@ -103,6 +103,9 @@ poll_interval: 30s
 port: 8080
 operator:
   enabled: true
+  check_interval: 60s
+  dedup_window: 5m
+  inbox_dir: ~/.workbuddy/operator/inbox
 `
 
 func TestRepositorySampleConfig_MatchesGlobalConfigSchema(t *testing.T) {
@@ -123,6 +126,7 @@ func TestRepositorySampleConfig_MatchesGlobalConfigSchema(t *testing.T) {
 		"poll_interval": {},
 		"port":          {},
 		"repo":          {},
+		"operator":      {},
 		"notifications": {},
 	}
 
@@ -158,6 +162,15 @@ func TestRepositorySampleConfig_MatchesGlobalConfigSchema(t *testing.T) {
 	}
 	if !cfg.Operator.Enabled {
 		t.Fatalf("operator.enabled = %v, want true", cfg.Operator.Enabled)
+	}
+	if cfg.Operator.CheckInterval != time.Minute {
+		t.Fatalf("operator.check_interval = %s, want 1m", cfg.Operator.CheckInterval)
+	}
+	if cfg.Operator.DedupWindow != 5*time.Minute {
+		t.Fatalf("operator.dedup_window = %s, want 5m", cfg.Operator.DedupWindow)
+	}
+	if cfg.Operator.InboxDir != "~/.workbuddy/operator/inbox" {
+		t.Fatalf("operator.inbox_dir = %q, want %q", cfg.Operator.InboxDir, "~/.workbuddy/operator/inbox")
 	}
 	if !cfg.Notifications.Enabled {
 		t.Fatalf("notifications.enabled = %v, want true", cfg.Notifications.Enabled)
@@ -203,6 +216,33 @@ func TestRepositorySampleConfig_MatchesGlobalConfigSchema(t *testing.T) {
 	}
 	if got := cfg.Notifications.SMTP.ToEnv; got != "WORKBUDDY_SMTP_TO" {
 		t.Fatalf("notifications.smtp.to_env = %q, want %q", got, "WORKBUDDY_SMTP_TO")
+	}
+}
+
+func TestLoadConfig_OperatorDefaults(t *testing.T) {
+	configDir := setupConfigDir(t, map[string]string{
+		"config.yaml": `repo: owner/repo
+environment: dev
+poll_interval: 30s
+port: 8080
+`,
+	})
+
+	cfg, _, err := LoadConfig(configDir)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.Operator.Enabled {
+		t.Fatalf("operator.enabled = %v, want true", cfg.Operator.Enabled)
+	}
+	if cfg.Operator.CheckInterval != time.Minute {
+		t.Fatalf("operator.check_interval = %s, want 1m", cfg.Operator.CheckInterval)
+	}
+	if cfg.Operator.DedupWindow != 5*time.Minute {
+		t.Fatalf("operator.dedup_window = %s, want 5m", cfg.Operator.DedupWindow)
+	}
+	if cfg.Operator.InboxDir != "~/.workbuddy/operator/inbox" {
+		t.Fatalf("operator.inbox_dir = %q", cfg.Operator.InboxDir)
 	}
 }
 
