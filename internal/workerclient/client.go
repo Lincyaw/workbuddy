@@ -18,6 +18,18 @@ var ErrUnauthorized = errors.New("workerclient: unauthorized")
 
 const defaultMaxBackoff = 60 * time.Second
 
+type HTTPStatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *HTTPStatusError) Error() string {
+	if e == nil {
+		return "workerclient: unexpected HTTP status"
+	}
+	return fmt.Sprintf("workerclient: unexpected status %d: %s", e.StatusCode, strings.TrimSpace(e.Body))
+}
+
 type Client struct {
 	baseURL    string
 	token      string
@@ -109,6 +121,7 @@ func (c *Client) ReleaseTask(ctx context.Context, taskID string, req ReleaseRequ
 
 func (c *Client) doJSON(ctx context.Context, method, path string, body any, out any, okStatuses ...int) (int, error) {
 	backoff := time.Second
+	var lastErr error
 	for {
 		status, err := c.doJSONOnce(ctx, method, path, body, out, okStatuses...)
 		if err == nil {
@@ -117,11 +130,15 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 		if errors.Is(err, ErrUnauthorized) || !isRetryable(err) || ctx.Err() != nil {
 			return 0, err
 		}
+		lastErr = err
 
 		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			if lastErr != nil {
+				return 0, lastErr
+			}
 			return 0, ctx.Err()
 		case <-timer.C:
 		}
@@ -178,10 +195,7 @@ func (c *Client) doJSONOnce(ctx context.Context, method, path string, body any, 
 	if resp.StatusCode == http.StatusUnauthorized {
 		return 0, ErrUnauthorized
 	}
-	if resp.StatusCode >= 500 {
-		return 0, fmt.Errorf("workerclient: server error %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-	return 0, fmt.Errorf("workerclient: unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	return 0, &HTTPStatusError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(respBody))}
 }
 
 func isRetryable(err error) bool {
@@ -192,5 +206,6 @@ func isRetryable(err error) bool {
 	if errors.As(err, &netErr) {
 		return true
 	}
-	return strings.Contains(err.Error(), "server error")
+	var httpErr *HTTPStatusError
+	return errors.As(err, &httpErr) && httpErr.StatusCode >= http.StatusInternalServerError
 }

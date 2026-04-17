@@ -29,23 +29,27 @@ import (
 const (
 	defaultWorkerPollTimeout      = 30 * time.Second
 	defaultWorkerHeartbeat        = 15 * time.Second
+	defaultWorkerResultSubmit     = 10 * time.Second
 	defaultWorkerShutdownDeadline = 5 * time.Second
 )
 
+var errWorkerResultSubmit = errors.New("worker: submit result")
+
 type workerOpts struct {
-	coordinatorURL    string
-	token             string
-	roleCSV           string
-	runtime           string
-	repo              string
-	workerID          string
-	configDir         string
-	workDir           string
-	sessionsDir       string
-	dbPath            string
-	pollTimeout       time.Duration
-	heartbeatInterval time.Duration
-	shutdownTimeout   time.Duration
+	coordinatorURL      string
+	token               string
+	roleCSV             string
+	runtime             string
+	repo                string
+	workerID            string
+	configDir           string
+	workDir             string
+	sessionsDir         string
+	dbPath              string
+	pollTimeout         time.Duration
+	heartbeatInterval   time.Duration
+	resultSubmitTimeout time.Duration
+	shutdownTimeout     time.Duration
 }
 
 type workerIssueReader interface {
@@ -86,15 +90,16 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	runtimeName, _ := cmd.Flags().GetString("runtime")
 	repo, _ := cmd.Flags().GetString("repo")
 	return &workerOpts{
-		coordinatorURL:    strings.TrimSpace(coordinatorURL),
-		token:             strings.TrimSpace(token),
-		roleCSV:           roleCSV,
-		runtime:           runtimeName,
-		repo:              strings.TrimSpace(repo),
-		configDir:         ".github/workbuddy",
-		pollTimeout:       defaultWorkerPollTimeout,
-		heartbeatInterval: defaultWorkerHeartbeat,
-		shutdownTimeout:   defaultWorkerShutdownDeadline,
+		coordinatorURL:      strings.TrimSpace(coordinatorURL),
+		token:               strings.TrimSpace(token),
+		roleCSV:             roleCSV,
+		runtime:             runtimeName,
+		repo:                strings.TrimSpace(repo),
+		configDir:           ".github/workbuddy",
+		pollTimeout:         defaultWorkerPollTimeout,
+		heartbeatInterval:   defaultWorkerHeartbeat,
+		resultSubmitTimeout: defaultWorkerResultSubmit,
+		shutdownTimeout:     defaultWorkerShutdownDeadline,
 	}, nil
 }
 
@@ -135,6 +140,9 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 	}
 	if opts.sessionsDir == "" {
 		opts.sessionsDir = filepath.Join(workDir, ".workbuddy", "sessions")
+	}
+	if opts.resultSubmitTimeout <= 0 {
+		opts.resultSubmitTimeout = defaultWorkerResultSubmit
 	}
 
 	publicRuntime, runtimeAlias, err := normalizeWorkerRuntime(opts.runtime)
@@ -227,13 +235,16 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 		if task == nil {
 			continue
 		}
-		if err := executeRemoteTask(ctx, task, client, cfg, lnch, auditor, rep, reader, workDir, opts.sessionsDir, workerID, runtimeAlias, opts.heartbeatInterval, opts.shutdownTimeout); err != nil {
+		if err := executeRemoteTask(ctx, task, client, cfg, lnch, auditor, rep, reader, workDir, opts.sessionsDir, workerID, runtimeAlias, opts.heartbeatInterval, opts.resultSubmitTimeout, opts.shutdownTimeout); err != nil {
+			if errors.Is(err, errWorkerResultSubmit) {
+				continue
+			}
 			return err
 		}
 	}
 }
 
-func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *workerclient.Client, cfg *config.FullConfig, lnch *launcher.Launcher, auditor *audit.Auditor, rep *reporter.Reporter, reader workerIssueReader, workDir, sessionsDir, workerID, runtimeAlias string, heartbeatInterval, shutdownTimeout time.Duration) error {
+func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *workerclient.Client, cfg *config.FullConfig, lnch *launcher.Launcher, auditor *audit.Auditor, rep *reporter.Reporter, reader workerIssueReader, workDir, sessionsDir, workerID, runtimeAlias string, heartbeatInterval, resultSubmitTimeout, shutdownTimeout time.Duration) error {
 	agentCfg, ok := cfg.Agents[task.AgentName]
 	if !ok {
 		return fmt.Errorf("worker: agent %q not found in local config", task.AgentName)
@@ -349,17 +360,31 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 	if result.Meta["timeout"] == "true" {
 		status = store.TaskStatusTimeout
 	}
-	if err := client.SubmitResult(taskCtx, task.TaskID, workerclient.ResultRequest{
+	log.Printf("[worker] submitting result for task %s status=%s", task.TaskID, status)
+	submitCtx, cancel := context.WithTimeout(context.Background(), resultSubmitTimeout)
+	defer cancel()
+	if err := client.SubmitResult(submitCtx, task.TaskID, workerclient.ResultRequest{
 		WorkerID:      workerID,
 		Status:        status,
 		CurrentLabels: currentLabels,
 	}); err != nil {
-		return fmt.Errorf("worker: submit result: %w", err)
+		logResultSubmitFailure(task.TaskID, err)
+		return fmt.Errorf("%w: %v", errWorkerResultSubmit, err)
 	}
+	log.Printf("[worker] result submitted for task %s status=%s", task.TaskID, status)
 	if err := rep.Report(taskCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, workerID, 0, workflowMaxRetries(cfg, task.Workflow), ""); err != nil {
 		log.Printf("[worker] report failed: %v", err)
 	}
 	return nil
+}
+
+func logResultSubmitFailure(taskID string, err error) {
+	var httpErr *workerclient.HTTPStatusError
+	if errors.As(err, &httpErr) {
+		log.Printf("[worker] result submission failed for task %s: status_code=%d response_body=%q err=%v", taskID, httpErr.StatusCode, httpErr.Body, err)
+		return
+	}
+	log.Printf("[worker] result submission failed for task %s: status_code=0 response_body=%q err=%v", taskID, "", err)
 }
 
 func buildRemoteTaskContext(task *workerclient.Task, reader workerIssueReader, workDir string) *launcher.TaskContext {

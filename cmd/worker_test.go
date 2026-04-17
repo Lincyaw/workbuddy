@@ -1,10 +1,16 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,6 +18,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/launcher"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/store"
+	"github.com/Lincyaw/workbuddy/internal/workerclient"
 	"github.com/spf13/cobra"
 )
 
@@ -205,6 +212,219 @@ func TestWorkerPairsWithCoordinatorAndCompletesTask(t *testing.T) {
 
 	if mockRT.CallCount() == 0 {
 		t.Fatal("expected worker runtime to execute task")
+	}
+}
+
+func TestWorkerLogsSubmitFailureAndResumesPolling(t *testing.T) {
+	setupFakeGHCLI(t)
+
+	repo := "owner/test-repo"
+	configDir := setupTestConfigDir(t, repo)
+	gh := &mockGHReader{
+		issues: []poller.Issue{
+			{Number: 9, Title: "Synthetic Task", State: "open", Body: "body", Labels: []string{"workbuddy", "status:developing"}},
+		},
+		labelSnapshots: [][]string{
+			{"workbuddy", "status:done"},
+		},
+	}
+
+	var pollCount atomic.Int32
+	polledAgain := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/workers/register":
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tasks/poll":
+			if pollCount.Add(1) == 1 {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(workerclient.Task{
+					TaskID:    "task-1",
+					Repo:      repo,
+					IssueNum:  9,
+					AgentName: "dev-agent",
+				})
+				return
+			}
+			select {
+			case polledAgain <- struct{}{}:
+			default:
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/tasks/task-1/heartbeat":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/tasks/task-1/result":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"submit boom"}`))
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	mockRT := &mockRuntime{name: config.RuntimeClaudeCode, resultFn: func(_ context.Context, _ *config.AgentConfig, _ *launcher.TaskContext) (*launcher.Result, error) {
+		return &launcher.Result{ExitCode: 0, Meta: map[string]string{}}, nil
+	}}
+	lnch := launcher.NewLauncher()
+	lnch.Register(mockRT, config.RuntimeClaudeCode)
+
+	var logs bytes.Buffer
+	origLogOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(origLogOutput) })
+
+	ctxWorker, cancelWorker := context.WithCancel(context.Background())
+	workerErrCh := make(chan error, 1)
+	go func() {
+		workerErrCh <- runWorkerWithOpts(&workerOpts{
+			coordinatorURL:      srv.URL,
+			token:               "secret-token",
+			roleCSV:             "dev",
+			runtime:             config.RuntimeClaudeCode,
+			repo:                repo,
+			configDir:           configDir,
+			workDir:             t.TempDir(),
+			dbPath:              filepath.Join(t.TempDir(), "worker.db"),
+			sessionsDir:         filepath.Join(t.TempDir(), "sessions"),
+			pollTimeout:         25 * time.Millisecond,
+			heartbeatInterval:   25 * time.Millisecond,
+			resultSubmitTimeout: 100 * time.Millisecond,
+			shutdownTimeout:     time.Second,
+		}, lnch, gh, ctxWorker)
+	}()
+
+	select {
+	case <-polledAgain:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not resume polling after submit failure")
+	}
+
+	cancelWorker()
+	select {
+	case err := <-workerErrCh:
+		if err != nil {
+			t.Fatalf("worker: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not exit")
+	}
+
+	logOutput := logs.String()
+	if !strings.Contains(logOutput, "submitting result for task task-1 status=completed") {
+		t.Fatalf("missing submit attempt log:\n%s", logOutput)
+	}
+	if !strings.Contains(logOutput, "result submission failed for task task-1") {
+		t.Fatalf("missing submit failure log:\n%s", logOutput)
+	}
+	if !strings.Contains(logOutput, "status_code=500") {
+		t.Fatalf("missing HTTP status in log:\n%s", logOutput)
+	}
+	if !strings.Contains(logOutput, `response_body="{\"error\":\"submit boom\"}"`) {
+		t.Fatalf("missing response body in log:\n%s", logOutput)
+	}
+}
+
+func TestWorkerPairsWithCoordinatorAndFailsTask(t *testing.T) {
+	setupFakeGHCLI(t)
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", "secret-token")
+
+	repo := "owner/test-repo"
+	configDir := setupTestConfigDir(t, repo)
+	port := getFreePort(t)
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	gh := &mockGHReader{
+		issues: []poller.Issue{
+			{Number: 10, Title: "Synthetic Failure", State: "open", Body: "body", Labels: []string{"workbuddy", "status:developing"}},
+		},
+		labelSnapshots: [][]string{
+			{"workbuddy", "status:developing"},
+		},
+	}
+
+	ctxCoordinator, cancelCoordinator := context.WithCancel(context.Background())
+	defer cancelCoordinator()
+	coordErrCh := make(chan error, 1)
+	go func() {
+		coordErrCh <- runCoordinatorWithOpts(&coordinatorOpts{
+			port:         port,
+			pollInterval: 50 * time.Millisecond,
+			configDir:    configDir,
+			dbPath:       dbPath,
+			auth:         true,
+		}, gh, ctxCoordinator)
+	}()
+	waitForHealth(t, port)
+
+	mockRT := &mockRuntime{name: config.RuntimeClaudeCode, resultFn: func(_ context.Context, _ *config.AgentConfig, _ *launcher.TaskContext) (*launcher.Result, error) {
+		return &launcher.Result{
+			ExitCode: 2,
+			Stderr:   "boom",
+			Meta:     map[string]string{},
+		}, nil
+	}}
+	lnch := launcher.NewLauncher()
+	lnch.Register(mockRT, config.RuntimeClaudeCode)
+
+	ctxWorker, cancelWorker := context.WithCancel(context.Background())
+	workerErrCh := make(chan error, 1)
+	go func() {
+		workerErrCh <- runWorkerWithOpts(&workerOpts{
+			coordinatorURL:      fmt.Sprintf("http://localhost:%d", port),
+			token:               "secret-token",
+			roleCSV:             "dev",
+			runtime:             config.RuntimeClaudeCode,
+			repo:                repo,
+			configDir:           configDir,
+			workDir:             t.TempDir(),
+			dbPath:              filepath.Join(t.TempDir(), "worker.db"),
+			sessionsDir:         filepath.Join(t.TempDir(), "sessions"),
+			pollTimeout:         100 * time.Millisecond,
+			heartbeatInterval:   50 * time.Millisecond,
+			resultSubmitTimeout: time.Second,
+			shutdownTimeout:     time.Second,
+		}, lnch, gh, ctxWorker)
+	}()
+
+	var failed bool
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		st, err := store.NewStore(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tasks, err := st.QueryTasks(store.TaskStatusFailed)
+		_ = st.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(tasks) > 0 {
+			failed = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !failed {
+		t.Fatal("worker did not mark synthetic task as failed")
+	}
+
+	cancelWorker()
+	select {
+	case err := <-workerErrCh:
+		if err != nil {
+			t.Fatalf("worker: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not exit")
+	}
+
+	cancelCoordinator()
+	select {
+	case err := <-coordErrCh:
+		if err != nil {
+			t.Fatalf("coordinator: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("coordinator did not exit")
 	}
 }
 
