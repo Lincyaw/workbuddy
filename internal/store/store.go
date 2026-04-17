@@ -789,6 +789,17 @@ func (s *Store) HeartbeatTask(taskID, workerID string, lease time.Duration) erro
 	if lease <= 0 {
 		lease = 30 * time.Second
 	}
+	for attempt := 0; attempt < 3; attempt++ {
+		err := s.heartbeatTaskOnce(taskID, workerID, lease)
+		if err == nil || !isSQLiteBusyError(err) {
+			return err
+		}
+		time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+	}
+	return s.heartbeatTaskOnce(taskID, workerID, lease)
+}
+
+func (s *Store) heartbeatTaskOnce(taskID, workerID string, lease time.Duration) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("store: begin heartbeat tx: %w", err)
@@ -797,21 +808,23 @@ func (s *Store) HeartbeatTask(taskID, workerID string, lease time.Duration) erro
 	if _, err := s.ensureTaskOwnership(tx, taskID, workerID); err != nil {
 		return err
 	}
+	// Update lease unconditionally for the owning worker. We intentionally
+	// omit the "lease_expires_at > CURRENT_TIMESTAMP" check so that a worker
+	// can recover its own lease after a transient SQLITE_BUSY prevents a
+	// heartbeat from landing. Ownership was already verified above.
 	res, err := tx.Exec(
 		`UPDATE task_queue
 		 SET heartbeat_at = CURRENT_TIMESTAMP,
 		     lease_expires_at = datetime('now', ?),
 		     updated_at = CURRENT_TIMESTAMP
-		 WHERE id = ? AND worker_id = ?
-		   AND lease_expires_at IS NOT NULL
-		   AND lease_expires_at > CURRENT_TIMESTAMP`,
-		taskLeaseOffset(lease), taskID, workerID,
+		 WHERE id = ? AND worker_id = ? AND status = ?`,
+		taskLeaseOffset(lease), taskID, workerID, TaskStatusRunning,
 	)
 	if err != nil {
 		return fmt.Errorf("store: heartbeat task: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("store: heartbeat task: task %s is no longer owned by worker %s or lease has expired", taskID, workerID)
+		return fmt.Errorf("store: heartbeat task: task %s is not running or not owned by worker %s", taskID, workerID)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("store: commit heartbeat: %w", err)

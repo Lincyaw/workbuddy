@@ -815,6 +815,9 @@ func (s *fullCoordinatorServer) handleTaskHeartbeat(w http.ResponseWriter, r *ht
 		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "worker_id does not match claimed task"})
 		return
 	}
+	if err := s.store.HeartbeatTask(taskID, req.WorkerID, defaultLongPollTimeout); err != nil {
+		log.Printf("[coordinator] task heartbeat DB update failed for %s: %v", taskID, err)
+	}
 	if err := s.registry.Heartbeat(req.WorkerID); err != nil {
 		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

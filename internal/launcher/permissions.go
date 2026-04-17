@@ -3,6 +3,7 @@ package launcher
 import (
 	"log"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
@@ -65,6 +66,13 @@ func buildScopedEnv(agent *config.AgentConfig, task *TaskContext) []string {
 	if ok && hostTokenValue != "" {
 		env = append(env, "GH_TOKEN="+hostTokenValue)
 		log.Printf("launcher: using host GitHub token env %q for agent %q role %q", hostTokenEnv, agentName, agentRole)
+		return env
+	}
+
+	// Last resort: try extracting token from gh CLI keyring via `gh auth token`.
+	if token, err := ghAuthToken(); err == nil && token != "" {
+		env = append(env, "GH_TOKEN="+token)
+		log.Printf("launcher: using gh-cli keyring token for agent %q role %q", agentName, agentRole)
 		return env
 	}
 
@@ -140,13 +148,14 @@ func effectivePermissionsPayload(agent *config.AgentConfig) launcherevents.Permi
 
 func tokenFromHost() (string, string) {
 	hostEnv, hostValue, ok := findHostGitHubToken()
-	if !ok {
-		return "", tokenSourceNone
+	if ok && strings.TrimSpace(hostValue) != "" {
+		return hostEnv, tokenSourceHost
 	}
-	if strings.TrimSpace(hostValue) == "" {
-		return "", tokenSourceNone
+	// Fall back to gh CLI keyring.
+	if token, err := ghAuthToken(); err == nil && token != "" {
+		return "gh-cli-keyring", tokenSourceHost
 	}
-	return hostEnv, tokenSourceHost
+	return "", tokenSourceNone
 }
 
 func findHostGitHubToken() (env, value string, ok bool) {
@@ -170,4 +179,14 @@ func isHostGitHubTokenKey(key string) bool {
 func envKey(entry string) string {
 	parts := strings.SplitN(entry, "=", 2)
 	return parts[0]
+}
+
+// ghAuthToken runs `gh auth token` to extract the token from the gh CLI keyring.
+// Returns empty string on any error.
+func ghAuthToken() (string, error) {
+	out, err := exec.Command("gh", "auth", "token").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
