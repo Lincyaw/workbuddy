@@ -3,105 +3,251 @@ info:
   title: Workbuddy Coordinator Worker API
   version: v1
   description: >
-    Coordinator-side task dispatch API used by remote Workers. Workers long-poll
-    for tasks, acknowledge execution start, send heartbeats, and report
-    completion.
+    Authenticated coordinator API used by remote workers to register,
+    long-poll for tasks, report lease heartbeats, submit execution results,
+    release claimed tasks, and explicitly unregister when decommissioned.
 servers:
   - url: http://localhost:8080
 paths:
-  /v1/tasks/claim:
+  /api/v1/workers/register:
     post:
-      summary: Claim the next dispatchable task
+      summary: Register or refresh a worker record
       description: >
-        Long-poll for a task matching the worker's supported roles. Returns 204
-        when no task becomes available before the requested poll timeout.
+        Creates or updates the worker registry entry that binds a worker ID to
+        one or more registered repos and supported roles.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ClaimTaskRequest'
+              $ref: '#/components/schemas/RegisterWorkerRequest'
       responses:
-        '200':
-          description: Task claimed
+        '201':
+          description: Worker registered
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Task'
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          description: Invalid request or repo not registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing or invalid bearer token when auth is enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Coordinator failed to persist the worker
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/workers/{workerId}:
+    delete:
+      summary: Unregister a worker
+      description: >
+        Permanently removes the worker record from the coordinator registry.
+        Conservative policy: if the worker currently owns a running task lease,
+        unregister is rejected with 409 Conflict instead of releasing the task.
+      parameters:
+        - $ref: '#/components/parameters/WorkerID'
+      responses:
+        '200':
+          description: Worker removed from the registry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '401':
+          description: Missing or invalid bearer token when auth is enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Worker not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Worker currently owns a running task
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Coordinator failed to remove the worker
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/tasks/poll:
+    get:
+      summary: Long-poll for the next dispatchable task
+      parameters:
+        - name: worker_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: timeout
+          in: query
+          required: false
+          schema:
+            type: string
+          description: >
+            Optional duration string such as 100ms or 30s. When omitted, the
+            coordinator uses its default long-poll timeout.
+      responses:
+        '200':
+          description: Task claimed for the worker
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskPollResponse'
         '204':
-          description: No task available before poll timeout
+          description: No task became available before timeout
+        '400':
+          description: Missing worker_id or unknown worker
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing or invalid bearer token when auth is enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Coordinator failed while trying to claim a task
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/tasks/{taskId}/result:
+    post:
+      summary: Report task completion status
+      parameters:
+        - $ref: '#/components/parameters/TaskID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskResultRequest'
+      responses:
+        '200':
+          description: Completion status recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          description: Invalid request body or wrong worker for the task
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing or invalid bearer token when auth is enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Coordinator failed to persist task completion
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/tasks/{taskId}/heartbeat:
+    post:
+      summary: Extend task lease and refresh worker heartbeat
+      parameters:
+        - $ref: '#/components/parameters/TaskID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkerIDRequest'
+      responses:
+        '204':
+          description: Heartbeat accepted
+        '400':
+          description: Invalid request body or wrong worker for the task
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing or invalid bearer token when auth is enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Coordinator failed to refresh worker or task heartbeat
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/tasks/{taskId}/release:
+    post:
+      summary: Release a claimed task back to pending
+      parameters:
+        - $ref: '#/components/parameters/TaskID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkerIDRequest'
+      responses:
+        '204':
+          description: Task released to pending
         '400':
           description: Invalid request body
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-  /v1/tasks/{taskId}/ack:
-    post:
-      summary: Acknowledge task start
-      parameters:
-        - $ref: '#/components/parameters/TaskID'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/WorkerActionRequest'
-      responses:
-        '200':
-          description: Task acknowledged
+        '401':
+          description: Missing or invalid bearer token when auth is enabled
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Task'
-        '404':
-          description: Task not found
+                $ref: '#/components/schemas/Error'
         '409':
-          description: Task is not owned by the worker or already completed
-  /v1/tasks/{taskId}/heartbeat:
-    post:
-      summary: Extend task lease
-      parameters:
-        - $ref: '#/components/parameters/TaskID'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/WorkerActionRequest'
-      responses:
-        '200':
-          description: Heartbeat accepted
+          description: Task is not currently owned by the provided worker
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Task'
-        '404':
-          description: Task not found
-        '409':
-          description: Task is not owned by the worker or already completed
-  /v1/tasks/{taskId}/complete:
-    post:
-      summary: Report task completion
-      parameters:
-        - $ref: '#/components/parameters/TaskID'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CompleteTaskRequest'
-      responses:
-        '200':
-          description: Task completion recorded
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Coordinator failed to release the task
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Task'
-        '404':
-          description: Task not found
-        '409':
-          description: Task is not owned by the worker or already completed
+                $ref: '#/components/schemas/Error'
 components:
   parameters:
     TaskID:
@@ -110,66 +256,62 @@ components:
       required: true
       schema:
         type: string
+    WorkerID:
+      name: workerId
+      in: path
+      required: true
+      schema:
+        type: string
   schemas:
-    ClaimTaskRequest:
+    RegisterWorkerRequest:
       type: object
-      required: [worker_id]
+      required: [worker_id, repo, roles]
       properties:
         worker_id:
           type: string
+        repo:
+          type: string
+          description: Primary repo in OWNER/NAME form
+        repos:
+          type: array
+          items:
+            type: string
+          description: >
+            Optional explicit repo bindings. If omitted, the primary repo is
+            used as the only binding.
         roles:
           type: array
           items:
             type: string
-        idempotency_key:
+        runtime:
           type: string
-          description: >
-            If the same worker retries the claim request with the same key while
-            the lease is active, the coordinator returns the same task.
-        long_poll_seconds:
-          type: integer
-          minimum: 1
-          default: 30
-        lease_seconds:
-          type: integer
-          minimum: 1
-          default: 45
-    WorkerActionRequest:
+          description: Worker runtime capability, for example claude-code or codex
+        hostname:
+          type: string
+    WorkerIDRequest:
       type: object
       required: [worker_id]
       properties:
         worker_id:
           type: string
-        lease_seconds:
-          type: integer
-          minimum: 1
-          default: 45
-    CompleteTaskRequest:
-      allOf:
-        - $ref: '#/components/schemas/WorkerActionRequest'
-        - type: object
-          properties:
-            exit_code:
-              type: integer
-              default: 0
-            session_refs:
-              type: array
-              items:
-                type: string
-    Task:
+    TaskResultRequest:
       type: object
-      required:
-        - id
-        - repo
-        - issue_num
-        - agent_name
-        - role
-        - runtime
-        - workflow
-        - state
-        - status
+      required: [worker_id, status]
       properties:
-        id:
+        worker_id:
+          type: string
+        status:
+          type: string
+          enum: [completed, failed, timeout]
+        current_labels:
+          type: array
+          items:
+            type: string
+    TaskPollResponse:
+      type: object
+      required: [task_id, repo, issue_num, agent_name, role, payload]
+      properties:
+        task_id:
           type: string
         repo:
           type: string
@@ -179,23 +321,19 @@ components:
           type: string
         role:
           type: string
-        runtime:
-          type: string
-        workflow:
-          type: string
-        state:
-          type: string
-        status:
-          type: string
-          enum: [pending, running, completed, failed, timeout]
+        payload:
+          description: Serialized task payload persisted by the coordinator
         worker_id:
           type: string
-        exit_code:
-          type: integer
-        session_refs:
-          type: array
-          items:
-            type: string
+        lease_expires_at:
+          type: string
+          format: date-time
+    StatusResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
     Error:
       type: object
       required: [error]
