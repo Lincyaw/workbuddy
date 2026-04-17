@@ -241,6 +241,25 @@ func (r *Reporter) Report(
 	return err
 }
 
+// ReportVerified formats and posts an agent execution report using a
+// precomputed verification result. This avoids running the same external
+// verification commands twice when the caller already needed the result for
+// control-flow decisions.
+func (r *Reporter) ReportVerified(
+	ctx context.Context,
+	repo string,
+	issueNum int,
+	agentName string,
+	result *launcher.Result,
+	sessionID, workerID string,
+	retryCount, maxRetries int,
+	labelLine string,
+	verification *VerificationResult,
+) error {
+	_, err := r.report(ctx, repo, issueNum, agentName, result, sessionID, workerID, retryCount, maxRetries, labelLine, verification)
+	return err
+}
+
 // ReportWithVerification is like Report but runs claim verification for
 // successful exits and returns the verification result. Callers should treat
 // a non-nil VerificationResult with Partial == true as a failed run for
@@ -254,6 +273,20 @@ func (r *Reporter) ReportWithVerification(
 	sessionID, workerID string,
 	retryCount, maxRetries int,
 	labelLine string,
+) (*VerificationResult, error) {
+	return r.report(ctx, repo, issueNum, agentName, result, sessionID, workerID, retryCount, maxRetries, labelLine, nil)
+}
+
+func (r *Reporter) report(
+	ctx context.Context,
+	repo string,
+	issueNum int,
+	agentName string,
+	result *launcher.Result,
+	sessionID, workerID string,
+	retryCount, maxRetries int,
+	labelLine string,
+	verification *VerificationResult,
 ) (*VerificationResult, error) {
 	status := "success"
 	var errorDetail string
@@ -275,8 +308,7 @@ func (r *Reporter) ReportWithVerification(
 	}
 
 	// Run claim verification for successful runs
-	var verification *VerificationResult
-	if status == "success" && r.verifier != nil {
+	if status == "success" && verification == nil && r.verifier != nil {
 		output := result.LastMessage
 		if output == "" {
 			output = result.Stdout

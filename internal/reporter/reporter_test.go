@@ -11,6 +11,17 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/launcher"
 )
 
+type mockVerifier struct {
+	result *VerificationResult
+	err    error
+	calls  int
+}
+
+func (m *mockVerifier) Verify(_ context.Context, _ string, _ int, _ string) (*VerificationResult, error) {
+	m.calls++
+	return m.result, m.err
+}
+
 type mockGHWriter struct {
 	comments []string
 	failN    int // fail the first N calls
@@ -142,6 +153,77 @@ func TestReport_PrefersLastMessage(t *testing.T) {
 	}
 	if strings.Contains(body, "raw stdout") {
 		t.Fatalf("expected stdout fallback not to be used: %s", body)
+	}
+}
+
+func TestReportWithVerification_Partial(t *testing.T) {
+	gh := &mockGHWriter{}
+	r := NewReporter(gh)
+	v := &mockVerifier{
+		result: &VerificationResult{
+			Partial: true,
+			Checks: []ClaimCheck{
+				{Type: ClaimCommentPR, Claim: "posted comment on PR #4", Actual: "no comments on PR", OK: false},
+			},
+		},
+	}
+	r.SetVerifier(v)
+
+	result := &launcher.Result{
+		ExitCode:    0,
+		LastMessage: "I posted a review comment on PR #4",
+		Duration:    time.Second,
+	}
+
+	verifyRes, err := r.ReportWithVerification(context.Background(), "test/repo", 42, "review-agent", result, "sess-verify", "worker-1", 0, 3, "")
+	if err != nil {
+		t.Fatalf("ReportWithVerification: %v", err)
+	}
+	if verifyRes == nil || !verifyRes.Partial {
+		t.Fatalf("expected partial verification result, got %+v", verifyRes)
+	}
+	if v.calls != 1 {
+		t.Fatalf("expected verifier to be called once, got %d", v.calls)
+	}
+	body := gh.comments[0]
+	if !strings.Contains(body, "Partial") {
+		t.Fatalf("expected partial status in report: %s", body)
+	}
+	if !strings.Contains(body, "Claim Verification") {
+		t.Fatalf("expected verification table in report: %s", body)
+	}
+	if !strings.Contains(body, "no comments on PR") {
+		t.Fatalf("expected claim-vs-reality detail in report: %s", body)
+	}
+}
+
+func TestReportVerified_UsesProvidedVerification(t *testing.T) {
+	gh := &mockGHWriter{}
+	r := NewReporter(gh)
+	v := &mockVerifier{
+		result: &VerificationResult{
+			Partial: true,
+			Checks:  []ClaimCheck{{Type: ClaimLabels, Claim: "added status:done", Actual: "label not found", OK: false}},
+		},
+	}
+	r.SetVerifier(v)
+
+	result := &launcher.Result{
+		ExitCode:    0,
+		LastMessage: "I flipped labels to status:done",
+		Duration:    time.Second,
+	}
+
+	err := r.ReportVerified(context.Background(), "test/repo", 42, "dev-agent", result, "sess-precomputed", "worker-1", 0, 3, "", v.result)
+	if err != nil {
+		t.Fatalf("ReportVerified: %v", err)
+	}
+	if v.calls != 0 {
+		t.Fatalf("expected provided verification to skip verifier, got %d calls", v.calls)
+	}
+	body := gh.comments[0]
+	if !strings.Contains(body, "label not found") {
+		t.Fatalf("expected provided verification detail in report: %s", body)
 	}
 }
 

@@ -3,6 +3,7 @@ package reporter
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -46,6 +47,7 @@ func TestVerify_AllClaimsVerified(t *testing.T) {
 	now := time.Now().UTC()
 	runner := &mockCommandRunner{
 		responses: map[string]string{
+			"gh [api user --jq .login]":                         "bot\n",
 			"gh [pr view 4 --repo owner/repo --json comments]":  fixedCommentJSON("bot", now),
 			"gh [issue view 1 --repo owner/repo --json labels]": labelsJSON("status:done"),
 		},
@@ -67,6 +69,7 @@ func TestVerify_AllClaimsVerified(t *testing.T) {
 func TestVerify_CommentMissing(t *testing.T) {
 	runner := &mockCommandRunner{
 		responses: map[string]string{
+			"gh [api user --jq .login]":                        "bot\n",
 			"gh [pr view 4 --repo owner/repo --json comments]": emptyCommentsJSON(),
 		},
 	}
@@ -130,6 +133,7 @@ func TestVerify_PRCommentOnIssue(t *testing.T) {
 	now := time.Now().UTC()
 	runner := &mockCommandRunner{
 		responses: map[string]string{
+			"gh [api user --jq .login]":                           "bot\n",
 			"gh [issue view 2 --repo owner/repo --json comments]": fixedCommentJSON("bot", now),
 		},
 	}
@@ -226,5 +230,33 @@ func TestVerify_LabelRemovedStillPresent(t *testing.T) {
 	}
 	if !res.Partial {
 		t.Fatal("expected partial, got success")
+	}
+}
+
+func TestVerify_CommentWrongAuthor(t *testing.T) {
+	now := time.Now().UTC()
+	runner := &mockCommandRunner{
+		responses: map[string]string{
+			"gh [api user --jq .login]":                        "bot\n",
+			"gh [pr view 4 --repo owner/repo --json comments]": fixedCommentJSON("someone-else", now),
+		},
+	}
+	v := &GHClaimVerifier{runCommand: runner.run}
+	output := "I posted a review comment on PR #4"
+	res, err := v.Verify(context.Background(), "owner/repo", 1, output)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.Partial {
+		t.Fatal("expected partial, got success")
+	}
+	if len(res.Checks) != 1 {
+		t.Fatalf("expected 1 check, got %d", len(res.Checks))
+	}
+	if res.Checks[0].OK {
+		t.Fatal("expected comment check to fail")
+	}
+	if got := res.Checks[0].Actual; got == "" || !strings.Contains(got, "expected bot") {
+		t.Fatalf("unexpected actual detail: %q", got)
 	}
 }

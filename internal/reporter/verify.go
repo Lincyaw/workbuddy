@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -47,6 +48,9 @@ type ClaimVerifier interface {
 // GHClaimVerifier implements ClaimVerifier using the gh CLI and git.
 type GHClaimVerifier struct {
 	runCommand func(ctx context.Context, name string, args ...string) ([]byte, error)
+	loginOnce  sync.Once
+	login      string
+	loginErr   error
 }
 
 // NewGHClaimVerifier creates a GHClaimVerifier that shells out to gh/git.
@@ -57,6 +61,18 @@ func NewGHClaimVerifier() *GHClaimVerifier {
 			return cmd.CombinedOutput()
 		},
 	}
+}
+
+func (v *GHClaimVerifier) authenticatedLogin(ctx context.Context) (string, error) {
+	v.loginOnce.Do(func() {
+		out, err := v.runCommand(ctx, "gh", "api", "user", "--jq", ".login")
+		if err != nil {
+			v.loginErr = fmt.Errorf("gh api user: %w", err)
+			return
+		}
+		v.login = strings.TrimSpace(string(out))
+	})
+	return v.login, v.loginErr
 }
 
 var (
@@ -135,6 +151,10 @@ type ghComment struct {
 
 func (v *GHClaimVerifier) verifyCommentOnPR(ctx context.Context, repo string, prNum int) ClaimCheck {
 	claim := fmt.Sprintf("posted comment on PR #%d", prNum)
+	login, err := v.authenticatedLogin(ctx)
+	if err != nil {
+		return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: err.Error(), OK: false}
+	}
 	out, err := v.runCommand(ctx, "gh", "pr", "view", strconv.Itoa(prNum), "--repo", repo, "--json", "comments")
 	if err != nil {
 		return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: fmt.Sprintf("gh error: %s", string(out)), OK: false}
@@ -149,6 +169,9 @@ func (v *GHClaimVerifier) verifyCommentOnPR(ctx context.Context, repo string, pr
 		return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: "no comments on PR", OK: false}
 	}
 	last := payload.Comments[len(payload.Comments)-1]
+	if login != "" && last.Author.Login != login {
+		return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: fmt.Sprintf("most recent comment author is %s, expected %s", last.Author.Login, login), OK: false}
+	}
 	if time.Since(last.CreatedAt) > 30*time.Minute {
 		return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: fmt.Sprintf("most recent comment by %s is too old (%s)", last.Author.Login, last.CreatedAt.Format(time.RFC3339)), OK: false}
 	}
@@ -157,6 +180,10 @@ func (v *GHClaimVerifier) verifyCommentOnPR(ctx context.Context, repo string, pr
 
 func (v *GHClaimVerifier) verifyCommentOnIssue(ctx context.Context, repo string, issueNum int) ClaimCheck {
 	claim := fmt.Sprintf("posted comment on issue #%d", issueNum)
+	login, err := v.authenticatedLogin(ctx)
+	if err != nil {
+		return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: err.Error(), OK: false}
+	}
 	out, err := v.runCommand(ctx, "gh", "issue", "view", strconv.Itoa(issueNum), "--repo", repo, "--json", "comments")
 	if err != nil {
 		return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: fmt.Sprintf("gh error: %s", string(out)), OK: false}
@@ -171,6 +198,9 @@ func (v *GHClaimVerifier) verifyCommentOnIssue(ctx context.Context, repo string,
 		return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: "no comments on issue", OK: false}
 	}
 	last := payload.Comments[len(payload.Comments)-1]
+	if login != "" && last.Author.Login != login {
+		return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: fmt.Sprintf("most recent comment author is %s, expected %s", last.Author.Login, login), OK: false}
+	}
 	if time.Since(last.CreatedAt) > 30*time.Minute {
 		return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: fmt.Sprintf("most recent comment by %s is too old (%s)", last.Author.Login, last.CreatedAt.Format(time.RFC3339)), OK: false}
 	}
