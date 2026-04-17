@@ -330,7 +330,7 @@ func TestRouter_WorktreeFailureFailsTaskAndComments(t *testing.T) {
 	if len(comments.comments) != 1 {
 		t.Fatalf("comment count = %d, want 1", len(comments.comments))
 	}
-	if !strings.Contains(comments.comments[0], "not a valid worktree") {
+	if !strings.Contains(comments.comments[0], "not a registered git worktree") {
 		t.Fatalf("comment missing worktree error: %s", comments.comments[0])
 	}
 }

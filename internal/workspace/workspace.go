@@ -52,6 +52,9 @@ func (m *Manager) Create(issueNum int, taskID string) (string, error) {
 
 	// 2. Path exists — validate branch and cleanliness, then reuse or fail.
 	if _, err := os.Stat(wtPath); err == nil {
+		if !m.isRegisteredWorktree(wtPath) {
+			return "", fmt.Errorf("workspace: path %s exists but is not a registered git worktree", wtPath)
+		}
 		curBranch, err := m.gitCurrentBranch(wtPath)
 		if err != nil {
 			return "", fmt.Errorf("workspace: path %s exists but is not a valid worktree: %w", wtPath, err)
@@ -61,6 +64,9 @@ func (m *Manager) Create(issueNum int, taskID string) (string, error) {
 		}
 		if !m.gitIsClean(wtPath) {
 			return "", fmt.Errorf("workspace: worktree %s has uncommitted changes — refusing to reuse", wtPath)
+		}
+		if err := m.syncExistingWorktree(wtPath, branchName); err != nil {
+			return "", err
 		}
 		log.Printf("[workspace] reused worktree %s (branch %s) for issue #%d", wtPath, branchName, issueNum)
 		return wtPath, nil
@@ -93,6 +99,30 @@ func (m *Manager) Create(issueNum int, taskID string) (string, error) {
 			wtPath, branchName, baseRef, issueNum)
 	}
 	return wtPath, nil
+}
+
+func (m *Manager) isRegisteredWorktree(wtPath string) bool {
+	foundPath := m.findWorktreePathForPath(wtPath)
+	return foundPath != ""
+}
+
+func (m *Manager) syncExistingWorktree(wtPath, branchName string) error {
+	checkoutCmd := exec.Command("git", "checkout", branchName)
+	checkoutCmd.Dir = wtPath
+	if out, err := checkoutCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("workspace: checkout %s in %s: %s: %w", branchName, wtPath, strings.TrimSpace(string(out)), err)
+	}
+
+	if !m.remoteBranchExists(branchName) {
+		return nil
+	}
+
+	pullCmd := exec.Command("git", "pull", "--ff-only", "origin", branchName)
+	pullCmd.Dir = wtPath
+	if out, err := pullCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("workspace: sync reused worktree %s on %s: %s: %w", wtPath, branchName, strings.TrimSpace(string(out)), err)
+	}
+	return nil
 }
 
 // gitCurrentBranch returns the current branch in the given worktree directory.
@@ -169,6 +199,14 @@ func (m *Manager) Remove(wtPath string) error {
 // findWorktreePath returns the filesystem path of an existing worktree for the
 // given branch, or empty string if none exists.
 func (m *Manager) findWorktreePath(branchName string) string {
+	return m.findWorktreePathForPathAndBranch("", branchName)
+}
+
+func (m *Manager) findWorktreePathForPath(wtPath string) string {
+	return m.findWorktreePathForPathAndBranch(wtPath, "")
+}
+
+func (m *Manager) findWorktreePathForPathAndBranch(wtPath, branchName string) string {
 	cmd := exec.Command("git", "worktree", "list", "--porcelain")
 	cmd.Dir = m.baseDir
 	out, err := cmd.Output()
@@ -176,6 +214,10 @@ func (m *Manager) findWorktreePath(branchName string) string {
 		return ""
 	}
 
+	absTargetPath := ""
+	if wtPath != "" {
+		absTargetPath, _ = filepath.Abs(wtPath)
+	}
 	lines := strings.Split(string(out), "\n")
 	var currentPath string
 	for _, line := range lines {
@@ -185,7 +227,17 @@ func (m *Manager) findWorktreePath(branchName string) string {
 		if strings.HasPrefix(line, "branch ") {
 			ref := strings.TrimPrefix(line, "branch ")
 			localBranch := strings.TrimPrefix(ref, "refs/heads/")
-			if localBranch == branchName && currentPath != "" {
+			branchMatches := branchName == "" || localBranch == branchName
+			pathMatches := false
+			if currentPath != "" {
+				if absTargetPath == "" {
+					pathMatches = true
+				} else {
+					absCurrentPath, _ := filepath.Abs(currentPath)
+					pathMatches = absCurrentPath == absTargetPath
+				}
+			}
+			if branchMatches && pathMatches && currentPath != "" {
 				return currentPath
 			}
 		}
