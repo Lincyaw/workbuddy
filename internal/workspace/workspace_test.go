@@ -202,6 +202,32 @@ func TestCreate_ExistingDirtyRefuse(t *testing.T) {
 	_ = mgr.Remove(wtPath)
 }
 
+func TestCreate_ExistingWrongBranchRefuse(t *testing.T) {
+	repoDir := initTestRepo(t)
+	mgr := NewManager(repoDir)
+
+	wtPath, err := mgr.Create(1, "task-1")
+	if err != nil {
+		t.Fatalf("Create first: %v", err)
+	}
+
+	cmd := exec.Command("git", "checkout", "-b", "workbuddy/issue-999")
+	cmd.Dir = wtPath
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git checkout -b: %s: %v", out, err)
+	}
+
+	_, err = mgr.Create(1, "task-2")
+	if err == nil {
+		t.Fatal("expected error for wrong-branch worktree, got nil")
+	}
+	if !strings.Contains(err.Error(), `expected "workbuddy/issue-1"`) {
+		t.Fatalf("expected branch mismatch error, got: %v", err)
+	}
+
+	_ = mgr.Remove(wtPath)
+}
+
 func TestCreate_StaleAddFailure(t *testing.T) {
 	repoDir := initTestRepo(t)
 	mgr := NewManager(repoDir)
@@ -224,4 +250,3 @@ func TestCreate_StaleAddFailure(t *testing.T) {
 		t.Fatalf("expected 'not a valid worktree' in error, got: %v", err)
 	}
 }
-

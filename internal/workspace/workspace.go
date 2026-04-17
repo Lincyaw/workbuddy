@@ -46,7 +46,9 @@ func (m *Manager) Create(issueNum int, taskID string) (string, error) {
 	// 1. Prune stale worktree metadata (cheap, idempotent).
 	pruneCmd := exec.Command("git", "worktree", "prune")
 	pruneCmd.Dir = m.baseDir
-	_ = pruneCmd.Run() // best-effort, ignore error
+	if out, err := pruneCmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("workspace: git worktree prune: %s: %w", strings.TrimSpace(string(out)), err)
+	}
 
 	// 2. Path exists — validate branch and cleanliness, then reuse or fail.
 	if _, err := os.Stat(wtPath); err == nil {
