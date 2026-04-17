@@ -28,9 +28,9 @@ const ReactionConfused = "confused"
 // gitignored for local runtime state.
 const overflowReportsDir = "scripts/review-reports"
 
-// maxCommentBodyBytes is the maximum body size the reporter will post.
-// GitHub's addComment API rejects bodies > 65536 characters; we leave
-// ~5KB headroom for the reporter's own framing.
+// maxCommentBodyBytes is the maximum encoded body size the reporter will post.
+// We enforce the guard in bytes because gh transmits UTF-8 text and we want a
+// conservative preflight check with headroom below GitHub's hard limit.
 const maxCommentBodyBytes = 60000
 
 // GHCommentWriter abstracts the gh issue comment command for testing.
@@ -290,7 +290,7 @@ func (r *Reporter) Report(
 	}
 
 	body := FormatReportAt(data, time.Now())
-	if len(body) > maxCommentBodyBytes {
+	if bodySizeBytes(body) > maxCommentBodyBytes {
 		return r.reportWithOverflow(ctx, repo, issueNum, agentName, body, workDir)
 	}
 	return r.writeWithRateLimitRetry(ctx, repo, issueNum, "report", func() error {
@@ -308,7 +308,7 @@ func (r *Reporter) reportWithOverflow(ctx context.Context, repo string, issueNum
 	if r.eventlog != nil {
 		payload := map[string]any{
 			"source":       "report",
-			"body_bytes":   len(body),
+			"body_bytes":   bodySizeBytes(body),
 			"committed":    commitErr == nil && artifactURL != "",
 			"artifact_url": artifactURL,
 		}
@@ -449,6 +449,10 @@ func sanitizeArtifactComponent(value string) string {
 		return "agent"
 	}
 	return sanitized
+}
+
+func bodySizeBytes(value string) int {
+	return len(value)
 }
 
 func utf8Prefix(value string, maxBytes int) string {

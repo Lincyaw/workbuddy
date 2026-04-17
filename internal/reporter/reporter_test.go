@@ -368,8 +368,8 @@ func TestReport_OverflowWithoutWorkDir(t *testing.T) {
 		t.Fatalf("expected 1 comment, got %d", len(gh.comments))
 	}
 	body := gh.comments[0]
-	if len(body) > maxCommentBodyBytes {
-		t.Fatalf("truncated comment should be under %d bytes, got %d", maxCommentBodyBytes, len(body))
+	if bodySizeBytes(body) > maxCommentBodyBytes {
+		t.Fatalf("truncated comment should be under %d bytes, got %d", maxCommentBodyBytes, bodySizeBytes(body))
 	}
 	if !strings.Contains(body, "truncated") {
 		t.Error("comment should indicate truncation")
@@ -379,6 +379,21 @@ func TestReport_OverflowWithoutWorkDir(t *testing.T) {
 	}
 	if !rec.Has(eventlog.TypeReportOverflow) {
 		t.Fatalf("expected report_overflow event")
+	}
+	payload, ok := rec.findPayload(eventlog.TypeReportOverflow)
+	if !ok {
+		t.Fatalf("expected report_overflow payload")
+	}
+	p, ok := payload.(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected payload type: %T", payload)
+	}
+	bodyBytes, ok := p["body_bytes"].(int)
+	if !ok {
+		t.Fatalf("expected body_bytes int payload, got %T", p["body_bytes"])
+	}
+	if bodyBytes <= maxCommentBodyBytes {
+		t.Fatalf("expected overflow payload body_bytes > %d, got %d", maxCommentBodyBytes, bodyBytes)
 	}
 }
 
@@ -445,8 +460,8 @@ func TestReport_OverflowWithWorkDir(t *testing.T) {
 		t.Fatalf("expected 1 comment, got %d", len(gh.comments))
 	}
 	body := gh.comments[0]
-	if len(body) > maxCommentBodyBytes {
-		t.Fatalf("truncated comment should be under %d bytes, got %d", maxCommentBodyBytes, len(body))
+	if bodySizeBytes(body) > maxCommentBodyBytes {
+		t.Fatalf("truncated comment should be under %d bytes, got %d", maxCommentBodyBytes, bodySizeBytes(body))
 	}
 	if !strings.Contains(body, "truncated") {
 		t.Error("comment should indicate truncation")
@@ -465,6 +480,10 @@ func TestReport_OverflowWithWorkDir(t *testing.T) {
 	p, ok := payload.(map[string]interface{})
 	if !ok {
 		t.Fatalf("unexpected payload type: %T", payload)
+	}
+	bodyBytes, ok := p["body_bytes"].(int)
+	if !ok || bodyBytes <= maxCommentBodyBytes {
+		t.Fatalf("expected body_bytes > %d in overflow event, got %v", maxCommentBodyBytes, p["body_bytes"])
 	}
 	if committed, ok := p["committed"].(bool); !ok || !committed {
 		t.Fatalf("expected committed=true in overflow event, got %v", p)
@@ -578,9 +597,54 @@ func TestReport_OverflowWithWorkDirButNotGitRepo(t *testing.T) {
 	payload, _ := rec.findPayload(eventlog.TypeReportOverflow)
 	p, ok := payload.(map[string]interface{})
 	if ok {
+		if bodyBytes, ok := p["body_bytes"].(int); !ok || bodyBytes <= maxCommentBodyBytes {
+			t.Fatalf("expected body_bytes > %d in overflow event, got %v", maxCommentBodyBytes, p["body_bytes"])
+		}
 		if committed, ok := p["committed"].(bool); ok && committed {
 			t.Fatal("expected committed=false when workDir is not a git repo")
 		}
+	}
+}
+
+func TestReport_OverflowUsesByteCountForUTF8(t *testing.T) {
+	gh := &mockGHWriter{}
+	r := NewReporter(gh)
+	rec := &mockEventRecorder{}
+	r.SetEventRecorder(rec)
+
+	// 25000 runes but 75000 bytes in UTF-8, so this must overflow even though
+	// the character count is below the byte guard.
+	longOutput := strings.Repeat("你", 25000)
+	result := &launcher.Result{
+		ExitCode: 0,
+		Stdout:   longOutput,
+		Duration: time.Second,
+	}
+
+	if err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-utf8", "worker-1", 0, 3, "", ""); err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if len(gh.comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(gh.comments))
+	}
+	if !strings.Contains(gh.comments[0], "truncated") {
+		t.Fatalf("expected truncated comment for UTF-8 overflow: %s", gh.comments[0])
+	}
+
+	payload, ok := rec.findPayload(eventlog.TypeReportOverflow)
+	if !ok {
+		t.Fatalf("expected report_overflow event")
+	}
+	p, ok := payload.(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected payload type: %T", payload)
+	}
+	bodyBytes, ok := p["body_bytes"].(int)
+	if !ok {
+		t.Fatalf("expected body_bytes int payload, got %T", p["body_bytes"])
+	}
+	if bodyBytes <= maxCommentBodyBytes {
+		t.Fatalf("expected UTF-8 body_bytes > %d, got %d", maxCommentBodyBytes, bodyBytes)
 	}
 }
 
@@ -588,8 +652,8 @@ func TestTruncateReport(t *testing.T) {
 	body := strings.Repeat("x", 10000)
 	url := "https://github.com/owner/repo/blob/main/scripts/review-reports/issue-42-dev-agent-123.md"
 	short := truncateReport(body, url)
-	if len(short) > maxCommentBodyBytes {
-		t.Fatalf("truncated report should be under %d bytes, got %d", maxCommentBodyBytes, len(short))
+	if bodySizeBytes(short) > maxCommentBodyBytes {
+		t.Fatalf("truncated report should be under %d bytes, got %d", maxCommentBodyBytes, bodySizeBytes(short))
 	}
 	if !strings.Contains(short, "truncated") {
 		t.Error("should contain truncation warning")
