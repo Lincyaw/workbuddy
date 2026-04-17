@@ -180,6 +180,7 @@ func TestVerify_BranchPushed(t *testing.T) {
 	runner := &mockCommandRunner{
 		responses: map[string]string{
 			"git [ls-remote origin feature-branch]": "abc123\trefs/heads/feature-branch",
+			"git [rev-parse feature-branch]":        "abc123\n",
 		},
 	}
 	v := &GHClaimVerifier{runCommand: runner.run}
@@ -193,6 +194,27 @@ func TestVerify_BranchPushed(t *testing.T) {
 	}
 	if len(res.Checks) != 1 || res.Checks[0].Type != ClaimBranchPushed {
 		t.Fatalf("expected branch-pushed check, got %+v", res.Checks)
+	}
+}
+
+func TestVerify_BranchPushedTipMismatch(t *testing.T) {
+	runner := &mockCommandRunner{
+		responses: map[string]string{
+			"git [ls-remote origin feature-branch]": "abc123\trefs/heads/feature-branch",
+			"git [rev-parse feature-branch]":        "def456\n",
+		},
+	}
+	v := &GHClaimVerifier{runCommand: runner.run}
+	output := "I pushed branch feature-branch"
+	res, err := v.Verify(context.Background(), "owner/repo", 1, verificationInput(output, time.Now().UTC()))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.Partial {
+		t.Fatal("expected partial, got success")
+	}
+	if len(res.Checks) != 1 || !strings.Contains(res.Checks[0].Actual, "does not match local") {
+		t.Fatalf("unexpected checks: %+v", res.Checks)
 	}
 }
 
@@ -213,6 +235,46 @@ func TestVerify_FileCreated(t *testing.T) {
 	}
 	if len(res.Checks) != 1 || res.Checks[0].Type != ClaimFileCreated {
 		t.Fatalf("expected file-created check, got %+v", res.Checks)
+	}
+}
+
+func TestVerify_CommitClaimBySubject(t *testing.T) {
+	runner := &mockCommandRunner{
+		responses: map[string]string{
+			"git [log -1 --format=%H%n%s]": "0123456789abcdef0123456789abcdef01234567\nFix issue #118 verification\n",
+		},
+	}
+	v := &GHClaimVerifier{runCommand: runner.run}
+	output := `I committed "Fix issue #118 verification"`
+	res, err := v.Verify(context.Background(), "owner/repo", 1, verificationInput(output, time.Now().UTC()))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Partial {
+		t.Fatalf("expected success, got partial: %+v", res.Checks)
+	}
+	if len(res.Checks) != 1 || res.Checks[0].Type != ClaimCommit {
+		t.Fatalf("expected commit check, got %+v", res.Checks)
+	}
+}
+
+func TestVerify_CommitClaimMissing(t *testing.T) {
+	runner := &mockCommandRunner{
+		responses: map[string]string{
+			"git [log -1 --format=%H%n%s]": "fedcba9876543210fedcba9876543210fedcba98\nDifferent subject\n",
+		},
+	}
+	v := &GHClaimVerifier{runCommand: runner.run}
+	output := `I committed "Fix issue #118 verification"`
+	res, err := v.Verify(context.Background(), "owner/repo", 1, verificationInput(output, time.Now().UTC()))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.Partial {
+		t.Fatal("expected partial, got success")
+	}
+	if len(res.Checks) != 1 || !strings.Contains(res.Checks[0].Actual, "latest commit is") {
+		t.Fatalf("unexpected checks: %+v", res.Checks)
 	}
 }
 

@@ -22,6 +22,7 @@ const (
 	ClaimPRCreated    ClaimType = "pr_created"
 	ClaimBranchPushed ClaimType = "branch_pushed"
 	ClaimFileCreated  ClaimType = "file_created"
+	ClaimCommit       ClaimType = "commit"
 )
 
 // ClaimCheck records a single claim and its verified reality.
@@ -93,6 +94,7 @@ var (
 	prCreatedPattern      = regexp.MustCompile(`(?i)(?:created|opened)\b.*?pr\b.*?#?(\d+)`)
 	branchPushedPattern   = regexp.MustCompile("(?i)(?:pushed|created)\\b.*?branch\\b\\s+([`\"']?\\S+[`\"']?)")
 	fileCreatedPattern    = regexp.MustCompile("(?i)(?:created|added)\\b.*?file\\b\\s+([`\"']?\\S+[`\"']?)")
+	commitPattern         = regexp.MustCompile(`(?i)\bcommitted\b(?:\s+["'` + "`" + `]([^"'` + "`" + `]+)["'` + "`" + `]|\s+([0-9a-f]{7,40})|\s+([^\n.;]+))`)
 )
 
 // Verify scans agent output for known claim patterns and runs the
@@ -139,6 +141,10 @@ func (v *GHClaimVerifier) Verify(ctx context.Context, repo string, issueNum int,
 
 	for _, m := range fileCreatedPattern.FindAllStringSubmatch(output, -1) {
 		checks = append(checks, v.verifyFileCreated(ctx, repo, normalizeClaimToken(m[1])))
+	}
+	for _, m := range commitPattern.FindAllStringSubmatch(output, -1) {
+		claim := firstNonEmpty(m[1], m[2], m[3])
+		checks = append(checks, v.verifyCommitClaim(ctx, normalizeClaimToken(claim)))
 	}
 
 	partial := false
@@ -307,14 +313,32 @@ func (v *GHClaimVerifier) verifyPRCreated(ctx context.Context, repo string, prNu
 
 func (v *GHClaimVerifier) verifyBranchPushed(ctx context.Context, repo string, branch string) ClaimCheck {
 	claim := fmt.Sprintf("pushed branch %s", branch)
-	out, err := v.runCommand(ctx, "git", "ls-remote", "origin", branch)
+	remoteOut, err := v.runCommand(ctx, "git", "ls-remote", "origin", branch)
 	if err != nil {
-		return ClaimCheck{Type: ClaimBranchPushed, Claim: claim, Actual: fmt.Sprintf("git error: %s", string(out)), OK: false}
+		return ClaimCheck{Type: ClaimBranchPushed, Claim: claim, Actual: fmt.Sprintf("git error: %s", string(remoteOut)), OK: false}
 	}
-	if strings.TrimSpace(string(out)) == "" {
+	remoteOut = bytesTrimSpace(remoteOut)
+	if len(remoteOut) == 0 {
 		return ClaimCheck{Type: ClaimBranchPushed, Claim: claim, Actual: "branch not found on origin", OK: false}
 	}
-	return ClaimCheck{Type: ClaimBranchPushed, Claim: claim, Actual: fmt.Sprintf("branch exists on origin: %s", strings.TrimSpace(string(out))), OK: true}
+	localOut, err := v.runCommand(ctx, "git", "rev-parse", branch)
+	if err != nil {
+		return ClaimCheck{Type: ClaimBranchPushed, Claim: claim, Actual: fmt.Sprintf("local branch lookup failed: %s", string(localOut)), OK: false}
+	}
+	localSHA := strings.TrimSpace(string(localOut))
+	remoteSHA := strings.Fields(string(remoteOut))[0]
+	if localSHA == "" {
+		return ClaimCheck{Type: ClaimBranchPushed, Claim: claim, Actual: "local branch has no resolvable tip", OK: false}
+	}
+	if remoteSHA != localSHA {
+		return ClaimCheck{
+			Type:   ClaimBranchPushed,
+			Claim:  claim,
+			Actual: fmt.Sprintf("remote tip %s does not match local %s", remoteSHA, localSHA),
+			OK:     false,
+		}
+	}
+	return ClaimCheck{Type: ClaimBranchPushed, Claim: claim, Actual: fmt.Sprintf("branch exists on origin at %s", remoteSHA), OK: true}
 }
 
 func (v *GHClaimVerifier) verifyFileCreated(ctx context.Context, repo string, path string) ClaimCheck {
@@ -332,8 +356,65 @@ func (v *GHClaimVerifier) verifyFileCreated(ctx context.Context, repo string, pa
 	return ClaimCheck{Type: ClaimFileCreated, Claim: claim, Actual: "file not in last commit", OK: false}
 }
 
+func (v *GHClaimVerifier) verifyCommitClaim(ctx context.Context, claimText string) ClaimCheck {
+	claim := fmt.Sprintf("committed %s", claimText)
+	out, err := v.runCommand(ctx, "git", "log", "-1", "--format=%H%n%s")
+	if err != nil {
+		return ClaimCheck{Type: ClaimCommit, Claim: claim, Actual: fmt.Sprintf("git error: %s", string(out)), OK: false}
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) == "" {
+		return ClaimCheck{Type: ClaimCommit, Claim: claim, Actual: "no commit found", OK: false}
+	}
+	sha := strings.TrimSpace(lines[0])
+	subject := ""
+	if len(lines) > 1 {
+		subject = strings.TrimSpace(lines[1])
+	}
+	if commitClaimMatches(claimText, sha, subject) {
+		return ClaimCheck{Type: ClaimCommit, Claim: claim, Actual: fmt.Sprintf("latest commit %s %q", shortSHA(sha), subject), OK: true}
+	}
+	return ClaimCheck{
+		Type:   ClaimCommit,
+		Claim:  claim,
+		Actual: fmt.Sprintf("latest commit is %s %q", shortSHA(sha), subject),
+		OK:     false,
+	}
+}
+
 func normalizeClaimToken(raw string) string {
 	return strings.Trim(strings.TrimSpace(raw), "`\"'.,:;)]}")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func commitClaimMatches(claim, sha, subject string) bool {
+	claim = strings.TrimSpace(claim)
+	if claim == "" {
+		return false
+	}
+	lowerClaim := strings.ToLower(claim)
+	lowerSHA := strings.ToLower(sha)
+	lowerSubject := strings.ToLower(subject)
+	return strings.HasPrefix(lowerSHA, lowerClaim) || strings.Contains(lowerSubject, lowerClaim)
+}
+
+func shortSHA(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
+}
+
+func bytesTrimSpace(b []byte) []byte {
+	return []byte(strings.TrimSpace(string(b)))
 }
 
 func commentWithinRunWindow(createdAt time.Time, input VerificationInput) bool {
