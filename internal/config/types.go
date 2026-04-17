@@ -169,10 +169,33 @@ type StatesBlock struct {
 	States map[string]*State `yaml:"states"`
 }
 
+// WorkerConfig holds worker-level configuration knobs.
+type WorkerConfig struct {
+	StaleInference StaleInferenceConfig `yaml:"stale_inference"`
+}
+
+// StaleInferenceConfig controls the stale inference watchdog that kills
+// hung agent processes when no session output is produced for too long.
+type StaleInferenceConfig struct {
+	Enabled       *bool         `yaml:"enabled"`
+	IdleThreshold time.Duration `yaml:"idle_threshold"` // default 10m
+	CheckInterval time.Duration `yaml:"check_interval"` // default 30s
+}
+
+// StaleInferenceEnabled returns whether the watchdog is enabled,
+// defaulting to true when the field is nil.
+func (c *StaleInferenceConfig) StaleInferenceEnabled() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
+}
+
 // FullConfig holds all loaded configuration.
 type FullConfig struct {
 	Global        GlobalConfig   `yaml:",inline"`
 	Operator      OperatorConfig `yaml:"operator"`
+	Worker        WorkerConfig   `yaml:"worker"`
 	Agents        map[string]*AgentConfig
 	Workflows     map[string]*WorkflowConfig
 	Notifications NotificationsConfig `yaml:"notifications"`

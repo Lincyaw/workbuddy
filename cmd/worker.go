@@ -22,6 +22,7 @@ import (
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
+	"github.com/Lincyaw/workbuddy/internal/staleinference"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/workerclient"
 	"github.com/Lincyaw/workbuddy/internal/workspace"
@@ -381,7 +382,39 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 
 	eventsCh := make(chan launcherevents.Event, 64)
 	eventsPath, waitEvents := streamSessionEvents(launchCtx, eventsCh)
-	result, runErr := session.Run(taskCtx, eventsCh)
+
+	// Set up stale inference watchdog channel wrapping.
+	// When enabled, events flow through a proxy channel that records
+	// activity timestamps; otherwise session writes directly to eventsCh.
+	siCfg := cfg.Worker.StaleInference
+	sessionCh := eventsCh // channel passed to session.Run
+	var proxyDone chan struct{}
+	if siCfg.StaleInferenceEnabled() {
+		tracker := staleinference.NewEventTracker()
+		watchdogCtx, watchdogCancel := context.WithCancel(taskCtx)
+		defer watchdogCancel()
+		go staleinference.Watch(watchdogCtx, staleinference.Config{
+			IdleThreshold: siCfg.IdleThreshold,
+			CheckInterval: siCfg.CheckInterval,
+		}, tracker, taskCancel)
+
+		proxyCh := make(chan launcherevents.Event, 64)
+		proxyDone = make(chan struct{})
+		go func() {
+			defer close(proxyDone)
+			for evt := range proxyCh {
+				tracker.RecordActivity()
+				eventsCh <- evt
+			}
+		}()
+		sessionCh = proxyCh
+	}
+
+	result, runErr := session.Run(taskCtx, sessionCh)
+	if proxyDone != nil {
+		close(sessionCh) // close proxy channel, triggers proxy goroutine drain
+		<-proxyDone      // wait for all events to be forwarded to eventsCh
+	}
 	close(eventsCh)
 	if waitErr := waitEvents(); waitErr != nil {
 		log.Printf("[worker] event capture failed: %v", waitErr)
