@@ -335,6 +335,59 @@ func TestRouter_WorktreeFailureFailsTaskAndComments(t *testing.T) {
 	}
 }
 
+func TestRouter_DispatchUsesWorktreeForRepoRootAndWorkDir(t *testing.T) {
+	setupFakeGHCLI(t)
+
+	st := newTestStore(t)
+	reg := registry.NewRegistry(st, 30*time.Second)
+	taskCh := make(chan WorkerTask, 1)
+	repoRoot := initGitRepo(t)
+
+	r := NewRouter(
+		map[string]*config.AgentConfig{
+			"dev-agent": {
+				Name:    "dev-agent",
+				Role:    "dev",
+				Runtime: "codex-exec",
+				Command: "echo hello",
+			},
+		},
+		reg,
+		st,
+		"test/repo",
+		repoRoot,
+		taskCh,
+		workspace.NewManager(repoRoot),
+		true,
+	)
+
+	r.handleDispatch(context.Background(), statemachine.DispatchRequest{
+		Repo:      "test/repo",
+		IssueNum:  6,
+		AgentName: "dev-agent",
+		Workflow:  "default",
+		State:     "developing",
+	})
+
+	select {
+	case task := <-taskCh:
+		if task.WorktreePath == "" {
+			t.Fatal("expected dispatched task to include worktree path")
+		}
+		if task.Context == nil {
+			t.Fatal("expected dispatched task context")
+		}
+		if task.Context.RepoRoot != task.WorktreePath {
+			t.Fatalf("RepoRoot = %q, want %q", task.Context.RepoRoot, task.WorktreePath)
+		}
+		if task.Context.WorkDir != task.WorktreePath {
+			t.Fatalf("WorkDir = %q, want %q", task.Context.WorkDir, task.WorktreePath)
+		}
+	default:
+		t.Fatal("expected dispatched task")
+	}
+}
+
 func initGitRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()

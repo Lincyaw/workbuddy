@@ -153,6 +153,7 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 
 	// Determine WorkDir: use an isolated worktree if workspace manager is set.
 	// If worktree setup fails, the task is failed and reported — never fall back to CWD.
+	var repoRoot string
 	var workDir string
 	var worktreePath string
 	if r.wsMgr != nil {
@@ -175,16 +176,18 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 			}
 			return
 		}
+		repoRoot = wt
 		workDir = wt
 		worktreePath = wt
 	} else {
+		repoRoot = r.repoRoot
 		workDir, _ = os.Getwd()
 	}
 
 	taskCtx := &launcher.TaskContext{
 		Issue:          issueCtx,
 		Repo:           req.Repo,
-		RepoRoot:       r.repoRoot,
+		RepoRoot:       repoRoot,
 		WorkDir:        workDir,
 		RelatedPRs:     relatedPRs,
 		RelatedPRsText: formatRelatedPRs(relatedPRs),
