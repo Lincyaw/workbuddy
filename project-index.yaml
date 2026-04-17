@@ -1879,3 +1879,30 @@ requirements:
       - internal/store/store_test.go
       - internal/statemachine/statemachine_test.go
     deps: [REQ-017, REQ-027, REQ-030]
+
+  - id: REQ-058
+    title: Worktree isolation safety
+    description: >
+      Prevent workers from falling back to the main working tree (CWD) when
+      git worktree creation fails. Ensure worktree setup is robust against
+      stale metadata, supports safe reuse of existing worktrees, and records
+      failures as user-visible issue comments.
+    priority: P0
+    version: v0.2.0
+    status: tested
+    acceptance_criteria:
+      - "AC-058-1: workspace.Manager.Create runs `git worktree prune` before every `git worktree add`"
+      - "AC-058-2: When target worktree path exists, is on the expected branch, and has no uncommitted changes, it is reused (no error)"
+      - "AC-058-3: When target worktree path exists but is on the wrong branch or has uncommitted changes, Create returns a loud error and the task is returned to the queue"
+      - "AC-058-4: When `git worktree add` fails for any reason, Create returns a loud error and NEVER falls back to CWD"
+      - "AC-058-5: Remote worker (cmd/worker.go) reports worktree failures on the issue as a user-visible comment via Reporter and submits a failed result to the coordinator"
+      - "AC-058-6: Embedded router (internal/router/router.go) reports worktree failures on the issue as a user-visible comment via Reporter and updates the task status to failed"
+      - "AC-058-7: Unit tests cover stale metadata + prune rescue, existing-clean reuse, existing-dirty refuse, and stale-add failure"
+    code:
+      - internal/workspace/workspace.go
+      - cmd/worker.go
+      - internal/router/router.go
+      - cmd/serve.go
+    tests:
+      - internal/workspace/workspace_test.go
+    deps: [REQ-028, REQ-017]

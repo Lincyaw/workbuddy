@@ -31,6 +31,11 @@ func NewManager(baseDir string) *Manager {
 // The worktree is created at .workbuddy/worktrees/<issue>/ branching from
 // the current HEAD (or from origin/workbuddy/issue-<issue> if it exists).
 // Branch names are deterministic per issue so work persists across cycles.
+//
+// Before every add, it runs `git worktree prune` to clean stale metadata.
+// If the worktree path already exists and is on the expected branch with
+// no uncommitted changes, it is reused. Otherwise, the call fails loudly
+// and never falls back to the main working tree.
 func (m *Manager) Create(issueNum int, taskID string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -38,20 +43,32 @@ func (m *Manager) Create(issueNum int, taskID string) (string, error) {
 	branchName := fmt.Sprintf("workbuddy/issue-%d", issueNum)
 	wtPath := filepath.Join(m.baseDir, worktreeDir, fmt.Sprintf("issue-%d", issueNum))
 
-	// Remove any existing worktree for this issue to avoid conflicts.
-	if existing := m.findWorktreePath(branchName); existing != "" {
-		_ = exec.Command("git", "worktree", "remove", "--force", existing).Run()
-		_ = exec.Command("git", "worktree", "prune").Run()
-	}
-	_ = os.RemoveAll(wtPath)
+	// 1. Prune stale worktree metadata (cheap, idempotent).
+	pruneCmd := exec.Command("git", "worktree", "prune")
+	pruneCmd.Dir = m.baseDir
+	_ = pruneCmd.Run() // best-effort, ignore error
 
-	// Ensure parent directory exists.
+	// 2. Path exists — validate branch and cleanliness, then reuse or fail.
+	if _, err := os.Stat(wtPath); err == nil {
+		curBranch, err := m.gitCurrentBranch(wtPath)
+		if err != nil {
+			return "", fmt.Errorf("workspace: path %s exists but is not a valid worktree: %w", wtPath, err)
+		}
+		if curBranch != branchName {
+			return "", fmt.Errorf("workspace: worktree %s is on branch %q, expected %q — refusing to reuse", wtPath, curBranch, branchName)
+		}
+		if !m.gitIsClean(wtPath) {
+			return "", fmt.Errorf("workspace: worktree %s has uncommitted changes — refusing to reuse", wtPath)
+		}
+		log.Printf("[workspace] reused worktree %s (branch %s) for issue #%d", wtPath, branchName, issueNum)
+		return wtPath, nil
+	}
+
+	// 3. Path does not exist — try add.
 	if err := os.MkdirAll(filepath.Dir(wtPath), 0755); err != nil {
 		return "", fmt.Errorf("workspace: mkdir: %w", err)
 	}
 
-	// If the local branch already exists, create worktree from it directly.
-	// Otherwise branch from origin/branch (if it exists) or HEAD.
 	if m.localBranchExists(branchName) {
 		cmd := exec.Command("git", "worktree", "add", wtPath, branchName)
 		cmd.Dir = m.baseDir
@@ -74,6 +91,28 @@ func (m *Manager) Create(issueNum int, taskID string) (string, error) {
 			wtPath, branchName, baseRef, issueNum)
 	}
 	return wtPath, nil
+}
+
+// gitCurrentBranch returns the current branch in the given worktree directory.
+func (m *Manager) gitCurrentBranch(wtPath string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = wtPath
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// gitIsClean reports whether the given worktree directory has no uncommitted changes.
+func (m *Manager) gitIsClean(wtPath string) bool {
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = wtPath
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == ""
 }
 
 // Remove cleans up a worktree and its associated branch.

@@ -125,3 +125,103 @@ func TestMultipleWorktrees(t *testing.T) {
 	_ = mgr.Remove(wt2)
 }
 
+func TestCreate_StaleMetadataPruneRescue(t *testing.T) {
+	repoDir := initTestRepo(t)
+	mgr := NewManager(repoDir)
+
+	// Create a worktree.
+	wtPath, err := mgr.Create(1, "task-1")
+	if err != nil {
+		t.Fatalf("Create first: %v", err)
+	}
+
+	// Simulate unclean shutdown: delete the worktree directory but leave git metadata.
+	if err := os.RemoveAll(wtPath); err != nil {
+		t.Fatalf("RemoveAll worktree dir: %v", err)
+	}
+
+	// Re-create should succeed because prune cleans stale metadata.
+	wtPath2, err := mgr.Create(1, "task-2")
+	if err != nil {
+		t.Fatalf("Create after stale metadata: %v", err)
+	}
+	if wtPath != wtPath2 {
+		t.Fatalf("worktree path changed: %s vs %s", wtPath, wtPath2)
+	}
+	if _, err := os.Stat(wtPath2); os.IsNotExist(err) {
+		t.Fatalf("worktree path does not exist after re-create: %s", wtPath2)
+	}
+
+	_ = mgr.Remove(wtPath2)
+}
+
+func TestCreate_ExistingCleanReuse(t *testing.T) {
+	repoDir := initTestRepo(t)
+	mgr := NewManager(repoDir)
+
+	wtPath, err := mgr.Create(1, "task-1")
+	if err != nil {
+		t.Fatalf("Create first: %v", err)
+	}
+
+	// Re-create for the same issue should reuse the existing worktree.
+	wtPath2, err := mgr.Create(1, "task-2")
+	if err != nil {
+		t.Fatalf("Create reuse: %v", err)
+	}
+	if wtPath != wtPath2 {
+		t.Fatalf("worktree path changed on reuse: %s vs %s", wtPath, wtPath2)
+	}
+
+	_ = mgr.Remove(wtPath)
+}
+
+func TestCreate_ExistingDirtyRefuse(t *testing.T) {
+	repoDir := initTestRepo(t)
+	mgr := NewManager(repoDir)
+
+	wtPath, err := mgr.Create(1, "task-1")
+	if err != nil {
+		t.Fatalf("Create first: %v", err)
+	}
+
+	// Dirty the worktree.
+	if err := os.WriteFile(filepath.Join(wtPath, "dirty.txt"), []byte("x"), 0644); err != nil {
+		t.Fatalf("write dirty file: %v", err)
+	}
+
+	// Re-create should fail because the worktree has uncommitted changes.
+	_, err = mgr.Create(1, "task-2")
+	if err == nil {
+		t.Fatal("expected error for dirty worktree, got nil")
+	}
+	if !strings.Contains(err.Error(), "uncommitted changes") {
+		t.Fatalf("expected 'uncommitted changes' in error, got: %v", err)
+	}
+
+	_ = mgr.Remove(wtPath)
+}
+
+func TestCreate_StaleAddFailure(t *testing.T) {
+	repoDir := initTestRepo(t)
+	mgr := NewManager(repoDir)
+
+	wtPath := filepath.Join(repoDir, ".workbuddy", "worktrees", "issue-1")
+	// Create a file (not directory) at the worktree path.
+	// os.Stat sees it exists, but git commands fail because it's not a directory.
+	if err := os.MkdirAll(filepath.Dir(wtPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(wtPath, []byte("stale"), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	_, err := mgr.Create(1, "task-1")
+	if err == nil {
+		t.Fatal("expected error for invalid existing path, got nil")
+	}
+	if !strings.Contains(err.Error(), "not a valid worktree") {
+		t.Fatalf("expected 'not a valid worktree' in error, got: %v", err)
+	}
+}
+
