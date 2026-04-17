@@ -10,6 +10,10 @@ policy:
   sandbox: danger-full-access
   approval: never
   timeout: 60m
+  stale_inference:
+    enabled: true
+    idle_threshold: 5m
+    check_interval: 30s
 prompt: |
   You are the dev agent for repo {{.Repo}}, working on issue #{{.Issue.Number}}.
 

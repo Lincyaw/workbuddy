@@ -24,6 +24,16 @@ type Session interface {
 	Close() error
 }
 
+type StaleInferenceInfo struct {
+	PID          int
+	ArtifactPath string
+}
+
+type StaleInferenceSession interface {
+	Session
+	StaleInferenceInfo() StaleInferenceInfo
+}
+
 type Approver interface {
 	Approve(ctx context.Context, req ApprovalRequest) ApprovalDecision
 }

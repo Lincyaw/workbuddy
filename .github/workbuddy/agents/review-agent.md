@@ -10,6 +10,10 @@ policy:
   sandbox: danger-full-access
   approval: never
   timeout: 15m
+  stale_inference:
+    enabled: true
+    idle_threshold: 5m
+    check_interval: 30s
 prompt: |
   You are the review agent for repo {{.Repo}}, verifying the artifact produced for issue #{{.Issue.Number}}.
 

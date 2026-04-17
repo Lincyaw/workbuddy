@@ -52,6 +52,11 @@ var validRunners = map[string]bool{
 	RunnerGitHubActions: true,
 }
 
+const (
+	defaultStaleInferenceIdleThreshold = 5 * time.Minute
+	defaultStaleInferenceCheckInterval = 30 * time.Second
+)
+
 // LoadConfig loads the full configuration from the given config directory.
 // It returns the parsed config, a list of non-fatal warnings, and any error.
 func LoadConfig(configDir string) (*FullConfig, []Warning, error) {
@@ -331,6 +336,36 @@ func defaultApprovalForRuntime(runtime string) string {
 		return "never"
 	default:
 		return ""
+	}
+}
+
+func (cfg *FullConfig) EffectiveStaleInference(agent *AgentConfig) EffectiveStaleInferenceConfig {
+	effective := EffectiveStaleInferenceConfig{
+		Enabled:       true,
+		IdleThreshold: defaultStaleInferenceIdleThreshold,
+		CheckInterval: defaultStaleInferenceCheckInterval,
+	}
+	if cfg != nil {
+		mergeStaleInferenceConfig(&effective, cfg.Global.Worker.StaleInference)
+	}
+	if agent != nil {
+		mergeStaleInferenceConfig(&effective, agent.Policy.StaleInference)
+	}
+	return effective
+}
+
+func mergeStaleInferenceConfig(dst *EffectiveStaleInferenceConfig, src StaleInferenceConfig) {
+	if dst == nil {
+		return
+	}
+	if src.Enabled != nil {
+		dst.Enabled = *src.Enabled
+	}
+	if src.IdleThreshold > 0 {
+		dst.IdleThreshold = src.IdleThreshold
+	}
+	if src.CheckInterval > 0 {
+		dst.CheckInterval = src.CheckInterval
 	}
 }
 

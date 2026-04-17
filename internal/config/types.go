@@ -14,6 +14,11 @@ type GlobalConfig struct {
 	Environment  string        `yaml:"environment"`
 	PollInterval time.Duration `yaml:"poll_interval"`
 	Port         int           `yaml:"port"`
+	Worker       WorkerConfig  `yaml:"worker"`
+}
+
+type WorkerConfig struct {
+	StaleInference StaleInferenceConfig `yaml:"stale_inference"`
 }
 
 // NotificationsConfig controls external notification routing.
@@ -57,10 +62,23 @@ type SMTPChannelConfig struct {
 
 // PolicyConfig defines runtime-neutral execution policy knobs.
 type PolicyConfig struct {
-	Sandbox  string        `yaml:"sandbox"`
-	Approval string        `yaml:"approval"`
-	Model    string        `yaml:"model"`
-	Timeout  time.Duration `yaml:"timeout"`
+	Sandbox        string               `yaml:"sandbox"`
+	Approval       string               `yaml:"approval"`
+	Model          string               `yaml:"model"`
+	Timeout        time.Duration        `yaml:"timeout"`
+	StaleInference StaleInferenceConfig `yaml:"stale_inference"`
+}
+
+type StaleInferenceConfig struct {
+	Enabled       *bool         `yaml:"enabled"`
+	IdleThreshold time.Duration `yaml:"idle_threshold"`
+	CheckInterval time.Duration `yaml:"check_interval"`
+}
+
+type EffectiveStaleInferenceConfig struct {
+	Enabled       bool
+	IdleThreshold time.Duration
+	CheckInterval time.Duration
 }
 
 // PermissionsConfig controls subprocess capability boundaries used by the launcher.

@@ -170,7 +170,8 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 
 	client := workerclient.New(opts.coordinatorURL, opts.token, nil)
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
-	rep.SetEventRecorder(eventlog.NewEventLogger(localStore))
+	evlog := eventlog.NewEventLogger(localStore)
+	rep.SetEventRecorder(evlog)
 	auditor := audit.NewAuditor(localStore, opts.sessionsDir)
 
 	var ctx context.Context
@@ -227,13 +228,13 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 		if task == nil {
 			continue
 		}
-		if err := executeRemoteTask(ctx, task, client, cfg, lnch, auditor, rep, reader, workDir, opts.sessionsDir, workerID, runtimeAlias, opts.heartbeatInterval, opts.shutdownTimeout); err != nil {
+		if err := executeRemoteTask(ctx, task, client, cfg, lnch, auditor, rep, evlog, reader, workDir, opts.sessionsDir, workerID, runtimeAlias, opts.heartbeatInterval, opts.shutdownTimeout); err != nil {
 			return err
 		}
 	}
 }
 
-func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *workerclient.Client, cfg *config.FullConfig, lnch *launcher.Launcher, auditor *audit.Auditor, rep *reporter.Reporter, reader workerIssueReader, workDir, sessionsDir, workerID, runtimeAlias string, heartbeatInterval, shutdownTimeout time.Duration) error {
+func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *workerclient.Client, cfg *config.FullConfig, lnch *launcher.Launcher, auditor *audit.Auditor, rep *reporter.Reporter, evlog *eventlog.EventLogger, reader workerIssueReader, workDir, sessionsDir, workerID, runtimeAlias string, heartbeatInterval, shutdownTimeout time.Duration) error {
 	agentCfg, ok := cfg.Agents[task.AgentName]
 	if !ok {
 		return fmt.Errorf("worker: agent %q not found in local config", task.AgentName)
@@ -298,7 +299,9 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 
 	eventsCh := make(chan launcherevents.Event, 64)
 	eventsPath, waitEvents := streamSessionEvents(launchCtx, eventsCh)
+	stopStaleMonitor := startStaleInferenceMonitor(taskCtx, cfg.EffectiveStaleInference(&agentCopy), session, task, workerID, evlog, staleInferenceMonitorDeps{})
 	result, runErr := session.Run(taskCtx, eventsCh)
+	staleKill := stopStaleMonitor()
 	close(eventsCh)
 	if waitErr := waitEvents(); waitErr != nil {
 		log.Printf("[worker] event capture failed: %v", waitErr)
@@ -321,6 +324,38 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 	}
 	if runErr != nil && result.Stderr == "" {
 		result.Stderr = runErr.Error()
+	}
+	if staleKill != nil {
+		if result == nil {
+			result = &launcher.Result{ExitCode: 1, Meta: map[string]string{}}
+		}
+		currentLabels, err := snapshotIssueLabels(task.Repo, task.IssueNum, reader)
+		if err != nil {
+			currentLabels = append([]string(nil), launchCtx.Issue.Labels...)
+		}
+		status := staleInferenceStatus(task, cfg, currentLabels)
+		if result.Meta == nil {
+			result.Meta = map[string]string{}
+		}
+		result.Meta["stale_inference"] = "true"
+		result.Meta["stale_idle_seconds"] = fmt.Sprintf("%d", int(staleKill.IdleDuration.Seconds()))
+		if status == store.TaskStatusCompleted {
+			result.ExitCode = 0
+		}
+		if err := client.SubmitResult(taskCtx, task.TaskID, workerclient.ResultRequest{
+			WorkerID:      workerID,
+			Status:        status,
+			CurrentLabels: currentLabels,
+		}); err != nil {
+			return fmt.Errorf("worker: submit stale inference result: %w", err)
+		}
+		if err := auditor.Capture(sessionID, task.TaskID, task.Repo, task.IssueNum, task.AgentName, result); err != nil {
+			log.Printf("[worker] audit capture failed: %v", err)
+		}
+		if err := rep.Report(taskCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, workerID, 0, workflowMaxRetries(cfg, task.Workflow), "stale inference watchdog terminated an idle agent process"); err != nil {
+			log.Printf("[worker] report failed: %v", err)
+		}
+		return nil
 	}
 	if err := auditor.Capture(sessionID, task.TaskID, task.Repo, task.IssueNum, task.AgentName, result); err != nil {
 		log.Printf("[worker] audit capture failed: %v", err)

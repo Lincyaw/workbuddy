@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -48,6 +49,7 @@ type codexSession struct {
 	lastMsgPath  string
 	stdoutPath   string
 	cachedResult *Result
+	pid          atomic.Int32
 }
 
 func newCodexSession(agent *config.AgentConfig, task *TaskContext, prompt string) *codexSession {
@@ -139,6 +141,7 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("launcher: codex-exec: start: %w", err)
 	}
+	s.pid.Store(int32(cmd.Process.Pid))
 	start := time.Now()
 
 	var stdoutBuf bytes.Buffer
@@ -295,6 +298,13 @@ func (s *codexSession) buildArgs() []string {
 	}
 	args = append(args, "-")
 	return args
+}
+
+func (s *codexSession) StaleInferenceInfo() StaleInferenceInfo {
+	return StaleInferenceInfo{
+		PID:          int(s.pid.Load()),
+		ArtifactPath: s.stdoutPath,
+	}
 }
 
 func codexPrompt(agent *config.AgentConfig, task *TaskContext) (string, error) {

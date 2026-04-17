@@ -9,9 +9,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -177,6 +179,69 @@ func (s *mockSession) Run(ctx context.Context, _ chan<- launcherevents.Event) (*
 
 func (s *mockSession) SetApprover(launcher.Approver) error { return launcher.ErrNotSupported }
 func (s *mockSession) Close() error                        { return nil }
+
+type mockStaleSession struct {
+	mockSession
+	info launcher.StaleInferenceInfo
+}
+
+func (s *mockStaleSession) StaleInferenceInfo() launcher.StaleInferenceInfo { return s.info }
+
+type hangingProcessRuntime struct {
+	name string
+}
+
+func (r *hangingProcessRuntime) Name() string { return r.name }
+
+func (r *hangingProcessRuntime) Start(_ context.Context, agent *config.AgentConfig, task *launcher.TaskContext) (launcher.Session, error) {
+	artifactDir := filepath.Join(task.RepoRoot, ".workbuddy", "sessions", task.Session.ID)
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		return nil, err
+	}
+	artifactPath := filepath.Join(artifactDir, "codex-exec.jsonl")
+	cmd := exec.Command("sh", "-c", "printf '{\"type\":\"message\"}\\n' > \"$1\" && exec tail -f /dev/null", "sh", artifactPath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if task.WorkDir != "" {
+		cmd.Dir = task.WorkDir
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return &hangingProcessSession{cmd: cmd, artifactPath: artifactPath}, nil
+}
+
+func (r *hangingProcessRuntime) Launch(context.Context, *config.AgentConfig, *launcher.TaskContext) (*launcher.Result, error) {
+	return nil, fmt.Errorf("launch not implemented")
+}
+
+type hangingProcessSession struct {
+	cmd          *exec.Cmd
+	artifactPath string
+}
+
+func (s *hangingProcessSession) Run(_ context.Context, _ chan<- launcherevents.Event) (*launcher.Result, error) {
+	err := s.cmd.Wait()
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		}
+	}
+	return &launcher.Result{
+		ExitCode:    exitCode,
+		SessionPath: s.artifactPath,
+		Meta:        map[string]string{},
+	}, err
+}
+
+func (s *hangingProcessSession) SetApprover(launcher.Approver) error { return launcher.ErrNotSupported }
+func (s *hangingProcessSession) Close() error                        { return nil }
+func (s *hangingProcessSession) StaleInferenceInfo() launcher.StaleInferenceInfo {
+	return launcher.StaleInferenceInfo{
+		PID:          s.cmd.Process.Pid,
+		ArtifactPath: s.artifactPath,
+	}
+}
 
 func (m *mockRuntime) Start(ctx context.Context, agent *config.AgentConfig, task *launcher.TaskContext) (launcher.Session, error) {
 	return &mockSession{rt: m, agent: agent, task: task}, nil

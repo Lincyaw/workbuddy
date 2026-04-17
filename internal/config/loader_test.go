@@ -101,6 +101,11 @@ const validGlobalConfig = `repo: owner/repo
 environment: production
 poll_interval: 30s
 port: 8080
+worker:
+  stale_inference:
+    enabled: true
+    idle_threshold: 7m
+    check_interval: 45s
 `
 
 func TestRepositorySampleConfig_MatchesGlobalConfigSchema(t *testing.T) {
@@ -120,6 +125,7 @@ func TestRepositorySampleConfig_MatchesGlobalConfigSchema(t *testing.T) {
 		"poll_interval": {},
 		"port":          {},
 		"repo":          {},
+		"worker":        {},
 		"notifications": {},
 	}
 
@@ -152,6 +158,15 @@ func TestRepositorySampleConfig_MatchesGlobalConfigSchema(t *testing.T) {
 	}
 	if cfg.Global.Port != 8090 {
 		t.Fatalf("port = %d, want 8090", cfg.Global.Port)
+	}
+	if cfg.Global.Worker.StaleInference.Enabled == nil || !*cfg.Global.Worker.StaleInference.Enabled {
+		t.Fatalf("worker.stale_inference.enabled = %v, want true", cfg.Global.Worker.StaleInference.Enabled)
+	}
+	if cfg.Global.Worker.StaleInference.IdleThreshold != 5*time.Minute {
+		t.Fatalf("worker.stale_inference.idle_threshold = %s, want 5m", cfg.Global.Worker.StaleInference.IdleThreshold)
+	}
+	if cfg.Global.Worker.StaleInference.CheckInterval != 30*time.Second {
+		t.Fatalf("worker.stale_inference.check_interval = %s, want 30s", cfg.Global.Worker.StaleInference.CheckInterval)
 	}
 	if !cfg.Notifications.Enabled {
 		t.Fatalf("notifications.enabled = %v, want true", cfg.Notifications.Enabled)
@@ -197,6 +212,36 @@ func TestRepositorySampleConfig_MatchesGlobalConfigSchema(t *testing.T) {
 	}
 	if got := cfg.Notifications.SMTP.ToEnv; got != "WORKBUDDY_SMTP_TO" {
 		t.Fatalf("notifications.smtp.to_env = %q, want %q", got, "WORKBUDDY_SMTP_TO")
+	}
+}
+
+func TestEffectiveStaleInferenceUsesDefaultsAndOverrides(t *testing.T) {
+	agentDisable := false
+	cfg := &FullConfig{
+		Global: GlobalConfig{
+			Worker: WorkerConfig{
+				StaleInference: StaleInferenceConfig{
+					IdleThreshold: 2 * time.Minute,
+				},
+			},
+		},
+	}
+	got := cfg.EffectiveStaleInference(&AgentConfig{
+		Policy: PolicyConfig{
+			StaleInference: StaleInferenceConfig{
+				Enabled:       &agentDisable,
+				CheckInterval: 10 * time.Second,
+			},
+		},
+	})
+	if got.Enabled {
+		t.Fatal("expected agent override to disable stale inference")
+	}
+	if got.IdleThreshold != 2*time.Minute {
+		t.Fatalf("idle threshold = %s, want 2m", got.IdleThreshold)
+	}
+	if got.CheckInterval != 10*time.Second {
+		t.Fatalf("check interval = %s, want 10s", got.CheckInterval)
 	}
 }
 
