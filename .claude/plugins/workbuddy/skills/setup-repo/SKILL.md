@@ -338,11 +338,103 @@ describing:
 - Test strategy (mock/real boundary, fixtures, coverage targets)
 - Project-specific gh CLI patterns
 
-And optionally `.claude/skills/` for reusable operation patterns that the
-dev-agent / review-agent will discover at runtime via its claude-code runtime.
-
 If the target repo has no `CLAUDE.md`, offer to scaffold one — but only
 after confirming with the user, since that's beyond "workbuddy setup".
+
+### Step 6b: Initialize agent runtime skills in the target repo
+
+Agent runtimes discover project-level skills from conventional directories
+inside the working directory. **This step is critical** — without it, agents
+only have generic global skills and miss repo-specific development patterns.
+
+The skill directories depend on the runtime configured in the agent definitions:
+
+| Runtime | Skill directory | Discovery |
+|---------|----------------|-----------|
+| `claude-code` | `.claude/skills/<name>/SKILL.md` | Auto-loaded when skill description matches context |
+| `codex` | `.codex/skills/<name>/SKILL.md` | Same — auto-loaded by description match |
+
+**Create skills for the runtime(s) used by this repo's agents.** If
+`runtime: codex` is set in the agent configs, create `.codex/skills/`. If
+`runtime: claude-code`, create `.claude/skills/`. If both runtimes are used
+(e.g., different agents use different runtimes), create both directories.
+
+#### Standard skills to initialize
+
+Create these three skills — they are runtime-agnostic in content and give
+agents a solid operational foundation:
+
+**1. `dev-loop/SKILL.md`** — Development cycle: implement → test → verify
+
+```yaml
+---
+name: dev-loop
+description: "Run a complete development loop: implement, test, vibe-check,
+  review, and measure before keeping or discarding. Use when implementing
+  features, fixing bugs, writing code, or refactoring."
+---
+```
+
+Body should describe the repo's specific build/test/lint commands, the
+keep/discard decision framework, and how to log progress. Detect the
+repo's language/stack (from Step 1) and tailor the commands accordingly.
+For example, a Go repo should mention `go build`, `go test`, `go vet`;
+a Node repo should mention `npm test`, `npm run lint`, etc.
+
+**2. `long-horizon/SKILL.md`** — Autonomous decision-making
+
+```yaml
+---
+name: long-horizon
+description: "Framework for autonomous decision-making during extended tasks.
+  Use when working on complex multi-step tasks that require judgment calls
+  without human intervention."
+---
+```
+
+Body should describe the escalation ladder (convention check → codebase
+research → external research → north-star reasoning → ask human) and
+decision logging conventions. This helps agents make good autonomous
+decisions during dev and review cycles instead of getting stuck.
+
+**3. `index/SKILL.md`** (optional, for repos with documentation) — Doc-code consistency
+
+Only create this if the repo has existing documentation (`docs/`, `README.md`,
+design docs, etc.). It helps agents keep documentation aligned with code changes.
+
+#### Codex-specific: agent metadata files
+
+For codex skills, also create an `agents/openai.yaml` alongside each
+`SKILL.md` with display metadata:
+
+```yaml
+# .codex/skills/dev-loop/agents/openai.yaml
+interface:
+  display_name: "Dev Loop"
+  short_description: "Run a full implement-test-measure loop"
+  default_prompt: "Use $dev-loop to drive this task through implementation,
+    testing, and verification."
+```
+
+#### What to put in the skill body
+
+Keep skills **lean and repo-specific**:
+- Reference the repo's actual build/test commands (detected in Step 1)
+- Reference the repo's CLAUDE.md for conventions
+- Do NOT duplicate generic methodology — link to it or summarize briefly
+- The goal is that when an agent reads the skill, it knows exactly how
+  to operate in THIS repo, not just in theory
+
+#### Commit the skills
+
+Add the skills directory to the same commit as the workbuddy config:
+
+```bash
+git add .codex/skills/   # or .claude/skills/ depending on runtime
+```
+
+The skills are version-controlled alongside the repo's code, so they
+evolve with the project.
 
 ### Step 7: Create config.yaml
 
