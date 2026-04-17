@@ -141,11 +141,27 @@ agent prompt template from its local config.
 
 Worker lifecycle:
 1. Registers with Coordinator (`POST /workers/register`)
-2. Long-polls for tasks (`GET /tasks/poll`, 30s timeout)
-3. On task received: reads issue via `gh`, launches agent subprocess
-4. Sends heartbeat every 15s to keep the lease
-5. On completion: submits result (`POST /tasks/{id}/result`)
-6. On `Ctrl+C`: releases task back to queue (`POST /tasks/{id}/release`)
+2. Prunes orphaned worktrees from prior crashes
+3. Long-polls for tasks (`GET /tasks/poll`, 30s timeout)
+4. On task received: creates isolated git worktree at `.workbuddy/worktrees/issue-N/`
+5. Launches agent subprocess in the worktree directory
+6. Sends heartbeat every 15s to keep the lease
+7. On completion: submits result, cleans up worktree
+8. On `Ctrl+C`: releases task back to queue (`POST /tasks/{id}/release`)
+
+**Worktree isolation**: Each task runs in its own git worktree, so multiple
+workers can safely process different issues in the same repo checkout without
+git conflicts. The main branch is never modified by agents.
+
+**Scaling with multiple workers**: To increase parallelism, start multiple
+worker processes. Each independently polls and claims tasks:
+```bash
+for i in 1 2 3; do
+  nohup ./workbuddy worker --coordinator http://coord:8081 \
+    --token $TOKEN --repo Owner/Repo \
+    > /tmp/worker-$i.log 2>&1 &
+done
+```
 
 ## Multi-repo setup
 

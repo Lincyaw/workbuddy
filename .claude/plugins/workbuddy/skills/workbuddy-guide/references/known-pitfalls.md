@@ -116,6 +116,76 @@ If `lease_expires_at` is far in the past but `status` is still `running`, the he
 
 **Prevention**: Ensure heartbeats are working (Pitfall 8 fix). If running multiple workers for the same repo, the lease mechanism prevents double-claims as long as heartbeats extend the lease correctly.
 
+## Pitfall 11: Codex stuck in API inference after completing work
+
+**Symptom**: Codex process alive (low CPU, no child processes) but no JSONL output for 10+ minutes. Labels may have already changed (work was done), but the worker can't move to the next task because the process won't exit.
+
+**Cause**: Codex enters a long LLM inference pass (API call to OpenAI) that never completes. Observed on 4/4 dev-agent runs during testing — the agent does its work, changes labels, then gets stuck generating a final summary or planning further work.
+
+**Impact**: Single-threaded worker is blocked. All pending tasks stall.
+
+**Diagnosis**:
+```bash
+# Find codex processes with no child processes
+pstree -p <codex-pid>  # only threads, no bash/rg children = stuck in inference
+# Check session file staleness
+stat -c '%Y' .workbuddy/sessions/session-<id>/codex-exec.jsonl
+```
+
+**Workaround**: Kill the codex process. If labels already changed, mark the task as completed in the DB. Then restart the worker.
+
+**Proper fix**: Issue #96 (stale inference detector) — auto-kill codex after configurable inactivity timeout.
+
+## Pitfall 12: Worker hangs after codex subprocess is killed
+
+**Symptom**: After manually killing a stuck codex process, the worker doesn't recover. Its heartbeat goroutine keeps running, sending heartbeats for the now-dead task. The worker never returns to the poll loop.
+
+**Cause**: The heartbeat goroutine in `executeRemoteTask` only exits via `heartbeatStop` channel or `taskCtx.Done()`. When codex is killed externally, the function flow gets stuck in result submission or error handling, never reaching the deferred `close(heartbeatStop)`.
+
+**Impact**: Requires `kill -9` on the worker process + manual DB cleanup + worker restart. Observed every time codex was killed during testing.
+
+**Workaround**: Kill the worker process (SIGKILL), clean up the DB task, start a new worker.
+
+**Proper fix**: Issue #97 / PR #100 (merged) — worker now recovers correctly.
+
+## Pitfall 13: Inflight dedup prevents re-dispatch after task failure
+
+**Symptom**: Task marked as failed in DB, issue labels still `developing`, cache invalidated, but the coordinator won't dispatch a new task for the same issue+agent.
+
+**Cause**: The state machine's in-memory `inflight` map remembers that `dev-agent` was already dispatched for this issue. Even after task failure, the inflight entry persists until a *different* state is entered (e.g., `reviewing`). Cache invalidation triggers a new `state_entry` event, but `dispatchSingleAgent` skips it: "agent already dispatched".
+
+**Workaround**: Either (a) flip labels to a different state and back (may be invisible within one poll cycle), or (b) manually insert a pending task in the DB:
+```bash
+sqlite3 .workbuddy/workbuddy.db \
+  "INSERT INTO task_queue (id, repo, issue_num, agent_name, role, runtime, status, created_at, updated_at)
+   VALUES ('manual-retry-$(date +%s)', 'Owner/Repo', <N>, 'dev-agent', 'dev', 'codex', 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);"
+```
+
+**Proper fix needed**: Clear inflight entry when task completes or fails. No issue filed yet — this is an edge case of the existing state machine design.
+
+## Pitfall 14: Worker mode missing worktree isolation (fixed in latest)
+
+**Symptom**: Multiple workers running in the same repo directory create branches and modify files simultaneously, causing git state pollution. `git status` shows uncommitted changes from another agent's work. Main branch gets switched to an agent's feature branch.
+
+**Cause**: `workbuddy serve` uses `workspace.Manager` for per-task git worktrees, but `workbuddy worker` did not. All worker agents shared the same working directory.
+
+**Status**: Fixed. Workers now create isolated worktrees at `.workbuddy/worktrees/issue-N/`. If running an older binary, rebuild.
+
+**Prevention**: Always use the latest binary. Verify worktrees are being created:
+```bash
+ls .workbuddy/worktrees/
+```
+
+## Pitfall 15: Commit message `Fixes #N` auto-closes issues on push to main
+
+**Symptom**: Issue is suddenly closed even though the review-agent hasn't run yet. Labels still show `status:developing` or `status:reviewing`.
+
+**Cause**: A commit pushed directly to `main` (not via PR merge) contains `Fixes #N` or `Closes #N` in its message. GitHub auto-closes the issue on push to the default branch. This bypasses workbuddy's label-driven state machine.
+
+**Impact**: Poller doesn't check issue open/closed state — it only watches labels. So the issue may get re-dispatched even after being closed.
+
+**Prevention**: When committing manual fixes to main, avoid `Fixes #N` in the commit message. Use `Relates to #N` or `See #N` instead.
+
 ## Diagnostic Commands
 
 ```bash

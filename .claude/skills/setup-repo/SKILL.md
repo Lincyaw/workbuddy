@@ -59,6 +59,14 @@ Determine:
 3. **Existing labels** — run `gh label list --repo <repo> --json name -q '.[].name'`
 4. **Existing workbuddy config** — check if `.github/workbuddy/` already exists
 5. **Existing issue templates** — check if `.github/ISSUE_TEMPLATE/` already has entries
+6. **Git remote protocol** — run `git remote -v`. If remote uses SSH (`git@github.com:...`)
+   but `gh auth status` shows HTTPS protocol, switch remote to HTTPS:
+   ```bash
+   git remote set-url origin https://github.com/OWNER/REPO.git
+   ```
+   This prevents push failures when agents try to push branches.
+7. **Commit hooks** — check for lefthook/husky/commitlint. If the repo enforces
+   conventional commits, note this — agents need to use the right prefix format.
 
 ### Step 2: Create labels
 
@@ -381,6 +389,34 @@ After creating all files:
      `status:developing` label on creation triggers dev-agent automatically
    - Labels flow: developing → reviewing → done (or blocked when criteria missing)
    - Monitor progress on the GitHub issue
+
+### Step 10: Register with coordinator (distributed mode)
+
+If the user is running workbuddy in distributed mode, register the repo
+after committing and pushing the config:
+
+```bash
+export WORKBUDDY_AUTH_TOKEN="<token>"
+workbuddy repo register \
+  --coordinator http://coordinator-host:8081 \
+  --token "$WORKBUDDY_AUTH_TOKEN"
+```
+
+This must be run from the target repo's root directory. It serializes
+the local `.github/workbuddy/` config and POSTs it to the coordinator.
+
+Then start a worker for the repo:
+
+```bash
+workbuddy worker \
+  --coordinator http://coordinator-host:8081 \
+  --token "$WORKBUDDY_AUTH_TOKEN" \
+  --runtime codex \
+  --repo Owner/Repo
+```
+
+The worker must also be started from the repo root — it loads agent
+prompt templates from `.github/workbuddy/agents/` locally.
 
 ## What NOT to do
 

@@ -1,13 +1,14 @@
 ---
 name: pipeline-monitor
-description: "Monitor the workbuddy agent pipeline, detect stuck issues, zombie processes, and missed redispatches. Use when the user says 'monitor the pipeline', 'check workbuddy status', '监工', '看看跑完了没', or asks to watch issue progress."
+description: "Monitor the workbuddy agent pipeline, detect stuck issues, zombie processes, and missed redispatches. Works for both serve mode and distributed (coordinator+worker) mode. Use when the user says 'monitor the pipeline', 'check workbuddy status', '监工', '看看跑完了没', or asks to watch issue progress."
 user_invocable: true
 ---
 
 # Pipeline Monitor
 
-Interactive skill that watches the workbuddy coordinator/worker pipeline,
-diagnoses common failure modes, and applies safe fixes.
+Interactive skill that watches the workbuddy pipeline, diagnoses common
+failure modes, and applies safe fixes. Works for both serve mode (single
+process) and distributed mode (coordinator + workers).
 
 ## When to use
 
@@ -16,152 +17,286 @@ diagnoses common failure modes, and applies safe fixes.
 - User wants a post-mortem on a completed batch
 - Background monitoring notified you that an agent completed or failed
 
+## Step 0: Detect deployment mode
+
+Before monitoring, determine which mode workbuddy is running in:
+
+```bash
+# Check for coordinator process
+ps aux | grep "workbuddy coordinator" | grep -v grep
+
+# Check for serve process
+ps aux | grep "workbuddy serve" | grep -v grep
+
+# Check for worker processes
+ps aux | grep "workbuddy worker" | grep -v grep
+```
+
+- **Serve mode**: single `workbuddy serve` process → use CLI tools + serve log
+- **Distributed mode**: `workbuddy coordinator` + one or more `workbuddy worker` → use HTTP API + DB queries + process monitoring
+
 ## What to check (every pass)
 
-Run these in parallel whenever possible. **Prefer native CLI tools over raw
-sqlite3 queries.**
+### Common checks (both modes)
 
-1. **Task queue**
+1. **GitHub issue labels** — the ground truth of pipeline state
    ```bash
-   .workbuddy/workbuddy status --tasks --repo Lincyaw/workbuddy
-   ```
-   Add `--status running` to filter active tasks, `--status failed` for failures.
-
-2. **Recent events**
-   ```bash
-   .workbuddy/workbuddy status --events --repo Lincyaw/workbuddy --since 10m
-   ```
-   Filter by type: `--type state_entry`, `--type dispatch_blocked_by_dependency`, etc.
-
-3. **Automated diagnosis**
-   ```bash
-   .workbuddy/workbuddy diagnose --repo Lincyaw/workbuddy
-   ```
-   Add `--fix` to auto-apply safe fixes (cache invalidation for stuck issues).
-
-4. **Agent process count**
-   ```bash
-   ps aux | grep -c '[c]odex'
+   gh issue view N -R Owner/Repo --json labels,state,comments \
+     --jq '{labels: [.labels[].name], state: .state, comments: (.comments | length)}'
    ```
 
-5. **GitHub issue labels** (for specific issues)
+2. **Agent processes**
    ```bash
-   gh issue view N --repo Lincyaw/workbuddy --json labels,state,title
+   ps aux | grep -E "codex.*exec|claude.*exec" | grep -v grep
    ```
 
-6. **New PRs**
+3. **Session logs** — what the agent is actually doing
    ```bash
-   gh pr list --repo Lincyaw/workbuddy --limit 20 --json number,title,state,createdAt
+   # Find session directories
+   ls -lt .workbuddy/sessions/
+   
+   # Check latest activity in a session
+   tail -3 .workbuddy/sessions/session-<ID>/codex-exec.jsonl | \
+     python3 -c "import sys,json; [print(json.loads(l).get('item',{}).get('command','')[:100] or json.loads(l).get('item',{}).get('type','')) for l in sys.stdin]"
    ```
 
-7. **Serve log** (only when CLI tools don't explain the situation)
+### Serve mode checks
+
+4. **Task queue** (CLI)
    ```bash
-   tail -n 30 .workbuddy/serve.log
+   ./workbuddy status --tasks
+   ```
+
+5. **Recent events** (CLI)
+   ```bash
+   ./workbuddy status --events --since 10m
+   ```
+
+6. **Automated diagnosis** (CLI)
+   ```bash
+   ./workbuddy diagnose
+   ./workbuddy diagnose --fix   # auto-apply safe fixes
+   ```
+
+### Distributed mode checks
+
+4. **Coordinator health**
+   ```bash
+   curl -s http://coordinator:8081/health
+   # Returns: {"repos":N,"status":"ok"}
+   ```
+
+5. **Registered repos**
+   ```bash
+   curl -s -H "Authorization: Bearer $TOKEN" http://coordinator:8081/api/v1/repos | python3 -m json.tool
+   ```
+
+6. **Task queue via DB** — most reliable way to see task state
+   ```bash
+   sqlite3 .workbuddy/workbuddy.db \
+     "SELECT agent_name, status, worker_id, lease_expires_at, created_at
+      FROM task_queue WHERE repo='Owner/Repo' ORDER BY created_at DESC LIMIT 10;"
+   ```
+
+7. **Events via DB** — the most complete audit trail
+   ```bash
+   sqlite3 .workbuddy/workbuddy.db \
+     "SELECT type, issue_num, substr(payload,1,80), ts
+      FROM events WHERE repo='Owner/Repo'
+      ORDER BY ts DESC LIMIT 15;"
+   ```
+   Key event types: `state_entry`, `dispatch`, `completed`, `worker_registered`,
+   `dispatch_blocked_by_dependency`, `poll_cycle_done`
+
+8. **Coordinator log** — check for state transitions and dispatch events
+   ```bash
+   # If running in background, check the output file
+   cat /path/to/coordinator-output.log
+   # Key patterns to look for:
+   #   [statemachine] state entry detected
+   #   [statemachine] clearing prior inflight group
+   #   [coordinator] task heartbeat DB update failed
+   ```
+
+8. **Worker log** — check for task pickup and agent launch
+   ```bash
+   cat /path/to/worker-output.log
+   # Key patterns:
+   #   [codex-debug] args=... env=... prompt=...  (agent started)
+   #   [worker] received signal terminated         (clean shutdown)
    ```
 
 ## Common failure modes & fixes
 
-### A. Issue not dispatched — missing `workbuddy` trigger label
-- **Symptom:** Issue has `status:developing` but no task in queue, no dispatch events.
-- **Cause:** Workflow trigger requires `issue_label: "workbuddy"`.
+### A. Issue not dispatched — missing `workbuddy` label
+- **Symptom:** Issue has `status:developing` but no task in queue.
 - **Fix:**
   ```bash
-  gh issue edit N --repo Lincyaw/workbuddy --add-label workbuddy
-  .workbuddy/workbuddy cache-invalidate --repo Lincyaw/workbuddy --issue N
+  gh issue edit N -R Owner/Repo --add-label workbuddy
   ```
 
-### B. Issue not dispatched — stale issue_cache
-- **Symptom:** Issue has correct labels, verdict is `ready`, but no task in queue.
-- **Fix:**
+### B. Task stuck in `running` with expired lease (distributed mode)
+- **Symptom:** DB shows task `status=running`, `lease_expires_at` in the past, no codex process.
+- **Cause:** Worker completed agent but failed to submit result (known bug #88).
+- **Diagnosis:**
   ```bash
-  .workbuddy/workbuddy cache-invalidate --repo Lincyaw/workbuddy --issue N
+  sqlite3 .workbuddy/workbuddy.db \
+    "SELECT id, agent_name, status, lease_expires_at FROM task_queue
+     WHERE status='running' AND lease_expires_at < datetime('now');"
+  ```
+- **Fix:** Mark task as completed and restart worker:
+  ```bash
+  sqlite3 .workbuddy/workbuddy.db \
+    "UPDATE task_queue SET status='completed', completed_at=CURRENT_TIMESTAMP
+     WHERE id='<task-id>';"
+  # Then restart the worker process
   ```
 
-### C. Dependency blocked — upstream not done
-- **Symptom:** `status --events` shows `dependency_verdict_changed` with `verdict: blocked`.
-- **Fix:** Normal. Wait for upstream. After upstream reaches `done`, the dependency
-  resolver will auto-invalidate cache and trigger redispatch (no manual intervention needed).
+### C. Worker not picking up pending tasks
+- **Symptom:** DB has `status=pending` task but worker is idle.
+- **Cause:** Older expired `running` task with earlier `created_at` blocks the claim query.
+- **Diagnosis:**
+  ```bash
+  sqlite3 .workbuddy/workbuddy.db \
+    "SELECT id, agent_name, status, created_at FROM task_queue
+     WHERE repo='Owner/Repo' AND status IN ('pending','running')
+     ORDER BY created_at;"
+  ```
+- **Fix:** Complete or delete the stale running task (see B above), then
+  restart the worker.
 
-### D. Dev-agent self-blocks — missing `## Acceptance Criteria` header
+### D. Dev-agent self-blocks — missing Acceptance Criteria
 - **Symptom:** Dev-agent completes quickly (~1 min), sets `status:blocked`.
-- **Cause:** Dev-agent prompt requires literal `## Acceptance Criteria` header.
-- **Fix:** Edit issue body to use exact header, then:
+- **Fix:** Edit issue body to add `## Acceptance Criteria` section, then:
   ```bash
-  gh issue edit N --repo Lincyaw/workbuddy --remove-label 'status:blocked' --add-label 'status:developing'
-  .workbuddy/workbuddy cache-invalidate --repo Lincyaw/workbuddy --issue N
+  gh issue edit N -R Owner/Repo --remove-label 'status:blocked' --add-label 'status:developing'
   ```
 
-### E. Transient `codex: no such file or directory`
-- **Symptom:** serve log shows `fork/exec .../bin/codex: no such file or directory`
-- **Fix:** serve has auto-retry (60s delay). If task fails after retries,
-  use `cache-invalidate` to force redispatch.
+### E. Agent completes but doesn't change labels
+- **Symptom:** Task completed/codex exited, but issue labels unchanged.
+- **Cause:** LLM didn't execute the label change command.
+- **Fix (serve mode):** Auto-detected and redispatched.
+- **Fix (distributed mode):** Manually change labels:
+  ```bash
+  gh issue edit N -R Owner/Repo --remove-label 'status:developing' --add-label 'status:reviewing'
+  ```
 
-### F. Agent completes but doesn't change labels
-- **Symptom:** Task completed, but issue label unchanged (state machine stalled).
-- **Cause:** LLM non-determinism — agent output judgment but didn't execute `gh issue edit`.
-- **Fix:** Automatic — serve now detects unchanged labels and auto-invalidates cache
-  for redispatch. Look for `labels unchanged — redispatching` in serve log.
+### F. Review sends issue back to developing (normal retry)
+- **Symptom:** Label flips `reviewing → developing`.
+- **Fix:** Normal. Do not intervene. Max 3 retries, then stops.
 
-### G. Review-agent sends issue back to developing
-- **Symptom:** Issue label flips from `reviewing` → `developing`
-- **Fix:** Normal back-edge. Do not intervene.
+### G. Coordinator not detecting label changes
+- **Symptom:** Labels changed on GitHub but coordinator log shows no state entry.
+- **Cause:** Poller hasn't run yet (poll_interval), or issue cache is stale.
+- **Fix:** Wait for next poll cycle, or invalidate cache:
+  ```bash
+  ./workbuddy cache-invalidate --repo Owner/Repo --issue N
+  ```
 
-### H. Zombie processes (rare after WaitDelay fix)
-- **Symptom:** Processes exist but CPU frozen and task completed/failed.
-- **Fix:** Wait 5+ minutes. If CPU still frozen, `kill -9 <pid>`.
+### H. Codex stuck in API inference (most common failure mode)
+- **Symptom:** Codex process alive, 0.5% CPU, no child processes, no JSONL output for 10+ min.
+- **Cause:** Codex enters a long LLM inference that never completes. Happens after agent finishes work (labels already changed) or mid-work.
+- **Diagnosis:**
+  ```bash
+  # Check JSONL staleness
+  for f in $(find .workbuddy -name "codex-exec.jsonl" -newer /tmp/workbuddy-worker*.log); do
+    age=$(( $(date +%s) - $(stat -c '%Y' "$f") ))
+    if [ $age -gt 600 ]; then echo "STALE ($age s): $f"; fi
+  done
+  # Confirm no child processes
+  pstree -p <codex-pid>  # only threads = stuck
+  ```
+- **Fix:** Kill codex, check if labels changed. If yes → mark task completed. If no → mark task failed + invalidate cache. Then restart worker.
 
-### I. Worktree remove failure
-- **Symptom:** log shows `致命错误：... 不是一个工作区: exit status 128`
-- **Fix:** Workspace manager falls back to `Prune()`. No action needed.
+### I. Worker hangs after codex is killed
+- **Symptom:** After killing stuck codex, worker doesn't claim next task. Heartbeat errors in coordinator log: "task already completed".
+- **Cause:** Worker's heartbeat goroutine doesn't exit when codex dies unexpectedly.
+- **Fix:** Kill the worker process (`kill -9`), clean up stale running tasks in DB, start new worker.
+
+### J. Inflight dedup blocks re-dispatch after failure
+- **Symptom:** Task failed, labels unchanged, cache invalidated, but no new task created.
+- **Cause:** State machine's in-memory inflight map still marks the agent as "already dispatched".
+- **Fix:** Manually insert a pending task:
+  ```bash
+  sqlite3 .workbuddy/workbuddy.db \
+    "INSERT INTO task_queue (id, repo, issue_num, agent_name, role, runtime, status, created_at, updated_at)
+     VALUES ('retry-N-$(date +%s)', 'Owner/Repo', N, 'dev-agent', 'dev', 'codex', 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);"
+  ```
+
+### K. Worktree not created (older binary)
+- **Symptom:** Multiple agents pollute the same working directory, switching branches on each other.
+- **Cause:** Worker binary predates the worktree isolation fix.
+- **Fix:** Rebuild: `go build -o workbuddy .` — new workers auto-create worktrees at `.workbuddy/worktrees/issue-N/`.
 
 ## Monitoring strategies
 
-### Strategy 1: `status --watch` (preferred for specific issues)
+### Strategy 1: Watch specific issue via GitHub polling
 ```bash
-.workbuddy/workbuddy status --watch --repo Lincyaw/workbuddy --issue 67 --timeout 30m
+# Poll issue state every 60s
+watch -n 60 "gh issue view N -R Owner/Repo --json labels --jq '[.labels[].name]'"
 ```
 
-### Strategy 2: `Monitor` with serve log (for broad watching)
+### Strategy 2: Monitor session log growth (agent is working)
 ```bash
-tail -n 0 -f .workbuddy/serve.log | grep -E --line-buffered '(state entry detected|agent.*(completed|failed)|labels unchanged|dependency unblocked|no such file|redispatch)'
+# Track codex activity
+watch -n 10 "wc -l .workbuddy/sessions/session-*/codex-exec.jsonl 2>/dev/null"
 ```
 
-### Strategy 3: `ScheduleWakeup` (periodic check-ins)
-Stay under 300s to keep cache warm.
+### Strategy 3: Monitor with until-loop (wait for completion)
+```bash
+until echo "$(gh issue view N -R Owner/Repo --json labels --jq '[.labels[].name]')" | grep -q "status:done"; do
+  sleep 30
+done
+echo "ISSUE_COMPLETED"
+```
 
-### Anti-pattern: manual sleep polling
-Use `Monitor` with `until` loop instead.
+### Strategy 4: DB-based task monitoring (distributed mode)
+```bash
+watch -n 15 "sqlite3 .workbuddy/workbuddy.db \
+  'SELECT agent_name, status, worker_id FROM task_queue
+   WHERE repo=\"Owner/Repo\" ORDER BY created_at DESC LIMIT 5;'"
+```
 
 ## Decision tree
 
 ```
-Run: status --tasks + status --events --since 5m + diagnose
+Detect mode (serve vs distributed)
 │
-├─ All issues status:done, task queue empty → Report completion. Stop monitors.
-├─ Task running, matching label → Normal. Use --watch or Monitor.
-├─ Log stale > 5 min, no agent processes → Run diagnose --fix.
-├─ Issue developing, verdict=ready, no task → cache-invalidate.
-├─ Issue developing but missing workbuddy label → Add label + cache-invalidate.
-├─ Verdict blocked, upstream done → cache-invalidate blocked issue.
-└─ Repeated failures (>3 times) → Escalate to user.
+├─ Check GitHub labels for target issues
+│  ├─ All status:done → Report completion. Stop.
+│  ├─ status:developing/reviewing with active agent process → Normal. Monitor.
+│  └─ Label unchanged for >10 min with no agent process → Investigate below
+│
+├─ Check task queue (CLI or DB)
+│  ├─ Task running + codex process alive → Normal. Wait.
+│  ├─ Task running + no codex process → Result submission failed (fix B)
+│  ├─ Task pending + worker alive → Worker may be re-claiming stale task (fix C)
+│  └─ No pending tasks + labels unchanged → Cache stale or missing workbuddy label
+│
+└─ Check logs (coordinator/worker/serve)
+   ├─ "state entry detected" → Dispatch happened, check worker
+   ├─ "heartbeat DB update failed" → Task already completed/released
+   └─ No recent log entries → Poller or worker may be stuck
 ```
 
 ## Reporting template
 
 ```markdown
-| Issue | Status | Agent | Notes |
-|-------|--------|-------|-------|
-| #67 | done | — | Review passed |
-| #68 | done | — | Review passed |
-| #69 | developing | dev-agent | Running |
-| #70 | blocked | — | Depends on #69 |
-```
+## Pipeline Status Report
 
-- **Agent processes:** N
-- **New PRs:** Yes/No (list numbers)
-- **Interventions:** None / cache-invalidate for #X
+| Issue | Repo | Status | Agent | Retry | Notes |
+|-------|------|--------|-------|-------|-------|
+| #37 | AegisLab | reviewing | review-agent | 2/3 | In progress |
+| #88 | workbuddy | developing | dev-agent | 0/3 | Started |
+
+**Mode:** distributed (coordinator:8081 + 2 workers)
+**Repos:** Lincyaw/workbuddy, OperationsPAI/AegisLab
+**Agent processes:** 1 (codex)
+**Interventions:** Fixed stale task for #37 dev-agent (bug #88)
+```
 
 ## Arguments
 
-Optional space-separated issue numbers, e.g. `/pipeline-monitor 67 68 69 70`.
-If omitted, monitor all `workbuddy`-labeled issues not `status:done`.
+Optional: `<owner/repo> <issue-numbers...>`
+Example: `/pipeline-monitor OperationsPAI/AegisLab 37 42`
+If omitted, monitor all repos and all open workbuddy-labeled issues.

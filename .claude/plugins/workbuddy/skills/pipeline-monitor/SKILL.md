@@ -193,6 +193,41 @@ ps aux | grep "workbuddy worker" | grep -v grep
   ./workbuddy cache-invalidate --repo Owner/Repo --issue N
   ```
 
+### H. Codex stuck in API inference (most common failure mode)
+- **Symptom:** Codex process alive, 0.5% CPU, no child processes, no JSONL output for 10+ min.
+- **Cause:** Codex enters a long LLM inference that never completes. Happens after agent finishes work (labels already changed) or mid-work.
+- **Diagnosis:**
+  ```bash
+  # Check JSONL staleness
+  for f in $(find .workbuddy -name "codex-exec.jsonl" -newer /tmp/workbuddy-worker*.log); do
+    age=$(( $(date +%s) - $(stat -c '%Y' "$f") ))
+    if [ $age -gt 600 ]; then echo "STALE ($age s): $f"; fi
+  done
+  # Confirm no child processes
+  pstree -p <codex-pid>  # only threads = stuck
+  ```
+- **Fix:** Kill codex, check if labels changed. If yes → mark task completed. If no → mark task failed + invalidate cache. Then restart worker.
+
+### I. Worker hangs after codex is killed
+- **Symptom:** After killing stuck codex, worker doesn't claim next task. Heartbeat errors in coordinator log: "task already completed".
+- **Cause:** Worker's heartbeat goroutine doesn't exit when codex dies unexpectedly.
+- **Fix:** Kill the worker process (`kill -9`), clean up stale running tasks in DB, start new worker.
+
+### J. Inflight dedup blocks re-dispatch after failure
+- **Symptom:** Task failed, labels unchanged, cache invalidated, but no new task created.
+- **Cause:** State machine's in-memory inflight map still marks the agent as "already dispatched".
+- **Fix:** Manually insert a pending task:
+  ```bash
+  sqlite3 .workbuddy/workbuddy.db \
+    "INSERT INTO task_queue (id, repo, issue_num, agent_name, role, runtime, status, created_at, updated_at)
+     VALUES ('retry-N-$(date +%s)', 'Owner/Repo', N, 'dev-agent', 'dev', 'codex', 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);"
+  ```
+
+### K. Worktree not created (older binary)
+- **Symptom:** Multiple agents pollute the same working directory, switching branches on each other.
+- **Cause:** Worker binary predates the worktree isolation fix.
+- **Fix:** Rebuild: `go build -o workbuddy .` — new workers auto-create worktrees at `.workbuddy/worktrees/issue-N/`.
+
 ## Monitoring strategies
 
 ### Strategy 1: Watch specific issue via GitHub polling
