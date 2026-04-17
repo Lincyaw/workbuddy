@@ -73,12 +73,14 @@ func LoadConfig(configDir string) (*FullConfig, []Warning, error) {
 	if data, err := os.ReadFile(globalPath); err == nil {
 		var fileCfg struct {
 			GlobalConfig  `yaml:",inline"`
+			Operator      OperatorConfig      `yaml:"operator"`
 			Notifications NotificationsConfig `yaml:"notifications"`
 		}
 		if err := yaml.Unmarshal(data, &fileCfg); err != nil {
 			return nil, nil, fmt.Errorf("config: %s: %w", globalPath, err)
 		}
 		cfg.Global = fileCfg.GlobalConfig
+		cfg.Operator = fileCfg.Operator
 		cfg.Notifications = fileCfg.Notifications
 	}
 

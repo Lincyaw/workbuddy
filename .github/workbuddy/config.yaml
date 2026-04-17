@@ -6,6 +6,9 @@ repo: Lincyaw/workbuddy
 poll_interval: 30s
 port: 8090                # HTTP audit server port
 
+operator:
+  enabled: true
+
 notifications:
   enabled: true
   instance_name: default

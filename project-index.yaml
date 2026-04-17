@@ -1430,3 +1430,37 @@ requirements:
     related_docs:
       - docs/implemented/current-config-workflow-and-agents.md
     deps: [REQ-001, REQ-003, REQ-031, REQ-037]
+
+  - id: REQ-046
+    title: CLI - operator-watch incident dispatcher
+    description: >
+      Add `workbuddy operator-watch` as a local operator-side dispatcher that
+      watches the incident inbox, serially launches Claude Code sessions via
+      the workbuddy plugin, enforces timeout and crash recovery semantics, and
+      records invocation events in SQLite for later diagnosis and metrics.
+    priority: P1
+    version: v0.2.0
+    status: tested
+    acceptance_criteria:
+      - "AC-046-1: `workbuddy operator-watch [--inbox PATH] [--claude PATH] [--dry-run]` command exists"
+      - "AC-046-2: Watches the inbox directory with fsnotify and dispatches newly arrived `*.json` incidents"
+      - "AC-046-3: Enforces serial execution: only one Claude session runs at a time even when multiple incidents arrive together"
+      - "AC-046-4: Enforces a default 10 minute timeout per incident and marks timed-out incidents as `failed/timeout-<id>.json`"
+      - "AC-046-5: Moves successful incidents to `processed/` and non-zero exit incidents to `failed/exit-<code>-<id>.json`"
+      - "AC-046-6: Startup crash recovery moves stale `*.processing` files to `failed/crash-<id>.json`"
+      - "AC-046-7: Kill switches work: sibling `paused` file pauses dispatch and `operator.enabled=false` in config pauses dispatch"
+      - "AC-046-8: Records `operator_invoked` events with incident id, exit code, and duration for every attempted invocation"
+      - "AC-046-9: Backlog scan logs when pending inbox size exceeds 50 incidents"
+      - "AC-046-10: Tests cover fsnotify pickup, serial processing, timeout handling, crash recovery, kill switches, and event recording"
+    code:
+      - .github/workbuddy/config.yaml
+      - cmd/operator_watch.go
+      - internal/config/loader.go
+      - internal/config/types.go
+      - internal/eventlog/eventlog.go
+      - internal/operatorwatch/watch.go
+    tests:
+      - cmd/operator_watch_test.go
+      - internal/config/loader_test.go
+      - internal/operatorwatch/watch_test.go
+    deps: [REQ-009]
