@@ -299,7 +299,7 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 
 	eventsCh := make(chan launcherevents.Event, 64)
 	eventsPath, waitEvents := streamSessionEvents(launchCtx, eventsCh)
-	stopStaleMonitor := startStaleInferenceMonitor(taskCtx, cfg.EffectiveStaleInference(&agentCopy), session, task, workerID, evlog, staleInferenceMonitorDeps{})
+	stopStaleMonitor := startStaleInferenceMonitor(taskCtx, cfg.EffectiveStaleInference(&agentCopy), session, task, reader, workerID, evlog, staleInferenceMonitorDeps{})
 	result, runErr := session.Run(taskCtx, eventsCh)
 	staleKill := stopStaleMonitor()
 	close(eventsCh)
@@ -329,9 +329,13 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 		if result == nil {
 			result = &launcher.Result{ExitCode: 1, Meta: map[string]string{}}
 		}
-		currentLabels, err := snapshotIssueLabels(task.Repo, task.IssueNum, reader)
-		if err != nil {
-			currentLabels = append([]string(nil), launchCtx.Issue.Labels...)
+		currentLabels := cloneLabels(staleKill.Labels)
+		if len(currentLabels) == 0 {
+			var err error
+			currentLabels, err = snapshotIssueLabels(task.Repo, task.IssueNum, reader)
+			if err != nil {
+				currentLabels = append([]string(nil), launchCtx.Issue.Labels...)
+			}
 		}
 		status := staleInferenceStatus(task, cfg, currentLabels)
 		if result.Meta == nil {
@@ -342,7 +346,9 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 		if status == store.TaskStatusCompleted {
 			result.ExitCode = 0
 		}
-		if err := client.SubmitResult(taskCtx, task.TaskID, workerclient.ResultRequest{
+		submitCtx, submitCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer submitCancel()
+		if err := client.SubmitResult(submitCtx, task.TaskID, workerclient.ResultRequest{
 			WorkerID:      workerID,
 			Status:        status,
 			CurrentLabels: currentLabels,
@@ -352,7 +358,7 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 		if err := auditor.Capture(sessionID, task.TaskID, task.Repo, task.IssueNum, task.AgentName, result); err != nil {
 			log.Printf("[worker] audit capture failed: %v", err)
 		}
-		if err := rep.Report(taskCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, workerID, 0, workflowMaxRetries(cfg, task.Workflow), "stale inference watchdog terminated an idle agent process"); err != nil {
+		if err := rep.Report(submitCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, workerID, 0, workflowMaxRetries(cfg, task.Workflow), "stale inference watchdog terminated an idle agent process"); err != nil {
 			log.Printf("[worker] report failed: %v", err)
 		}
 		return nil

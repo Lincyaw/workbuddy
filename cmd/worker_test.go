@@ -355,6 +355,7 @@ func TestStartStaleInferenceMonitorKillsIdleAgent(t *testing.T) {
 		},
 		session,
 		&workerclient.Task{TaskID: "task-1", Repo: "owner/repo", IssueNum: 7, AgentName: "dev-agent"},
+		&mockGHReader{labelSnapshots: [][]string{{"status:reviewing"}}},
 		"worker-1",
 		logger,
 		staleInferenceMonitorDeps{
@@ -372,6 +373,9 @@ func TestStartStaleInferenceMonitorKillsIdleAgent(t *testing.T) {
 	}
 	if kill.PID != 4242 {
 		t.Fatalf("pid = %d, want 4242", kill.PID)
+	}
+	if got := kill.Labels; len(got) != 1 || got[0] != "status:reviewing" {
+		t.Fatalf("labels = %v, want [status:reviewing]", got)
 	}
 	select {
 	case pid := <-killed:
@@ -403,9 +407,14 @@ func TestStaleInferenceStatusUsesWorkflowLabels(t *testing.T) {
 							{To: "blocked", When: `labeled "status:blocked"`},
 						},
 					},
-					"reviewing":  {EnterLabel: "status:reviewing"},
-					"blocked":    {EnterLabel: "status:blocked"},
-					"done":       {EnterLabel: "status:done"},
+					"reviewing": {
+						EnterLabel: "status:reviewing",
+						Transitions: []config.Transition{
+							{To: "done", When: `labeled "status:done"`},
+						},
+					},
+					"blocked": {EnterLabel: "status:blocked"},
+					"done":    {EnterLabel: "status:done"},
 				},
 			},
 		},
@@ -420,8 +429,11 @@ func TestStaleInferenceStatusUsesWorkflowLabels(t *testing.T) {
 	if got := staleInferenceStatus(task, cfg, []string{"status:blocked"}); got != store.TaskStatusCompleted {
 		t.Fatalf("status with alternate allowed label = %q, want completed", got)
 	}
-	if got := staleInferenceStatus(task, cfg, []string{"status:done"}); got != store.TaskStatusFailed {
-		t.Fatalf("status with invalid transition = %q, want failed", got)
+	if got := staleInferenceStatus(task, cfg, []string{"status:done"}); got != store.TaskStatusCompleted {
+		t.Fatalf("status with downstream advanced label = %q, want completed", got)
+	}
+	if got := staleInferenceStatus(task, cfg, []string{"status:triage"}); got != store.TaskStatusFailed {
+		t.Fatalf("status with unrelated label = %q, want failed", got)
 	}
 }
 
@@ -510,6 +522,114 @@ max_retries: 3
 	}
 	if !completed {
 		t.Fatal("worker did not recover hung task")
+	}
+
+	cancelWorker()
+	select {
+	case err := <-workerErrCh:
+		if err != nil {
+			t.Fatalf("worker: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not exit")
+	}
+
+	cancelCoordinator()
+	select {
+	case err := <-coordErrCh:
+		if err != nil {
+			t.Fatalf("coordinator: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("coordinator did not exit")
+	}
+}
+
+func TestWorkerUsesPreKillLabelSnapshotForStaleInferenceCompletion(t *testing.T) {
+	setupFakeGHCLI(t)
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", "secret-token")
+
+	repo := "owner/test-repo"
+	configDir := setupTestConfigDir(t, repo)
+	port := getFreePort(t)
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	gh := &mockGHReader{
+		issues: []poller.Issue{
+			{Number: 10, Title: "Hung Task With Fast Follow-up", State: "open", Body: "body", Labels: []string{"workbuddy", "status:developing"}},
+		},
+		labelSnapshots: [][]string{
+			{"workbuddy", "status:done"},
+			{"workbuddy", "status:developing"},
+		},
+	}
+	writeFile(t, filepath.Join(configDir, "config.yaml"), "repo: "+repo+"\npoll_interval: 1s\nport: 0\nworker:\n  stale_inference:\n    enabled: true\n    idle_threshold: 250ms\n    check_interval: 25ms\n")
+	writeFile(t, filepath.Join(configDir, "workflows", "dev-workflow.md"), `---
+name: dev-workflow
+description: Dev workflow
+trigger:
+  issue_label: "workbuddy"
+max_retries: 3
+---
+# Dev Workflow
+
+`+"```yaml\nstates:\n  triage:\n    enter_label: \"status:triage\"\n    transitions:\n      - to: developing\n        when: 'labeled \"status:developing\"'\n  developing:\n    enter_label: \"status:developing\"\n    agent: dev-agent\n    transitions:\n      - to: reviewing\n        when: 'labeled \"status:reviewing\"'\n  reviewing:\n    enter_label: \"status:reviewing\"\n    transitions:\n      - to: done\n        when: 'labeled \"status:done\"'\n      - to: developing\n        when: 'labeled \"status:developing\"'\n  done:\n    enter_label: \"status:done\"\n```\n")
+
+	ctxCoordinator, cancelCoordinator := context.WithCancel(context.Background())
+	defer cancelCoordinator()
+	coordErrCh := make(chan error, 1)
+	go func() {
+		coordErrCh <- runCoordinatorWithOpts(&coordinatorOpts{
+			port:         port,
+			pollInterval: 50 * time.Millisecond,
+			configDir:    configDir,
+			dbPath:       dbPath,
+			auth:         true,
+		}, gh, ctxCoordinator)
+	}()
+	waitForHealth(t, port)
+
+	lnch := launcher.NewLauncher()
+	lnch.Register(&hangingProcessRuntime{name: config.RuntimeClaudeCode}, config.RuntimeClaudeCode)
+
+	ctxWorker, cancelWorker := context.WithCancel(context.Background())
+	workerErrCh := make(chan error, 1)
+	go func() {
+		workerErrCh <- runWorkerWithOpts(&workerOpts{
+			coordinatorURL:    fmt.Sprintf("http://localhost:%d", port),
+			token:             "secret-token",
+			roleCSV:           "dev",
+			runtime:           config.RuntimeClaudeCode,
+			repo:              repo,
+			configDir:         configDir,
+			workDir:           t.TempDir(),
+			dbPath:            filepath.Join(t.TempDir(), "worker.db"),
+			sessionsDir:       filepath.Join(t.TempDir(), "sessions"),
+			pollTimeout:       100 * time.Millisecond,
+			heartbeatInterval: 50 * time.Millisecond,
+			shutdownTimeout:   time.Second,
+		}, lnch, gh, ctxWorker)
+	}()
+
+	var completed bool
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		st, err := store.NewStore(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tasks, err := st.QueryTasks(store.TaskStatusCompleted)
+		_ = st.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(tasks) > 0 {
+			completed = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !completed {
+		t.Fatal("worker did not classify stale task as completed from pre-kill labels")
 	}
 
 	cancelWorker()

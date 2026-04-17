@@ -21,6 +21,7 @@ import (
 type staleInferenceKill struct {
 	ArtifactPath string
 	IdleDuration time.Duration
+	Labels       []string
 	PID          int
 }
 
@@ -35,6 +36,7 @@ func startStaleInferenceMonitor(
 	cfg config.EffectiveStaleInferenceConfig,
 	session launcher.Session,
 	task *workerclient.Task,
+	reader issueLabelReader,
 	workerID string,
 	evlog *eventlog.EventLogger,
 	deps staleInferenceMonitorDeps,
@@ -87,10 +89,16 @@ func startStaleInferenceMonitor(
 					continue
 				}
 
+				labels, err := snapshotIssueLabels(task.Repo, task.IssueNum, reader)
+				if err != nil {
+					labels = nil
+				}
+
 				payload := map[string]any{
 					"agent":         task.AgentName,
 					"artifact_path": info.ArtifactPath,
 					"idle_seconds":  int(idle.Seconds()),
+					"labels":        cloneLabels(labels),
 					"pid":           info.PID,
 					"session_dir":   filepath.Dir(info.ArtifactPath),
 					"task_id":       task.TaskID,
@@ -111,6 +119,7 @@ func startStaleInferenceMonitor(
 				done <- &staleInferenceKill{
 					ArtifactPath: info.ArtifactPath,
 					IdleDuration: idle,
+					Labels:       cloneLabels(labels),
 					PID:          info.PID,
 				}
 				return
@@ -142,20 +151,45 @@ func staleInferenceStatus(task *workerclient.Task, cfg *config.FullConfig, label
 	if slices.Contains(labels, current.EnterLabel) {
 		return store.TaskStatusFailed
 	}
-
-	for _, transition := range current.Transitions {
-		if strings.TrimSpace(transition.To) == "" {
-			continue
-		}
-		next := workflow.States[transition.To]
-		if next == nil || strings.TrimSpace(next.EnterLabel) == "" {
-			continue
-		}
-		if slices.Contains(labels, next.EnterLabel) {
-			return store.TaskStatusCompleted
-		}
+	if staleInferenceReachedDownstreamState(workflow, task.State, labels) {
+		return store.TaskStatusCompleted
 	}
 	return store.TaskStatusFailed
+}
+
+func staleInferenceReachedDownstreamState(workflow *config.WorkflowConfig, start string, labels []string) bool {
+	if workflow == nil || len(labels) == 0 {
+		return false
+	}
+
+	visited := map[string]bool{start: true}
+	queue := []string{start}
+	for len(queue) > 0 {
+		stateName := queue[0]
+		queue = queue[1:]
+
+		state := workflow.States[stateName]
+		if state == nil {
+			continue
+		}
+		for _, transition := range state.Transitions {
+			nextName := strings.TrimSpace(transition.To)
+			if nextName == "" || visited[nextName] {
+				continue
+			}
+			visited[nextName] = true
+
+			next := workflow.States[nextName]
+			if next == nil {
+				continue
+			}
+			if label := strings.TrimSpace(next.EnterLabel); label != "" && slices.Contains(labels, label) {
+				return true
+			}
+			queue = append(queue, nextName)
+		}
+	}
+	return false
 }
 
 func hasRunningChildren(pid int) (bool, error) {
