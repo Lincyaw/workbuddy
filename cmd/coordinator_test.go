@@ -58,11 +58,13 @@ func TestParseCoordinatorFlagsReadsNewOptions(t *testing.T) {
 	cmd.Flags().Set("port", "8123")
 	cmd.Flags().Set("poll-interval", "42s")
 	cmd.Flags().Set("auth", "true")
+	cmd.Flags().Set("trusted-authors", "alice,bob")
 	t.Cleanup(func() {
 		cmd.Flags().Set("config-dir", ".github/workbuddy")
 		cmd.Flags().Set("port", "0")
 		cmd.Flags().Set("poll-interval", "0s")
 		cmd.Flags().Set("auth", "false")
+		cmd.Flags().Set("trusted-authors", "")
 	})
 
 	opts, err := parseCoordinatorFlags(cmd)
@@ -80,5 +82,11 @@ func TestParseCoordinatorFlagsReadsNewOptions(t *testing.T) {
 	}
 	if !opts.auth {
 		t.Fatal("expected auth to be true")
+	}
+	if got, want := opts.trustedAuthors, "alice,bob"; got != want {
+		t.Fatalf("trustedAuthors = %q, want %q", got, want)
+	}
+	if !opts.trustedAuthorsSet {
+		t.Fatal("expected trustedAuthorsSet to be true")
 	}
 }

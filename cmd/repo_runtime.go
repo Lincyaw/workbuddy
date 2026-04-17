@@ -17,6 +17,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
 	"github.com/Lincyaw/workbuddy/internal/router"
+	"github.com/Lincyaw/workbuddy/internal/security"
 	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
@@ -56,13 +57,14 @@ type pollerManager struct {
 	reporter     *reporter.Reporter
 	repoRoot     string
 	pollInterval time.Duration
+	security     *security.Runtime
 
 	mu       sync.RWMutex
 	runtimes map[string]*repoRuntime
 	events   chan poller.ChangeEvent
 }
 
-func newPollerManager(ctx context.Context, st *store.Store, reg *registry.Registry, evlog *eventlog.EventLogger, ab *alertbus.Bus, ghReader poller.GHReader, rep *reporter.Reporter, repoRoot string, pollInterval time.Duration) *pollerManager {
+func newPollerManager(ctx context.Context, st *store.Store, reg *registry.Registry, evlog *eventlog.EventLogger, ab *alertbus.Bus, ghReader poller.GHReader, rep *reporter.Reporter, repoRoot string, pollInterval time.Duration, secRuntime *security.Runtime) *pollerManager {
 	pm := &pollerManager{
 		rootCtx:      ctx,
 		store:        st,
@@ -73,6 +75,7 @@ func newPollerManager(ctx context.Context, st *store.Store, reg *registry.Regist
 		reporter:     rep,
 		repoRoot:     repoRoot,
 		pollInterval: pollInterval,
+		security:     secRuntime,
 		runtimes:     make(map[string]*repoRuntime),
 		events:       make(chan poller.ChangeEvent, 256),
 	}
@@ -453,6 +456,9 @@ func (pm *pollerManager) handleEvent(ev poller.ChangeEvent) {
 		runtime.stateMachine.ResetDedup()
 		return
 	}
+	if !allowSecurityEvent(pm.security, ev) {
+		return
+	}
 	if !runtime.depsResolvedThisCycle {
 		pm.runDependencyMaintenance(runtime)
 		runtime.depsResolvedThisCycle = true
@@ -463,6 +469,7 @@ func (pm *pollerManager) handleEvent(ev poller.ChangeEvent) {
 		IssueNum: ev.IssueNum,
 		Labels:   ev.Labels,
 		Detail:   ev.Detail,
+		Author:   ev.Author,
 	}); err != nil {
 		log.Printf("[coordinator] state machine error for %s: %v", ev.Repo, err)
 	}

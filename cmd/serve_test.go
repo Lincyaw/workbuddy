@@ -235,6 +235,17 @@ func setupFakeGHCLI(t *testing.T) {
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+func setupFakeGHCLIWithScript(t *testing.T, script string) {
+	t.Helper()
+	fakeBin := t.TempDir()
+	ghPath := filepath.Join(fakeBin, "gh")
+	writeFile(t, ghPath, script)
+	if err := os.Chmod(ghPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 func waitForHealth(t *testing.T, port int) {
 	t.Helper()
 	addr := fmt.Sprintf("http://localhost:%d/health", port)
@@ -260,6 +271,126 @@ func getFreePort(t *testing.T) int {
 	}
 	defer func() { _ = ln.Close() }()
 	return ln.Addr().(*net.TCPAddr).Port
+}
+
+func TestGHCLIReaderListIssuesIncludesAuthor(t *testing.T) {
+	setupFakeGHCLIWithScript(t, `#!/bin/sh
+if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
+  printf '%s\n' '[{"number":7,"title":"security","state":"OPEN","body":"body","author":{"login":"Alice"},"labels":[{"name":"workbuddy"}]}]'
+  exit 0
+fi
+exit 1
+`)
+
+	reader := &GHCLIReader{}
+	issues, err := reader.ListIssues("owner/repo")
+	if err != nil {
+		t.Fatalf("ListIssues: %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("len(issues) = %d, want 1", len(issues))
+	}
+	if got, want := issues[0].Author, "Alice"; got != want {
+		t.Fatalf("author = %q, want %q", got, want)
+	}
+}
+
+func TestServeTrustedAuthorsBlocksUnauthorizedIssue(t *testing.T) {
+	setupFakeGHCLI(t)
+
+	repo := "owner/security-blocked"
+	configDir := setupTestConfigDir(t, repo)
+	gh := &mockGHReader{
+		issues: []poller.Issue{
+			{Number: 21, Title: "blocked", State: "open", Body: "body", Labels: []string{"workbuddy", "status:developing"}, Author: "mallory"},
+		},
+	}
+	mockRT := &mockRuntime{name: config.RuntimeClaudeCode}
+	lnch := launcher.NewLauncher()
+	lnch.Register(mockRT, config.RuntimeClaudeCode, config.RuntimeClaudeShot)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runServeWithOpts(&serveOpts{
+			port:              getFreePort(t),
+			pollInterval:      25 * time.Millisecond,
+			maxParallelTasks:  1,
+			roles:             []string{"dev"},
+			configDir:         configDir,
+			dbPath:            filepath.Join(t.TempDir(), "serve.db"),
+			trustedAuthors:    "alice,bob",
+			trustedAuthorsSet: true,
+		}, gh, lnch, ctx)
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("runServeWithOpts: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not exit")
+	}
+
+	if got := mockRT.CallCount(); got != 0 {
+		t.Fatalf("runtime call count = %d, want 0", got)
+	}
+}
+
+func TestServeTrustedAuthorsAllowsAuthorizedIssueCaseInsensitive(t *testing.T) {
+	setupFakeGHCLI(t)
+
+	repo := "owner/security-allowed"
+	configDir := setupTestConfigDir(t, repo)
+	gh := &mockGHReader{
+		issues: []poller.Issue{
+			{Number: 22, Title: "allowed", State: "open", Body: "body", Labels: []string{"workbuddy", "status:developing"}, Author: "Alice"},
+		},
+	}
+	mockRT := &mockRuntime{name: config.RuntimeClaudeCode}
+	lnch := launcher.NewLauncher()
+	lnch.Register(mockRT, config.RuntimeClaudeCode, config.RuntimeClaudeShot)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runServeWithOpts(&serveOpts{
+			port:              getFreePort(t),
+			pollInterval:      25 * time.Millisecond,
+			maxParallelTasks:  1,
+			roles:             []string{"dev"},
+			configDir:         configDir,
+			dbPath:            filepath.Join(t.TempDir(), "serve.db"),
+			trustedAuthors:    "alice",
+			trustedAuthorsSet: true,
+		}, gh, lnch, ctx)
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if mockRT.CallCount() > 0 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("runServeWithOpts: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not exit")
+	}
+
+	if got := mockRT.CallCount(); got == 0 {
+		t.Fatal("expected authorized issue to dispatch")
+	}
 }
 
 func newWorkerTestDeps(t *testing.T, rt *mockRuntime, readers ...issueLabelReader) (*workerDeps, *store.Store) {

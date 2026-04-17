@@ -1611,3 +1611,36 @@ requirements:
       - cmd/worker_test.go
       - cmd/worker_repos_test.go
     deps: [REQ-025, REQ-028]
+
+  - id: REQ-050
+    title: Issue author allowlist for agent dispatch
+    description: >
+      Allow operators to restrict which GitHub issue authors can trigger
+      agent dispatch. The allowlist must load from operator-controlled
+      sources outside repo config, apply case-insensitively before any
+      dispatch work begins, and support hot reload for the local
+      `.workbuddy/security.yaml` file.
+    priority: P0
+    version: v0.2.0
+    status: tested
+    acceptance_criteria:
+      - "AC-050-1: poller issues/events include the GitHub issue author from `gh issue list --json ... author`"
+      - "AC-050-2: `trusted_authors` loads with priority flag > env > `.workbuddy/security.yaml`, with empty config meaning unrestricted"
+      - "AC-050-3: author matching is case-insensitive and unauthorized issues are skipped before dispatch with security logging only"
+      - "AC-050-4: file-based security config hot-reloads on create/write/delete, parse errors keep the prior in-memory config"
+      - "AC-050-5: startup logs report the active security posture and source when restricted"
+      - "AC-050-6: unit/integration tests cover precedence, case-insensitive matching, reload behavior, parse-error handling, and serve-side dispatch gating"
+    code:
+      - cmd/serve.go
+      - cmd/coordinator.go
+      - cmd/repo_runtime.go
+      - internal/poller/poller.go
+      - internal/security/security.go
+      - internal/statemachine/statemachine.go
+    tests:
+      - cmd/coordinator_test.go
+      - cmd/serve_flags_test.go
+      - cmd/serve_test.go
+      - internal/poller/poller_test.go
+      - internal/security/security_test.go
+    deps: [REQ-001, REQ-017, REQ-027]

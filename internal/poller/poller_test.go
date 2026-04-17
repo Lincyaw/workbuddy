@@ -104,7 +104,7 @@ func TestPreCheck_Failure(t *testing.T) {
 func TestNewIssueDetection(t *testing.T) {
 	gh := &mockGHReader{
 		issues: []Issue{
-			{Number: 1, Title: "Bug report", State: "open", Labels: []string{"bug"}},
+			{Number: 1, Title: "Bug report", State: "open", Labels: []string{"bug"}, Author: "alice"},
 		},
 	}
 	st := testStore(t)
@@ -127,6 +127,9 @@ func TestNewIssueDetection(t *testing.T) {
 	if events[0].IssueNum != 1 {
 		t.Errorf("expected issue 1, got %d", events[0].IssueNum)
 	}
+	if got, want := events[0].Author, "alice"; got != want {
+		t.Errorf("expected author %q, got %q", want, got)
+	}
 }
 
 func TestLabelAddedRemoved(t *testing.T) {
@@ -145,7 +148,7 @@ func TestLabelAddedRemoved(t *testing.T) {
 	// Now the issue has labels "enhancement" (bug removed, enhancement added).
 	gh := &mockGHReader{
 		issues: []Issue{
-			{Number: 1, Title: "Bug report", State: "open", Labels: []string{"enhancement"}},
+			{Number: 1, Title: "Bug report", State: "open", Labels: []string{"enhancement"}, Author: "alice"},
 		},
 	}
 	p := NewPoller(gh, st, "owner/repo", time.Hour)
@@ -165,6 +168,9 @@ func TestLabelAddedRemoved(t *testing.T) {
 	types := map[string]string{}
 	for _, ev := range events {
 		types[ev.Type] = ev.Detail
+		if got, want := ev.Author, "alice"; got != want {
+			t.Errorf("event author = %q, want %q", got, want)
+		}
 	}
 	if types[EventLabelAdded] != "enhancement" {
 		t.Errorf("expected label_added=enhancement, got %q", types[EventLabelAdded])

@@ -24,6 +24,7 @@ type ChangeEvent struct {
 	IssueNum int
 	Labels   []string // current labels on the issue
 	Detail   string   // extra info (e.g. label name, comment body)
+	Author   string
 }
 
 // DispatchRequest is sent to the Task Router when an agent needs to run.
@@ -130,7 +131,7 @@ func NewStateMachine(
 		alertBus:        alertBus,
 		inflight:        make(map[string]*dispatchGroup),
 		stuckTimeout:    StuckTimeout,
-		completionTimes:  make(map[string]completionRecord),
+		completionTimes: make(map[string]completionRecord),
 		workflowManager: workflowManager,
 	}
 }

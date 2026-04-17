@@ -35,6 +35,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
 	"github.com/Lincyaw/workbuddy/internal/router"
+	"github.com/Lincyaw/workbuddy/internal/security"
 	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/tasknotify"
@@ -98,13 +99,15 @@ func (rt *RunningTasks) Remove(repo string, issue int) {
 
 // serveOpts holds parsed CLI flags for the serve command.
 type serveOpts struct {
-	port             int
-	pollInterval     time.Duration
-	maxParallelTasks int
-	roles            []string
-	configDir        string
-	dbPath           string
-	coordinatorAPI   bool
+	port              int
+	pollInterval      time.Duration
+	maxParallelTasks  int
+	roles             []string
+	configDir         string
+	dbPath            string
+	coordinatorAPI    bool
+	trustedAuthors    string
+	trustedAuthorsSet bool
 }
 
 // issueTaskLocks serializes tasks for the same repo+issue. Entries are
@@ -186,6 +189,9 @@ type ghIssueJSON struct {
 	Title  string `json:"title"`
 	State  string `json:"state"`
 	Body   string `json:"body"`
+	Author struct {
+		Login string `json:"login"`
+	} `json:"author"`
 	Labels []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
@@ -230,7 +236,7 @@ func (g *GHCLIReader) ListIssues(repo string) ([]poller.Issue, error) {
 		"--repo", repo,
 		"--state", "open",
 		"--limit", "100",
-		"--json", "number,title,state,body,labels",
+		"--json", "number,title,state,body,author,labels",
 	)
 	out, err := cmd.Output()
 	if err != nil {
@@ -254,6 +260,7 @@ func (g *GHCLIReader) ListIssues(repo string) ([]poller.Issue, error) {
 			State:  r.State,
 			Labels: labels,
 			Body:   r.Body,
+			Author: r.Author.Login,
 		}
 	}
 	return issues, nil
@@ -380,6 +387,7 @@ func init() {
 	serveCmd.Flags().String("config-dir", ".github/workbuddy", "Configuration directory")
 	serveCmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "SQLite database path")
 	serveCmd.Flags().Bool("coordinator-api", false, "Expose coordinator task claim API and persist tasks for remote workers")
+	serveCmd.Flags().String("trusted-authors", "", "Comma-separated GitHub logins allowed to trigger agent work")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -401,18 +409,22 @@ func parseServeFlags(cmd *cobra.Command) (*serveOpts, error) {
 	configDir, _ := cmd.Flags().GetString("config-dir")
 	dbPath, _ := cmd.Flags().GetString("db-path")
 	coordinatorAPI, _ := cmd.Flags().GetBool("coordinator-api")
+	trustedAuthors, _ := cmd.Flags().GetString("trusted-authors")
+	trustedAuthorsSet := cmd.Flags().Changed("trusted-authors")
 	if maxParallelTasks <= 0 {
 		return nil, fmt.Errorf("serve: --max-parallel-tasks must be > 0")
 	}
 
 	return &serveOpts{
-		port:             port,
-		pollInterval:     pollInterval,
-		maxParallelTasks: maxParallelTasks,
-		roles:            roles,
-		configDir:        configDir,
-		dbPath:           dbPath,
-		coordinatorAPI:   coordinatorAPI,
+		port:              port,
+		pollInterval:      pollInterval,
+		maxParallelTasks:  maxParallelTasks,
+		roles:             roles,
+		configDir:         configDir,
+		dbPath:            dbPath,
+		coordinatorAPI:    coordinatorAPI,
+		trustedAuthors:    trustedAuthors,
+		trustedAuthorsSet: trustedAuthorsSet,
 	}, nil
 }
 
@@ -473,6 +485,17 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	if err != nil {
 		return fmt.Errorf("serve: get working directory: %w", err)
 	}
+	securityPath := filepath.Join(repoDir, ".workbuddy", "security.yaml")
+	secRuntime, watchSecurityFile, err := security.NewRuntime(security.Options{
+		FlagValue: opts.trustedAuthors,
+		FlagSet:   opts.trustedAuthorsSet,
+		EnvValue:  os.Getenv("WORKBUDDY_TRUSTED_AUTHORS"),
+		FilePath:  securityPath,
+	})
+	if err != nil {
+		return fmt.Errorf("serve: load security config: %w", err)
+	}
+	logSecurityPosture(secRuntime.Current())
 	sessionsDir := filepath.Join(repoDir, ".workbuddy", "sessions")
 	auditor := audit.NewAuditor(st, sessionsDir)
 
@@ -543,6 +566,11 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	}
 	defer cancel()
+	if watchSecurityFile {
+		if err := secRuntime.StartFileWatcher(ctx); err != nil {
+			return fmt.Errorf("serve: start security watcher: %w", err)
+		}
+	}
 
 	// Optional startup rate-limit budget check; this is best-effort and
 	// intentionally non-fatal for normal startup.
@@ -699,10 +727,6 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 					sm.ResetDedup()
 					continue
 				}
-				if !depsResolvedThisCycle {
-					runDependencyMaintenance(ctx)
-					depsResolvedThisCycle = true
-				}
 				// Handle issue closure: cancel running agent and skip state machine.
 				if ev.Type == poller.EventIssueClosed {
 					closedTracker.MarkClosed(ev.Repo, ev.IssueNum)
@@ -712,12 +736,20 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 					continue // don't pass to state machine
 				}
 				closedTracker.MarkOpen(ev.Repo, ev.IssueNum)
+				if !allowSecurityEvent(secRuntime, ev) {
+					continue
+				}
+				if !depsResolvedThisCycle {
+					runDependencyMaintenance(ctx)
+					depsResolvedThisCycle = true
+				}
 				smEvent := statemachine.ChangeEvent{
 					Type:     ev.Type,
 					Repo:     ev.Repo,
 					IssueNum: ev.IssueNum,
 					Labels:   ev.Labels,
 					Detail:   ev.Detail,
+					Author:   ev.Author,
 				}
 				if err := sm.HandleEvent(ctx, smEvent); err != nil {
 					log.Printf("[serve] state machine error: %v", err)
@@ -805,6 +837,35 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	wg.Wait()
 	log.Printf("[serve] shutdown complete")
 	return nil
+}
+
+func allowSecurityEvent(secRuntime *security.Runtime, ev poller.ChangeEvent) bool {
+	if secRuntime == nil {
+		return true
+	}
+	switch ev.Type {
+	case poller.EventIssueCreated, poller.EventLabelAdded, poller.EventLabelRemoved:
+	default:
+		return true
+	}
+	current := secRuntime.Current()
+	if !current.IsRestricted() || current.Allows(ev.Author) {
+		return true
+	}
+	author := strings.TrimSpace(ev.Author)
+	if author == "" {
+		author = "unknown"
+	}
+	log.Printf("[security] skipping issue #%d by @%s: author not in trusted_authors", ev.IssueNum, author)
+	return false
+}
+
+func logSecurityPosture(snapshot security.Snapshot) {
+	if !snapshot.IsRestricted() {
+		log.Printf("[security] trusted_authors: unrestricted (no allowlist configured)")
+		return
+	}
+	log.Printf("[security] trusted_authors: %s (source: %s)", snapshot.FormatAuthors(), snapshot.Source)
 }
 
 // workerDeps bundles the dependencies for the embedded worker, avoiding parameter sprawl.
