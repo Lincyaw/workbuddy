@@ -24,6 +24,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/metrics"
 	"github.com/Lincyaw/workbuddy/internal/notifier"
+	"github.com/Lincyaw/workbuddy/internal/operator"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
@@ -395,6 +396,28 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 		return fmt.Errorf("coordinator: init notifier: %w", err)
 	}
 	not.Start(ctx)
+
+	operatorCfg := config.OperatorConfig{Enabled: true}
+	defaultRepo := ""
+	if bootstrapCfg != nil {
+		operatorCfg = bootstrapCfg.Operator
+		defaultRepo = bootstrapCfg.Global.Repo
+	}
+	if operatorCfg.Enabled {
+		detector := operator.NewDetector(operator.DetectorOptions{
+			Store:                   st,
+			Config:                  operatorCfg,
+			AlertBus:                alertBus,
+			DefaultRepo:             defaultRepo,
+			DefaultPollInterval:     pollInterval,
+			WorkerHeartbeatInterval: defaultWorkerHeartbeat,
+		})
+		go func() {
+			if err := detector.Run(ctx); err != nil {
+				log.Printf("[coordinator] operator detector error: %v", err)
+			}
+		}()
+	}
 
 	// Optional startup rate-limit budget check; best-effort and non-fatal.
 	if bootstrapCfg != nil && strings.TrimSpace(bootstrapCfg.Global.Repo) != "" {

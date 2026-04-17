@@ -18,9 +18,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/alertbus"
 	"github.com/Lincyaw/workbuddy/internal/audit"
 	"github.com/Lincyaw/workbuddy/internal/auditapi"
-	"github.com/Lincyaw/workbuddy/internal/alertbus"
 	"github.com/Lincyaw/workbuddy/internal/config"
 	coordinatorhttp "github.com/Lincyaw/workbuddy/internal/coordinator/http"
 	"github.com/Lincyaw/workbuddy/internal/dependency"
@@ -29,11 +29,12 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/launcher"
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 	"github.com/Lincyaw/workbuddy/internal/metrics"
+	"github.com/Lincyaw/workbuddy/internal/notifier"
+	"github.com/Lincyaw/workbuddy/internal/operator"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
 	"github.com/Lincyaw/workbuddy/internal/router"
-	"github.com/Lincyaw/workbuddy/internal/notifier"
 	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/tasknotify"
@@ -554,6 +555,24 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 		return fmt.Errorf("serve: init notifier: %w", err)
 	}
 	not.Start(ctx)
+
+	if cfg.Operator.Enabled {
+		detector := operator.NewDetector(operator.DetectorOptions{
+			Store:                   st,
+			Config:                  cfg.Operator,
+			AlertBus:                alertBus,
+			DefaultRepo:             cfg.Global.Repo,
+			DefaultPollInterval:     cfg.Global.PollInterval,
+			WorkerHeartbeatInterval: defaultWorkerHeartbeat,
+		})
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := detector.Run(ctx); err != nil {
+				log.Printf("[serve] operator detector error: %v", err)
+			}
+		}()
+	}
 
 	// 5. Start HTTP server
 	mux := http.NewServeMux()

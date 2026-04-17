@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/operator"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
@@ -349,6 +351,24 @@ func seedDashboardData(t *testing.T, st *store.Store, sessionsDir string) {
 	}); err != nil {
 		t.Fatalf("InsertEvent completed: %v", err)
 	}
+	alertPayload, err := json.Marshal(operator.Alert{
+		ID:       "alert-40",
+		Kind:     operator.KindWorkerMissing,
+		Severity: operator.SeverityWarn,
+		Ts:       time.Date(2026, 4, 17, 11, 58, 0, 0, time.UTC),
+		Resource: map[string]any{"repo": "owner/repo", "worker_id": "worker-2"},
+		Detail:   "worker heartbeat is stale",
+	})
+	if err != nil {
+		t.Fatalf("marshal alert payload: %v", err)
+	}
+	if _, err := st.InsertEvent(store.Event{
+		Type:    eventlog.TypeAlert,
+		Repo:    "owner/repo",
+		Payload: string(alertPayload),
+	}); err != nil {
+		t.Fatalf("InsertEvent alert: %v", err)
+	}
 	if err := st.UpsertIssueCache(store.IssueCache{
 		Repo:     "owner/repo",
 		IssueNum: 40,
@@ -550,6 +570,34 @@ func TestDashboardEventsEndpoint(t *testing.T) {
 	}
 	if body[0].Type != "dispatch" {
 		t.Fatalf("type = %q, want dispatch", body[0].Type)
+	}
+}
+
+func TestDashboardAlertsEndpoint(t *testing.T) {
+	fixture := newDashboardFixture(t)
+
+	resp, err := http.Get(fixture.server.URL + "/api/v1/alerts?severity=warn")
+	if err != nil {
+		t.Fatalf("GET /api/v1/alerts: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+		t.Fatalf("content-type = %q", got)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	var body []operator.Alert
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body) != 1 {
+		t.Fatalf("len = %d, want 1", len(body))
+	}
+	if body[0].Kind != operator.KindWorkerMissing {
+		t.Fatalf("kind = %q, want %q", body[0].Kind, operator.KindWorkerMissing)
 	}
 }
 

@@ -16,9 +16,12 @@ type GlobalConfig struct {
 	Port         int           `yaml:"port"`
 }
 
-// OperatorConfig controls the local incident-operator dispatcher.
+// OperatorConfig controls the event-driven self-healing detector and incident dispatcher.
 type OperatorConfig struct {
-	Enabled bool `yaml:"enabled"`
+	Enabled       bool          `yaml:"enabled"`
+	CheckInterval time.Duration `yaml:"check_interval"`
+	DedupWindow   time.Duration `yaml:"dedup_window"`
+	InboxDir      string        `yaml:"inbox_dir"`
 }
 
 // NotificationsConfig controls external notification routing.

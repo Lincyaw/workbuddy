@@ -52,6 +52,7 @@ documentation:
         - .github/workbuddy/config.yaml
         - internal/config/types.go
         - internal/config/loader.go
+        - internal/operator/detector.go
         - internal/poller/poller.go
         - internal/statemachine/statemachine.go
         - .github/workbuddy/agents/dev-agent.md
@@ -194,7 +195,11 @@ documentation:
         - cmd/status.go
         - cmd/cache_invalidate.go
         - cmd/diagnose.go
+        - cmd/coordinator.go
+        - cmd/serve.go
         - internal/diagnose/diagnose.go
+        - internal/operator/detector.go
+        - internal/auditapi/handler.go
         - internal/tasknotify/hub.go
         - internal/audit/http.go
         - internal/store/store.go
@@ -1464,3 +1469,37 @@ requirements:
       - internal/config/loader_test.go
       - internal/operatorwatch/watch_test.go
     deps: [REQ-009]
+    title: Event-driven operator anomaly detector
+    description: >
+      The coordinator must detect runtime anomalies in-process, emit them as
+      structured alerts, persist them to the events log, and fan them out to a
+      local operator inbox for event-driven incident handling.
+    priority: P1
+    version: v0.4.0
+    status: tested
+    acceptance_criteria:
+      - "AC-046-1: internal/operator/detector.go runs a periodic scan on operator.check_interval and also performs startup-only recovery checks"
+      - "AC-046-2: detector implements lease_expired, task_stuck, missing_label, cache_stale, worker_missing, and coordinator_restart_gap rules"
+      - "AC-046-3: emitted alerts are persisted to events with type=alert and a structured JSON payload"
+      - "AC-046-4: duplicate alerts with the same (kind, stable-resource-id) are suppressed within operator.dedup_window"
+      - "AC-046-5: non-suppressed alerts are written to operator.inbox_dir as 0600 JSON files inside a 0700 directory"
+      - "AC-046-6: GET /api/v1/alerts supports since and severity filters and returns recent structured alerts"
+      - "AC-046-7: operator.enabled=false disables detector startup and prevents inbox/event emission from the subsystem"
+      - "AC-046-8: unit tests cover every detector rule kind plus dedup/inbox behavior"
+    code:
+      - .github/workbuddy/config.yaml
+      - cmd/coordinator.go
+      - cmd/serve.go
+      - internal/config/types.go
+      - internal/config/loader.go
+      - internal/eventlog/eventlog.go
+      - internal/operator/detector.go
+      - internal/auditapi/handler.go
+    tests:
+      - internal/operator/detector_test.go
+      - internal/auditapi/handler_test.go
+      - internal/config/loader_test.go
+    related_docs:
+      - docs/implemented/current-config-workflow-and-agents.md
+      - docs/implemented/pipeline-observability-and-diagnosis.md
+    deps: [REQ-001, REQ-017, REQ-019, REQ-037, REQ-039]

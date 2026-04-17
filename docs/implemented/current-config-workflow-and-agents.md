@@ -23,6 +23,7 @@
 - `environment`
 - `poll_interval`
 - `port`
+- `operator`
 - `notifications`
 
 代码：
@@ -31,7 +32,26 @@
 - `internal/config/types.go`
 - `internal/config/loader.go`
 
-仓库样例 `.github/workbuddy/config.yaml` 还包含 `notifications` 配置块（用于告警路由），并在该块内包含四个可选通道的开关与环境变量名。
+仓库样例 `.github/workbuddy/config.yaml` 还包含：
+
+- `operator` 配置块（自愈 detector 的启停、扫描周期、去重窗口、inbox 目录）
+- `notifications` 配置块（用于告警路由），并在该块内包含四个可选通道的开关与环境变量名
+
+## 当前 operator 配置
+
+`operator` 顶层字段用于控制 coordinator / serve 进程内的异常检测 goroutine：
+
+- `enabled`：总开关；`false` 时不启动 detector，也不会写 inbox
+- `check_interval`：扫描周期
+- `dedup_window`：相同 `(kind, stable-resource-id)` 的抑制窗口
+- `inbox_dir`：告警 JSON 落盘目录，默认 `~/.workbuddy/operator/inbox`
+
+代码：
+
+- `internal/config/types.go`
+- `internal/config/loader.go`
+- `internal/operator/detector.go`
+- `.github/workbuddy/config.yaml`
 
 ## 当前告警（notifications）配置
 
