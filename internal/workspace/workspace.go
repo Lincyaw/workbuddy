@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 )
@@ -36,12 +37,16 @@ func (m *Manager) Create(issueNum int, taskID string) (string, error) {
 	defer m.mu.Unlock()
 
 	branchName := fmt.Sprintf("workbuddy/issue-%d", issueNum)
-	wtPath := filepath.Join(m.baseDir, worktreeDir, fmt.Sprintf("issue-%d", issueNum))
+	wtPath := filepath.Join(m.baseDir, worktreeDir, worktreeDirName(issueNum, taskID))
 
 	// Remove any existing worktree for this issue to avoid conflicts.
 	if existing := m.findWorktreePath(branchName); existing != "" {
-		_ = exec.Command("git", "worktree", "remove", "--force", existing).Run()
-		_ = exec.Command("git", "worktree", "prune").Run()
+		removeCmd := exec.Command("git", "worktree", "remove", "--force", existing)
+		removeCmd.Dir = m.baseDir
+		_ = removeCmd.Run()
+		pruneCmd := exec.Command("git", "worktree", "prune")
+		pruneCmd.Dir = m.baseDir
+		_ = pruneCmd.Run()
 	}
 	_ = os.RemoveAll(wtPath)
 
@@ -74,6 +79,22 @@ func (m *Manager) Create(issueNum int, taskID string) (string, error) {
 			wtPath, branchName, baseRef, issueNum)
 	}
 	return wtPath, nil
+}
+
+var invalidWorktreeNameChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+
+func worktreeDirName(issueNum int, taskID string) string {
+	name := fmt.Sprintf("issue-%d", issueNum)
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return name
+	}
+	taskID = invalidWorktreeNameChars.ReplaceAllString(taskID, "-")
+	taskID = strings.Trim(taskID, "-.")
+	if taskID == "" {
+		return name
+	}
+	return name + "-" + taskID
 }
 
 // Remove cleans up a worktree and its associated branch.

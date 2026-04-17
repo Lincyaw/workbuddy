@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -20,6 +22,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/reporter"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/workerclient"
+	"github.com/Lincyaw/workbuddy/internal/workspace"
 	"github.com/spf13/cobra"
 )
 
@@ -540,5 +543,244 @@ func TestWorkerRecoversAfterKilledTaskWhenResultSubmitFails(t *testing.T) {
 	}
 	if pollCount.Load() < 2 {
 		t.Fatalf("expected worker to return to poll loop, got %d poll(s)", pollCount.Load())
+	}
+}
+
+func TestWorkerPrunesOrphanedWorktreesOnStartup(t *testing.T) {
+	setupFakeGHCLI(t)
+
+	repoDir := initWorkerTestRepo(t)
+	repo := "owner/test-repo"
+	configDir := setupTestConfigDir(t, repo)
+
+	orphanPath := filepath.Join(repoDir, ".workbuddy", "worktrees", "issue-99-orphan-task")
+	if err := os.MkdirAll(orphanPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkerTestFile(t, filepath.Join(orphanPath, "marker.txt"), "stale")
+
+	polled := make(chan struct{})
+	var pollOnce sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/workers/register":
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tasks/poll":
+			pollOnce.Do(func() {
+				close(polled)
+			})
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runWorkerWithOpts(&workerOpts{
+			coordinatorURL:    server.URL,
+			roleCSV:           "dev",
+			runtime:           config.RuntimeClaudeCode,
+			repo:              repo,
+			configDir:         configDir,
+			workDir:           repoDir,
+			dbPath:            filepath.Join(t.TempDir(), "worker.db"),
+			sessionsDir:       filepath.Join(t.TempDir(), "sessions"),
+			pollTimeout:       20 * time.Millisecond,
+			heartbeatInterval: 20 * time.Millisecond,
+			shutdownTimeout:   100 * time.Millisecond,
+		}, launcher.NewLauncher(), &mockGHReader{}, ctx)
+	}()
+
+	select {
+	case <-polled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("worker did not reach poll loop")
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("worker: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not exit")
+	}
+
+	if _, err := os.Stat(orphanPath); !os.IsNotExist(err) {
+		t.Fatalf("expected orphaned worktree %q to be pruned, stat err = %v", orphanPath, err)
+	}
+}
+
+func TestExecuteRemoteTaskUsesWorktreeAndCleansItUp(t *testing.T) {
+	repoDir := initWorkerTestRepo(t)
+	initialBranch := gitOutput(t, repoDir, "branch", "--show-current")
+	localStore, err := store.NewStore(filepath.Join(t.TempDir(), "worker.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = localStore.Close() }()
+
+	var heartbeatCount atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/heartbeat"):
+			heartbeatCount.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/result"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"completed"}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	cfg := &config.FullConfig{
+		Agents: map[string]*config.AgentConfig{
+			"dev-agent": {
+				Name:    "dev-agent",
+				Role:    "dev",
+				Runtime: config.RuntimeClaudeCode,
+				Command: "echo hello",
+			},
+		},
+	}
+	task := &workerclient.Task{
+		TaskID:    "task-remote-12",
+		Repo:      "owner/test-repo",
+		IssueNum:  12,
+		AgentName: "dev-agent",
+	}
+	reader := &mockGHReader{
+		issues: []poller.Issue{
+			{Number: 12, Body: "body", Labels: []string{"workbuddy", "status:developing"}},
+		},
+		labelSnapshots: [][]string{
+			{"workbuddy", "status:done"},
+		},
+	}
+
+	var runtimeWorkDir string
+	var runtimeBranch string
+	var runtimeRepoRoot string
+	markerName := "task-marker.txt"
+	mockRT := &mockRuntime{name: config.RuntimeClaudeCode, resultFn: func(_ context.Context, _ *config.AgentConfig, task *launcher.TaskContext) (*launcher.Result, error) {
+		runtimeWorkDir = task.WorkDir
+		runtimeRepoRoot = task.RepoRoot
+		runtimeBranch = gitOutput(t, task.WorkDir, "branch", "--show-current")
+		writeWorkerTestFile(t, filepath.Join(task.WorkDir, markerName), "worktree-only")
+		time.Sleep(50 * time.Millisecond)
+		return &launcher.Result{
+			ExitCode:    0,
+			LastMessage: "done",
+			Meta:        map[string]string{},
+		}, nil
+	}}
+	lnch := launcher.NewLauncher()
+	lnch.Register(mockRT, config.RuntimeClaudeCode)
+
+	rep := reporter.NewReporter(&mockCommentWriter{})
+	auditor := audit.NewAuditor(localStore, filepath.Join(t.TempDir(), "sessions"))
+	client := workerclient.New(server.URL, "", server.Client())
+	wsMgr := workspace.NewManager(repoDir)
+
+	if err := executeRemoteTask(
+		context.Background(),
+		task,
+		client,
+		cfg,
+		lnch,
+		auditor,
+		rep,
+		reader,
+		repoDir,
+		filepath.Join(t.TempDir(), "sessions"),
+		"worker-1",
+		"",
+		20*time.Millisecond,
+		200*time.Millisecond,
+		wsMgr,
+	); err != nil {
+		t.Fatalf("executeRemoteTask: %v", err)
+	}
+
+	wantWorktree := filepath.Join(repoDir, ".workbuddy", "worktrees", "issue-12-task-remote-12")
+	if runtimeWorkDir != wantWorktree {
+		t.Fatalf("runtime workdir = %q, want %q", runtimeWorkDir, wantWorktree)
+	}
+	if runtimeRepoRoot != wantWorktree {
+		t.Fatalf("runtime repo root = %q, want %q", runtimeRepoRoot, wantWorktree)
+	}
+	if runtimeBranch != "workbuddy/issue-12" {
+		t.Fatalf("runtime branch = %q, want %q", runtimeBranch, "workbuddy/issue-12")
+	}
+	if got := gitOutput(t, repoDir, "branch", "--show-current"); got != initialBranch {
+		t.Fatalf("repo branch changed: got %q want %q", got, initialBranch)
+	}
+	if _, err := os.Stat(wantWorktree); !os.IsNotExist(err) {
+		t.Fatalf("expected worktree cleanup for %q, stat err = %v", wantWorktree, err)
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, markerName)); !os.IsNotExist(err) {
+		t.Fatalf("marker leaked into repo root: %v", err)
+	}
+	if heartbeatCount.Load() == 0 {
+		t.Fatal("expected at least one heartbeat while task ran")
+	}
+}
+
+func initWorkerTestRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s: %v", args, out, err)
+		}
+	}
+
+	writeWorkerTestFile(t, filepath.Join(dir, "README.md"), "test repo")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	return dir
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %s: %v", args, out, err)
+	}
+}
+
+func gitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %s: %v", args, out, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func writeWorkerTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

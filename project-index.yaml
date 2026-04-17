@@ -994,10 +994,12 @@ requirements:
     code:
       - cmd/worker.go
       - cmd/coordinator.go
+      - internal/workspace/workspace.go
       - internal/workerclient/client.go
       - internal/store/store.go
     tests:
       - cmd/worker_test.go
+      - internal/workspace/workspace_test.go
       - internal/workerclient/client_test.go
     deps: [REQ-026, REQ-006]
 

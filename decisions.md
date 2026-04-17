@@ -17,3 +17,8 @@
 - `[L2]` REQ-007 now requests `return_run_details=true` on workflow dispatch and polls the returned run ID directly, removing the branch/time-window heuristic that could attach concurrent workflow_dispatch runs to the wrong remote session.
 - `[L2]` Remote runner success now requires an ingested session artifact (`events-v1.jsonl` or `codex-exec.jsonl`); flattened Actions logs remain diagnostic output only and are no longer accepted as a fake session capture.
 - `[L2]` `workbuddy recover --kill-zombies` only targets `codex` and `workbuddy serve` processes whose `/proc/<pid>/cwd` is inside the current repo's shared git root, which keeps recovery scoped to this repo instead of killing unrelated sessions on the host.
+
+## 2026-04-17
+
+- `[L2]` Worker worktrees keep the branch name stable per issue (`workbuddy/issue-N`) but now use task-scoped directory names, which preserves agent prompt continuity while preventing path reuse collisions across retries or worker restarts.
+- `[L2]` `workspace.Manager.Create` now roots its best-effort `git worktree remove/prune` cleanup in the repo base directory, because relying on the process CWD broke same-issue worktree replacement outside repo-root call sites.

@@ -125,3 +125,34 @@ func TestMultipleWorktrees(t *testing.T) {
 	_ = mgr.Remove(wt2)
 }
 
+func TestCreateUsesTaskScopedPathForSameIssue(t *testing.T) {
+	repoDir := initTestRepo(t)
+	mgr := NewManager(repoDir)
+
+	wt1, err := mgr.Create(7, "task-alpha")
+	if err != nil {
+		t.Fatalf("Create wt1: %v", err)
+	}
+	wt2, err := mgr.Create(7, "task-beta")
+	if err != nil {
+		t.Fatalf("Create wt2: %v", err)
+	}
+
+	if wt1 == wt2 {
+		t.Fatalf("expected task-scoped worktree paths, got identical path %q", wt1)
+	}
+	if !strings.HasSuffix(wt1, filepath.Join(".workbuddy", "worktrees", "issue-7-task-alpha")) {
+		t.Fatalf("wt1 path = %q", wt1)
+	}
+	if !strings.HasSuffix(wt2, filepath.Join(".workbuddy", "worktrees", "issue-7-task-beta")) {
+		t.Fatalf("wt2 path = %q", wt2)
+	}
+	if _, err := os.Stat(wt1); !os.IsNotExist(err) {
+		t.Fatalf("expected previous worktree %q to be removed, stat err = %v", wt1, err)
+	}
+	if _, err := os.Stat(wt2); err != nil {
+		t.Fatalf("expected replacement worktree %q to exist: %v", wt2, err)
+	}
+
+	_ = mgr.Remove(wt2)
+}
