@@ -9,6 +9,7 @@
 #   INSTALL_DIR         - binary install path (default: ~/.local/bin)
 #   SKIP_PLUGIN         - set to 1 to skip Claude Code plugin install
 #   SKIP_BINARY         - set to 1 to skip binary install (plugin only)
+#   GITHUB_TOKEN        - GitHub token for API calls (avoids rate limits)
 
 set -euo pipefail
 
@@ -17,12 +18,28 @@ VERSION="${WORKBUDDY_VERSION:-latest}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 SKIP_PLUGIN="${SKIP_PLUGIN:-0}"
 SKIP_BINARY="${SKIP_BINARY:-0}"
+TMPDIR_ROOT=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_ROOT"' EXIT
 
 # --- helpers ---------------------------------------------------------------
 
 log()  { printf '\033[1;32m%s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m%s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[1;31mError: %s\033[0m\n' "$*" >&2; exit 1; }
+
+# Build auth header array for curl. Tries GITHUB_TOKEN env, then gh CLI token.
+auth_header=()
+setup_auth() {
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    auth_header=(-H "Authorization: token ${GITHUB_TOKEN}")
+  elif command -v gh >/dev/null 2>&1; then
+    local token
+    token=$(gh auth token 2>/dev/null || true)
+    if [ -n "$token" ]; then
+      auth_header=(-H "Authorization: token ${token}")
+    fi
+  fi
+}
 
 need() {
   command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not found"
@@ -47,7 +64,7 @@ detect_arch() {
 resolve_version() {
   if [ "$VERSION" = "latest" ]; then
     need curl
-    VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+    VERSION=$(curl -fsSL "${auth_header[@]}" "https://api.github.com/repos/${REPO}/releases/latest" \
       | grep '"tag_name"' | head -1 | sed 's/.*"v\(.*\)".*/\1/')
     [ -n "$VERSION" ] || die "Could not determine latest version"
   else
@@ -66,24 +83,23 @@ install_binary() {
   need curl
   need tar
 
-  local os arch archive url tmpdir
+  local os arch archive url dl_dir
   os=$(detect_os)
   arch=$(detect_arch)
   archive="workbuddy_${VERSION}_${os}_${arch}.tar.gz"
   url="https://github.com/${REPO}/releases/download/v${VERSION}/${archive}"
+  dl_dir="${TMPDIR_ROOT}/binary"
+  mkdir -p "$dl_dir"
 
   log "Downloading workbuddy v${VERSION} (${os}/${arch})..."
 
-  tmpdir=$(mktemp -d)
-  trap 'rm -rf "$tmpdir"' EXIT
-
-  curl -fsSL "$url" -o "${tmpdir}/${archive}" \
+  curl -fsSL "${auth_header[@]}" "$url" -o "${dl_dir}/${archive}" \
     || die "Download failed. Check that v${VERSION} exists at ${url}"
 
-  tar -xzf "${tmpdir}/${archive}" -C "$tmpdir"
+  tar -xzf "${dl_dir}/${archive}" -C "$dl_dir"
 
   mkdir -p "$INSTALL_DIR"
-  mv "${tmpdir}/workbuddy" "${INSTALL_DIR}/workbuddy"
+  mv "${dl_dir}/workbuddy" "${INSTALL_DIR}/workbuddy"
   chmod +x "${INSTALL_DIR}/workbuddy"
 
   log "Installed workbuddy to ${INSTALL_DIR}/workbuddy"
@@ -109,25 +125,23 @@ install_plugin() {
   need git
 
   local plugin_dir="$HOME/.claude/plugins/workbuddy"
-  local tmpdir
-  tmpdir=$(mktemp -d)
-  trap 'rm -rf "$tmpdir"' EXIT
+  local clone_dir="${TMPDIR_ROOT}/plugin"
 
   log "Installing Claude Code plugin..."
 
   git clone --depth 1 --filter=blob:none --sparse \
-    "https://github.com/${REPO}.git" "$tmpdir/repo" 2>/dev/null
+    "https://github.com/${REPO}.git" "$clone_dir" 2>/dev/null
 
   (
-    cd "$tmpdir/repo"
+    cd "$clone_dir"
     git sparse-checkout set .claude/plugins/workbuddy 2>/dev/null
   )
 
   # Copy plugin files
-  if [ -d "$tmpdir/repo/.claude/plugins/workbuddy" ]; then
+  if [ -d "$clone_dir/.claude/plugins/workbuddy" ]; then
     mkdir -p "$plugin_dir"
     rm -rf "${plugin_dir:?}/"*
-    cp -R "$tmpdir/repo/.claude/plugins/workbuddy/." "$plugin_dir/"
+    cp -R "$clone_dir/.claude/plugins/workbuddy/." "$plugin_dir/"
     log "Installed Claude Code plugin to ${plugin_dir}"
   else
     warn "Plugin files not found in repo, skipping plugin install"
@@ -161,6 +175,7 @@ main() {
   log "==================="
   echo
 
+  setup_auth
   resolve_version
   log "Version: v${VERSION}"
   echo
