@@ -50,6 +50,11 @@ type codexSession struct {
 	cachedResult *Result
 }
 
+var (
+	codexTaskCompleteGracePeriod = time.Minute
+	codexTaskCompleteKillDelay   = 10 * time.Second
+)
+
 func newCodexSession(agent *config.AgentConfig, task *TaskContext, prompt string) *codexSession {
 	if task != nil && task.SessionHandle() != nil {
 		return &codexSession{
@@ -145,6 +150,37 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 	var stderrBuf bytes.Buffer
 	var scanErr error
 	var wg sync.WaitGroup
+	postCompleteCh := make(chan struct{}, 1)
+
+	go func() {
+		select {
+		case <-execCtx.Done():
+			return
+		case <-postCompleteCh:
+		}
+
+		timer := time.NewTimer(codexTaskCompleteGracePeriod)
+		defer timer.Stop()
+		select {
+		case <-execCtx.Done():
+			return
+		case <-timer.C:
+		}
+
+		if cmd.Process == nil {
+			return
+		}
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+
+		killTimer := time.NewTimer(codexTaskCompleteKillDelay)
+		defer killTimer.Stop()
+		select {
+		case <-execCtx.Done():
+			return
+		case <-killTimer.C:
+		}
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}()
 
 	wg.Add(1)
 	go func() {
@@ -170,6 +206,12 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 					case <-ctx.Done():
 						return
 					}
+				}
+			}
+			if mapper.taskCompleteObserved() {
+				select {
+				case postCompleteCh <- struct{}{}:
+				default:
 				}
 			}
 		}
@@ -469,7 +511,10 @@ func (m *codexEventMapper) Map(line []byte, seq *uint64) []launcherevents.Event 
 		payload := launcherevents.TurnCompletedPayload{TurnID: m.effectiveTurnID(), Status: status}
 		m.turnCompleted = &payload
 		m.turnCompletedRaw = cloneRaw(line)
-		return nil
+		return []launcherevents.Event{m.makeEvent(seq, launcherevents.KindTaskComplete, launcherevents.TaskCompletePayload{
+			TurnID: m.effectiveTurnID(),
+			Status: status,
+		}, line)}
 
 	case "error":
 		code := rawString(raw, "code")
@@ -482,6 +527,10 @@ func (m *codexEventMapper) Map(line []byte, seq *uint64) []launcherevents.Event 
 	default:
 		return []launcherevents.Event{m.makeEvent(seq, launcherevents.KindLog, launcherevents.LogPayload{Stream: "stdout", Line: string(line)}, line)}
 	}
+}
+
+func (m *codexEventMapper) taskCompleteObserved() bool {
+	return m.turnCompleteSaw
 }
 
 func (m *codexEventMapper) makeEvent(seq *uint64, kind launcherevents.EventKind, payload any, raw []byte) launcherevents.Event {

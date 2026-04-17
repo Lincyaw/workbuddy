@@ -137,6 +137,26 @@ func TestWatch_DefaultConfig(t *testing.T) {
 	// Just ensure it doesn't panic or hang.
 }
 
+func TestIsStale_UsesShorterGraceAfterCompletion(t *testing.T) {
+	tracker := NewEventTracker()
+	tracker.RecordCompletion()
+
+	cfg := Config{
+		IdleThreshold:        10 * time.Minute,
+		CompletedGracePeriod: 50 * time.Millisecond,
+	}
+
+	time.Sleep(20 * time.Millisecond)
+	if isStale(cfg, tracker) {
+		t.Fatal("expected not stale before completion grace elapses")
+	}
+
+	time.Sleep(40 * time.Millisecond)
+	if !isStale(cfg, tracker) {
+		t.Fatal("expected stale after completion grace elapses")
+	}
+}
+
 func TestEventTracker_RecordActivity(t *testing.T) {
 	tracker := NewEventTracker()
 	before := time.Now()
@@ -161,6 +181,18 @@ func TestEventTracker_HasChildProcesses(t *testing.T) {
 	}
 	if has {
 		t.Fatal("EventTracker should always report no children")
+	}
+}
+
+func TestEventTracker_CompletionObservedAt(t *testing.T) {
+	tracker := NewEventTracker()
+	if _, ok := tracker.CompletionObservedAt(); ok {
+		t.Fatal("expected no completion timestamp before RecordCompletion")
+	}
+
+	tracker.RecordCompletion()
+	if at, ok := tracker.CompletionObservedAt(); !ok || at.IsZero() {
+		t.Fatalf("expected completion timestamp, got at=%v ok=%v", at, ok)
 	}
 }
 

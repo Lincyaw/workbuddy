@@ -137,6 +137,36 @@ func newParallelWorkflow(join string) *config.WorkflowConfig {
 	}
 }
 
+func TestMarkAgentCompletedUsesCanonicalTaskAgentName(t *testing.T) {
+	sm, rec, _ := newTestSM(t)
+	repo := "test/repo"
+	issueNum := 99
+
+	if err := sm.store.InsertTask(store.TaskRecord{
+		ID:        "task-review-1",
+		Repo:      repo,
+		IssueNum:  issueNum,
+		AgentName: "review-agent",
+		Status:    store.TaskStatusRunning,
+	}); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+
+	sm.MarkAgentCompleted(repo, issueNum, "task-review-1", "dev-agent", 1, []string{"workbuddy", "status:reviewing"})
+
+	completed := rec.find(eventlog.TypeCompleted)
+	if len(completed) != 1 {
+		t.Fatalf("completed events = %d, want 1", len(completed))
+	}
+	payload, ok := completed[0].Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T", completed[0].Payload)
+	}
+	if got := payload["agent_name"]; got != "review-agent" {
+		t.Fatalf("agent_name = %v, want review-agent", got)
+	}
+}
+
 // Test 1: Normal transition (developing → reviewing)
 func TestNormalTransition(t *testing.T) {
 	sm, rec, dispatch := newTestSM(t)

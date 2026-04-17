@@ -423,8 +423,9 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 		watchdogCtx, watchdogCancel := context.WithCancel(taskCtx)
 		defer watchdogCancel()
 		go staleinference.Watch(watchdogCtx, staleinference.Config{
-			IdleThreshold: siCfg.IdleThreshold,
-			CheckInterval: siCfg.CheckInterval,
+			IdleThreshold:        siCfg.IdleThreshold,
+			CheckInterval:        siCfg.CheckInterval,
+			CompletedGracePeriod: siCfg.CompletedGracePeriod,
 		}, tracker, taskCancel)
 
 		proxyCh := make(chan launcherevents.Event, 64)
@@ -432,7 +433,11 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 		go func() {
 			defer close(proxyDone)
 			for evt := range proxyCh {
-				tracker.RecordActivity()
+				if evt.Kind == launcherevents.KindTaskComplete {
+					tracker.RecordCompletion()
+				} else {
+					tracker.RecordActivity()
+				}
 				select {
 				case eventsCh <- evt:
 				case <-taskCtx.Done():

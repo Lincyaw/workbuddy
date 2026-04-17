@@ -11,6 +11,7 @@ worker:
     enabled: true
     idle_threshold: 30m
     check_interval: 30s
+    completed_grace_period: 60s
 
 operator:
   enabled: true
