@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install workbuddy binary and Claude Code plugin.
+# Install the workbuddy binary from GitHub Releases.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/Lincyaw/workbuddy/main/install.sh | bash
@@ -7,17 +7,17 @@
 # Options (env vars):
 #   WORKBUDDY_VERSION   - version to install (default: latest)
 #   INSTALL_DIR         - binary install path (default: ~/.local/bin)
-#   SKIP_PLUGIN         - set to 1 to skip Claude Code plugin install
-#   SKIP_BINARY         - set to 1 to skip binary install (plugin only)
 #   GITHUB_TOKEN        - GitHub token for API calls (avoids rate limits)
+#
+# For the Claude Code plugin, use the native marketplace instead:
+#   /plugin marketplace add Lincyaw/workbuddy
+#   /plugin install workbuddy
 
 set -euo pipefail
 
 REPO="Lincyaw/workbuddy"
 VERSION="${WORKBUDDY_VERSION:-latest}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
-SKIP_PLUGIN="${SKIP_PLUGIN:-0}"
-SKIP_BINARY="${SKIP_BINARY:-0}"
 TMPDIR_ROOT=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_ROOT"' EXIT
 
@@ -72,23 +72,26 @@ resolve_version() {
   fi
 }
 
-# --- binary install --------------------------------------------------------
+# --- main ------------------------------------------------------------------
 
-install_binary() {
-  if [ "$SKIP_BINARY" = "1" ]; then
-    log "Skipping binary install (SKIP_BINARY=1)"
-    return
-  fi
+main() {
+  log "workbuddy installer"
+  log "==================="
+  echo
 
   need curl
   need tar
+
+  setup_auth
+  resolve_version
+  log "Version: v${VERSION}"
 
   local os arch archive url dl_dir
   os=$(detect_os)
   arch=$(detect_arch)
   archive="workbuddy_${VERSION}_${os}_${arch}.tar.gz"
   url="https://github.com/${REPO}/releases/download/v${VERSION}/${archive}"
-  dl_dir="${TMPDIR_ROOT}/binary"
+  dl_dir="${TMPDIR_ROOT}/dl"
   mkdir -p "$dl_dir"
 
   log "Downloading workbuddy v${VERSION} (${os}/${arch})..."
@@ -112,81 +115,10 @@ install_binary() {
       warn "Add it with:  export PATH=\"${INSTALL_DIR}:\$PATH\""
       ;;
   esac
-}
 
-# --- plugin install --------------------------------------------------------
-
-install_plugin() {
-  if [ "$SKIP_PLUGIN" = "1" ]; then
-    log "Skipping plugin install (SKIP_PLUGIN=1)"
-    return
-  fi
-
-  need git
-
-  local plugin_dir="$HOME/.claude/plugins/workbuddy"
-  local clone_dir="${TMPDIR_ROOT}/plugin"
-
-  log "Installing Claude Code plugin..."
-
-  git clone --depth 1 --filter=blob:none --sparse \
-    "https://github.com/${REPO}.git" "$clone_dir" 2>/dev/null
-
-  (
-    cd "$clone_dir"
-    git sparse-checkout set .claude/plugins/workbuddy 2>/dev/null
-  )
-
-  # Copy plugin files
-  if [ -d "$clone_dir/.claude/plugins/workbuddy" ]; then
-    mkdir -p "$plugin_dir"
-    rm -rf "${plugin_dir:?}/"*
-    cp -R "$clone_dir/.claude/plugins/workbuddy/." "$plugin_dir/"
-    log "Installed Claude Code plugin to ${plugin_dir}"
-  else
-    warn "Plugin files not found in repo, skipping plugin install"
-    return
-  fi
-
-  # Write marketplace entry for local discovery
-  local marketplace_dir="$HOME/.claude/plugins/workbuddy/.claude-plugin"
-  mkdir -p "$marketplace_dir"
-  cat > "$marketplace_dir/marketplace.json" <<'MKJSON'
-{
-  "name": "workbuddy",
-  "owner": { "name": "lincyaw" },
-  "plugins": [
-    {
-      "name": "workbuddy",
-      "source": "./",
-      "description": "Operate workbuddy — GitHub Issue-driven agent orchestration platform. Covers repo setup, deployment, issue creation, pipeline monitoring, and troubleshooting."
-    }
-  ]
-}
-MKJSON
-
-  log "Plugin marketplace entry written"
-}
-
-# --- main ------------------------------------------------------------------
-
-main() {
-  log "workbuddy installer"
-  log "==================="
   echo
-
-  setup_auth
-  resolve_version
-  log "Version: v${VERSION}"
-  echo
-
-  install_binary
-  echo
-
-  install_plugin
-  echo
-
   log "Done! Run 'workbuddy version' to verify."
+  log "For the Claude Code plugin: /plugin marketplace add Lincyaw/workbuddy"
 }
 
 main
