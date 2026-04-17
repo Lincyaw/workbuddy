@@ -616,13 +616,16 @@ requirements:
       - "AC-011-7: go build、go vet、go test -count=1 全绿"
     code:
       - cmd/serve.go
+      - cmd/coordinator.go
       - internal/auditapi/handler.go
+      - internal/audit/http.go
       - internal/webui/handler.go
       - docs/implemented/audit-http-server.md
       - docs/implemented/index.md
       - docs/index.md
     tests:
       - cmd/serve_test.go
+      - cmd/coordinator_audit_test.go
       - internal/auditapi/handler_test.go
       - internal/webui/handler_test.go
     deps: [REQ-009, REQ-024, REQ-029]
@@ -1126,10 +1129,12 @@ requirements:
       - "AC-033-7: 单元测试：有任务、空队列、--json 格式、repo 过滤、status 过滤 5 种场景"
     code:
       - cmd/status.go
+      - cmd/coordinator.go
       - internal/audit/http.go
       - internal/store/store.go
       - internal/store/types.go
     tests:
+      - cmd/coordinator_audit_test.go
       - cmd/status_test.go
       - internal/store/store_test.go
     deps: [REQ-019, REQ-024]
@@ -1180,8 +1185,10 @@ requirements:
       - "AC-035-7: 单元测试：有事件、空、--since 过滤、--type 过滤、--json 格式 5 种场景"
     code:
       - cmd/status.go
+      - cmd/coordinator.go
       - internal/audit/http.go
     tests:
+      - cmd/coordinator_audit_test.go
       - cmd/status_test.go
     deps: [REQ-019, REQ-009]
 
