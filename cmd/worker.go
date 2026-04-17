@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -30,6 +31,7 @@ const (
 	defaultWorkerPollTimeout      = 30 * time.Second
 	defaultWorkerHeartbeat        = 15 * time.Second
 	defaultWorkerShutdownDeadline = 5 * time.Second
+	defaultWorkerTaskAPITimeout   = 5 * time.Second
 )
 
 type workerOpts struct {
@@ -263,13 +265,22 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 	defer close(releaseDone)
 
 	heartbeatStop := make(chan struct{})
+	heartbeatDone := make(chan struct{})
+	var heartbeatStopOnce sync.Once
+	stopHeartbeat := func() {
+		heartbeatStopOnce.Do(func() {
+			close(heartbeatStop)
+		})
+		<-heartbeatDone
+	}
 	go func() {
+		defer close(heartbeatDone)
 		ticker := time.NewTicker(heartbeatInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				hbCtx, cancel := context.WithTimeout(context.Background(), heartbeatInterval)
+				hbCtx, cancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(heartbeatInterval))
 				err := client.Heartbeat(hbCtx, task.TaskID, workerclient.HeartbeatRequest{WorkerID: workerID})
 				cancel()
 				if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, workerclient.ErrUnauthorized) {
@@ -282,7 +293,7 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 			}
 		}
 	}()
-	defer close(heartbeatStop)
+	defer stopHeartbeat()
 
 	launchCtx := buildRemoteTaskContext(task, reader, workDir)
 	sessionID := launchCtx.Session.ID
@@ -303,6 +314,7 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 	if waitErr := waitEvents(); waitErr != nil {
 		log.Printf("[worker] event capture failed: %v", waitErr)
 	}
+	stopHeartbeat()
 	if result == nil {
 		result = &launcher.Result{
 			ExitCode: 1,
@@ -349,17 +361,27 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 	if result.Meta["timeout"] == "true" {
 		status = store.TaskStatusTimeout
 	}
-	if err := client.SubmitResult(taskCtx, task.TaskID, workerclient.ResultRequest{
+	submitCtx, cancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(shutdownTimeout))
+	defer cancel()
+	if err := client.SubmitResult(submitCtx, task.TaskID, workerclient.ResultRequest{
 		WorkerID:      workerID,
 		Status:        status,
 		CurrentLabels: currentLabels,
 	}); err != nil {
-		return fmt.Errorf("worker: submit result: %w", err)
+		log.Printf("[worker] submit result failed for task %s: %v", task.TaskID, err)
+		return nil
 	}
 	if err := rep.Report(taskCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, workerID, 0, workflowMaxRetries(cfg, task.Workflow), ""); err != nil {
 		log.Printf("[worker] report failed: %v", err)
 	}
 	return nil
+}
+
+func boundedWorkerTaskAPITimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 || timeout > defaultWorkerTaskAPITimeout {
+		return defaultWorkerTaskAPITimeout
+	}
+	return timeout
 }
 
 func buildRemoteTaskContext(task *workerclient.Task, reader workerIssueReader, workDir string) *launcher.TaskContext {
