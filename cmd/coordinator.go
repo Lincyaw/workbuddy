@@ -28,6 +28,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
 	"github.com/Lincyaw/workbuddy/internal/router"
+	"github.com/Lincyaw/workbuddy/internal/security"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/tasknotify"
 	"github.com/spf13/cobra"
@@ -38,10 +39,12 @@ type coordinatorOpts struct {
 	listenAddr   string
 	loopbackOnly bool
 	// Fields used by the full coordinator mode (runCoordinatorWithOpts).
-	port         int
-	pollInterval time.Duration
-	configDir    string
-	auth         bool
+	port              int
+	pollInterval      time.Duration
+	configDir         string
+	auth              bool
+	trustedAuthors    string
+	trustedAuthorsSet bool
 }
 
 type tokenCreateOpts struct {
@@ -100,6 +103,7 @@ func init() {
 	coordinatorCmd.Flags().Duration("poll-interval", defaultPollInterval, "GitHub poll interval for managed repos")
 	coordinatorCmd.Flags().Int("port", 8081, "Coordinator API port")
 	coordinatorCmd.Flags().Bool("auth", false, "Require WORKBUDDY_AUTH_TOKEN for worker and repo registration APIs")
+	coordinatorCmd.Flags().String("trusted-authors", "", "Comma-separated GitHub logins allowed to trigger agent work")
 
 	coordinatorTokenCreateCmd.Flags().String("db", ".workbuddy/workbuddy.db", "SQLite database path")
 	coordinatorTokenCreateCmd.Flags().String("worker-id", "", "Worker ID")
@@ -139,6 +143,8 @@ func parseCoordinatorFlags(cmd *cobra.Command) (*coordinatorOpts, error) {
 	pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
 	port, _ := cmd.Flags().GetInt("port")
 	authEnabled, _ := cmd.Flags().GetBool("auth")
+	trustedAuthors, _ := cmd.Flags().GetString("trusted-authors")
+	trustedAuthorsSet := cmd.Flags().Changed("trusted-authors")
 	if strings.TrimSpace(listenAddr) == "" {
 		return nil, fmt.Errorf("coordinator: --listen is required")
 	}
@@ -146,13 +152,15 @@ func parseCoordinatorFlags(cmd *cobra.Command) (*coordinatorOpts, error) {
 		return nil, fmt.Errorf("coordinator: --loopback-only requires a loopback --listen address, got %q", listenAddr)
 	}
 	return &coordinatorOpts{
-		dbPath:       dbPath,
-		listenAddr:   listenAddr,
-		loopbackOnly: loopbackOnly,
-		port:         port,
-		pollInterval: pollInterval,
-		configDir:    strings.TrimSpace(configDir),
-		auth:         authEnabled,
+		dbPath:            dbPath,
+		listenAddr:        listenAddr,
+		loopbackOnly:      loopbackOnly,
+		port:              port,
+		pollInterval:      pollInterval,
+		configDir:         strings.TrimSpace(configDir),
+		auth:              authEnabled,
+		trustedAuthors:    trustedAuthors,
+		trustedAuthorsSet: trustedAuthorsSet,
 	}, nil
 }
 
@@ -369,6 +377,17 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	if ghReader == nil {
 		ghReader = &GHCLIReader{}
 	}
+	securityPath := filepath.Join(mustRepoRoot(), ".workbuddy", "security.yaml")
+	secRuntime, watchSecurityFile, err := security.NewRuntime(security.Options{
+		FlagValue: opts.trustedAuthors,
+		FlagSet:   opts.trustedAuthorsSet,
+		EnvValue:  os.Getenv("WORKBUDDY_TRUSTED_AUTHORS"),
+		FilePath:  securityPath,
+	})
+	if err != nil {
+		return fmt.Errorf("coordinator: load security config: %w", err)
+	}
+	logSecurityPosture(secRuntime.Current())
 
 	evlog := eventlog.NewEventLogger(st)
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
@@ -429,9 +448,14 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 		registry:    reg,
 		eventlog:    evlog,
 		taskHub:     taskHub,
-		pollers:     newPollerManager(ctx, st, reg, evlog, alertBus, ghReader, rep, mustRepoRoot(), pollInterval),
+		pollers:     newPollerManager(ctx, st, reg, evlog, alertBus, ghReader, rep, mustRepoRoot(), pollInterval, secRuntime),
 		authEnabled: opts.auth,
 		authToken:   authToken,
+	}
+	if watchSecurityFile {
+		if err := secRuntime.StartFileWatcher(ctx); err != nil {
+			return fmt.Errorf("coordinator: start security watcher: %w", err)
+		}
 	}
 	if err := api.pollers.loadExisting(); err != nil {
 		return fmt.Errorf("coordinator: load existing registrations: %w", err)

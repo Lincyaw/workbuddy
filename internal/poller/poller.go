@@ -49,6 +49,7 @@ type Issue struct {
 	State  string   `json:"state"`
 	Labels []string `json:"labels"`
 	Body   string   `json:"body"`
+	Author string   `json:"author"`
 }
 
 // PR represents a GitHub pull request as returned by gh pr list --json.
@@ -75,6 +76,7 @@ type ChangeEvent struct {
 	IssueNum int
 	Labels   []string
 	Detail   string // e.g., which label was added
+	Author   string
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +291,7 @@ func (p *Poller) diffIssue(iss Issue) []ChangeEvent {
 			IssueNum: iss.Number,
 			Labels:   iss.Labels,
 			Detail:   iss.Title,
+			Author:   iss.Author,
 		})
 	} else {
 		// Compare labels.
@@ -301,6 +304,7 @@ func (p *Poller) diffIssue(iss Issue) []ChangeEvent {
 				IssueNum: iss.Number,
 				Labels:   iss.Labels,
 				Detail:   l,
+				Author:   iss.Author,
 			})
 		}
 		for _, l := range removed {
@@ -310,6 +314,7 @@ func (p *Poller) diffIssue(iss Issue) []ChangeEvent {
 				IssueNum: iss.Number,
 				Labels:   iss.Labels,
 				Detail:   l,
+				Author:   iss.Author,
 			})
 		}
 	}
