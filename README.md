@@ -2,6 +2,10 @@
 
 GitHub Issue-driven agent orchestration platform. Agents pick up Issues, do the work, and change labels to hand off to the next agent — fully automated.
 
+<p align="center">
+  <img src="docs/architecture.svg" alt="Workbuddy Architecture" width="800"/>
+</p>
+
 ## Install
 
 ### Binary
