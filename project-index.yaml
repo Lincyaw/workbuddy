@@ -1720,7 +1720,7 @@ requirements:
     acceptance_criteria:
       - "AC-053-1: Reporter counts formatted body bytes before calling gh issue comment"
       - "AC-053-2: If len(body) <= 60000, the comment is posted verbatim"
-      - "AC-053-3: If len(body) > 60000 and a workDir is available, the full body is written to .workbuddy/reports/issue-{N}-{agent}-{timestamp}.md inside the working tree"
+      - "AC-053-3: If len(body) > 60000 and a workDir is available, the full body is written to a tracked path inside the working tree (currently scripts/review-reports/issue-{N}-{agent}-{timestamp}.md)"
       - "AC-053-4: The overflow file is git-added, committed, and pushed to the current branch"
       - "AC-053-5: The posted comment is under 60000 bytes, contains a truncation warning, and links to the committed artifact via a GitHub blob URL"
       - "AC-053-6: If workDir is empty or not a git repository, the reporter still posts a truncated comment and records the failure reason"

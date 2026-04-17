@@ -21,6 +21,11 @@ import (
 // +1, -1, laugh, confused, heart, hooray, rocket, eyes.)
 const ReactionConfused = "confused"
 
+// overflowReportsDir is a tracked path in the repo where oversized reports
+// are committed. We intentionally avoid .workbuddy/ because that directory is
+// gitignored for local runtime state.
+const overflowReportsDir = "scripts/review-reports"
+
 // maxCommentBodyBytes is the maximum body size the reporter will post.
 // GitHub's addComment API rejects bodies > 65536 characters; we leave
 // ~5KB headroom for the reporter's own framing.
@@ -328,7 +333,7 @@ func (r *Reporter) commitOverflowArtifact(ctx context.Context, workDir, repo str
 		return "", fmt.Errorf("determine branch: %w", err)
 	}
 
-	reportsDir := filepath.Join(workDir, ".workbuddy", "reports")
+	reportsDir := filepath.Join(workDir, overflowReportsDir)
 	if err := os.MkdirAll(reportsDir, 0755); err != nil {
 		return "", fmt.Errorf("mkdir: %w", err)
 	}
@@ -358,7 +363,7 @@ func (r *Reporter) commitOverflowArtifact(ctx context.Context, workDir, repo str
 		return "", fmt.Errorf("git push: %w", err)
 	}
 
-	relPath := filepath.Join(".workbuddy", "reports", filename)
+	relPath := filepath.Join(overflowReportsDir, filename)
 	relPath = strings.ReplaceAll(relPath, string(os.PathSeparator), "/")
 	return fmt.Sprintf("https://github.com/%s/blob/%s/%s", repo, branch, relPath), nil
 }

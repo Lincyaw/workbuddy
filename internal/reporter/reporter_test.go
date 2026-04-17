@@ -417,6 +417,11 @@ func TestReport_OverflowWithWorkDir(t *testing.T) {
 	// Set up local repo with a remote.
 	tmpDir := t.TempDir()
 	branch := initGitRepo(t, tmpDir)
+	if err := os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte(".workbuddy/\n"), 0644); err != nil {
+		t.Fatalf("write gitignore: %v", err)
+	}
+	runGit(t, tmpDir, "add", ".gitignore")
+	runGit(t, tmpDir, "commit", "-m", "add gitignore")
 	runGit(t, tmpDir, "remote", "add", "origin", remoteDir)
 	runGit(t, tmpDir, "push", "-u", "origin", branch)
 
@@ -472,7 +477,7 @@ func TestReport_OverflowWithWorkDir(t *testing.T) {
 	}
 
 	// Verify the report file exists on disk.
-	reportsDir := filepath.Join(tmpDir, ".workbuddy", "reports")
+	reportsDir := filepath.Join(tmpDir, overflowReportsDir)
 	entries, err := os.ReadDir(reportsDir)
 	if err != nil {
 		t.Fatalf("read reports dir: %v", err)
@@ -486,6 +491,15 @@ func TestReport_OverflowWithWorkDir(t *testing.T) {
 	}
 	if !strings.Contains(string(content), longOutput) {
 		t.Error("report file should contain the full original output")
+	}
+
+	statusCmd := exec.Command("git", "-C", tmpDir, "status", "--short")
+	statusOut, err := statusCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status: %s: %v", statusOut, err)
+	}
+	if len(strings.TrimSpace(string(statusOut))) != 0 {
+		t.Fatalf("expected clean worktree after overflow commit, got %q", string(statusOut))
 	}
 }
 
@@ -530,7 +544,7 @@ func TestReport_OverflowWithWorkDirButNotGitRepo(t *testing.T) {
 
 func TestTruncateReport(t *testing.T) {
 	body := strings.Repeat("x", 10000)
-	url := "https://github.com/owner/repo/blob/main/.workbuddy/reports/issue-42-dev-agent-123.md"
+	url := "https://github.com/owner/repo/blob/main/scripts/review-reports/issue-42-dev-agent-123.md"
 	short := truncateReport(body, url)
 	if len(short) > maxCommentBodyBytes {
 		t.Fatalf("truncated report should be under %d bytes, got %d", maxCommentBodyBytes, len(short))
