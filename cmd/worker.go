@@ -239,8 +239,18 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 		if ctx.Err() != nil {
 			break
 		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			break
+		}
+		if ctx.Err() != nil {
+			break
+		}
+
 		task, err := client.PollTask(ctx, workerID, opts.pollTimeout)
 		if err != nil {
+			<-sem
 			if errors.Is(err, context.Canceled) {
 				break
 			}
@@ -252,17 +262,8 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 			return fmt.Errorf("worker: poll task: %w", err)
 		}
 		if task == nil {
+			<-sem
 			continue
-		}
-
-		// Acquire a semaphore slot (blocks if all slots are in use).
-		select {
-		case sem <- struct{}{}:
-		case <-ctx.Done():
-			break
-		}
-		if ctx.Err() != nil {
-			break
 		}
 
 		wg.Add(1)

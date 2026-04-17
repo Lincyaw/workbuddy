@@ -549,3 +549,161 @@ func TestWorkerRecoversAfterKilledTaskWhenResultSubmitFails(t *testing.T) {
 		t.Fatalf("expected worker to return to poll loop, got %d poll(s)", pollCount.Load())
 	}
 }
+
+func TestWorkerHonorsConcurrencyLimitBeforePollingNextTask(t *testing.T) {
+	setupFakeGHCLI(t)
+
+	repo := "owner/test-repo"
+	configDir := setupTestConfigDir(t, repo)
+
+	var registerCount atomic.Int64
+	var pollCount atomic.Int64
+	thirdTaskSubmitted := make(chan struct{})
+	var thirdTaskSubmitOnce sync.Once
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/workers/register":
+			registerCount.Add(1)
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tasks/poll":
+			switch pollCount.Add(1) {
+			case 1:
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"task_id":"task-1","repo":"owner/test-repo","issue_num":101,"agent_name":"dev-agent"}`))
+			case 2:
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"task_id":"task-2","repo":"owner/test-repo","issue_num":102,"agent_name":"dev-agent"}`))
+			case 3:
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"task_id":"task-3","repo":"owner/test-repo","issue_num":103,"agent_name":"dev-agent"}`))
+			default:
+				w.WriteHeader(http.StatusNoContent)
+			}
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/heartbeat"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/release"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/task-1/result"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"completed"}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/task-2/result"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"completed"}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/task-3/result"):
+			thirdTaskSubmitOnce.Do(func() {
+				close(thirdTaskSubmitted)
+			})
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"completed"}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	gh := &mockGHReader{
+		issues: []poller.Issue{
+			{Number: 101, Title: "Task One", State: "open", Body: "body", Labels: []string{"workbuddy", "status:developing"}},
+			{Number: 102, Title: "Task Two", State: "open", Body: "body", Labels: []string{"workbuddy", "status:developing"}},
+			{Number: 103, Title: "Task Three", State: "open", Body: "body", Labels: []string{"workbuddy", "status:developing"}},
+		},
+		labelSnapshots: [][]string{
+			{"workbuddy", "status:done"},
+			{"workbuddy", "status:done"},
+			{"workbuddy", "status:done"},
+		},
+	}
+
+	releaseTask1 := make(chan struct{})
+	releaseTask2 := make(chan struct{})
+	twoTasksRunning := make(chan struct{})
+	var twoTasksRunningOnce sync.Once
+	var running atomic.Int64
+	var maxRunning atomic.Int64
+
+	mockRT := &mockRuntime{name: config.RuntimeClaudeCode, resultFn: func(_ context.Context, _ *config.AgentConfig, task *launcher.TaskContext) (*launcher.Result, error) {
+		current := running.Add(1)
+		for {
+			prev := maxRunning.Load()
+			if current <= prev || maxRunning.CompareAndSwap(prev, current) {
+				break
+			}
+		}
+		if current == 2 {
+			twoTasksRunningOnce.Do(func() {
+				close(twoTasksRunning)
+			})
+		}
+		defer running.Add(-1)
+
+		switch task.Issue.Number {
+		case 101:
+			<-releaseTask1
+		case 102:
+			<-releaseTask2
+		}
+		return &launcher.Result{ExitCode: 0, Meta: map[string]string{}}, nil
+	}}
+	lnch := launcher.NewLauncher()
+	lnch.Register(mockRT, config.RuntimeClaudeCode)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runWorkerWithOpts(&workerOpts{
+			coordinatorURL:    server.URL,
+			token:             "",
+			roleCSV:           "dev",
+			runtime:           config.RuntimeClaudeCode,
+			repo:              repo,
+			configDir:         configDir,
+			workDir:           t.TempDir(),
+			dbPath:            filepath.Join(t.TempDir(), "worker.db"),
+			sessionsDir:       filepath.Join(t.TempDir(), "sessions"),
+			pollTimeout:       20 * time.Millisecond,
+			heartbeatInterval: 20 * time.Millisecond,
+			shutdownTimeout:   100 * time.Millisecond,
+			concurrency:       2,
+		}, lnch, gh, ctx)
+	}()
+
+	select {
+	case <-twoTasksRunning:
+	case <-time.After(3 * time.Second):
+		t.Fatal("worker did not start two tasks concurrently")
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	if got := pollCount.Load(); got != 2 {
+		t.Fatalf("expected worker to stop polling when saturated, got %d polls before a slot freed", got)
+	}
+
+	close(releaseTask1)
+
+	select {
+	case <-thirdTaskSubmitted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("worker did not poll and execute the third task after a slot freed")
+	}
+
+	close(releaseTask2)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("worker: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not exit")
+	}
+
+	if got := maxRunning.Load(); got != 2 {
+		t.Fatalf("expected max parallelism of 2, got %d", got)
+	}
+	if got := registerCount.Load(); got != 1 {
+		t.Fatalf("expected single worker registration, got %d", got)
+	}
+}
