@@ -36,6 +36,8 @@ const (
 	TypeNotificationFailed          = "notification_failed"
 	TypeOperatorInvoked             = "operator_invoked"
 	TypeAlert                       = "alert"
+	TypeConfigReloaded              = "config_reloaded"
+	TypeConfigReloadFailed          = "config_reload_failed"
 )
 
 // AllEventTypes lists every recognised event type.
@@ -64,6 +66,8 @@ var AllEventTypes = []string{
 	TypeNotificationFailed,
 	TypeOperatorInvoked,
 	TypeAlert,
+	TypeConfigReloaded,
+	TypeConfigReloadFailed,
 }
 
 // EventFilter specifies optional criteria for querying events.

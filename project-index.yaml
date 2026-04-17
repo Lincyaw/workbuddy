@@ -1503,3 +1503,30 @@ requirements:
       - docs/implemented/current-config-workflow-and-agents.md
       - docs/implemented/pipeline-observability-and-diagnosis.md
     deps: [REQ-001, REQ-017, REQ-019, REQ-037, REQ-039]
+    title: Coordinator hot-reload for bootstrap config
+    description: >
+      Allow the coordinator bootstrap config directory to be reloaded in place
+      without restarting the process. File-watch and manual API triggers must
+      validate the new config atomically, preserve in-flight tasks, and record
+      reload outcomes in the events table.
+    priority: P2
+    version: v0.3.0
+    status: tested
+    acceptance_criteria:
+      - "AC-046-1: Coordinator watches .github/workbuddy/config.yaml and agent/workflow markdown files and reloads changes without restart"
+      - "AC-046-2: POST /api/v1/config/reload triggers an immediate validated reload and returns the applied summary"
+      - "AC-046-3: Invalid reload attempts return an error, emit config_reload_failed, and leave the process healthy"
+      - "AC-046-4: Successful reloads emit config_reloaded with audit payload in the events table"
+      - "AC-046-5: Tasks already claimed before reload keep their original task metadata; only later dispatches use reloaded config"
+      - "AC-046-6: Poll interval updates are applied from config.yaml on reload"
+      - "AC-046-7: go build && go vet && go test ./... -count=1 are green"
+    code:
+      - cmd/coordinator.go
+      - cmd/config_reload.go
+      - cmd/repo_runtime.go
+      - internal/eventlog/eventlog.go
+      - internal/registry/registry.go
+      - go.mod
+    tests:
+      - cmd/config_reload_test.go
+    deps: [REQ-025, REQ-039, REQ-042]
