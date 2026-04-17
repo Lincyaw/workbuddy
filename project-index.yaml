@@ -426,6 +426,7 @@ requirements:
       - internal/launcher/types.go
     tests:
       - internal/launcher/launcher_test.go
+      - internal/launcher/codex_test.go
     deps: []
 
   - id: REQ-007
@@ -1567,6 +1568,7 @@ requirements:
       - "AC-048-1: Watchdog goroutine monitors event flow during session.Run()"
       - "AC-048-2: If no events received and no child processes for > idle_threshold, cancel the agent via context cancellation"
       - "AC-048-3: Config supports worker.stale_inference.enabled, idle_threshold (default 10m), check_interval (default 30s)"
+      - "AC-048-3a: After task completion is observed, watchdog switches to completed_grace_period (default 60s)"
       - "AC-048-4: Config parsed from .github/workbuddy/config.yaml worker section"
       - "AC-048-5: Watchdog disabled when worker.stale_inference.enabled=false"
       - "AC-048-6: Unit tests cover stale detection, healthy process, boundary conditions, EventTracker, and Watch cancellation"

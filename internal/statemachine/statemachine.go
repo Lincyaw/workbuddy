@@ -548,6 +548,7 @@ func (sm *StateMachine) isBackEdge(repo string, issueNum int, targetState string
 // when the group can no longer progress.
 func (sm *StateMachine) MarkAgentCompleted(repo string, issueNum int, taskID, agentName string, exitCode int, currentLabels []string) {
 	issueKey := sm.issueKey(repo, issueNum)
+	agentName = sm.canonicalAgentName(taskID, agentName)
 
 	sm.inflightMu.Lock()
 	group := sm.inflight[issueKey]
@@ -689,6 +690,17 @@ func (sm *StateMachine) logCompletionEvent(repo string, issueNum int, taskID, ag
 		"agent_name": agentName,
 		"exit_code":  exitCode,
 	})
+}
+
+func (sm *StateMachine) canonicalAgentName(taskID, fallback string) string {
+	if sm.store == nil || strings.TrimSpace(taskID) == "" {
+		return fallback
+	}
+	task, err := sm.store.GetTask(taskID)
+	if err != nil || task == nil || strings.TrimSpace(task.AgentName) == "" {
+		return fallback
+	}
+	return task.AgentName
 }
 
 func (sm *StateMachine) recordStuckCandidate(issueKey string, labels []string) {

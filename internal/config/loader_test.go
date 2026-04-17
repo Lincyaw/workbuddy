@@ -172,6 +172,18 @@ func TestRepositorySampleConfig_MatchesGlobalConfigSchema(t *testing.T) {
 	if cfg.Operator.InboxDir != "~/.workbuddy/operator/inbox" {
 		t.Fatalf("operator.inbox_dir = %q, want %q", cfg.Operator.InboxDir, "~/.workbuddy/operator/inbox")
 	}
+	if !cfg.Worker.StaleInference.StaleInferenceEnabled() {
+		t.Fatalf("worker.stale_inference.enabled = %v, want true", cfg.Worker.StaleInference.StaleInferenceEnabled())
+	}
+	if cfg.Worker.StaleInference.IdleThreshold != 30*time.Minute {
+		t.Fatalf("worker.stale_inference.idle_threshold = %s, want 30m", cfg.Worker.StaleInference.IdleThreshold)
+	}
+	if cfg.Worker.StaleInference.CheckInterval != 30*time.Second {
+		t.Fatalf("worker.stale_inference.check_interval = %s, want 30s", cfg.Worker.StaleInference.CheckInterval)
+	}
+	if cfg.Worker.StaleInference.CompletedGracePeriod != time.Minute {
+		t.Fatalf("worker.stale_inference.completed_grace_period = %s, want 1m", cfg.Worker.StaleInference.CompletedGracePeriod)
+	}
 	if !cfg.Notifications.Enabled {
 		t.Fatalf("notifications.enabled = %v, want true", cfg.Notifications.Enabled)
 	}

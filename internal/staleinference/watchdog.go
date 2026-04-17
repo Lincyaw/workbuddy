@@ -20,6 +20,9 @@ type Config struct {
 	IdleThreshold time.Duration
 	// CheckInterval is how often the watchdog checks for staleness.
 	CheckInterval time.Duration
+	// CompletedGracePeriod is the shorter grace period applied after an
+	// agent has already reported completion but has not exited yet.
+	CompletedGracePeriod time.Duration
 }
 
 // ActivityChecker provides an interface for checking process activity,
@@ -34,6 +37,11 @@ type ActivityChecker interface {
 	HasChildProcesses() (bool, error)
 }
 
+// CompletionAwareActivityChecker exposes whether completion has been observed.
+type CompletionAwareActivityChecker interface {
+	CompletionObservedAt() (time.Time, bool)
+}
+
 // Watch starts the stale inference watchdog. It periodically checks
 // whether the agent process is producing output or has child processes.
 // If the process is stale for longer than cfg.IdleThreshold, the
@@ -46,6 +54,9 @@ func Watch(ctx context.Context, cfg Config, checker ActivityChecker, cancel cont
 	}
 	if cfg.IdleThreshold <= 0 {
 		cfg.IdleThreshold = 10 * time.Minute
+	}
+	if cfg.CompletedGracePeriod <= 0 {
+		cfg.CompletedGracePeriod = time.Minute
 	}
 
 	ticker := time.NewTicker(cfg.CheckInterval)
@@ -76,8 +87,18 @@ func isStale(cfg Config, checker ActivityChecker) bool {
 		return false
 	}
 
+	threshold := cfg.IdleThreshold
+	if completionAware, ok := checker.(CompletionAwareActivityChecker); ok {
+		if completedAt, completed := completionAware.CompletionObservedAt(); completed && !completedAt.IsZero() {
+			threshold = cfg.CompletedGracePeriod
+			if mtime.Before(completedAt) {
+				mtime = completedAt
+			}
+		}
+	}
+
 	idleDuration := time.Since(mtime)
-	if idleDuration < cfg.IdleThreshold {
+	if idleDuration < threshold {
 		return false
 	}
 
@@ -149,6 +170,7 @@ func (p *ProcChecker) HasChildProcesses() (bool, error) {
 // channel and implements ActivityChecker using this timestamp.
 type EventTracker struct {
 	lastActivity atomic.Int64 // unix nano
+	completedAt  atomic.Int64 // unix nano
 }
 
 // NewEventTracker creates a new EventTracker with initial activity set to now.
@@ -161,6 +183,13 @@ func NewEventTracker() *EventTracker {
 // RecordActivity records that activity was observed right now.
 func (t *EventTracker) RecordActivity() {
 	t.lastActivity.Store(time.Now().UnixNano())
+}
+
+// RecordCompletion marks the tracker as having seen a terminal completion event.
+func (t *EventTracker) RecordCompletion() {
+	now := time.Now().UnixNano()
+	t.completedAt.Store(now)
+	t.lastActivity.Store(now)
 }
 
 // SessionFileModTime returns the time of last observed activity.
@@ -177,4 +206,13 @@ func (t *EventTracker) SessionFileModTime() (time.Time, error) {
 // on event flow.
 func (t *EventTracker) HasChildProcesses() (bool, error) {
 	return false, nil
+}
+
+// CompletionObservedAt reports when task completion was observed.
+func (t *EventTracker) CompletionObservedAt() (time.Time, bool) {
+	ns := t.completedAt.Load()
+	if ns == 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(0, ns), true
 }

@@ -177,9 +177,10 @@ type WorkerConfig struct {
 // StaleInferenceConfig controls the stale inference watchdog that kills
 // hung agent processes when no session output is produced for too long.
 type StaleInferenceConfig struct {
-	Enabled       *bool         `yaml:"enabled"`
-	IdleThreshold time.Duration `yaml:"idle_threshold"` // default 10m
-	CheckInterval time.Duration `yaml:"check_interval"` // default 30s
+	Enabled              *bool         `yaml:"enabled"`
+	IdleThreshold        time.Duration `yaml:"idle_threshold"`         // default 10m
+	CheckInterval        time.Duration `yaml:"check_interval"`         // default 30s
+	CompletedGracePeriod time.Duration `yaml:"completed_grace_period"` // default 60s
 }
 
 // StaleInferenceEnabled returns whether the watchdog is enabled,

@@ -46,6 +46,7 @@ func TestCodexEventMapperFixture(t *testing.T) {
 		launcherevents.KindToolResult,
 		launcherevents.KindFileChange,
 		launcherevents.KindTokenUsage,
+		launcherevents.KindTaskComplete,
 	}
 	if len(got) != len(wantKinds) {
 		t.Fatalf("got %d events, want %d", len(got), len(wantKinds))
@@ -203,6 +204,88 @@ func TestCodexSessionRunEmitsEventsAndArtifact(t *testing.T) {
 	lastMsgPath := filepath.Join(filepath.Dir(result.SessionPath), "codex-last-message.txt")
 	if _, err := os.Stat(lastMsgPath); err != nil {
 		t.Fatalf("expected last message file: %v", err)
+	}
+}
+
+func TestCodexSessionRunKillsHungProcessAfterTaskComplete(t *testing.T) {
+	restore := installFakeCodexScript(t, "#!/bin/sh\n"+
+		"output_last_message=''\n"+
+		"while [ $# -gt 0 ]; do\n"+
+		"  case \"$1\" in\n"+
+		"    --output-last-message)\n"+
+		"      output_last_message=\"$2\"\n"+
+		"      shift 2\n"+
+		"      ;;\n"+
+		"    *)\n"+
+		"      shift\n"+
+		"      ;;\n"+
+		"  esac\n"+
+		"done\n"+
+		"if [ -n \"$output_last_message\" ]; then\n"+
+		"  mkdir -p \"$(dirname \"$output_last_message\")\"\n"+
+		"  printf 'DONE\\n' > \"$output_last_message\"\n"+
+		"fi\n"+
+		"printf '{\"type\":\"task_started\",\"task_id\":\"task-123\"}\\n'\n"+
+		"printf '{\"type\":\"task_complete\"}\\n'\n"+
+		"while :; do sleep 1; done\n")
+	defer restore()
+
+	oldGrace := codexTaskCompleteGracePeriod
+	oldKillDelay := codexTaskCompleteKillDelay
+	codexTaskCompleteGracePeriod = 50 * time.Millisecond
+	codexTaskCompleteKillDelay = 50 * time.Millisecond
+	defer func() {
+		codexTaskCompleteGracePeriod = oldGrace
+		codexTaskCompleteKillDelay = oldKillDelay
+	}()
+
+	launcher := NewLauncher()
+	task := newTestTask(t)
+	agent := &config.AgentConfig{
+		Name:    "codex-agent",
+		Runtime: config.RuntimeCodexExec,
+		Prompt:  "Reply DONE",
+		Timeout: 5 * time.Second,
+	}
+
+	session, err := launcher.Start(context.Background(), agent, task)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = session.Close() }()
+
+	ch := make(chan launcherevents.Event, 16)
+	var collected []launcherevents.Event
+	done := make(chan struct{})
+	go func() {
+		for evt := range ch {
+			collected = append(collected, evt)
+		}
+		close(done)
+	}()
+
+	start := time.Now()
+	result, err := session.Run(context.Background(), ch)
+	close(ch)
+	<-done
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if result.ExitCode == 0 {
+		t.Fatalf("expected forced termination to produce non-zero exit, got %d", result.ExitCode)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("expected hung codex to be terminated quickly, took %s", elapsed)
+	}
+
+	turnCompleted := 0
+	for _, evt := range collected {
+		if evt.Kind == launcherevents.KindTurnCompleted {
+			turnCompleted++
+		}
+	}
+	if turnCompleted != 1 {
+		t.Fatalf("turn.completed count = %d, want 1", turnCompleted)
 	}
 }
 

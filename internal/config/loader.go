@@ -148,6 +148,9 @@ func applyWorkerDefaults(cfg *WorkerConfig) {
 	if cfg.StaleInference.CheckInterval <= 0 {
 		cfg.StaleInference.CheckInterval = 30 * time.Second
 	}
+	if cfg.StaleInference.CompletedGracePeriod <= 0 {
+		cfg.StaleInference.CompletedGracePeriod = time.Minute
+	}
 }
 
 func applyOperatorDefaults(cfg *OperatorConfig, explicit bool) {

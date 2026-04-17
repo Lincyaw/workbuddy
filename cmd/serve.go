@@ -1173,7 +1173,9 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	}
 
 	// Report to issue
-	if err := deps.reporter.Report(taskCtx, task.Repo, task.IssueNum, task.AgentName, result,
+	reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(agentShutdownWait))
+	defer reportCancel()
+	if err := deps.reporter.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, result,
 		sessionID, deps.workerID, retryCount, maxRetries, labelSummary); err != nil {
 		log.Printf("[worker] report failed: %v", err)
 	}
