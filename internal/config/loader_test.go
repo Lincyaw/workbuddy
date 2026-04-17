@@ -101,6 +101,8 @@ const validGlobalConfig = `repo: owner/repo
 environment: production
 poll_interval: 30s
 port: 8080
+operator:
+  enabled: true
 `
 
 func TestRepositorySampleConfig_MatchesGlobalConfigSchema(t *testing.T) {
@@ -117,6 +119,7 @@ func TestRepositorySampleConfig_MatchesGlobalConfigSchema(t *testing.T) {
 
 	expectedKeys := map[string]struct{}{
 		"environment":   {},
+		"operator":      {},
 		"poll_interval": {},
 		"port":          {},
 		"repo":          {},
@@ -152,6 +155,9 @@ func TestRepositorySampleConfig_MatchesGlobalConfigSchema(t *testing.T) {
 	}
 	if cfg.Global.Port != 8090 {
 		t.Fatalf("port = %d, want 8090", cfg.Global.Port)
+	}
+	if !cfg.Operator.Enabled {
+		t.Fatalf("operator.enabled = %v, want true", cfg.Operator.Enabled)
 	}
 	if !cfg.Notifications.Enabled {
 		t.Fatalf("notifications.enabled = %v, want true", cfg.Notifications.Enabled)

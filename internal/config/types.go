@@ -16,6 +16,11 @@ type GlobalConfig struct {
 	Port         int           `yaml:"port"`
 }
 
+// OperatorConfig controls the local incident-operator dispatcher.
+type OperatorConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
 // NotificationsConfig controls external notification routing.
 type NotificationsConfig struct {
 	Enabled      bool          `yaml:"enabled"`
@@ -163,7 +168,8 @@ type StatesBlock struct {
 
 // FullConfig holds all loaded configuration.
 type FullConfig struct {
-	Global        GlobalConfig `yaml:",inline"`
+	Global        GlobalConfig   `yaml:",inline"`
+	Operator      OperatorConfig `yaml:"operator"`
 	Agents        map[string]*AgentConfig
 	Workflows     map[string]*WorkflowConfig
 	Notifications NotificationsConfig `yaml:"notifications"`
