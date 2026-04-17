@@ -42,7 +42,9 @@ type workerOpts struct {
 	roleCSV           string
 	runtime           string
 	repo              string
+	reposCSV          string
 	workerID          string
+	mgmtAddr          string
 	configDir         string
 	workDir           string
 	sessionsDir       string
@@ -70,10 +72,15 @@ func init() {
 	workerCmd.Flags().String("token", "", "Bearer token for Coordinator authentication")
 	workerCmd.Flags().String("role", "", "Comma-separated worker roles (default: roles from local agent config)")
 	workerCmd.Flags().String("runtime", config.RuntimeClaudeCode, "Worker runtime capability: claude-code or codex")
-	workerCmd.Flags().String("repo", "", "Repository in OWNER/NAME form (default: config.yaml repo)")
+	workerCmd.Flags().String("repo", "", "Repository in OWNER/NAME form (backward-compatible alias; path defaults to cwd)")
+	workerCmd.Flags().String("repos", "", "Comma-separated OWNER/NAME=/path repo bindings")
+	workerCmd.Flags().String("id", "", "Stable worker ID (default: hostname)")
+	workerCmd.Flags().String("mgmt-addr", defaultWorkerMgmtAddr, "Local-only worker management listen address")
 	workerCmd.Flags().Int("concurrency", 1, "Maximum concurrent tasks per worker")
 	_ = workerCmd.MarkFlagRequired("coordinator")
 	_ = workerCmd.MarkFlagRequired("token")
+	workerReposCmd.AddCommand(workerReposAddCmd, workerReposRemoveCmd, workerReposListCmd)
+	workerCmd.AddCommand(workerReposCmd)
 	rootCmd.AddCommand(workerCmd)
 }
 
@@ -91,6 +98,9 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	roleCSV, _ := cmd.Flags().GetString("role")
 	runtimeName, _ := cmd.Flags().GetString("runtime")
 	repo, _ := cmd.Flags().GetString("repo")
+	reposCSV, _ := cmd.Flags().GetString("repos")
+	workerID, _ := cmd.Flags().GetString("id")
+	mgmtAddr, _ := cmd.Flags().GetString("mgmt-addr")
 	concurrency, _ := cmd.Flags().GetInt("concurrency")
 	if concurrency < 1 {
 		concurrency = 1
@@ -101,6 +111,9 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 		roleCSV:           roleCSV,
 		runtime:           runtimeName,
 		repo:              strings.TrimSpace(repo),
+		reposCSV:          strings.TrimSpace(reposCSV),
+		workerID:          strings.TrimSpace(workerID),
+		mgmtAddr:          strings.TrimSpace(mgmtAddr),
 		configDir:         ".github/workbuddy",
 		pollTimeout:       defaultWorkerPollTimeout,
 		heartbeatInterval: defaultWorkerHeartbeat,
@@ -121,14 +134,6 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 		log.Printf("[worker] warning: %s", w)
 	}
 
-	repoName := opts.repo
-	if repoName == "" {
-		repoName = strings.TrimSpace(cfg.Global.Repo)
-	}
-	if repoName == "" {
-		return fmt.Errorf("worker: repo is required")
-	}
-
 	workDir := opts.workDir
 	if workDir == "" {
 		workDir, err = os.Getwd()
@@ -139,6 +144,10 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 	workDir, err = filepath.Abs(workDir)
 	if err != nil {
 		return fmt.Errorf("worker: resolve working directory: %w", err)
+	}
+	repoBindings, err := resolveWorkerRepoBindings(opts, strings.TrimSpace(cfg.Global.Repo), workDir)
+	if err != nil {
+		return err
 	}
 
 	if opts.dbPath == "" {
@@ -163,7 +172,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 		if hostname == "" {
 			hostname = "worker"
 		}
-		workerID = fmt.Sprintf("%s-%d", hostname, os.Getpid())
+		workerID = hostname
 	}
 
 	if lnch == nil {
@@ -183,9 +192,8 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
 	rep.SetEventRecorder(eventlog.NewEventLogger(localStore))
 	auditor := audit.NewAuditor(localStore, opts.sessionsDir)
-
-	wsMgr := workspace.NewManager(workDir)
-	_ = wsMgr.Prune() // clean up orphaned worktrees from prior crashes
+	bindings := newWorkerRepoBindingStore(repoBindings)
+	workspaces := newWorkerWorkspaceSet()
 
 	var ctx context.Context
 	var cancel context.CancelFunc
@@ -210,14 +218,22 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 		}()
 	}
 
-	if err := client.Register(ctx, workerclient.RegisterRequest{
-		WorkerID: workerID,
-		Repo:     repoName,
-		Roles:    roles,
-		Runtime:  publicRuntime,
-		Repos:    []string{repoName},
-		Hostname: hostnameOrUnknown(),
-	}); err != nil {
+	addrFile := workerAddrFile(workDir)
+	mgmtServer, err := startWorkerMgmtServer(opts.mgmtAddr, addrFile, bindings, func(changeCtx context.Context, _ []string) error {
+		return registerWorkerRepos(changeCtx, client, workerID, roles, publicRuntime, bindings.list())
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), opts.shutdownTimeout)
+		defer shutdownCancel()
+		if err := mgmtServer.Close(shutdownCtx); err != nil {
+			log.Printf("[worker] mgmt server shutdown failed: %v", err)
+		}
+	}()
+
+	if err := registerWorkerRepos(ctx, client, workerID, roles, publicRuntime, bindings.list()); err != nil {
 		if errors.Is(err, workerclient.ErrUnauthorized) {
 			return fmt.Errorf("worker: coordinator rejected the provided token")
 		}
@@ -254,6 +270,16 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 		if task == nil {
 			continue
 		}
+		repoPath, ok := bindings.get(task.Repo)
+		if !ok {
+			releaseCtx, releaseCancel := context.WithTimeout(context.Background(), opts.shutdownTimeout)
+			err := client.ReleaseTask(releaseCtx, task.TaskID, workerclient.ReleaseRequest{WorkerID: workerID, Reason: "repo not bound on worker"})
+			releaseCancel()
+			if err != nil && !errors.Is(err, context.Canceled) {
+				log.Printf("[worker] failed to release unmapped task %s for repo %s: %v", task.TaskID, task.Repo, err)
+			}
+			continue
+		}
 
 		// Acquire a semaphore slot (blocks if all slots are in use).
 		select {
@@ -268,7 +294,10 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 		wg.Add(1)
 		go func(t *workerclient.Task) {
 			defer func() { <-sem; wg.Done() }()
-			if err := executeRemoteTask(ctx, t, client, cfg, lnch, auditor, rep, reader, workDir, opts.sessionsDir, workerID, runtimeAlias, opts.heartbeatInterval, opts.shutdownTimeout, wsMgr); err != nil {
+			wsMgr := workspaces.forRepoPath(repoPath, func(path string) workspaceManager {
+				return workspace.NewManager(path)
+			})
+			if err := executeRemoteTask(ctx, t, client, cfg, lnch, auditor, rep, reader, repoPath, opts.sessionsDir, workerID, runtimeAlias, opts.heartbeatInterval, opts.shutdownTimeout, wsMgr); err != nil {
 				taskErrMu.Lock()
 				if taskErrVal == nil {
 					taskErrVal = err
@@ -287,7 +316,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 	return taskErrVal
 }
 
-func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *workerclient.Client, cfg *config.FullConfig, lnch *launcher.Launcher, auditor *audit.Auditor, rep *reporter.Reporter, reader workerIssueReader, workDir, sessionsDir, workerID, runtimeAlias string, heartbeatInterval, shutdownTimeout time.Duration, wsMgr *workspace.Manager) error {
+func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *workerclient.Client, cfg *config.FullConfig, lnch *launcher.Launcher, auditor *audit.Auditor, rep *reporter.Reporter, reader workerIssueReader, workDir, sessionsDir, workerID, runtimeAlias string, heartbeatInterval, shutdownTimeout time.Duration, wsMgr workspaceManager) error {
 	agentCfg, ok := cfg.Agents[task.AgentName]
 	if !ok {
 		return fmt.Errorf("worker: agent %q not found in local config", task.AgentName)

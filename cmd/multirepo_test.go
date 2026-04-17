@@ -60,6 +60,14 @@ func (r *repoAwareGHReader) ReadIssue(repo string, issueNum int) (poller.IssueDe
 	return poller.IssueDetails{Number: issueNum, State: "open"}, nil
 }
 
+func (r *repoAwareGHReader) ReadIssueLabels(repo string, issueNum int) ([]string, error) {
+	details, err := r.ReadIssue(repo, issueNum)
+	if err != nil {
+		return nil, err
+	}
+	return append([]string(nil), details.Labels...), nil
+}
+
 func setupNamedConfigDir(t *testing.T, repo, agentName, workflowName string) string {
 	t.Helper()
 	dir := t.TempDir()
