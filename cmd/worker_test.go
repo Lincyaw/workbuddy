@@ -30,6 +30,7 @@ func TestParseWorkerFlags(t *testing.T) {
 	cmd.Flags().String("role", "", "")
 	cmd.Flags().String("runtime", config.RuntimeClaudeCode, "")
 	cmd.Flags().String("repo", "", "")
+	cmd.Flags().Int("concurrency", 1, "")
 	if err := cmd.Flags().Set("coordinator", "http://localhost:9999"); err != nil {
 		t.Fatal(err)
 	}
@@ -42,6 +43,9 @@ func TestParseWorkerFlags(t *testing.T) {
 	if err := cmd.Flags().Set("runtime", "codex"); err != nil {
 		t.Fatal(err)
 	}
+	if err := cmd.Flags().Set("concurrency", "4"); err != nil {
+		t.Fatal(err)
+	}
 
 	opts, err := parseWorkerFlags(cmd)
 	if err != nil {
@@ -52,6 +56,9 @@ func TestParseWorkerFlags(t *testing.T) {
 	}
 	if opts.roleCSV != "dev,review" || opts.runtime != "codex" {
 		t.Fatalf("unexpected opts: %+v", opts)
+	}
+	if opts.concurrency != 4 {
+		t.Fatalf("expected concurrency=4, got %d", opts.concurrency)
 	}
 }
 

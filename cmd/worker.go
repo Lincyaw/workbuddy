@@ -49,6 +49,7 @@ type workerOpts struct {
 	pollTimeout       time.Duration
 	heartbeatInterval time.Duration
 	shutdownTimeout   time.Duration
+	concurrency       int
 }
 
 type workerIssueReader interface {
@@ -69,6 +70,7 @@ func init() {
 	workerCmd.Flags().String("role", "", "Comma-separated worker roles (default: roles from local agent config)")
 	workerCmd.Flags().String("runtime", config.RuntimeClaudeCode, "Worker runtime capability: claude-code or codex")
 	workerCmd.Flags().String("repo", "", "Repository in OWNER/NAME form (default: config.yaml repo)")
+	workerCmd.Flags().Int("concurrency", 1, "Maximum concurrent tasks per worker")
 	_ = workerCmd.MarkFlagRequired("coordinator")
 	_ = workerCmd.MarkFlagRequired("token")
 	rootCmd.AddCommand(workerCmd)
@@ -88,6 +90,10 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	roleCSV, _ := cmd.Flags().GetString("role")
 	runtimeName, _ := cmd.Flags().GetString("runtime")
 	repo, _ := cmd.Flags().GetString("repo")
+	concurrency, _ := cmd.Flags().GetInt("concurrency")
+	if concurrency < 1 {
+		concurrency = 1
+	}
 	return &workerOpts{
 		coordinatorURL:    strings.TrimSpace(coordinatorURL),
 		token:             strings.TrimSpace(token),
@@ -98,6 +104,7 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 		pollTimeout:       defaultWorkerPollTimeout,
 		heartbeatInterval: defaultWorkerHeartbeat,
 		shutdownTimeout:   defaultWorkerShutdownDeadline,
+		concurrency:       concurrency,
 	}, nil
 }
 
@@ -216,27 +223,67 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 		return fmt.Errorf("worker: register with coordinator: %w", err)
 	}
 
+	concurrency := opts.concurrency
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	var (
+		taskErrMu  sync.Mutex
+		taskErrVal error
+	)
+
 	for {
 		if ctx.Err() != nil {
-			return nil
+			break
 		}
 		task, err := client.PollTask(ctx, workerID, opts.pollTimeout)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				return nil
+				break
 			}
 			if errors.Is(err, workerclient.ErrUnauthorized) {
+				wg.Wait()
 				return fmt.Errorf("worker: coordinator rejected the provided token")
 			}
+			wg.Wait()
 			return fmt.Errorf("worker: poll task: %w", err)
 		}
 		if task == nil {
 			continue
 		}
-		if err := executeRemoteTask(ctx, task, client, cfg, lnch, auditor, rep, reader, workDir, opts.sessionsDir, workerID, runtimeAlias, opts.heartbeatInterval, opts.shutdownTimeout, wsMgr); err != nil {
-			return err
+
+		// Acquire a semaphore slot (blocks if all slots are in use).
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			break
 		}
+		if ctx.Err() != nil {
+			break
+		}
+
+		wg.Add(1)
+		go func(t *workerclient.Task) {
+			defer func() { <-sem; wg.Done() }()
+			if err := executeRemoteTask(ctx, t, client, cfg, lnch, auditor, rep, reader, workDir, opts.sessionsDir, workerID, runtimeAlias, opts.heartbeatInterval, opts.shutdownTimeout, wsMgr); err != nil {
+				taskErrMu.Lock()
+				if taskErrVal == nil {
+					taskErrVal = err
+				}
+				taskErrMu.Unlock()
+				log.Printf("[worker] task %s error: %v", t.TaskID, err)
+			}
+		}(task)
 	}
+
+	// Wait for all in-flight tasks to finish before exiting.
+	wg.Wait()
+
+	taskErrMu.Lock()
+	defer taskErrMu.Unlock()
+	return taskErrVal
 }
 
 func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *workerclient.Client, cfg *config.FullConfig, lnch *launcher.Launcher, auditor *audit.Auditor, rep *reporter.Reporter, reader workerIssueReader, workDir, sessionsDir, workerID, runtimeAlias string, heartbeatInterval, shutdownTimeout time.Duration, wsMgr *workspace.Manager) error {
