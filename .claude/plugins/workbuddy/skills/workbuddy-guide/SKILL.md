@@ -220,22 +220,74 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
 
 ### Multi-repo Worker configuration
 
-Each Worker declares which repo(s) it serves at registration time via
-`--repo`. A Worker only receives tasks for its declared repo.
+Each Worker declares which repo(s) it serves. There are two ways to bind repos:
 
-For a fleet serving multiple repos:
+**Method A — At startup (static)**
 
 ```bash
-# Worker A: serves repo-1 only
+# Single repo (backward-compatible)
 ./workbuddy worker --coordinator http://coord:8081 --token $TOKEN --repo Owner/repo-1
 
-# Worker B: serves repo-2 only
-./workbuddy worker --coordinator http://coord:8081 --token $TOKEN --repo Owner/repo-2
-
-# Worker C: serves both (via config — the worker registers with repos from config.yaml)
-cd /path/with/multi-repo-config
-./workbuddy worker --coordinator http://coord:8081 --token $TOKEN
+# Multiple repos with explicit local paths
+./workbuddy worker --coordinator http://coord:8081 --token $TOKEN \
+  --repos "Owner/repo-1=/path/to/repo-1,Owner/repo-2=/path/to/repo-2"
 ```
+
+**Method B — Dynamic binding (no restart needed)**
+
+Every worker starts a local management server on a random port. You can
+add/remove repo bindings at runtime:
+
+```bash
+# Add a new repo binding to a running worker
+# (run from the worker's control directory — where .workbuddy/ lives)
+./workbuddy worker repos add Owner/new-repo=/path/to/new-repo
+
+# List current bindings
+./workbuddy worker repos list
+
+# Remove a binding
+./workbuddy worker repos remove Owner/old-repo
+```
+
+The worker automatically re-registers with the coordinator when bindings
+change, so it immediately starts receiving tasks for newly added repos.
+
+The management server address is written to `.workbuddy/worker.addr`.
+You can also call it directly via curl:
+
+```bash
+MGMT_ADDR=$(cat .workbuddy/worker.addr)
+
+# Add binding
+curl -X POST $MGMT_ADDR/mgmt/repos \
+  -d '{"repo":"Owner/new-repo","path":"/path/to/new-repo"}'
+
+# List bindings
+curl $MGMT_ADDR/mgmt/repos
+
+# Remove binding
+curl -X DELETE $MGMT_ADDR/mgmt/repos/Owner%2Fnew-repo
+```
+
+### Adding a new repo (full workflow, no restart)
+
+To add a brand-new repo to an already-running workbuddy deployment:
+
+```bash
+# 1. Register the repo config with the coordinator
+cd /path/to/new-repo
+workbuddy repo register \
+  --coordinator http://coordinator-host:8081 \
+  --token "$WORKBUDDY_AUTH_TOKEN"
+
+# 2. Bind the repo to a running worker
+cd /path/to/worker-control-dir
+./workbuddy worker repos add Owner/new-repo=/path/to/new-repo
+```
+
+Both coordinator and worker pick up the change immediately — no restart
+required.
 
 ## Prerequisites for any repo
 
@@ -384,6 +436,16 @@ gh issue edit 42 -R Owner/Repo \
 | `POST /api/v1/tasks/{id}/heartbeat` | Heartbeat |
 | `POST /api/v1/tasks/{id}/release` | Release task |
 
+### worker management server (random port, loopback only)
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /mgmt/repos` | List repo bindings |
+| `POST /mgmt/repos` | Add repo binding `{"repo":"O/R","path":"/..."}` |
+| `DELETE /mgmt/repos/{owner%2Fname}` | Remove repo binding |
+
+Address is in `.workbuddy/worker.addr`. CLI: `workbuddy worker repos {list,add,remove}`.
+
 ## Configuring a new repository
 
 For a complete step-by-step guide, read `references/new-repo-onboarding.md`.
@@ -397,8 +459,9 @@ Here's the quick summary:
 4. Commit + push the config
 5. Validate: `workbuddy validate` (run from repo root)
 6. (Distributed mode) Register: `workbuddy repo register --coordinator URL --token TOKEN`
-7. (Distributed mode) Start worker from the repo directory:
+7. (Distributed mode) Bind worker — either start a new one:
    `workbuddy worker --coordinator URL --token TOKEN --repo Owner/Repo`
+   or add to a running worker: `workbuddy worker repos add Owner/Repo=/path/to/repo`
 
 The agent configs (`dev-agent.md`, `review-agent.md`) and workflow (`default.md`)
 are generic — copy them from any existing workbuddy-managed repo. The only
