@@ -262,7 +262,123 @@ func (pm *pollerManager) StartOrUpdate(rec store.RepoRegistrationRecord) error {
 	pm.mu.Lock()
 	pm.runtimes[rec.Repo] = runtime
 	pm.mu.Unlock()
+	pm.recoverOrphanedActiveStates(runtime)
 	return nil
+}
+
+func (pm *pollerManager) recoverOrphanedActiveStates(runtime *repoRuntime) {
+	if runtime == nil || runtime.config == nil {
+		return
+	}
+
+	caches, err := pm.store.ListIssueCaches(runtime.registration.Repo)
+	if err != nil {
+		log.Printf("[coordinator] recovery: list issue cache for %s: %v", runtime.registration.Repo, err)
+		return
+	}
+
+	for _, cached := range caches {
+		if cached.State != "open" {
+			continue
+		}
+
+		labels, err := parseCachedLabels(cached.Labels)
+		if err != nil {
+			log.Printf("[coordinator] recovery: decode labels for %s#%d: %v", cached.Repo, cached.IssueNum, err)
+			continue
+		}
+
+		workflowName, stateName, agents, ok, err := recoverableActiveState(runtime.config, labels)
+		if err != nil {
+			log.Printf("[coordinator] recovery: skip %s#%d: %v", cached.Repo, cached.IssueNum, err)
+			continue
+		}
+		if !ok {
+			continue
+		}
+
+		active, err := pm.store.HasAnyActiveTask(cached.Repo, cached.IssueNum)
+		if err != nil {
+			log.Printf("[coordinator] recovery: query active task for %s#%d: %v", cached.Repo, cached.IssueNum, err)
+			continue
+		}
+		if active {
+			continue
+		}
+
+		log.Printf(
+			"[coordinator] recovery: re-dispatching orphaned active state for %s#%d workflow=%s state=%s agents=%v",
+			cached.Repo, cached.IssueNum, workflowName, stateName, agents,
+		)
+		if err := runtime.stateMachine.HandleEvent(pm.rootCtx, statemachine.ChangeEvent{
+			Type:     poller.EventIssueCreated,
+			Repo:     cached.Repo,
+			IssueNum: cached.IssueNum,
+			Labels:   labels,
+		}); err != nil {
+			log.Printf("[coordinator] recovery: failed to re-dispatch %s#%d: %v", cached.Repo, cached.IssueNum, err)
+		}
+	}
+}
+
+func parseCachedLabels(raw string) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var labels []string
+	if err := json.Unmarshal([]byte(raw), &labels); err != nil {
+		return nil, fmt.Errorf("parse cached labels: %w", err)
+	}
+	return labels, nil
+}
+
+func recoverableActiveState(cfg *config.FullConfig, labels []string) (workflowName, stateName string, agents []string, ok bool, err error) {
+	labelSet := make(map[string]struct{}, len(labels))
+	for _, label := range labels {
+		labelSet[label] = struct{}{}
+	}
+
+	for _, wf := range cfg.Workflows {
+		triggerLabel := strings.TrimSpace(wf.Trigger.IssueLabel)
+		if triggerLabel == "" {
+			continue
+		}
+		if _, exists := labelSet[triggerLabel]; !exists {
+			continue
+		}
+
+		for name, state := range wf.States {
+			if state.EnterLabel == "" {
+				continue
+			}
+			if _, exists := labelSet[state.EnterLabel]; !exists {
+				continue
+			}
+			stateAgents := recoverableStateAgents(state)
+			if len(stateAgents) == 0 {
+				continue
+			}
+			if ok {
+				return "", "", nil, false, fmt.Errorf("multiple active workflow states match labels %v", labels)
+			}
+			workflowName = wf.Name
+			stateName = name
+			agents = stateAgents
+			ok = true
+		}
+	}
+
+	return workflowName, stateName, agents, ok, nil
+}
+
+func recoverableStateAgents(state *config.State) []string {
+	if len(state.Agents) > 0 {
+		return append([]string(nil), state.Agents...)
+	}
+	if strings.TrimSpace(state.Agent) == "" {
+		return nil
+	}
+	return []string{state.Agent}
 }
 
 func (pm *pollerManager) Deregister(repo string) error {
