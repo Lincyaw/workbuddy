@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/store"
@@ -13,6 +14,7 @@ import (
 // Registry manages worker registration, heartbeat, and online/offline detection.
 type Registry struct {
 	store        *store.Store
+	mu           sync.RWMutex
 	pollInterval time.Duration
 }
 
@@ -23,6 +25,13 @@ func NewRegistry(s *store.Store, pollInterval time.Duration) *Registry {
 		store:        s,
 		pollInterval: pollInterval,
 	}
+}
+
+// SetPollInterval updates the heartbeat staleness threshold basis used by the registry.
+func (r *Registry) SetPollInterval(pollInterval time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pollInterval = pollInterval
 }
 
 // Register adds a worker to the registry.
@@ -59,7 +68,9 @@ func (r *Registry) Heartbeat(id string) error {
 // MarkStaleOffline finds workers that are online but whose last_heartbeat
 // is older than 3 * pollInterval, and marks them offline.
 func (r *Registry) MarkStaleOffline() error {
+	r.mu.RLock()
 	threshold := 3 * r.pollInterval
+	r.mu.RUnlock()
 	db := r.store.DB()
 
 	rows, err := db.Query(

@@ -126,7 +126,6 @@ func TestRepositorySampleConfig_MatchesGlobalConfigSchema(t *testing.T) {
 		"poll_interval": {},
 		"port":          {},
 		"repo":          {},
-		"operator":      {},
 		"notifications": {},
 	}
 

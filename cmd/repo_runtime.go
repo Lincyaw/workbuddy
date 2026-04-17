@@ -22,10 +22,11 @@ import (
 )
 
 type repoRegistrationPayload struct {
-	Repo        string                   `json:"repo"`
-	Environment string                   `json:"environment,omitempty"`
-	Agents      []*config.AgentConfig    `json:"agents"`
-	Workflows   []*config.WorkflowConfig `json:"workflows"`
+	Repo         string                   `json:"repo"`
+	Environment  string                   `json:"environment,omitempty"`
+	PollInterval time.Duration            `json:"poll_interval,omitempty"`
+	Agents       []*config.AgentConfig    `json:"agents"`
+	Workflows    []*config.WorkflowConfig `json:"workflows"`
 }
 
 type repoRuntime struct {
@@ -81,10 +82,11 @@ func newPollerManager(ctx context.Context, st *store.Store, reg *registry.Regist
 
 func buildRepoRegistrationPayload(cfg *config.FullConfig) *repoRegistrationPayload {
 	payload := &repoRegistrationPayload{
-		Repo:        strings.TrimSpace(cfg.Global.Repo),
-		Environment: strings.TrimSpace(cfg.Global.Environment),
-		Agents:      make([]*config.AgentConfig, 0, len(cfg.Agents)),
-		Workflows:   make([]*config.WorkflowConfig, 0, len(cfg.Workflows)),
+		Repo:         strings.TrimSpace(cfg.Global.Repo),
+		Environment:  strings.TrimSpace(cfg.Global.Environment),
+		PollInterval: cfg.Global.PollInterval,
+		Agents:       make([]*config.AgentConfig, 0, len(cfg.Agents)),
+		Workflows:    make([]*config.WorkflowConfig, 0, len(cfg.Workflows)),
 	}
 	for _, agent := range cfg.Agents {
 		agentCopy := *agent
@@ -142,8 +144,9 @@ func decodeRepoRegistrationConfig(rec store.RepoRegistrationRecord) (*config.Ful
 	}
 	cfg := &config.FullConfig{
 		Global: config.GlobalConfig{
-			Repo:        rec.Repo,
-			Environment: rec.Environment,
+			Repo:         rec.Repo,
+			Environment:  rec.Environment,
+			PollInterval: payload.PollInterval,
 		},
 		Agents:    make(map[string]*config.AgentConfig, len(payload.Agents)),
 		Workflows: make(map[string]*config.WorkflowConfig, len(payload.Workflows)),
@@ -206,7 +209,11 @@ func (pm *pollerManager) StartOrUpdate(rec store.RepoRegistrationRecord) error {
 		return err
 	}
 
-	p := poller.NewPoller(pm.ghReader, pm.store, rec.Repo, pm.pollInterval)
+	interval := cfg.Global.PollInterval
+	if interval <= 0 {
+		interval = pm.pollInterval
+	}
+	p := poller.NewPoller(pm.ghReader, pm.store, rec.Repo, interval)
 	if err := p.PreCheck(); err != nil {
 		return err
 	}

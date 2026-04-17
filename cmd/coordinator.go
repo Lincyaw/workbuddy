@@ -23,7 +23,6 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/metrics"
-	"github.com/Lincyaw/workbuddy/internal/notifier"
 	"github.com/Lincyaw/workbuddy/internal/operator"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/registry"
@@ -261,6 +260,7 @@ type fullCoordinatorServer struct {
 	eventlog    *eventlog.EventLogger
 	taskHub     *tasknotify.Hub
 	pollers     *pollerManager
+	config      *coordinatorConfigRuntime
 	authEnabled bool
 	authToken   string
 }
@@ -391,11 +391,10 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	if bootstrapCfg != nil {
 		notifCfg = bootstrapCfg.Notifications
 	}
-	not, err := notifier.New(notifCfg, alertBus, taskHub, evlog)
+	notifierRuntime, err := newNotifierRuntime(ctx, notifCfg, alertBus, taskHub, evlog)
 	if err != nil {
 		return fmt.Errorf("coordinator: init notifier: %w", err)
 	}
-	not.Start(ctx)
 
 	operatorCfg := config.OperatorConfig{Enabled: true}
 	defaultRepo := ""
@@ -448,6 +447,10 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 		if err := api.pollers.StartOrUpdate(rec); err != nil {
 			return fmt.Errorf("coordinator: start bootstrap repo runtime: %w", err)
 		}
+		api.config = newCoordinatorConfigRuntime(opts.configDir, bootstrapCfg, st, evlog, api.pollers, reg, notifierRuntime, alertBus, taskHub)
+		if err := startCoordinatorConfigWatcher(ctx, opts.configDir, api.config); err != nil {
+			return fmt.Errorf("coordinator: start config watcher: %w", err)
+		}
 	}
 
 	mux := http.NewServeMux()
@@ -466,6 +469,7 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	mux.Handle("/api/v1/repos/", api.wrapAuth(http.HandlerFunc(api.handleRepoByPath)))
 	mux.Handle("/api/v1/repos", api.wrapAuth(http.HandlerFunc(api.handleListRepos)))
 	mux.Handle("/api/v1/workers/register", api.wrapAuth(http.HandlerFunc(api.handleRegisterWorker)))
+	mux.Handle("/api/v1/config/reload", api.wrapAuth(http.HandlerFunc(api.handleConfigReload)))
 	mux.Handle("/api/v1/tasks/poll", api.wrapAuth(http.HandlerFunc(api.handlePollTask)))
 	mux.Handle("/api/v1/tasks/", api.wrapAuth(http.HandlerFunc(api.handleTaskAction)))
 
@@ -509,6 +513,23 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	wg.Wait()
 	log.Printf("[coordinator] shutdown complete")
 	return nil
+}
+
+func (s *fullCoordinatorServer) handleConfigReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		coordWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if s.config == nil {
+		coordWriteJSON(w, http.StatusNotFound, map[string]string{"error": "config reload is unavailable without --config-dir bootstrap mode"})
+		return
+	}
+	summary, err := s.config.Reload("manual_api")
+	if err != nil {
+		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	coordWriteJSON(w, http.StatusOK, summary)
 }
 
 func mustRepoRoot() string {
