@@ -23,6 +23,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/reporter"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/workerclient"
+	"github.com/Lincyaw/workbuddy/internal/workspace"
 	"github.com/spf13/cobra"
 )
 
@@ -173,6 +174,9 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 	rep.SetEventRecorder(eventlog.NewEventLogger(localStore))
 	auditor := audit.NewAuditor(localStore, opts.sessionsDir)
 
+	wsMgr := workspace.NewManager(workDir)
+	_ = wsMgr.Prune() // clean up orphaned worktrees from prior crashes
+
 	var ctx context.Context
 	var cancel context.CancelFunc
 	var sigCh chan os.Signal
@@ -227,13 +231,13 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 		if task == nil {
 			continue
 		}
-		if err := executeRemoteTask(ctx, task, client, cfg, lnch, auditor, rep, reader, workDir, opts.sessionsDir, workerID, runtimeAlias, opts.heartbeatInterval, opts.shutdownTimeout); err != nil {
+		if err := executeRemoteTask(ctx, task, client, cfg, lnch, auditor, rep, reader, workDir, opts.sessionsDir, workerID, runtimeAlias, opts.heartbeatInterval, opts.shutdownTimeout, wsMgr); err != nil {
 			return err
 		}
 	}
 }
 
-func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *workerclient.Client, cfg *config.FullConfig, lnch *launcher.Launcher, auditor *audit.Auditor, rep *reporter.Reporter, reader workerIssueReader, workDir, sessionsDir, workerID, runtimeAlias string, heartbeatInterval, shutdownTimeout time.Duration) error {
+func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *workerclient.Client, cfg *config.FullConfig, lnch *launcher.Launcher, auditor *audit.Auditor, rep *reporter.Reporter, reader workerIssueReader, workDir, sessionsDir, workerID, runtimeAlias string, heartbeatInterval, shutdownTimeout time.Duration, wsMgr *workspace.Manager) error {
 	agentCfg, ok := cfg.Agents[task.AgentName]
 	if !ok {
 		return fmt.Errorf("worker: agent %q not found in local config", task.AgentName)
@@ -242,6 +246,27 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 	if runtimeAlias != "" {
 		agentCopy.Runtime = runtimeAlias
 	}
+
+	// Create an isolated worktree for this task so multiple agents
+	// don't interfere with each other's git state.
+	var worktreePath string
+	if wsMgr != nil {
+		wt, err := wsMgr.Create(task.IssueNum, task.TaskID)
+		if err != nil {
+			log.Printf("[worker] failed to create worktree for issue #%d: %v, falling back to CWD", task.IssueNum, err)
+		} else {
+			workDir = wt
+			worktreePath = wt
+			log.Printf("[worker] using worktree %s for issue #%d", wt, task.IssueNum)
+		}
+	}
+	defer func() {
+		if worktreePath != "" && wsMgr != nil {
+			if err := wsMgr.Remove(worktreePath); err != nil {
+				log.Printf("[worker] worktree cleanup failed for issue #%d: %v", task.IssueNum, err)
+			}
+		}
+	}()
 
 	taskCtx, taskCancel := context.WithCancel(ctx)
 	defer taskCancel()
