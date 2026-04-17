@@ -1706,3 +1706,33 @@ requirements:
       - internal/store/store_test.go
       - internal/workerclient/client_test.go
     deps: [REQ-025, REQ-026]
+
+  - id: REQ-053
+    title: Reporter Comment Overflow Guard
+    description: >
+      Prevent GitHub addComment API rejections when agent execution reports
+      exceed the 65536-character body limit. Reporter pre-checks comment size
+      and spills overflow into a committed artifact on the agent's branch,
+      posting a short summary with a link instead.
+    priority: P0
+    version: v0.2.0
+    status: tested
+    acceptance_criteria:
+      - "AC-053-1: Reporter counts formatted body bytes before calling gh issue comment"
+      - "AC-053-2: If len(body) <= 60000, the comment is posted verbatim"
+      - "AC-053-3: If len(body) > 60000 and a workDir is available, the full body is written to .workbuddy/reports/issue-{N}-{agent}-{timestamp}.md inside the working tree"
+      - "AC-053-4: The overflow file is git-added, committed, and pushed to the current branch"
+      - "AC-053-5: The posted comment is under 60000 bytes, contains a truncation warning, and links to the committed artifact via a GitHub blob URL"
+      - "AC-053-6: If workDir is empty or not a git repository, the reporter still posts a truncated comment and records the failure reason"
+      - "AC-053-7: Reporter emits a TypeReportOverflow event with body_bytes, committed, artifact_url, and optional commit_error fields"
+      - "AC-053-8: Unit tests cover under-limit posting, over-limit without workDir, over-limit with git repo (including commit/push), and non-git workDir fallback"
+    code:
+      - internal/reporter/reporter.go
+      - internal/reporter/format.go
+      - internal/eventlog/eventlog.go
+      - cmd/worker.go
+      - cmd/serve.go
+    tests:
+      - internal/reporter/reporter_test.go
+      - internal/reporter/format_test.go
+    deps: [REQ-005, REQ-009]

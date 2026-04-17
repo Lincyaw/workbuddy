@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +20,11 @@ import (
 // issue is currently dependency-blocked. (gh API content vocabulary:
 // +1, -1, laugh, confused, heart, hooray, rocket, eyes.)
 const ReactionConfused = "confused"
+
+// maxCommentBodyBytes is the maximum body size the reporter will post.
+// GitHub's addComment API rejects bodies > 65536 characters; we leave
+// ~5KB headroom for the reporter's own framing.
+const maxCommentBodyBytes = 60000
 
 // GHCommentWriter abstracts the gh issue comment command for testing.
 type GHCommentWriter interface {
@@ -72,7 +79,7 @@ func (g *GHCLIReactionManager) authenticatedLogin(ctx context.Context) (string, 
 	return g.botLogin, g.botLoginErr
 }
 
-// SetBlockedReaction adds or removes the bot's own 😕 reaction on the issue.
+// SetBlockedReaction adds or removes the bot's own reaction on the issue.
 //
 // blocked=true → POST a confused reaction (idempotent on GitHub side: if the
 // authenticated user already reacted with `confused`, GitHub returns 200
@@ -208,6 +215,9 @@ func (r *Reporter) ReportNeedsHuman(ctx context.Context, repo string, issueNum i
 }
 
 // Report formats and posts an agent execution report to the issue.
+// If the formatted body exceeds maxCommentBodyBytes, the overflow is written
+// to a file in workDir, committed, pushed, and a short summary is posted
+// instead.
 func (r *Reporter) Report(
 	ctx context.Context,
 	repo string,
@@ -217,6 +227,7 @@ func (r *Reporter) Report(
 	sessionID, workerID string,
 	retryCount, maxRetries int,
 	labelLine string,
+	workDir string,
 ) error {
 	status := "success"
 	var errorDetail string
@@ -272,9 +283,137 @@ func (r *Reporter) Report(
 	}
 
 	body := FormatReportAt(data, time.Now())
+	if len(body) > maxCommentBodyBytes {
+		return r.reportWithOverflow(ctx, repo, issueNum, agentName, body, workDir)
+	}
 	return r.writeWithRateLimitRetry(ctx, repo, issueNum, "report", func() error {
 		return r.gh.WriteComment(repo, issueNum, body)
 	})
+}
+
+func (r *Reporter) reportWithOverflow(ctx context.Context, repo string, issueNum int, agentName, body, workDir string) error {
+	artifactURL := ""
+	var commitErr error
+	if workDir != "" {
+		artifactURL, commitErr = r.commitOverflowArtifact(ctx, workDir, repo, issueNum, agentName, body)
+	}
+
+	if r.eventlog != nil {
+		payload := map[string]any{
+			"source":       "report",
+			"body_bytes":   len(body),
+			"committed":    commitErr == nil && artifactURL != "",
+			"artifact_url": artifactURL,
+		}
+		if commitErr != nil {
+			payload["commit_error"] = commitErr.Error()
+		}
+		r.eventlog.Log(eventlog.TypeReportOverflow, repo, issueNum, payload)
+	}
+
+	shortBody := truncateReport(body, artifactURL)
+	return r.writeWithRateLimitRetry(ctx, repo, issueNum, "report", func() error {
+		return r.gh.WriteComment(repo, issueNum, shortBody)
+	})
+}
+
+func (r *Reporter) commitOverflowArtifact(ctx context.Context, workDir, repo string, issueNum int, agentName, body string) (string, error) {
+	gitDir := filepath.Join(workDir, ".git")
+	if _, err := os.Stat(gitDir); err != nil {
+		return "", fmt.Errorf("not a git repository: %w", err)
+	}
+
+	branch, err := r.gitBranch(ctx, workDir)
+	if err != nil {
+		return "", fmt.Errorf("determine branch: %w", err)
+	}
+
+	reportsDir := filepath.Join(workDir, ".workbuddy", "reports")
+	if err := os.MkdirAll(reportsDir, 0755); err != nil {
+		return "", fmt.Errorf("mkdir: %w", err)
+	}
+
+	filename := fmt.Sprintf("issue-%d-%s-%d.md", issueNum, agentName, time.Now().Unix())
+	filePath := filepath.Join(reportsDir, filename)
+	if err := os.WriteFile(filePath, []byte(body), 0644); err != nil {
+		return "", fmt.Errorf("write file: %w", err)
+	}
+
+	if _, err := r.execGit(ctx, workDir, "add", filePath); err != nil {
+		return "", fmt.Errorf("git add: %w", err)
+	}
+
+	env := []string{
+		"GIT_AUTHOR_NAME=workbuddy",
+		"GIT_AUTHOR_EMAIL=workbuddy@localhost",
+		"GIT_COMMITTER_NAME=workbuddy",
+		"GIT_COMMITTER_EMAIL=workbuddy@localhost",
+	}
+	_, commitErr := r.execGitEnv(ctx, workDir, env, "commit", "-m", fmt.Sprintf("workbuddy: overflow report for issue #%d", issueNum))
+	if commitErr != nil && !strings.Contains(commitErr.Error(), "nothing to commit") {
+		return "", fmt.Errorf("git commit: %w", commitErr)
+	}
+
+	if _, err := r.execGit(ctx, workDir, "push", "origin", branch); err != nil {
+		return "", fmt.Errorf("git push: %w", err)
+	}
+
+	relPath := filepath.Join(".workbuddy", "reports", filename)
+	relPath = strings.ReplaceAll(relPath, string(os.PathSeparator), "/")
+	return fmt.Sprintf("https://github.com/%s/blob/%s/%s", repo, branch, relPath), nil
+}
+
+func (r *Reporter) gitBranch(ctx context.Context, workDir string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", workDir, "branch", "--show-current")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch == "" {
+		return "", fmt.Errorf("empty branch name")
+	}
+	return branch, nil
+}
+
+func (r *Reporter) execGit(ctx context.Context, workDir string, args ...string) (string, error) {
+	return r.execGitEnv(ctx, workDir, nil, args...)
+}
+
+func (r *Reporter) execGitEnv(ctx context.Context, workDir string, env []string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", workDir}, args...)...)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return string(out), nil
+}
+
+func truncateReport(body, artifactURL string) string {
+	prefix := 2000
+	if prefix > len(body) {
+		prefix = len(body)
+	}
+	short := body[:prefix]
+	if idx := strings.LastIndex(short, "\n"); idx > 0 {
+		short = short[:idx]
+	}
+
+	var b strings.Builder
+	b.WriteString(short)
+	b.WriteString("\n\n")
+	b.WriteString("> :warning: **Report truncated due to size limit.**\n\n")
+	if artifactURL != "" {
+		fmt.Fprintf(&b, "[View full report](%s)\n\n", artifactURL)
+	} else {
+		b.WriteString("*(Full report could not be committed to branch.)*\n\n")
+	}
+	b.WriteString("---\n")
+	fmt.Fprintf(&b, "*workbuddy coordinator | %s*", time.Now().UTC().Format(time.RFC3339))
+	return b.String()
 }
 
 func (r *Reporter) writeWithRateLimitRetry(ctx context.Context, repo string, issueNum int, source string, writeFn func() error) error {

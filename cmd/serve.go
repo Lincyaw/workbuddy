@@ -1175,8 +1175,12 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	// Report to issue
 	reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(agentShutdownWait))
 	defer reportCancel()
+	var reportWorkDir string
+	if task.Context != nil {
+		reportWorkDir = task.Context.WorkDir
+	}
 	if err := deps.reporter.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, result,
-		sessionID, deps.workerID, retryCount, maxRetries, labelSummary); err != nil {
+		sessionID, deps.workerID, retryCount, maxRetries, labelSummary, reportWorkDir); err != nil {
 		log.Printf("[worker] report failed: %v", err)
 	}
 
