@@ -111,8 +111,14 @@ func TestCreateAndReadWrite(t *testing.T) {
 	if err := s.UpdateWorkerHeartbeat("w-1"); err != nil {
 		t.Fatalf("UpdateWorkerHeartbeat: %v", err)
 	}
+	if err := s.UpdateWorkerHeartbeat("missing-worker"); !errors.Is(err, ErrWorkerNotFound) {
+		t.Fatalf("UpdateWorkerHeartbeat missing worker = %v, want ErrWorkerNotFound", err)
+	}
 	if err := s.UpdateWorkerStatus("w-1", "offline"); err != nil {
 		t.Fatalf("UpdateWorkerStatus: %v", err)
+	}
+	if err := s.UpdateWorkerStatus("missing-worker", "offline"); !errors.Is(err, ErrWorkerNotFound) {
+		t.Fatalf("UpdateWorkerStatus missing worker = %v, want ErrWorkerNotFound", err)
 	}
 	workers, _ = s.QueryWorkers("")
 	if workers[0].Status != "offline" {

@@ -921,6 +921,10 @@ func (s *fullCoordinatorServer) handleTaskHeartbeat(w http.ResponseWriter, r *ht
 		log.Printf("[coordinator] task heartbeat DB update failed for %s: %v", taskID, err)
 	}
 	if err := s.registry.Heartbeat(req.WorkerID); err != nil {
+		if errors.Is(err, registry.ErrWorkerNotFound) {
+			coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown worker"})
+			return
+		}
 		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}

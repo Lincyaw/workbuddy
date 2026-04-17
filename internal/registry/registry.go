@@ -70,7 +70,13 @@ func (r *Registry) RegisterWithRepos(id, repo string, repos []string, roles []st
 
 // Heartbeat updates the last_heartbeat timestamp for a worker.
 func (r *Registry) Heartbeat(id string) error {
-	return r.store.UpdateWorkerHeartbeat(id)
+	if err := r.store.UpdateWorkerHeartbeat(id); err != nil {
+		if errors.Is(err, store.ErrWorkerNotFound) {
+			return ErrWorkerNotFound
+		}
+		return err
+	}
+	return nil
 }
 
 // MarkStaleOffline finds workers that are online but whose last_heartbeat

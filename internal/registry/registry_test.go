@@ -72,8 +72,8 @@ func TestHeartbeat(t *testing.T) {
 	}
 
 	// Heartbeat for non-existent worker should fail.
-	if err := reg.Heartbeat("nonexistent"); err == nil {
-		t.Error("expected error for non-existent worker heartbeat")
+	if err := reg.Heartbeat("nonexistent"); !errors.Is(err, ErrWorkerNotFound) {
+		t.Fatalf("expected ErrWorkerNotFound for non-existent worker heartbeat, got %v", err)
 	}
 }
 

@@ -48,6 +48,7 @@ var (
 	ErrTaskClaimConflict      = errors.New("task claim conflict")
 	ErrTaskAlreadyCompleted   = errors.New("task already completed")
 	ErrTaskNotClaimedByWorker = errors.New("task not claimed by worker")
+	ErrWorkerNotFound         = errors.New("worker not found")
 )
 
 // Store provides typed CRUD access to the workbuddy SQLite database.
@@ -933,7 +934,7 @@ func (s *Store) UpdateWorkerHeartbeat(workerID string) error {
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("store: update worker heartbeat: worker %q not found", workerID)
+		return fmt.Errorf("store: update worker heartbeat: %w", ErrWorkerNotFound)
 	}
 	return nil
 }
@@ -949,7 +950,7 @@ func (s *Store) UpdateWorkerStatus(workerID, status string) error {
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("store: update worker status: worker %q not found", workerID)
+		return fmt.Errorf("store: update worker status: %w", ErrWorkerNotFound)
 	}
 	return nil
 }

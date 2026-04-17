@@ -78,6 +78,18 @@ func TestCoordinatorWorkerUnregister(t *testing.T) {
 	}
 	_ = pollResp.Body.Close()
 
+	// Heartbeat with unregistered worker should also fail with unknown worker.
+	if err := insertClaimedTaskForWorker(dbPath, repo, "task-heartbeat", 1, "worker-1"); err != nil {
+		t.Fatalf("insert claimed task: %v", err)
+	}
+	heartbeatResp := postCoordinatorJSON(t, client, fmt.Sprintf("http://localhost:%d/api/v1/tasks/task-heartbeat/heartbeat", port), "", taskHeartbeatRequest{
+		WorkerID: "worker-1",
+	})
+	if heartbeatResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("heartbeat after unregister status = %d, want %d", heartbeatResp.StatusCode, http.StatusBadRequest)
+	}
+	_ = heartbeatResp.Body.Close()
+
 	// Unregister unknown worker should return 404.
 	req, _ = http.NewRequest(http.MethodDelete, fmt.Sprintf("http://localhost:%d/api/v1/workers/unknown-worker", port), nil)
 	unregisterResp, err = client.Do(req)
@@ -169,6 +181,33 @@ func TestCoordinatorWorkerUnregisterWithRunningTask(t *testing.T) {
 		t.Fatalf("unregister with running task status = %d, want %d", unregisterResp.StatusCode, http.StatusConflict)
 	}
 	_ = unregisterResp.Body.Close()
+}
+
+func insertClaimedTaskForWorker(dbPath, repo, taskID string, issueNum int, workerID string) error {
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = st.Close() }()
+
+	if err := st.InsertTask(store.TaskRecord{
+		ID:        taskID,
+		Repo:      repo,
+		IssueNum:  issueNum,
+		AgentName: "dev-agent",
+		Role:      "dev",
+		Status:    store.TaskStatusPending,
+	}); err != nil {
+		return err
+	}
+	claimed, err := st.ClaimTask(taskID, workerID)
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		return fmt.Errorf("claim task %s: expected claim to succeed", taskID)
+	}
+	return nil
 }
 
 func TestParseCoordinatorFlagsRejectsNonLoopbackBypass(t *testing.T) {

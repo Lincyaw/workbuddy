@@ -187,7 +187,7 @@ paths:
         '204':
           description: Heartbeat accepted
         '400':
-          description: Invalid request body or wrong worker for the task
+          description: Invalid request body, wrong worker for the task, or unknown worker
           content:
             application/json:
               schema:
