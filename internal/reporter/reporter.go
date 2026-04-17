@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/ghutil"
@@ -338,7 +340,7 @@ func (r *Reporter) commitOverflowArtifact(ctx context.Context, workDir, repo str
 		return "", fmt.Errorf("mkdir: %w", err)
 	}
 
-	filename := fmt.Sprintf("issue-%d-%s-%d.md", issueNum, agentName, time.Now().Unix())
+	filename := fmt.Sprintf("issue-%d-%s-%d.md", issueNum, sanitizeArtifactComponent(agentName), time.Now().Unix())
 	filePath := filepath.Join(reportsDir, filename)
 	if err := os.WriteFile(filePath, []byte(body), 0644); err != nil {
 		return "", fmt.Errorf("write file: %w", err)
@@ -398,11 +400,7 @@ func (r *Reporter) execGitEnv(ctx context.Context, workDir string, env []string,
 }
 
 func truncateReport(body, artifactURL string) string {
-	prefix := 2000
-	if prefix > len(body) {
-		prefix = len(body)
-	}
-	short := body[:prefix]
+	short := utf8Prefix(body, 2000)
 	if idx := strings.LastIndex(short, "\n"); idx > 0 {
 		short = short[:idx]
 	}
@@ -419,6 +417,52 @@ func truncateReport(body, artifactURL string) string {
 	b.WriteString("---\n")
 	fmt.Fprintf(&b, "*workbuddy coordinator | %s*", time.Now().UTC().Format(time.RFC3339))
 	return b.String()
+}
+
+func sanitizeArtifactComponent(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "agent"
+	}
+
+	var b strings.Builder
+	b.Grow(len(value))
+	lastDash := false
+	for _, r := range value {
+		switch {
+		case unicode.IsLetter(r), unicode.IsDigit(r):
+			b.WriteRune(unicode.ToLower(r))
+			lastDash = false
+		case r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+			lastDash = false
+		default:
+			if !lastDash && b.Len() > 0 {
+				b.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+
+	sanitized := strings.Trim(b.String(), "-")
+	if sanitized == "" {
+		return "agent"
+	}
+	return sanitized
+}
+
+func utf8Prefix(value string, maxBytes int) string {
+	if maxBytes <= 0 || value == "" {
+		return ""
+	}
+	if len(value) <= maxBytes {
+		return value
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.ValidString(value[:cut]) {
+		cut--
+	}
+	return value[:cut]
 }
 
 func (r *Reporter) writeWithRateLimitRetry(ctx context.Context, repo string, issueNum int, source string, writeFn func() error) error {

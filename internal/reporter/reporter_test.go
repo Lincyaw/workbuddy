@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/launcher"
@@ -503,6 +504,47 @@ func TestReport_OverflowWithWorkDir(t *testing.T) {
 	}
 }
 
+func TestReport_OverflowWithUnsafeAgentName(t *testing.T) {
+	remoteDir := t.TempDir()
+	runGit(t, remoteDir, "init", "--bare")
+
+	tmpDir := t.TempDir()
+	branch := initGitRepo(t, tmpDir)
+	runGit(t, tmpDir, "remote", "add", "origin", remoteDir)
+	runGit(t, tmpDir, "push", "-u", "origin", branch)
+
+	gh := &mockGHWriter{}
+	r := NewReporter(gh)
+
+	result := &launcher.Result{
+		ExitCode: 0,
+		Stdout:   strings.Repeat("unsafe", 12000),
+		Duration: time.Second,
+	}
+
+	if err := r.Report(context.Background(), "owner/repo", 42, "review/agent", result, "sess-unsafe", "worker-1", 0, 3, "", tmpDir); err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+
+	reportsDir := filepath.Join(tmpDir, overflowReportsDir)
+	entries, err := os.ReadDir(reportsDir)
+	if err != nil {
+		t.Fatalf("read reports dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 report file, got %d", len(entries))
+	}
+	if strings.Contains(entries[0].Name(), "/") {
+		t.Fatalf("expected sanitized filename, got %q", entries[0].Name())
+	}
+	if !strings.Contains(entries[0].Name(), "review-agent") {
+		t.Fatalf("expected sanitized agent segment in filename, got %q", entries[0].Name())
+	}
+	if !strings.Contains(gh.comments[0], "View full report") {
+		t.Fatalf("expected comment to include artifact link: %s", gh.comments[0])
+	}
+}
+
 func TestReport_OverflowWithWorkDirButNotGitRepo(t *testing.T) {
 	gh := &mockGHWriter{}
 	r := NewReporter(gh)
@@ -568,5 +610,13 @@ func TestTruncateReport_NoArtifactURL(t *testing.T) {
 	}
 	if strings.Contains(short, "View full report") {
 		t.Error("should not contain link when no artifact URL")
+	}
+}
+
+func TestTruncateReport_PreservesUTF8(t *testing.T) {
+	body := strings.Repeat("你", 1000)
+	short := truncateReport(body, "")
+	if !utf8.ValidString(short) {
+		t.Fatalf("expected valid UTF-8, got %q", short)
 	}
 }
