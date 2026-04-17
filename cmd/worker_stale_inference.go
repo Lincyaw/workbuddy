@@ -142,11 +142,16 @@ func staleInferenceStatus(task *workerclient.Task, cfg *config.FullConfig, label
 	if slices.Contains(labels, current.EnterLabel) {
 		return store.TaskStatusFailed
 	}
-	for stateName, state := range workflow.States {
-		if stateName == task.State || state == nil || strings.TrimSpace(state.EnterLabel) == "" {
+
+	for _, transition := range current.Transitions {
+		if strings.TrimSpace(transition.To) == "" {
 			continue
 		}
-		if slices.Contains(labels, state.EnterLabel) {
+		next := workflow.States[transition.To]
+		if next == nil || strings.TrimSpace(next.EnterLabel) == "" {
+			continue
+		}
+		if slices.Contains(labels, next.EnterLabel) {
 			return store.TaskStatusCompleted
 		}
 	}

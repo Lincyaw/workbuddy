@@ -28,6 +28,10 @@ workbuddy worker --coordinator http://A:8080 --token <secret> --role dev --repo 
 - Worker 负责：向 Coordinator 注册、长轮询领取任务、执行 agent 子进程、提交结果
 - 通信方式：HTTP 长轮询（`GET /api/v1/tasks/poll`，无任务时挂起最多 timeout 秒）
 - 认证：共享密钥，`Authorization: Bearer <token>`（REQ-029）
+- Worker 对支持该能力的 runtime session 启用 stale-inference watchdog：
+  session artifact 长时间无增长且 agent PID 无活动子进程时，会记录
+  `agent_stale_inference` 事件并终止该进程组；随后依据 issue 当前 labels
+  判断这次执行应记为 `completed` 还是 `failed`
 
 ## CLI 命令列表
 

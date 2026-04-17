@@ -52,12 +52,14 @@ documentation:
         - .github/workbuddy/config.yaml
         - internal/config/types.go
         - internal/config/loader.go
+        - cmd/worker.go
+        - cmd/worker_stale_inference.go
         - internal/poller/poller.go
         - internal/statemachine/statemachine.go
         - .github/workbuddy/agents/dev-agent.md
         - .github/workbuddy/agents/review-agent.md
         - .github/workbuddy/workflows/default.md
-      notes: Current config, agent, workflow, and label-driven trigger behavior. Agent catalog is now the 2-agent set (dev-agent, review-agent); runtime selection is an agent-config field, not a separate agent kind. Worker/agent stale_inference watchdog policy is part of the current config surface.
+      notes: Current config, agent, workflow, and label-driven trigger behavior. Agent catalog is now the 2-agent set (dev-agent, review-agent); runtime selection is an agent-config field, not a separate agent kind. Worker/agent stale_inference watchdog policy, defaults, and valid-transition completion recovery are part of the current config surface.
 
     - path: docs/implemented/current-runtime-reporting-and-audit.md
       bucket: implemented
@@ -175,7 +177,7 @@ documentation:
         - internal/eventlog/eventlog.go
         - internal/workerclient/client.go
         - internal/coordinator/server.go
-      notes: Distributed coordinator/worker topology fully implemented with HTTP long-polling, shared-secret auth, stale-inference watchdog recovery on remote workers, and complete CLI surface (REQ-017~022, REQ-025~029, REQ-032~037).
+      notes: Distributed coordinator/worker topology fully implemented with HTTP long-polling, shared-secret auth, stale-inference watchdog recovery on remote workers, label-aware stale completion classification, and complete CLI surface (REQ-017~022, REQ-025~029, REQ-032~037).
 
     - path: docs/implemented/runtime-migration-plan.md
       bucket: implemented

@@ -396,8 +396,16 @@ func TestStaleInferenceStatusUsesWorkflowLabels(t *testing.T) {
 		Workflows: map[string]*config.WorkflowConfig{
 			"dev-workflow": {
 				States: map[string]*config.State{
-					"developing": {EnterLabel: "status:developing"},
+					"developing": {
+						EnterLabel: "status:developing",
+						Transitions: []config.Transition{
+							{To: "reviewing", When: `labeled "status:reviewing"`},
+							{To: "blocked", When: `labeled "status:blocked"`},
+						},
+					},
 					"reviewing":  {EnterLabel: "status:reviewing"},
+					"blocked":    {EnterLabel: "status:blocked"},
+					"done":       {EnterLabel: "status:done"},
 				},
 			},
 		},
@@ -408,6 +416,12 @@ func TestStaleInferenceStatusUsesWorkflowLabels(t *testing.T) {
 	}
 	if got := staleInferenceStatus(task, cfg, []string{"status:reviewing"}); got != store.TaskStatusCompleted {
 		t.Fatalf("status with advanced label = %q, want completed", got)
+	}
+	if got := staleInferenceStatus(task, cfg, []string{"status:blocked"}); got != store.TaskStatusCompleted {
+		t.Fatalf("status with alternate allowed label = %q, want completed", got)
+	}
+	if got := staleInferenceStatus(task, cfg, []string{"status:done"}); got != store.TaskStatusFailed {
+		t.Fatalf("status with invalid transition = %q, want failed", got)
 	}
 }
 
@@ -424,11 +438,21 @@ func TestWorkerKillsStaleInferenceAndCompletesTask(t *testing.T) {
 			{Number: 9, Title: "Hung Task", State: "open", Body: "body", Labels: []string{"workbuddy", "status:developing"}},
 		},
 		labelSnapshots: [][]string{
-			{"workbuddy", "status:done"},
-			{"workbuddy", "status:done"},
+			{"workbuddy", "status:reviewing"},
+			{"workbuddy", "status:reviewing"},
 		},
 	}
 	writeFile(t, filepath.Join(configDir, "config.yaml"), "repo: "+repo+"\npoll_interval: 1s\nport: 0\nworker:\n  stale_inference:\n    enabled: true\n    idle_threshold: 250ms\n    check_interval: 25ms\n")
+	writeFile(t, filepath.Join(configDir, "workflows", "dev-workflow.md"), `---
+name: dev-workflow
+description: Dev workflow
+trigger:
+  issue_label: "workbuddy"
+max_retries: 3
+---
+# Dev Workflow
+
+`+"```yaml\nstates:\n  triage:\n    enter_label: \"status:triage\"\n    transitions:\n      - to: developing\n        when: 'labeled \"status:developing\"'\n  developing:\n    enter_label: \"status:developing\"\n    agent: dev-agent\n    transitions:\n      - to: reviewing\n        when: 'labeled \"status:reviewing\"'\n  reviewing:\n    enter_label: \"status:reviewing\"\n```\n")
 
 	ctxCoordinator, cancelCoordinator := context.WithCancel(context.Background())
 	defer cancelCoordinator()

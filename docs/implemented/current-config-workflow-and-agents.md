@@ -23,6 +23,7 @@
 - `environment`
 - `poll_interval`
 - `port`
+- `worker`
 - `notifications`
 
 代码：
@@ -31,7 +32,34 @@
 - `internal/config/types.go`
 - `internal/config/loader.go`
 
-仓库样例 `.github/workbuddy/config.yaml` 还包含 `notifications` 配置块（用于告警路由），并在该块内包含四个可选通道的开关与环境变量名。
+仓库样例 `.github/workbuddy/config.yaml` 还包含：
+
+- `worker.stale_inference`
+- `notifications`
+
+其中 `worker.stale_inference` 用于 Worker 侧的空转推理 watchdog。
+
+## 当前 Worker stale_inference 配置
+
+当前 `worker.stale_inference` 支持：
+
+- `enabled`
+- `idle_threshold`
+- `check_interval`
+
+语义：
+
+- Worker 在 agent 子进程运行期间周期性检查 session artifact（当前主要是 `codex-exec.jsonl`）的 `mtime`
+- 当 artifact 在 `idle_threshold` 内没有增长，且目标 PID 没有活动子进程时，watchdog 视为 stale inference
+- Worker 记录 `agent_stale_inference` 事件，杀掉该进程组，然后重新读取 issue labels
+- 如果 label 已经推进到当前 workflow state 的允许后继状态，则该 task 记为 `completed`
+- 如果 label 仍停留在当前状态，或跳到了不允许的状态，则该 task 记为 `failed`
+
+默认值：
+
+- `enabled: true`
+- `idle_threshold: 5m`
+- `check_interval: 30s`
 
 ## 当前告警（notifications）配置
 
@@ -79,6 +107,16 @@
 - `output_contract`（历史字段，2-agent catalog 不再使用）
 - `command`（legacy shim）
 - `timeout`
+
+当前 `policy` 下真正使用的执行字段包括：
+
+- `sandbox`
+- `approval`
+- `model`
+- `timeout`
+- `stale_inference.enabled`
+- `stale_inference.idle_threshold`
+- `stale_inference.check_interval`
 
 当前 runtime 公共值：
 
