@@ -1281,6 +1281,7 @@ requirements:
       - "AC-042-7: With `--auth`, unauthenticated registration returns 401"
       - "AC-042-8: `workbuddy serve` backward compat — existing tests pass"
       - "AC-042-9: `go build && go vet && go test` all green"
+      - "AC-042-10: On coordinator startup, registered repos re-dispatch open issues in active workflow states when no pending/running task exists"
     code:
       - cmd/coordinator.go
       - cmd/repo.go

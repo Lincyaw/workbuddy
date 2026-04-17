@@ -178,6 +178,28 @@ func waitForPendingTasks(t *testing.T, dbPath string, want int) {
 	t.Fatalf("expected at least %d pending tasks", want)
 }
 
+func waitForTaskCount(t *testing.T, dbPath, status string, want int) []store.TaskRecord {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		st, err := store.NewStore(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tasks, err := st.QueryTasks(status)
+		_ = st.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(tasks) >= want {
+			return tasks
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("expected at least %d tasks with status %s", want, status)
+	return nil
+}
+
 func waitForRepoStatus(t *testing.T, client *http.Client, url, repo, wantStatus string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -357,6 +379,122 @@ func TestCoordinatorMultiRepoRegistrationIsolationAndDeregister(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("coordinator did not exit")
+	}
+}
+
+func TestCoordinatorRestartRedispatchesOrphanedActiveState(t *testing.T) {
+	repo := "owner/restart-repo"
+	configDir := setupNamedConfigDir(t, repo, "dev-agent-restart", "workflow-restart")
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	gh := &repoAwareGHReader{
+		issuesByRepo: map[string][]poller.Issue{
+			repo: {{
+				Number: 37,
+				Title:  "Restart me",
+				State:  "open",
+				Body:   "body",
+				Labels: []string{"workbuddy", "status:developing"},
+			}},
+		},
+	}
+
+	port1 := getFreePort(t)
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	errCh1 := make(chan error, 1)
+	go func() {
+		errCh1 <- runCoordinatorWithOpts(&coordinatorOpts{
+			port:         port1,
+			pollInterval: 50 * time.Millisecond,
+			dbPath:       dbPath,
+		}, gh, ctx1)
+	}()
+	waitForHealth(t, port1)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp := postCoordinatorJSON(t, client, fmt.Sprintf("http://localhost:%d/api/v1/repos/register", port1), "", mustRegistrationRequest(t, configDir))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("register repo status = %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	waitForPendingTasks(t, dbPath, 1)
+
+	workerResp := postCoordinatorJSON(t, client, fmt.Sprintf("http://localhost:%d/api/v1/workers/register", port1), "", workerRegisterRequest{
+		WorkerID: "worker-restart",
+		Repo:     repo,
+		Repos:    []string{repo},
+		Roles:    []string{"dev"},
+		Hostname: "host-restart",
+	})
+	if workerResp.StatusCode != http.StatusCreated {
+		t.Fatalf("register worker status = %d", workerResp.StatusCode)
+	}
+	_ = workerResp.Body.Close()
+
+	pollResp, err := client.Get(fmt.Sprintf("http://localhost:%d/api/v1/tasks/poll?worker_id=worker-restart&timeout=100ms", port1))
+	if err != nil {
+		t.Fatalf("poll worker: %v", err)
+	}
+	if pollResp.StatusCode != http.StatusOK {
+		t.Fatalf("poll worker status = %d", pollResp.StatusCode)
+	}
+	var task taskPollResponse
+	if err := json.NewDecoder(pollResp.Body).Decode(&task); err != nil {
+		t.Fatalf("decode task: %v", err)
+	}
+	_ = pollResp.Body.Close()
+	if task.IssueNum != 37 || task.AgentName != "dev-agent-restart" {
+		t.Fatalf("unexpected task after first dispatch: %+v", task)
+	}
+
+	cancel1()
+	select {
+	case err := <-errCh1:
+		if err != nil {
+			t.Fatalf("first coordinator: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first coordinator did not exit")
+	}
+
+	port2 := getFreePort(t)
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	errCh2 := make(chan error, 1)
+	go func() {
+		errCh2 <- runCoordinatorWithOpts(&coordinatorOpts{
+			port:         port2,
+			pollInterval: 50 * time.Millisecond,
+			dbPath:       dbPath,
+		}, gh, ctx2)
+	}()
+	waitForHealth(t, port2)
+
+	failed := waitForTaskCount(t, dbPath, store.TaskStatusFailed, 1)
+	if failed[0].IssueNum != 37 {
+		t.Fatalf("failed task issue = %d, want 37", failed[0].IssueNum)
+	}
+
+	pending := waitForTaskCount(t, dbPath, store.TaskStatusPending, 1)
+	foundRedispatch := false
+	for _, queued := range pending {
+		if queued.IssueNum == 37 && queued.AgentName == "dev-agent-restart" {
+			foundRedispatch = true
+			break
+		}
+	}
+	if !foundRedispatch {
+		t.Fatalf("pending tasks after restart = %+v, want redispatched task for issue 37", pending)
+	}
+
+	cancel2()
+	select {
+	case err := <-errCh2:
+		if err != nil {
+			t.Fatalf("second coordinator: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second coordinator did not exit")
 	}
 }
 
