@@ -1581,3 +1581,33 @@ requirements:
       - internal/staleinference/watchdog_test.go
       - internal/config/loader_test.go
     deps: [REQ-006]
+
+  - id: REQ-049
+    title: Dynamic worker repo binding and management API
+    description: >
+      Allow a running worker to add or remove repo-to-local-path bindings
+      without restart. Workers expose a loopback-only management API,
+      persist a discoverable `.workbuddy/worker.addr`, re-register with the
+      coordinator when bindings change, and route each claimed task through
+      the repo-specific local checkout/worktree root.
+    priority: P1
+    version: v0.2.0
+    status: tested
+    acceptance_criteria:
+      - "AC-049-1: `workbuddy worker` supports stable `--id` with hostname default and `--repos owner/repo=/path,...` startup bindings"
+      - "AC-049-2: legacy `--repo owner/repo` remains supported and defaults its path to cwd"
+      - "AC-049-3: worker starts a loopback-only management API at `--mgmt-addr` (default 127.0.0.1:0) and writes the resolved address to `.workbuddy/worker.addr`"
+      - "AC-049-4: GET/POST/DELETE `/mgmt/repos` list, add, and remove repo bindings; worker re-registers with coordinator after successful changes"
+      - "AC-049-5: `workbuddy worker repos add|remove|list` discover the management API via `.workbuddy/worker.addr`"
+      - "AC-049-6: claimed tasks use repo-specific path mapping for RepoRoot/WorkDir/worktree isolation"
+      - "AC-049-7: tasks claimed for an unmapped repo are released back to coordinator"
+      - "AC-049-8: `.workbuddy/worker.addr` is removed on worker shutdown"
+      - "AC-049-9: unit tests cover repo map operations and management API endpoints"
+      - "AC-049-10: integration test covers coordinator + worker + dynamic repo add dispatch"
+    code:
+      - cmd/worker.go
+      - cmd/worker_repos.go
+    tests:
+      - cmd/worker_test.go
+      - cmd/worker_repos_test.go
+    deps: [REQ-025, REQ-028]
