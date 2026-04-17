@@ -76,6 +76,11 @@ func (c *Client) Register(ctx context.Context, req RegisterRequest) error {
 	return err
 }
 
+func (c *Client) Unregister(ctx context.Context, workerID string) error {
+	_, err := c.doJSON(ctx, http.MethodDelete, "/api/v1/workers/"+url.PathEscape(workerID), nil, nil, http.StatusOK)
+	return err
+}
+
 func (c *Client) PollTask(ctx context.Context, workerID string, timeout time.Duration) (*Task, error) {
 	path := fmt.Sprintf("/api/v1/tasks/poll?worker_id=%s", url.QueryEscape(workerID))
 	if timeout > 0 {

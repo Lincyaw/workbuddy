@@ -954,6 +954,30 @@ func (s *Store) UpdateWorkerStatus(workerID, status string) error {
 	return nil
 }
 
+// DeleteWorker removes a worker record from the registry.
+// Returns true if a row was deleted, false if the worker did not exist.
+func (s *Store) DeleteWorker(workerID string) (bool, error) {
+	res, err := s.db.Exec(`DELETE FROM workers WHERE id = ?`, workerID)
+	if err != nil {
+		return false, fmt.Errorf("store: delete worker: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// WorkerHasRunningTask returns true if the worker currently owns a running task.
+func (s *Store) WorkerHasRunningTask(workerID string) (bool, error) {
+	var count int
+	err := s.db.QueryRow(
+		`SELECT COUNT(1) FROM task_queue WHERE worker_id = ? AND status = ?`,
+		workerID, TaskStatusRunning,
+	).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("store: check worker running task: %w", err)
+	}
+	return count > 0, nil
+}
+
 // ---------------------------------------------------------------------------
 // Repo registrations
 // ---------------------------------------------------------------------------

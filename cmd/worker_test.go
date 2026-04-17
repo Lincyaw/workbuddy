@@ -79,6 +79,75 @@ func TestParseWorkerFlags(t *testing.T) {
 	}
 }
 
+func TestWorkerUnregisterCmd(t *testing.T) {
+	var method string
+	var path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method = r.Method
+		path = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"unregistered"}`))
+	}))
+	defer srv.Close()
+
+	cmd := &cobra.Command{Use: "unregister"}
+	cmd.Flags().String("coordinator", "", "")
+	cmd.Flags().String("token", "", "")
+	cmd.Flags().String("id", "", "")
+	if err := cmd.Flags().Set("coordinator", srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("token", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("id", "worker-1"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd.SetContext(ctx)
+
+	if err := runWorkerUnregister(cmd, nil); err != nil {
+		t.Fatalf("runWorkerUnregister: %v", err)
+	}
+	if method != http.MethodDelete {
+		t.Fatalf("method = %s, want DELETE", method)
+	}
+	if path != "/api/v1/workers/worker-1" {
+		t.Fatalf("path = %s, want /api/v1/workers/worker-1", path)
+	}
+}
+
+func TestWorkerUnregisterCmdNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"worker not found"}`))
+	}))
+	defer srv.Close()
+
+	cmd := &cobra.Command{Use: "unregister"}
+	cmd.Flags().String("coordinator", "", "")
+	cmd.Flags().String("token", "", "")
+	cmd.Flags().String("id", "", "")
+	if err := cmd.Flags().Set("coordinator", srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("token", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("id", "missing-worker"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd.SetContext(ctx)
+
+	err := runWorkerUnregister(cmd, nil)
+	if err == nil {
+		t.Fatal("expected error for 404")
+	}
+}
+
 func TestWorkerRejectsInvalidToken(t *testing.T) {
 	setupFakeGHCLI(t)
 	t.Setenv("WORKBUDDY_AUTH_TOKEN", "secret-token")

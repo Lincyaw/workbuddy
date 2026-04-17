@@ -67,6 +67,12 @@ var workerCmd = &cobra.Command{
 	RunE:  runWorker,
 }
 
+var workerUnregisterCmd = &cobra.Command{
+	Use:   "unregister",
+	Short: "Unregister a worker from the coordinator",
+	RunE:  runWorkerUnregister,
+}
+
 func init() {
 	workerCmd.Flags().String("coordinator", "", "Coordinator base URL")
 	workerCmd.Flags().String("token", "", "Bearer token for Coordinator authentication")
@@ -79,8 +85,17 @@ func init() {
 	workerCmd.Flags().Int("concurrency", 1, "Maximum concurrent tasks per worker")
 	_ = workerCmd.MarkFlagRequired("coordinator")
 	_ = workerCmd.MarkFlagRequired("token")
+
+	workerUnregisterCmd.Flags().String("coordinator", "", "Coordinator base URL")
+	workerUnregisterCmd.Flags().String("token", "", "Bearer token for Coordinator authentication")
+	workerUnregisterCmd.Flags().String("id", "", "Worker ID to unregister")
+	_ = workerUnregisterCmd.MarkFlagRequired("coordinator")
+	_ = workerUnregisterCmd.MarkFlagRequired("token")
+	_ = workerUnregisterCmd.MarkFlagRequired("id")
+
 	workerReposCmd.AddCommand(workerReposAddCmd, workerReposRemoveCmd, workerReposListCmd)
 	workerCmd.AddCommand(workerReposCmd)
+	workerCmd.AddCommand(workerUnregisterCmd)
 	rootCmd.AddCommand(workerCmd)
 }
 
@@ -90,6 +105,19 @@ func runWorker(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	return runWorkerWithOpts(opts, nil, nil)
+}
+
+func runWorkerUnregister(cmd *cobra.Command, _ []string) error {
+	coordinatorURL, _ := cmd.Flags().GetString("coordinator")
+	token, _ := cmd.Flags().GetString("token")
+	workerID, _ := cmd.Flags().GetString("id")
+
+	client := workerclient.New(strings.TrimSpace(coordinatorURL), strings.TrimSpace(token), nil)
+	if err := client.Unregister(cmd.Context(), strings.TrimSpace(workerID)); err != nil {
+		return fmt.Errorf("worker unregister: %w", err)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "unregistered worker %s\n", workerID)
+	return nil
 }
 
 func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {

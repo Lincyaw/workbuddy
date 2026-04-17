@@ -2,6 +2,7 @@ package registry
 
 import (
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -189,6 +190,72 @@ func TestRegisterEmbedded(t *testing.T) {
 	}
 	if len(workers) != 1 || workers[0].ID != id {
 		t.Errorf("expected embedded worker, got %v", workerIDs(workers))
+	}
+}
+
+func TestUnregister(t *testing.T) {
+	reg := newTestRegistry(t, 10*time.Second)
+
+	if err := reg.Register("w1", "owner/repo", []string{"dev"}, "host1"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// Unregister existing worker should succeed.
+	if err := reg.Unregister("w1"); err != nil {
+		t.Fatalf("unregister: %v", err)
+	}
+
+	workers, err := reg.FindWorkers("owner/repo", "dev")
+	if err != nil {
+		t.Fatalf("find workers: %v", err)
+	}
+	if len(workers) != 0 {
+		t.Fatalf("expected 0 workers after unregister, got %d", len(workers))
+	}
+
+	// Unregister non-existent worker should return ErrWorkerNotFound.
+	if err := reg.Unregister("w-missing"); !errors.Is(err, ErrWorkerNotFound) {
+		t.Fatalf("expected ErrWorkerNotFound, got %v", err)
+	}
+}
+
+func TestUnregisterWithRunningTask(t *testing.T) {
+	reg := newTestRegistry(t, 10*time.Second)
+
+	if err := reg.Register("w-task", "owner/repo", []string{"dev"}, "host1"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// Insert and claim a task for the worker via the store.
+	if err := reg.store.InsertTask(store.TaskRecord{
+		ID:        "task-1",
+		Repo:      "owner/repo",
+		IssueNum:  1,
+		AgentName: "dev",
+		Role:      "dev",
+		Status:    store.TaskStatusPending,
+	}); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+	claimed, err := reg.store.ClaimTask("task-1", "w-task")
+	if err != nil {
+		t.Fatalf("ClaimTask: %v", err)
+	}
+	if !claimed {
+		t.Fatal("expected claim to succeed")
+	}
+
+	// Unregister should be rejected while task is running.
+	if err := reg.Unregister("w-task"); !errors.Is(err, ErrWorkerHasRunningTask) {
+		t.Fatalf("expected ErrWorkerHasRunningTask, got %v", err)
+	}
+
+	// Release the task and retry unregister.
+	if _, err := reg.store.ReleaseTask("task-1", "w-task"); err != nil {
+		t.Fatalf("ReleaseTask: %v", err)
+	}
+	if err := reg.Unregister("w-task"); err != nil {
+		t.Fatalf("unregister after release: %v", err)
 	}
 }
 
