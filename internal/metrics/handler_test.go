@@ -193,7 +193,7 @@ func seedMetricsFixtureForHandler(t *testing.T, st *store.Store, repo string) {
 	if err != nil {
 		t.Fatalf("InsertEvent: %v", err)
 	}
-	stale := time.Now().Add(-2 * time.Hour).Format("2006-01-02 15:04:05")
+	stale := time.Now().UTC().Add(-2 * time.Hour).Format("2006-01-02 15:04:05")
 	if _, err := st.DB().Exec(`UPDATE events SET ts = ? WHERE id = ?`, stale, eventID); err != nil {
 		t.Fatalf("set stale event ts: %v", err)
 	}

@@ -552,7 +552,199 @@ func newStatusFlagCommand() *cobra.Command {
 	cmd.Flags().String("since", "", "")
 	cmd.Flags().Int("issue", 0, "")
 	cmd.Flags().Duration("timeout", defaultWatchTimeout, "")
+	cmd.Flags().String("coordinator", "", "")
+	cmd.Flags().StringP("token", "t", "", "")
+	cmd.Flags().Bool("repos", false, "")
 	return cmd
+}
+
+func TestParseStatusFlags_Coordinator(t *testing.T) {
+	cmd := newStatusFlagCommand()
+	_ = cmd.Flags().Set("coordinator", "http://127.0.0.1:8091")
+
+	opts, err := parseStatusFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseStatusFlags: %v", err)
+	}
+	if opts.coordinator != "http://127.0.0.1:8091" {
+		t.Fatalf("coordinator = %q", opts.coordinator)
+	}
+	if opts.repos {
+		t.Fatal("repos should be false")
+	}
+}
+
+func TestParseStatusFlags_CoordinatorRepos(t *testing.T) {
+	cmd := newStatusFlagCommand()
+	_ = cmd.Flags().Set("coordinator", "http://127.0.0.1:8091")
+	_ = cmd.Flags().Set("repos", "true")
+	_ = cmd.Flags().Set("json", "true")
+
+	opts, err := parseStatusFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseStatusFlags: %v", err)
+	}
+	if !opts.repos {
+		t.Fatal("repos should be true")
+	}
+	if !opts.jsonOut {
+		t.Fatal("jsonOut should be true")
+	}
+}
+
+func TestParseStatusFlags_CoordinatorMutualExclusion(t *testing.T) {
+	for _, flag := range []string{"stuck", "tasks", "events", "watch"} {
+		cmd := newStatusFlagCommand()
+		_ = cmd.Flags().Set("coordinator", "http://127.0.0.1:8091")
+		_ = cmd.Flags().Set(flag, "true")
+
+		_, err := parseStatusFlags(cmd)
+		if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+			t.Fatalf("expected mutual exclusion error for --%s, got %v", flag, err)
+		}
+	}
+}
+
+func TestParseStatusFlags_ReposRequiresCoordinator(t *testing.T) {
+	cmd := newStatusFlagCommand()
+	_ = cmd.Flags().Set("repos", "true")
+
+	_, err := parseStatusFlags(cmd)
+	if err == nil || !strings.Contains(err.Error(), "--repos requires --coordinator") {
+		t.Fatalf("expected --repos requires --coordinator error, got %v", err)
+	}
+}
+
+func TestRunStatusCoordinator_Health(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		if auth := r.Header.Get("Authorization"); auth != "Bearer test-token" {
+			t.Fatalf("authorization = %q", auth)
+		}
+		_, _ = fmt.Fprint(w, `{"status":"ok","repos":3}`)
+	}))
+	defer srv.Close()
+
+	var out bytes.Buffer
+	err := runStatusCoordinator(context.Background(), &statusOpts{
+		coordinator: srv.URL,
+		token:       "test-token",
+	}, &out)
+	if err != nil {
+		t.Fatalf("runStatusCoordinator: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "status: ok") {
+		t.Fatalf("expected status: ok, got %q", got)
+	}
+	if !strings.Contains(got, "repos: 3") {
+		t.Fatalf("expected repos: 3, got %q", got)
+	}
+}
+
+func TestRunStatusCoordinator_HealthJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, `{"status":"ok","repos":2}`)
+	}))
+	defer srv.Close()
+
+	var out bytes.Buffer
+	err := runStatusCoordinator(context.Background(), &statusOpts{
+		coordinator: srv.URL,
+		jsonOut:     true,
+	}, &out)
+	if err != nil {
+		t.Fatalf("runStatusCoordinator: %v", err)
+	}
+	var health map[string]any
+	if err := json.Unmarshal(out.Bytes(), &health); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if health["status"] != "ok" {
+		t.Fatalf("status = %v", health["status"])
+	}
+}
+
+func TestRunStatusCoordinator_Repos(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/repos" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		_, _ = fmt.Fprint(w, mustJSON(t, []repoStatusResponse{
+			{Repo: "owner/a", Environment: "prod", Status: "active", PollerStatus: "running"},
+			{Repo: "owner/b", Environment: "dev", Status: "active", PollerStatus: "stopped"},
+		}))
+	}))
+	defer srv.Close()
+
+	var out bytes.Buffer
+	err := runStatusCoordinator(context.Background(), &statusOpts{
+		coordinator: srv.URL,
+		repos:       true,
+	}, &out)
+	if err != nil {
+		t.Fatalf("runStatusCoordinator: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{"owner/a", "owner/b", "prod", "dev", "running", "stopped"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunStatusCoordinator_ReposJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, `[{"repo":"owner/a","status":"active","poller_status":"running"}]`)
+	}))
+	defer srv.Close()
+
+	var out bytes.Buffer
+	err := runStatusCoordinator(context.Background(), &statusOpts{
+		coordinator: srv.URL,
+		repos:       true,
+		jsonOut:     true,
+	}, &out)
+	if err != nil {
+		t.Fatalf("runStatusCoordinator: %v", err)
+	}
+	var repos []repoStatusResponse
+	if err := json.Unmarshal(out.Bytes(), &repos); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(repos) != 1 || repos[0].Repo != "owner/a" {
+		t.Fatalf("unexpected repos: %+v", repos)
+	}
+}
+
+func TestRunStatusCoordinator_Non200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = fmt.Fprint(w, `{"error":"unauthorized"}`)
+	}))
+	defer srv.Close()
+
+	var out bytes.Buffer
+	err := runStatusCoordinator(context.Background(), &statusOpts{
+		coordinator: srv.URL,
+	}, &out)
+	var exitErr *cliExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected exit error with code 1, got %v", err)
+	}
+	if !strings.Contains(exitErr.Error(), "401") {
+		t.Fatalf("expected 401 in error, got %q", exitErr.Error())
+	}
+}
+
+func TestRenderRepoStatusTable_Empty(t *testing.T) {
+	var out bytes.Buffer
+	renderRepoStatusTable(&out, nil)
+	if strings.TrimSpace(out.String()) != "No repos found." {
+		t.Fatalf("unexpected empty output: %q", out.String())
+	}
 }
 
 func mustJSON(t *testing.T, v any) string {
