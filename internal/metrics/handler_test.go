@@ -70,9 +70,8 @@ func TestMetricsHandler_ScrapeLatencyUnder5sOn10kEvents(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	logger := eventlog.NewEventLogger(st)
-	for i := 0; i < 10_000; i++ {
-		logger.Log(eventlog.TypeCompleted, "owner/repo", i, map[string]string{"i": fmt.Sprintf("%d", i)})
+	if err := bulkInsertCompletedEvents(st, 10_000); err != nil {
+		t.Fatalf("bulkInsertCompletedEvents: %v", err)
 	}
 
 	mux := http.NewServeMux()
@@ -89,6 +88,28 @@ func TestMetricsHandler_ScrapeLatencyUnder5sOn10kEvents(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d", resp.Code)
 	}
+}
+
+func bulkInsertCompletedEvents(st *store.Store, count int) error {
+	tx, err := st.DB().Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.Prepare(`INSERT INTO events (type, repo, issue_num, payload) VALUES (?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = stmt.Close() }()
+
+	for i := 0; i < count; i++ {
+		payload := fmt.Sprintf(`{"i":%q}`, fmt.Sprintf("%d", i))
+		if _, err := stmt.Exec(eventlog.TypeCompleted, "owner/repo", i, payload); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func seedMetricsFixtureForHandler(t *testing.T, st *store.Store, repo string) {
