@@ -165,7 +165,11 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 					_ = persistToolCallEvent(handle, "codex", evt)
 				}
 				if events != nil {
-					events <- evt
+					select {
+					case events <- evt:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}

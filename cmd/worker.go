@@ -404,7 +404,14 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 			defer close(proxyDone)
 			for evt := range proxyCh {
 				tracker.RecordActivity()
-				eventsCh <- evt
+				select {
+				case eventsCh <- evt:
+				case <-taskCtx.Done():
+					// Drain remaining events without blocking if context is cancelled.
+					for range proxyCh {
+					}
+					return
+				}
 			}
 		}()
 		sessionCh = proxyCh

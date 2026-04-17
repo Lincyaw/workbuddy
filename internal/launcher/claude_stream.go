@@ -254,7 +254,11 @@ func (s *processSession) runClaudeStream(ctx context.Context, timeout time.Durat
 					_ = persistToolCallEvent(handle, "claude-code", evt)
 				}
 				if events != nil {
-					events <- evt
+					select {
+					case events <- evt:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}
