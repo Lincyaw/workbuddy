@@ -408,6 +408,7 @@ func TestExecuteRemoteTaskStopsHeartbeatAfterKilledProcess(t *testing.T) {
 		"",
 		20*time.Millisecond,
 		200*time.Millisecond,
+		nil, // wsMgr — no worktree isolation in test
 	); err != nil {
 		t.Fatalf("executeRemoteTask: %v", err)
 	}
