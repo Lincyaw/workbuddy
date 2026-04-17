@@ -9,7 +9,7 @@ port: 8090                # HTTP audit server port
 worker:
   stale_inference:
     enabled: true
-    idle_threshold: 10m
+    idle_threshold: 30m
     check_interval: 30s
 
 operator:

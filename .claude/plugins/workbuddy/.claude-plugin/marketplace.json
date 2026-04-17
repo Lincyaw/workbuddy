@@ -1,0 +1,11 @@
+{
+  "name": "workbuddy-local",
+  "owner": { "name": "lincyaw" },
+  "plugins": [
+    {
+      "name": "workbuddy",
+      "source": "./",
+      "description": "Operate workbuddy — GitHub Issue-driven agent orchestration platform. Covers repo setup, deployment, issue creation, pipeline monitoring, and troubleshooting."
+    }
+  ]
+}

@@ -1,7 +1,6 @@
 ---
 name: setup-repo
 description: "Configure a GitHub repository for workbuddy orchestration — creates labels, the two canonical agent configs (dev + review), workflow definitions, issue templates, and config.yaml. Use when the user says 'set up repo', 'configure repo for workbuddy', 'initialize workbuddy', '配置仓库', '初始化workbuddy', or wants to onboard a new repo."
-user_invocable: true
 ---
 
 # Setup Repo

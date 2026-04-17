@@ -1,7 +1,6 @@
 ---
 name: pipeline-monitor
 description: "Monitor the workbuddy agent pipeline, detect stuck issues, zombie processes, and missed redispatches. Works for both serve mode and distributed (coordinator+worker) mode. Use when the user says 'monitor the pipeline', 'check workbuddy status', '监工', '看看跑完了没', or asks to watch issue progress."
-user_invocable: true
 ---
 
 # Pipeline Monitor

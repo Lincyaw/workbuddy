@@ -1,0 +1,42 @@
+version: 2
+
+project_name: workbuddy
+
+builds:
+  - main: .
+    binary: workbuddy
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/Lincyaw/workbuddy/cmd.Version={{.Version}}
+      - -X github.com/Lincyaw/workbuddy/cmd.Commit={{.ShortCommit}}
+      - -X github.com/Lincyaw/workbuddy/cmd.Date={{.Date}}
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+
+release:
+  github:
+    owner: Lincyaw
+    name: workbuddy
+  draft: false
+  prerelease: auto

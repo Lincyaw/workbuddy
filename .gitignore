@@ -17,7 +17,11 @@
 # Notifications config (contains credentials)
 notify.json
 
+# Temporary scratch files
+.tmp/
+
 # Test output
 coverage.out
 .claude/worktrees/
 .remember
+__pycache__/

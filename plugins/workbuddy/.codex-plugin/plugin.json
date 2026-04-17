@@ -1,0 +1,39 @@
+{
+  "name": "workbuddy",
+  "version": "0.1.0",
+  "description": "Operate workbuddy from Codex with repo setup, pipeline monitoring, troubleshooting, and operator workflows.",
+  "author": {
+    "name": "Lincyaw",
+    "email": "boxiyu888@proton.me",
+    "url": "https://github.com/Lincyaw"
+  },
+  "homepage": "https://github.com/Lincyaw/workbuddy",
+  "repository": "https://github.com/Lincyaw/workbuddy",
+  "license": "MIT",
+  "keywords": [
+    "workbuddy",
+    "codex",
+    "agent-orchestration",
+    "github-issues",
+    "devops"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Workbuddy",
+    "shortDescription": "Operate the workbuddy issue-driven agent pipeline from Codex.",
+    "longDescription": "Installable Codex plugin for workbuddy. Includes guided repo setup, pipeline monitoring, troubleshooting, and operator-facing workflows adapted from the Claude plugin layout.",
+    "developerName": "Lincyaw",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/Lincyaw/workbuddy",
+    "defaultPrompt": [
+      "Use setup-repo to onboard owner/repo for workbuddy.",
+      "Use pipeline-monitor to diagnose a stuck workbuddy issue.",
+      "Use workbuddy-guide to explain serve and coordinator-worker modes."
+    ],
+    "brandColor": "#0F766E"
+  }
+}

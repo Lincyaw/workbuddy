@@ -2,6 +2,21 @@
 
 Claude Code plugin for operating [workbuddy](https://github.com/Lincyaw/workbuddy) — a GitHub Issue-driven agent orchestration platform.
 
+## Codex plugin
+
+This Claude plugin is the source of truth for the generated Codex plugin bundle.
+
+- generated Codex plugin: `plugins/workbuddy`
+- generated Codex marketplace entry: `.agents/plugins/marketplace.json`
+- Codex packaging and home-local install notes: `plugins/workbuddy/README.md`
+
+After changing files in `.claude/plugins/workbuddy/`, regenerate the Codex
+bundle with:
+
+```bash
+python3 scripts/sync_codex_plugin.py
+```
+
 ## Skills
 
 | Skill | Trigger | Purpose |
