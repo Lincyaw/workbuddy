@@ -1530,3 +1530,26 @@ requirements:
     tests:
       - cmd/config_reload_test.go
     deps: [REQ-025, REQ-039, REQ-042]
+
+  - id: REQ-047
+    title: Worker --concurrency flag for in-process parallel task execution
+    description: >
+      Add a --concurrency N flag to the worker command that controls
+      the maximum number of tasks executed in parallel within a single
+      worker process. Uses a semaphore-based goroutine pool with
+      graceful shutdown (WaitGroup). Default concurrency=1 preserves
+      the existing serial behavior.
+    priority: P1
+    version: v0.2.0
+    status: implemented
+    acceptance_criteria:
+      - "AC-047-1: --concurrency flag is available on workerCmd, default=1"
+      - "AC-047-2: concurrency=1 behaves identically to pre-change serial loop"
+      - "AC-047-3: concurrency=N allows up to N tasks to run in parallel"
+      - "AC-047-4: Graceful shutdown waits for all in-flight goroutines before exiting"
+      - "AC-047-5: go build && go vet pass cleanly"
+    code:
+      - cmd/worker.go
+    tests:
+      - cmd/worker_test.go
+    deps: [REQ-025]
