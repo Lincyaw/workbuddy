@@ -89,7 +89,7 @@ var (
 	commentOnPRPattern    = regexp.MustCompile(`(?i)(?:posted|added|wrote)\b.*?comment\b.*?on\b.*?pr\b.*?#?(\b\d+\b)`)
 	commentOnIssuePattern = regexp.MustCompile(`(?i)(?:posted|added|wrote)\b.*?comment\b.*?on\b.*?issue\b.*?#?(\b\d+\b)`)
 	labelUpdatePattern    = regexp.MustCompile(`(?i)(?:updated|changed|flipped)\b.*?(?:the\b)?.*?labels`)
-	labelAddedPattern     = regexp.MustCompile(`(?i)(?:added|flipped\b.*?to)\b.*?status:([a-zA-Z0-9_-]+)`)
+	labelAddedPattern     = regexp.MustCompile(`(?i)(?:added|flipped\b.*?to|updated\b.*?to)\b.*?status:([a-zA-Z0-9_-]+)`)
 	labelRemovedPattern   = regexp.MustCompile(`(?i)removed\b.*?status:([a-zA-Z0-9_-]+)`)
 	prCreatedPattern      = regexp.MustCompile(`(?i)(?:created|opened)\b.*?pr\b.*?#?(\d+)`)
 	branchPushedPattern   = regexp.MustCompile("(?i)(?:pushed|created)\\b.*?branch\\b\\s+([`\"']?\\S+[`\"']?)")
@@ -289,7 +289,16 @@ func (v *GHClaimVerifier) verifyLabelsGeneric(ctx context.Context, repo string, 
 	for _, l := range payload.Labels {
 		names = append(names, l.Name)
 	}
-	return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("current labels: %s", strings.Join(names, ", ")), OK: true}
+	actual := fmt.Sprintf("current labels: %s", strings.Join(names, ", "))
+	if len(names) == 0 {
+		actual = "current labels: none"
+	}
+	return ClaimCheck{
+		Type:   ClaimLabels,
+		Claim:  claim,
+		Actual: actual + "; generic label update claim does not specify an intended label set",
+		OK:     false,
+	}
 }
 
 func (v *GHClaimVerifier) verifyPRCreated(ctx context.Context, repo string, prNum int) ClaimCheck {

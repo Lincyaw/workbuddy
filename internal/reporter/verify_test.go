@@ -121,6 +121,49 @@ func TestVerify_LabelsNotFlipped(t *testing.T) {
 	}
 }
 
+func TestVerify_UpdatedLabelsToStatus(t *testing.T) {
+	runner := &mockCommandRunner{
+		responses: map[string]string{
+			"gh [issue view 1 --repo owner/repo --json labels]": labelsJSON("status:done"),
+		},
+	}
+	v := &GHClaimVerifier{runCommand: runner.run}
+	output := "I updated labels to status:done"
+	res, err := v.Verify(context.Background(), "owner/repo", 1, verificationInput(output, time.Now().UTC()))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Partial {
+		t.Fatalf("expected success, got partial: %+v", res.Checks)
+	}
+	if len(res.Checks) != 1 || !res.Checks[0].OK {
+		t.Fatalf("expected one successful label check, got %+v", res.Checks)
+	}
+}
+
+func TestVerify_GenericUpdatedLabelsIsUnverifiable(t *testing.T) {
+	runner := &mockCommandRunner{
+		responses: map[string]string{
+			"gh [issue view 1 --repo owner/repo --json labels]": labelsJSON("status:reviewing"),
+		},
+	}
+	v := &GHClaimVerifier{runCommand: runner.run}
+	output := "I updated labels"
+	res, err := v.Verify(context.Background(), "owner/repo", 1, verificationInput(output, time.Now().UTC()))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.Partial {
+		t.Fatal("expected generic label claim to be partial")
+	}
+	if len(res.Checks) != 1 {
+		t.Fatalf("expected 1 check, got %d", len(res.Checks))
+	}
+	if !strings.Contains(res.Checks[0].Actual, "does not specify an intended label set") {
+		t.Fatalf("unexpected actual detail: %q", res.Checks[0].Actual)
+	}
+}
+
 func TestVerify_NoClaims(t *testing.T) {
 	v := &GHClaimVerifier{runCommand: func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return nil, fmt.Errorf("should not be called")
