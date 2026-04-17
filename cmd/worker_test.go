@@ -30,6 +30,7 @@ func TestParseWorkerFlags(t *testing.T) {
 	cmd.Flags().String("role", "", "")
 	cmd.Flags().String("runtime", config.RuntimeClaudeCode, "")
 	cmd.Flags().String("repo", "", "")
+	cmd.Flags().Int("concurrency", 1, "")
 	if err := cmd.Flags().Set("coordinator", "http://localhost:9999"); err != nil {
 		t.Fatal(err)
 	}
@@ -42,6 +43,9 @@ func TestParseWorkerFlags(t *testing.T) {
 	if err := cmd.Flags().Set("runtime", "codex"); err != nil {
 		t.Fatal(err)
 	}
+	if err := cmd.Flags().Set("concurrency", "3"); err != nil {
+		t.Fatal(err)
+	}
 
 	opts, err := parseWorkerFlags(cmd)
 	if err != nil {
@@ -52,6 +56,27 @@ func TestParseWorkerFlags(t *testing.T) {
 	}
 	if opts.roleCSV != "dev,review" || opts.runtime != "codex" {
 		t.Fatalf("unexpected opts: %+v", opts)
+	}
+	if opts.concurrency != 3 {
+		t.Fatalf("unexpected concurrency: %d", opts.concurrency)
+	}
+}
+
+func TestParseWorkerFlagsRejectsInvalidConcurrency(t *testing.T) {
+	cmd := &cobra.Command{Use: "worker"}
+	cmd.Flags().String("coordinator", "", "")
+	cmd.Flags().String("token", "", "")
+	cmd.Flags().String("role", "", "")
+	cmd.Flags().String("runtime", config.RuntimeClaudeCode, "")
+	cmd.Flags().String("repo", "", "")
+	cmd.Flags().Int("concurrency", 1, "")
+	if err := cmd.Flags().Set("concurrency", "0"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := parseWorkerFlags(cmd)
+	if err == nil || !strings.Contains(err.Error(), "concurrency must be >= 1") {
+		t.Fatalf("expected invalid concurrency error, got %v", err)
 	}
 }
 
@@ -325,6 +350,168 @@ func TestWorkerShutdownRequeuesInFlightTask(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("coordinator did not exit")
+	}
+}
+
+
+func TestWorkerExecutesTasksConcurrentlyAndPausesPollingAtCapacity(t *testing.T) {
+	setupFakeGHCLI(t)
+
+	repo := "owner/test-repo"
+	configDir := setupTestConfigDir(t, repo)
+
+	var registerCount atomic.Int64
+	var pollCount atomic.Int64
+	var task1Heartbeats atomic.Int64
+	var task2Heartbeats atomic.Int64
+	task1Done := make(chan struct{})
+	task2Done := make(chan struct{})
+	submitted := make(chan string, 2)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/workers/register":
+			registerCount.Add(1)
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tasks/poll":
+			switch pollCount.Add(1) {
+			case 1:
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"task_id":"task-1","repo":"owner/test-repo","issue_num":10,"agent_name":"dev-agent"}`))
+			case 2:
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"task_id":"task-2","repo":"owner/test-repo","issue_num":11,"agent_name":"dev-agent"}`))
+			default:
+				w.WriteHeader(http.StatusNoContent)
+			}
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/heartbeat"):
+			switch {
+			case strings.Contains(r.URL.Path, "task-1"):
+				task1Heartbeats.Add(1)
+			case strings.Contains(r.URL.Path, "task-2"):
+				task2Heartbeats.Add(1)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/release"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/result"):
+			switch {
+			case strings.Contains(r.URL.Path, "task-1"):
+				submitted <- "task-1"
+			case strings.Contains(r.URL.Path, "task-2"):
+				submitted <- "task-2"
+			default:
+				t.Fatalf("unexpected result path: %s", r.URL.Path)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"completed"}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	gh := &mockGHReader{
+		issues: []poller.Issue{
+			{Number: 10, Title: "Parallel Task 1", State: "open", Body: "body", Labels: []string{"workbuddy", "status:developing"}},
+			{Number: 11, Title: "Parallel Task 2", State: "open", Body: "body", Labels: []string{"workbuddy", "status:developing"}},
+		},
+		labelSnapshots: [][]string{
+			{"workbuddy", "status:done"},
+			{"workbuddy", "status:done"},
+		},
+	}
+
+	var running atomic.Int64
+	var maxRunning atomic.Int64
+	started := make(chan int, 2)
+	mockRT := &mockRuntime{name: config.RuntimeClaudeCode, resultFn: func(_ context.Context, _ *config.AgentConfig, task *launcher.TaskContext) (*launcher.Result, error) {
+		current := running.Add(1)
+		defer running.Add(-1)
+		for {
+			prev := maxRunning.Load()
+			if current <= prev || maxRunning.CompareAndSwap(prev, current) {
+				break
+			}
+		}
+		started <- task.Issue.Number
+		switch task.Issue.Number {
+		case 10:
+			<-task1Done
+		case 11:
+			<-task2Done
+		default:
+			t.Fatalf("unexpected issue number: %d", task.Issue.Number)
+		}
+		return &launcher.Result{ExitCode: 0, LastMessage: "done", Meta: map[string]string{}}, nil
+	}}
+	lnch := launcher.NewLauncher()
+	lnch.Register(mockRT, config.RuntimeClaudeCode)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runWorkerWithOpts(&workerOpts{
+			coordinatorURL:    server.URL,
+			token:             "",
+			roleCSV:           "dev",
+			runtime:           config.RuntimeClaudeCode,
+			repo:              repo,
+			concurrency:       2,
+			configDir:         configDir,
+			workDir:           t.TempDir(),
+			dbPath:            filepath.Join(t.TempDir(), "worker.db"),
+			sessionsDir:       filepath.Join(t.TempDir(), "sessions"),
+			pollTimeout:       20 * time.Millisecond,
+			heartbeatInterval: 20 * time.Millisecond,
+			shutdownTimeout:   100 * time.Millisecond,
+		}, lnch, gh, ctx)
+	}()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-started:
+		case <-time.After(3 * time.Second):
+			t.Fatal("worker did not start two tasks")
+		}
+	}
+
+	time.Sleep(120 * time.Millisecond)
+	if registerCount.Load() != 1 {
+		t.Fatalf("expected single worker registration, got %d", registerCount.Load())
+	}
+	if maxRunning.Load() != 2 {
+		t.Fatalf("expected max parallelism of 2, got %d", maxRunning.Load())
+	}
+	if pollCount.Load() != 2 {
+		t.Fatalf("expected polling to pause at capacity, got %d polls", pollCount.Load())
+	}
+	if task1Heartbeats.Load() == 0 || task2Heartbeats.Load() == 0 {
+		t.Fatalf("expected independent heartbeats for both tasks, got task-1=%d task-2=%d", task1Heartbeats.Load(), task2Heartbeats.Load())
+	}
+
+	close(task1Done)
+	close(task2Done)
+
+	got := map[string]bool{}
+	for len(got) < 2 {
+		select {
+		case taskID := <-submitted:
+			got[taskID] = true
+		case <-time.After(3 * time.Second):
+			t.Fatalf("timed out waiting for both task submissions: %+v", got)
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("worker: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not exit")
 	}
 }
 

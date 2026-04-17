@@ -991,6 +991,9 @@ requirements:
       - "AC-028-8: graceful shutdown：当前 running 任务会 release/requeue"
       - "AC-028-9: 集成测试：与 `workbuddy coordinator` 配对后可 claim+complete synthetic task"
       - "AC-028-10: invalid token 时退出非零并给出明确诊断"
+      - "AC-028-11: `workbuddy worker` 支持 `--concurrency N`（默认 1），单个 worker 进程内可并发执行最多 N 个任务"
+      - "AC-028-12: 并发 worker 仅注册一次 worker_id；所有任务共享同一配置、launcher 和本地 SQLite store"
+      - "AC-028-13: 当并发槽位已满时暂停 poll；收到 shutdown 后等待所有 in-flight task 结束/requeue 后退出"
     code:
       - cmd/worker.go
       - cmd/coordinator.go

@@ -40,6 +40,7 @@ type workerOpts struct {
 	roleCSV           string
 	runtime           string
 	repo              string
+	concurrency       int
 	workerID          string
 	configDir         string
 	workDir           string
@@ -68,6 +69,7 @@ func init() {
 	workerCmd.Flags().String("role", "", "Comma-separated worker roles (default: roles from local agent config)")
 	workerCmd.Flags().String("runtime", config.RuntimeClaudeCode, "Worker runtime capability: claude-code or codex")
 	workerCmd.Flags().String("repo", "", "Repository in OWNER/NAME form (default: config.yaml repo)")
+	workerCmd.Flags().Int("concurrency", 1, "Maximum number of tasks to execute concurrently")
 	_ = workerCmd.MarkFlagRequired("coordinator")
 	_ = workerCmd.MarkFlagRequired("token")
 	rootCmd.AddCommand(workerCmd)
@@ -87,12 +89,17 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	roleCSV, _ := cmd.Flags().GetString("role")
 	runtimeName, _ := cmd.Flags().GetString("runtime")
 	repo, _ := cmd.Flags().GetString("repo")
+	concurrency, _ := cmd.Flags().GetInt("concurrency")
+	if concurrency <= 0 {
+		return nil, fmt.Errorf("worker: concurrency must be >= 1")
+	}
 	return &workerOpts{
 		coordinatorURL:    strings.TrimSpace(coordinatorURL),
 		token:             strings.TrimSpace(token),
 		roleCSV:           roleCSV,
 		runtime:           runtimeName,
 		repo:              strings.TrimSpace(repo),
+		concurrency:       concurrency,
 		configDir:         ".github/workbuddy",
 		pollTimeout:       defaultWorkerPollTimeout,
 		heartbeatInterval: defaultWorkerHeartbeat,
@@ -163,6 +170,9 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 	if reader == nil {
 		reader = &GHCLIReader{}
 	}
+	if opts.concurrency <= 0 {
+		opts.concurrency = 1
+	}
 
 	localStore, err := store.NewStore(opts.dbPath)
 	if err != nil {
@@ -212,12 +222,26 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 		return fmt.Errorf("worker: register with coordinator: %w", err)
 	}
 
+	sem := make(chan struct{}, opts.concurrency)
+	slotFreed := make(chan struct{}, 1)
+	var wg sync.WaitGroup
+	waitForInflight := func() {
+		wg.Wait()
+	}
+	defer waitForInflight()
+
 	for {
 		if ctx.Err() != nil {
+			waitForInflight()
+			return nil
+		}
+		if err := waitForWorkerSlot(ctx, sem, slotFreed); err != nil {
+			waitForInflight()
 			return nil
 		}
 		task, err := client.PollTask(ctx, workerID, opts.pollTimeout)
 		if err != nil {
+			waitForInflight()
 			if errors.Is(err, context.Canceled) {
 				return nil
 			}
@@ -229,10 +253,36 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 		if task == nil {
 			continue
 		}
-		if err := executeRemoteTask(ctx, task, client, cfg, lnch, auditor, rep, reader, workDir, opts.sessionsDir, workerID, runtimeAlias, opts.heartbeatInterval, opts.shutdownTimeout); err != nil {
-			return err
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(task *workerclient.Task) {
+			defer func() {
+				<-sem
+				wg.Done()
+				select {
+				case slotFreed <- struct{}{}:
+				default:
+				}
+			}()
+			if err := executeRemoteTask(ctx, task, client, cfg, lnch, auditor, rep, reader, workDir, opts.sessionsDir, workerID, runtimeAlias, opts.heartbeatInterval, opts.shutdownTimeout); err != nil {
+				log.Printf("[worker] task %s failed: %v", task.TaskID, err)
+			}
+		}(task)
+	}
+}
+
+func waitForWorkerSlot(ctx context.Context, sem <-chan struct{}, slotFreed <-chan struct{}) error {
+	if cap(sem) == 0 {
+		return nil
+	}
+	for len(sem) >= cap(sem) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-slotFreed:
 		}
 	}
+	return nil
 }
 
 func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *workerclient.Client, cfg *config.FullConfig, lnch *launcher.Launcher, auditor *audit.Auditor, rep *reporter.Reporter, reader workerIssueReader, workDir, sessionsDir, workerID, runtimeAlias string, heartbeatInterval, shutdownTimeout time.Duration) error {
