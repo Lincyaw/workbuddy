@@ -214,13 +214,9 @@ func (r *Reporter) Verify(ctx context.Context, repo string, issueNum int, result
 	if r.verifier == nil || result == nil || result.ExitCode != 0 {
 		return nil, nil
 	}
-	output := result.LastMessage
-	if output == "" {
-		output = result.Stdout
-	}
 	finishedAt := r.now()
 	return r.verifier.Verify(ctx, repo, issueNum, VerificationInput{
-		Output:    output,
+		Output:    reportOutput(result),
 		StartedAt: finishedAt.Add(-result.Duration),
 		EndedAt:   finishedAt,
 	})
@@ -336,13 +332,9 @@ func (r *Reporter) report(
 
 	// Run claim verification for successful runs
 	if status == "success" && verification == nil && r.verifier != nil {
-		output := result.LastMessage
-		if output == "" {
-			output = result.Stdout
-		}
 		finishedAt := r.now()
 		vRes, vErr := r.verifier.Verify(ctx, repo, issueNum, VerificationInput{
-			Output:    output,
+			Output:    reportOutput(result),
 			StartedAt: finishedAt.Add(-result.Duration),
 			EndedAt:   finishedAt,
 		})
@@ -378,10 +370,7 @@ func (r *Reporter) report(
 		prLink = result.Meta["pr_url"]
 	}
 
-	output := result.LastMessage
-	if output == "" {
-		output = result.Stdout
-	}
+	output := reportOutput(result)
 	if output == "" && result.Stderr != "" {
 		output = result.Stderr
 	}
@@ -414,6 +403,13 @@ func (r *Reporter) report(
 	return verification, r.writeWithRateLimitRetry(ctx, repo, issueNum, "report", func() error {
 		return r.gh.WriteComment(repo, issueNum, body)
 	})
+}
+
+func reportOutput(result *launcher.Result) string {
+	if result == nil {
+		return ""
+	}
+	return strings.TrimSpace(result.LastMessage)
 }
 
 func (r *Reporter) reportWithOverflow(ctx context.Context, repo string, issueNum int, agentName, body, workDir string) error {

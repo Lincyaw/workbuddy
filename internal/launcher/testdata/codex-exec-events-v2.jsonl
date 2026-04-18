@@ -1,0 +1,8 @@
+{"type":"thread.started","thread_id":"thread-abc"}
+{"type":"turn.started","turn_id":"turn-123"}
+{"type":"item.completed","item":{"id":"item-1","type":"agent_message","text":"PONG"}}
+{"type":"item.started","item":{"id":"item-2","type":"command_execution","command":["bash","-lc","echo PONG"],"cwd":"/tmp/repo","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item-2","type":"command_execution","command":["bash","-lc","echo PONG"],"aggregated_output":"PONG\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item-3","type":"mcp_tool_call","tool":"github.search","arguments":{"q":"issue 8"},"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item-3","type":"mcp_tool_call","tool":"github.search","arguments":{"q":"issue 8"},"result":{"count":1},"status":"completed"}}
+{"type":"turn.completed","usage":{"input_tokens":11,"cached_input_tokens":2,"output_tokens":5}}
