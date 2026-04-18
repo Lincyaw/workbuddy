@@ -29,19 +29,22 @@ const (
 )
 
 type statusOpts struct {
-	repo       string
-	stuck      bool
-	tasks      bool
-	events     bool
-	watch      bool
-	jsonOut    bool
-	taskStatus string
-	eventType  string
-	since      string
-	issue      int
-	timeout    time.Duration
-	baseURL    string
-	now        func() time.Time
+	repo        string
+	stuck       bool
+	tasks       bool
+	events      bool
+	watch       bool
+	jsonOut     bool
+	taskStatus  string
+	eventType   string
+	since       string
+	issue       int
+	timeout     time.Duration
+	baseURL     string
+	coordinator string
+	token       string
+	repos       bool
+	now         func() time.Time
 }
 
 type statusClient struct {
@@ -90,6 +93,9 @@ func init() {
 	statusCmd.Flags().String("since", "", "Relative time filter for --events, for example 10m or 1h")
 	statusCmd.Flags().Int("issue", 0, "Issue number filter for --watch")
 	statusCmd.Flags().Duration("timeout", defaultWatchTimeout, "Maximum time to wait for --watch")
+	statusCmd.Flags().String("coordinator", "", "Coordinator base URL for remote status queries")
+	statusCmd.Flags().StringP("token", "t", "", "Bearer token for coordinator auth (defaults to WORKBUDDY_AUTH_TOKEN)")
+	statusCmd.Flags().Bool("repos", false, "List registered repos from coordinator (requires --coordinator)")
 	rootCmd.AddCommand(statusCmd)
 }
 
@@ -121,6 +127,31 @@ func parseStatusFlags(cmd *cobra.Command) (*statusOpts, error) {
 	since, _ := cmd.Flags().GetString("since")
 	issue, _ := cmd.Flags().GetInt("issue")
 	timeout, _ := cmd.Flags().GetDuration("timeout")
+	coordinator, _ := cmd.Flags().GetString("coordinator")
+	token, _ := cmd.Flags().GetString("token")
+	repos, _ := cmd.Flags().GetBool("repos")
+
+	coordinator = strings.TrimSpace(coordinator)
+	token = strings.TrimSpace(token)
+	if token == "" {
+		token = strings.TrimSpace(os.Getenv("WORKBUDDY_AUTH_TOKEN"))
+	}
+
+	if coordinator != "" {
+		if stuck || tasks || events || watch {
+			return nil, fmt.Errorf("status: --coordinator is mutually exclusive with --stuck, --tasks, --events, and --watch")
+		}
+		if repos && cmd.Flags().Changed("repo") {
+			return nil, fmt.Errorf("status: --repo is not used with --coordinator")
+		}
+		return &statusOpts{
+			coordinator: strings.TrimRight(coordinator, "/"),
+			token:       token,
+			repos:       repos,
+			jsonOut:     jsonOut,
+			now:         time.Now,
+		}, nil
+	}
 
 	selected := 0
 	for _, enabled := range []bool{stuck, tasks, events, watch} {
@@ -130,6 +161,9 @@ func parseStatusFlags(cmd *cobra.Command) (*statusOpts, error) {
 	}
 	if selected > 1 {
 		return nil, fmt.Errorf("status: --stuck, --tasks, --events, and --watch are mutually exclusive")
+	}
+	if repos {
+		return nil, fmt.Errorf("status: --repos requires --coordinator")
 	}
 	if !tasks && strings.TrimSpace(taskStatus) != "" {
 		return nil, fmt.Errorf("status: --status requires --tasks")
@@ -212,6 +246,8 @@ func loadStatusConfig(explicitRepo string) (*config.FullConfig, error) {
 
 func runStatusWithOpts(ctx context.Context, opts *statusOpts, client *statusClient, stdout io.Writer) error {
 	switch {
+	case opts.coordinator != "":
+		return runStatusCoordinator(ctx, opts, stdout)
 	case opts.tasks:
 		return runStatusTasks(ctx, opts, client, stdout)
 	case opts.events:
@@ -221,6 +257,73 @@ func runStatusWithOpts(ctx context.Context, opts *statusOpts, client *statusClie
 	default:
 		return runStatusSummary(ctx, opts, client, stdout)
 	}
+}
+
+func runStatusCoordinator(ctx context.Context, opts *statusOpts, stdout io.Writer) error {
+	client := &http.Client{Timeout: statusHTTPTimeout}
+	url := opts.coordinator + "/health"
+	if opts.repos {
+		url = opts.coordinator + "/api/v1/repos"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("status: build request: %w", err)
+	}
+	if opts.token != "" {
+		req.Header.Set("Authorization", "Bearer "+opts.token)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("status: request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return &cliExitError{msg: fmt.Sprintf("status: coordinator returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body))), code: 1}
+	}
+	if opts.jsonOut {
+		_, err = io.Copy(stdout, resp.Body)
+		if err != nil {
+			return fmt.Errorf("status: copy response: %w", err)
+		}
+		return nil
+	}
+	if opts.repos {
+		var repos []repoStatusResponse
+		if err := json.NewDecoder(resp.Body).Decode(&repos); err != nil {
+			return fmt.Errorf("status: decode repos: %w", err)
+		}
+		renderRepoStatusTable(stdout, repos)
+		return nil
+	}
+	var health map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
+		return fmt.Errorf("status: decode health: %w", err)
+	}
+	statusStr, _ := health["status"].(string)
+	reposCount, _ := health["repos"].(float64)
+	_, _ = fmt.Fprintf(stdout, "status: %s\nrepos: %.0f\n", statusStr, reposCount)
+	return nil
+}
+
+func renderRepoStatusTable(w io.Writer, repos []repoStatusResponse) {
+	if len(repos) == 0 {
+		_, _ = fmt.Fprintln(w, "No repos found.")
+		return
+	}
+	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "REPO\tENVIRONMENT\tSTATUS\tPOLLER\tREGISTERED\tUPDATED")
+	for _, r := range repos {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			r.Repo,
+			r.Environment,
+			r.Status,
+			r.PollerStatus,
+			r.RegisteredAt.Format(time.RFC3339),
+			r.UpdatedAt.Format(time.RFC3339),
+		)
+	}
+	_ = tw.Flush()
 }
 
 func runStatusSummary(ctx context.Context, opts *statusOpts, client *statusClient, stdout io.Writer) error {
