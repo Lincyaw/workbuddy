@@ -41,6 +41,8 @@ const (
 	TypeReportOverflow              = "report_overflow"
 	TypeDispatchBlockedByFailureCap = "dispatch_blocked_by_failure_cap"
 	TypeDispatchBlockedByDone       = "dispatch_blocked_by_done"
+	TypeDispatchSkippedClaim        = "dispatch_skipped_claim"
+	TypeIssueClaimExpired           = "issue_claim_expired"
 )
 
 // AllEventTypes lists every recognised event type.
@@ -74,6 +76,8 @@ var AllEventTypes = []string{
 	TypeReportOverflow,
 	TypeDispatchBlockedByFailureCap,
 	TypeDispatchBlockedByDone,
+	TypeDispatchSkippedClaim,
+	TypeIssueClaimExpired,
 }
 
 // EventFilter specifies optional criteria for querying events.
