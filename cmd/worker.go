@@ -219,6 +219,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 	client := workerclient.New(opts.coordinatorURL, opts.token, nil)
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
 	rep.SetEventRecorder(eventlog.NewEventLogger(localStore))
+	rep.SetVerifier(reporter.NewGHClaimVerifier())
 	auditor := audit.NewAuditor(localStore, opts.sessionsDir)
 	bindings := newWorkerRepoBindingStore(repoBindings)
 	workspaces := newWorkerWorkspaceSet()
@@ -535,6 +536,19 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 	if result.Meta["timeout"] == "true" {
 		status = store.TaskStatusTimeout
 	}
+
+	// Verify agent claims before submitting result to coordinator.
+	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(shutdownTimeout))
+	verifyRes, verifyErr := rep.Verify(verifyCtx, task.Repo, task.IssueNum, result)
+	verifyCancel()
+	if verifyErr != nil {
+		log.Printf("[worker] claim verification error for task %s: %v", task.TaskID, verifyErr)
+	}
+	if verifyRes != nil && verifyRes.Partial {
+		log.Printf("[worker] agent %s for %s#%d claimed side-effects not verified — treating as failure", task.AgentName, task.Repo, task.IssueNum)
+		status = store.TaskStatusFailed
+	}
+
 	submitCtx, cancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(shutdownTimeout))
 	defer cancel()
 	if err := client.SubmitResult(submitCtx, task.TaskID, workerclient.ResultRequest{
@@ -547,7 +561,7 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 	}
 	reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(shutdownTimeout))
 	defer reportCancel()
-	if err := rep.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, workerID, 0, workflowMaxRetries(cfg, task.Workflow), "", workDir); err != nil {
+	if err := rep.ReportVerified(reportCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, workerID, 0, workflowMaxRetries(cfg, task.Workflow), "", workDir, verifyRes); err != nil {
 		log.Printf("[worker] report failed: %v", err)
 	}
 	return nil

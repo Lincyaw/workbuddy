@@ -15,6 +15,19 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/launcher"
 )
 
+type mockVerifier struct {
+	result *VerificationResult
+	err    error
+	calls  int
+	inputs []VerificationInput
+}
+
+func (m *mockVerifier) Verify(_ context.Context, _ string, _ int, input VerificationInput) (*VerificationResult, error) {
+	m.calls++
+	m.inputs = append(m.inputs, input)
+	return m.result, m.err
+}
+
 type mockGHWriter struct {
 	comments []string
 	failN    int // fail the first N calls
@@ -146,6 +159,115 @@ func TestReport_PrefersLastMessage(t *testing.T) {
 	}
 	if strings.Contains(body, "raw stdout") {
 		t.Fatalf("expected stdout fallback not to be used: %s", body)
+	}
+}
+
+func TestReportWithVerification_Partial(t *testing.T) {
+	gh := &mockGHWriter{}
+	r := NewReporter(gh)
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	v := &mockVerifier{
+		result: &VerificationResult{
+			Partial: true,
+			Checks: []ClaimCheck{
+				{Type: ClaimCommentPR, Claim: "posted comment on PR #4", Actual: "no comments on PR", OK: false},
+			},
+		},
+	}
+	r.SetVerifier(v)
+
+	result := &launcher.Result{
+		ExitCode:    0,
+		LastMessage: "I posted a review comment on PR #4",
+		Duration:    time.Second,
+	}
+
+	verifyRes, err := r.ReportWithVerification(context.Background(), "test/repo", 42, "review-agent", result, "sess-verify", "worker-1", 0, 3, "", "")
+	if err != nil {
+		t.Fatalf("ReportWithVerification: %v", err)
+	}
+	if verifyRes == nil || !verifyRes.Partial {
+		t.Fatalf("expected partial verification result, got %+v", verifyRes)
+	}
+	if v.calls != 1 {
+		t.Fatalf("expected verifier to be called once, got %d", v.calls)
+	}
+	if len(v.inputs) != 1 {
+		t.Fatalf("expected verifier input, got %d", len(v.inputs))
+	}
+	if v.inputs[0].StartedAt != now.Add(-time.Second) || v.inputs[0].EndedAt != now {
+		t.Fatalf("unexpected run window: %+v", v.inputs[0])
+	}
+	body := gh.comments[0]
+	if !strings.Contains(body, "Partial") {
+		t.Fatalf("expected partial status in report: %s", body)
+	}
+	if !strings.Contains(body, "Claim Verification") {
+		t.Fatalf("expected verification table in report: %s", body)
+	}
+	if !strings.Contains(body, "no comments on PR") {
+		t.Fatalf("expected claim-vs-reality detail in report: %s", body)
+	}
+}
+
+func TestReportVerified_UsesProvidedVerification(t *testing.T) {
+	gh := &mockGHWriter{}
+	r := NewReporter(gh)
+	v := &mockVerifier{
+		result: &VerificationResult{
+			Partial: true,
+			Checks:  []ClaimCheck{{Type: ClaimLabels, Claim: "added status:done", Actual: "label not found", OK: false}},
+		},
+	}
+	r.SetVerifier(v)
+
+	result := &launcher.Result{
+		ExitCode:    0,
+		LastMessage: "I flipped labels to status:done",
+		Duration:    time.Second,
+	}
+
+	err := r.ReportVerified(context.Background(), "test/repo", 42, "dev-agent", result, "sess-precomputed", "worker-1", 0, 3, "", "", v.result)
+	if err != nil {
+		t.Fatalf("ReportVerified: %v", err)
+	}
+	if v.calls != 0 {
+		t.Fatalf("expected provided verification to skip verifier, got %d calls", v.calls)
+	}
+	body := gh.comments[0]
+	if !strings.Contains(body, "label not found") {
+		t.Fatalf("expected provided verification detail in report: %s", body)
+	}
+}
+
+func TestReporterVerify_UsesRunWindow(t *testing.T) {
+	r := NewReporter(&mockGHWriter{})
+	now := time.Date(2026, 4, 17, 13, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	v := &mockVerifier{result: &VerificationResult{}}
+	r.SetVerifier(v)
+
+	result := &launcher.Result{
+		ExitCode:    0,
+		LastMessage: "I posted a review comment on PR #4",
+		Duration:    90 * time.Second,
+	}
+
+	if _, err := r.Verify(context.Background(), "test/repo", 42, result); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if v.calls != 1 {
+		t.Fatalf("expected verifier to be called once, got %d", v.calls)
+	}
+	if got := v.inputs[0].Output; got != result.LastMessage {
+		t.Fatalf("output = %q, want %q", got, result.LastMessage)
+	}
+	if got := v.inputs[0].StartedAt; got != now.Add(-90*time.Second) {
+		t.Fatalf("startedAt = %s, want %s", got, now.Add(-90*time.Second))
+	}
+	if got := v.inputs[0].EndedAt; got != now {
+		t.Fatalf("endedAt = %s, want %s", got, now)
 	}
 }
 

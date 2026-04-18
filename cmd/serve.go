@@ -548,6 +548,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
 	rep.SetBaseURL(fmt.Sprintf("http://localhost:%d", cfg.Global.Port))
 	rep.SetEventRecorder(evlog)
+	rep.SetVerifier(reporter.NewGHClaimVerifier())
 
 	// Poller
 	p := poller.NewPoller(ghReader, st, cfg.Global.Repo, cfg.Global.PollInterval)
@@ -1179,14 +1180,25 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	if task.Context != nil {
 		reportWorkDir = task.Context.WorkDir
 	}
-	if err := deps.reporter.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, result,
-		sessionID, deps.workerID, retryCount, maxRetries, labelSummary, reportWorkDir); err != nil {
+	verifyResult, err := deps.reporter.ReportWithVerification(reportCtx, task.Repo, task.IssueNum, task.AgentName, result,
+		sessionID, deps.workerID, retryCount, maxRetries, labelSummary, reportWorkDir)
+	if err != nil {
 		log.Printf("[worker] report failed: %v", err)
 	}
 
+	// If claims failed verification, treat as failure for state machine
+	exitCode := result.ExitCode
+	if verifyResult != nil && verifyResult.Partial {
+		exitCode = 1
+		status = store.TaskStatusFailed
+		if err := deps.store.UpdateTaskStatus(task.TaskID, status); err != nil {
+			log.Printf("[worker] failed to update task status after partial: %v", err)
+		}
+	}
+
 	// Mark agent completed in state machine
-	deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, task.TaskID, task.AgentName, result.ExitCode, completionLabels)
-	publishTaskCompletion(deps.taskHub, task, status, result.ExitCode, startedAt, time.Now().UTC())
+	deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, task.TaskID, task.AgentName, exitCode, completionLabels)
+	publishTaskCompletion(deps.taskHub, task, status, exitCode, startedAt, time.Now().UTC())
 
 	// Fallback: if the agent completed successfully but did not change labels,
 	// the state machine won't advance. Invalidate the poller cache and
