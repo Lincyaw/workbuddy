@@ -22,3 +22,19 @@ func TestParseServeFlagsReadsTrustedAuthors(t *testing.T) {
 		t.Fatal("expected trustedAuthorsSet to be true")
 	}
 }
+
+func TestParseServeFlagsAllowsAutoParallelism(t *testing.T) {
+	cmd := serveCmd
+	cmd.Flags().Set("max-parallel-tasks", "0")
+	t.Cleanup(func() {
+		cmd.Flags().Set("max-parallel-tasks", "1")
+	})
+
+	opts, err := parseServeFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseServeFlags: %v", err)
+	}
+	if got := opts.maxParallelTasks; got != 0 {
+		t.Fatalf("maxParallelTasks = %d, want 0 for auto mode", got)
+	}
+}

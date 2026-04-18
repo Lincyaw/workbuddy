@@ -46,6 +46,7 @@ workbuddy worker --coordinator http://A:8080 --token <secret> --role dev --repo 
 | `workbuddy cache-invalidate` | 清除 issue 缓存强制重新评估 | REQ-034 | v0.2.0 |
 | `workbuddy diagnose` | 自动诊断 pipeline 问题（stuck/orphaned/repeated failure） | REQ-037 | v0.2.0 |
 | `workbuddy recover` | 重启恢复（清理僵尸进程、重置运行时状态） | REQ-032 | v0.2.0 |
+| `workbuddy deploy` | 安装当前 binary、写入 systemd unit、并支持后续 redeploy/upgrade | main | main |
 | `workbuddy worker unregister` | 从 Coordinator 注销指定 Worker | REQ-052 | v0.2.0 |
 
 ## Coordinator HTTP API
@@ -68,9 +69,21 @@ workbuddy worker --coordinator http://A:8080 --token <secret> --role dev --repo 
 
 详见 `docs/api/coordinator-v1.yaml`。
 
+## Deploy 命令
+
+`workbuddy deploy` 记录一份 scope-aware deployment manifest，使 install、redeploy、
+upgrade 可以围绕同一份定义重复执行，而不是每次手工重写 systemd 参数。
+
+- `workbuddy deploy install`：把当前正在执行的 `workbuddy` binary 安装到目标路径；可选写入 user/system scope 的 systemd unit。
+- `workbuddy deploy redeploy`：读取 manifest，重新安装当前 binary，刷新 unit，并重启 service。
+- `workbuddy deploy upgrade`：从 GitHub Releases 下载指定版本（或 latest）的归档，替换部署 binary，并重启 service。
+- `--scope user|system`：分别使用 XDG user 目录或 `/etc` 下的 systemd / manifest 路径，便于开发机和系统服务两种场景。
+- `install` 支持在 `--` 后传递任意 `workbuddy` 子命令参数，因此同一套 deploy surface 可以覆盖 `serve`、`coordinator`、`worker` 等运行形态。
+
 ## 主要代码
 
 - `cmd/coordinator.go` — Coordinator 命令
+- `cmd/deploy.go` — 部署 / systemd / upgrade 命令
 - `cmd/worker.go` — Worker 命令
 - `internal/coordinator/http/handler.go` — Coordinator HTTP API handler
 - `internal/workerclient/client.go` — Worker HTTP client

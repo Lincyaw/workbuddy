@@ -20,6 +20,40 @@ Or build from source:
 go build -o workbuddy .
 ```
 
+### Deploy as a service
+
+Install the current `workbuddy` binary into a managed location and optionally
+write a systemd unit in one step:
+
+```bash
+workbuddy deploy install \
+  --name workbuddy \
+  --scope user \
+  --systemd \
+  --working-directory "$PWD"
+```
+
+That writes a deployment manifest under the selected scope, so you can later
+redeploy the current binary or upgrade to the latest GitHub release without
+retyping the service definition:
+
+```bash
+workbuddy deploy redeploy --name workbuddy --scope user
+workbuddy deploy upgrade --name workbuddy --scope user --version latest
+```
+
+For a system-wide service, run the same command with `--scope system` (typically
+via `sudo`) and pass the desired runtime command after `--`, for example:
+
+```bash
+sudo workbuddy deploy install \
+  --name workbuddy-coordinator \
+  --scope system \
+  --systemd \
+  --working-directory /srv/workbuddy \
+  -- coordinator --listen 0.0.0.0:8081 --db /srv/workbuddy/.workbuddy/workbuddy.db
+```
+
 ### Claude Code Plugin
 
 ```bash
