@@ -42,8 +42,10 @@ workbuddy deploy redeploy --name workbuddy --scope user
 workbuddy deploy upgrade --name workbuddy --scope user --version latest
 ```
 
-For a system-wide service, run the same command with `--scope system` (typically
-via `sudo`) and pass the desired runtime command after `--`, for example:
+`deploy install` defaults to `workbuddy serve`, but you can record dedicated
+distributed roles by passing the runtime command after `--`.
+
+Coordinator service example:
 
 ```bash
 sudo workbuddy deploy install \
@@ -53,6 +55,27 @@ sudo workbuddy deploy install \
   --working-directory /srv/workbuddy \
   -- coordinator --listen 0.0.0.0:8081 --db /srv/workbuddy/.workbuddy/workbuddy.db
 ```
+
+Worker service example:
+
+```bash
+sudo workbuddy deploy install \
+  --name workbuddy-worker-dev \
+  --scope system \
+  --systemd \
+  --working-directory /srv/workbuddy-worker \
+  -- worker \
+     --coordinator http://127.0.0.1:8081 \
+     --token <worker-token> \
+     --role dev \
+     --repo owner/repo
+```
+
+This makes the split explicit:
+
+- `workbuddy deploy install ...` with no trailing command => installs `serve`
+- `workbuddy deploy install ... -- coordinator ...` => installs a coordinator
+- `workbuddy deploy install ... -- worker ...` => installs a worker
 
 ### Claude Code Plugin
 

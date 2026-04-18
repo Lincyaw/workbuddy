@@ -80,6 +80,15 @@ upgrade 可以围绕同一份定义重复执行，而不是每次手工重写 sy
 - `--scope user|system`：分别使用 XDG user 目录或 `/etc` 下的 systemd / manifest 路径，便于开发机和系统服务两种场景。
 - `install` 支持在 `--` 后传递任意 `workbuddy` 子命令参数，因此同一套 deploy surface 可以覆盖 `serve`、`coordinator`、`worker` 等运行形态。
 
+典型安装形态：
+
+- 单机部署：`workbuddy deploy install --scope user --systemd`（默认记录 `serve`）
+- 分布式 Coordinator：`workbuddy deploy install --scope system --systemd -- coordinator ...`
+- 分布式 Worker：`workbuddy deploy install --scope system --systemd -- worker --coordinator ... --token ...`
+
+也就是说，Coordinator / Worker 没有单独的 deploy 子命令；二者都是通过
+`deploy install -- <runtime args>` 明确指定运行时角色。
+
 ## 主要代码
 
 - `cmd/coordinator.go` — Coordinator 命令

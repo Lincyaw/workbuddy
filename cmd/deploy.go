@@ -22,17 +22,18 @@ import (
 )
 
 const (
-	defaultDeployName     = "workbuddy"
-	defaultDeployScope    = "user"
-	defaultUpgradeRepo    = "Lincyaw/workbuddy"
-	deploymentManifestVer = 1
+	defaultDeployName        = "workbuddy"
+	defaultDeployScope       = "user"
+	defaultUpgradeRepo       = "Lincyaw/workbuddy"
+	defaultDeployHTTPTimeout = 30 * time.Second
+	deploymentManifestVer    = 1
 )
 
 var (
 	deployExecutablePath     = os.Executable
 	deployNow                = time.Now
 	deployRunSystemctl       = runSystemctl
-	deployHTTPClient         = http.DefaultClient
+	deployHTTPClient         = &http.Client{Timeout: defaultDeployHTTPTimeout}
 	deployGitHubAPIBaseURL   = "https://api.github.com"
 	deployGitHubDownloadBase = "https://github.com"
 	deployNamePattern        = regexp.MustCompile(`^[A-Za-z0-9@_.-]+$`)
@@ -95,14 +96,26 @@ type deployScopePaths struct {
 var deployCmd = &cobra.Command{
 	Use:   "deploy",
 	Short: "Install and manage deployed workbuddy services",
-	Long:  "Install the current workbuddy binary, optionally wire it into systemd, and keep enough deployment state to support later redeploy and upgrade operations.",
+	Long:  "Install the current workbuddy binary, optionally wire it into systemd, and keep enough deployment state to support later redeploy and upgrade operations for serve, coordinator, or worker runtimes.",
 }
 
 var deployInstallCmd = &cobra.Command{
 	Use:   "install [-- workbuddy args...]",
 	Short: "Install the current binary and optionally create a systemd unit",
-	Args:  cobra.ArbitraryArgs,
-	RunE:  runDeployInstallCmd,
+	Example: strings.TrimSpace(`
+  # Single-process deploy (default command is "serve")
+  workbuddy deploy install --name workbuddy --scope user --systemd
+
+  # Dedicated coordinator service
+  workbuddy deploy install --name workbuddy-coordinator --scope system --systemd -- \
+    coordinator --listen 0.0.0.0:8081 --db /srv/workbuddy/.workbuddy/workbuddy.db
+
+  # Dedicated worker service bound to a coordinator
+  workbuddy deploy install --name workbuddy-worker-dev --scope system --systemd -- \
+    worker --coordinator http://127.0.0.1:8081 --token <token> --role dev --repo owner/repo
+`),
+	Args: cobra.ArbitraryArgs,
+	RunE: runDeployInstallCmd,
 }
 
 var deployRedeployCmd = &cobra.Command{
@@ -270,7 +283,7 @@ func runDeployInstallWithOpts(ctx context.Context, opts *deployInstallOpts, stdo
 		if err != nil {
 			return fmt.Errorf("deploy install: render systemd unit: %w", err)
 		}
-		if err := writeTextFileAtomic(manifest.Systemd.UnitPath, unit, 0o644); err != nil {
+		if err := writeTextFileAtomic(manifest.Systemd.UnitPath, unit, deploymentUnitFileMode(manifest)); err != nil {
 			return fmt.Errorf("deploy install: write systemd unit: %w", err)
 		}
 	}
@@ -343,7 +356,7 @@ func runDeployRedeployWithOpts(ctx context.Context, opts *deployLookupOpts, stdo
 		if err != nil {
 			return fmt.Errorf("deploy redeploy: render systemd unit: %w", err)
 		}
-		if err := writeTextFileAtomic(manifest.Systemd.UnitPath, unit, 0o644); err != nil {
+		if err := writeTextFileAtomic(manifest.Systemd.UnitPath, unit, deploymentUnitFileMode(manifest)); err != nil {
 			return fmt.Errorf("deploy redeploy: write systemd unit: %w", err)
 		}
 	}
@@ -406,7 +419,7 @@ func runDeployUpgradeWithOpts(ctx context.Context, opts *deployUpgradeOpts, stdo
 		if err != nil {
 			return fmt.Errorf("deploy upgrade: render systemd unit: %w", err)
 		}
-		if err := writeTextFileAtomic(manifest.Systemd.UnitPath, unit, 0o644); err != nil {
+		if err := writeTextFileAtomic(manifest.Systemd.UnitPath, unit, deploymentUnitFileMode(manifest)); err != nil {
 			return fmt.Errorf("deploy upgrade: write systemd unit: %w", err)
 		}
 	}
@@ -519,8 +532,12 @@ func parseDeployEnv(entries []string) (map[string]string, error) {
 	env := make(map[string]string, len(entries))
 	for _, entry := range entries {
 		key, value, ok := strings.Cut(entry, "=")
-		if !ok || strings.TrimSpace(key) == "" {
+		key = strings.TrimSpace(key)
+		if !ok || key == "" {
 			return nil, fmt.Errorf("--env values must be KEY=VALUE, got %q", entry)
+		}
+		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(value, "\r\n") {
+			return nil, fmt.Errorf("--env values may not contain newlines, got %q", entry)
 		}
 		env[key] = value
 	}
@@ -604,6 +621,20 @@ func readDeploymentManifest(path string) (*deploymentManifest, error) {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return nil, fmt.Errorf("parse manifest %s: %w", path, err)
 	}
+	if manifest.SchemaVersion == 0 {
+		manifest.SchemaVersion = deploymentManifestVer
+	}
+	if manifest.SchemaVersion < 0 {
+		return nil, fmt.Errorf("manifest %s has invalid schema_version %d", path, manifest.SchemaVersion)
+	}
+	if manifest.SchemaVersion > deploymentManifestVer {
+		return nil, fmt.Errorf(
+			"manifest %s uses unsupported schema_version %d (max supported %d)",
+			path,
+			manifest.SchemaVersion,
+			deploymentManifestVer,
+		)
+	}
 	if manifest.BinaryPath == "" {
 		return nil, fmt.Errorf("manifest %s is missing binary_path", path)
 	}
@@ -626,7 +657,14 @@ func writeDeploymentManifest(path string, manifest *deploymentManifest) error {
 		return fmt.Errorf("marshal manifest: %w", err)
 	}
 	data = append(data, '\n')
-	return writeBytesAtomic(path, data, 0o644)
+	return writeBytesAtomic(path, data, 0o600)
+}
+
+func deploymentUnitFileMode(manifest *deploymentManifest) os.FileMode {
+	if manifest != nil && manifest.Systemd != nil && len(manifest.Systemd.Environment) > 0 {
+		return 0o600
+	}
+	return 0o644
 }
 
 func renderSystemdUnit(manifest *deploymentManifest, wantedBy string) (string, error) {
@@ -894,7 +932,16 @@ func installBinaryFromArchive(reader io.Reader, dst string, mode os.FileMode) er
 }
 
 func applyGitHubAuth(request *http.Request) {
-	if token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); token != "" {
+	if token := findDeployGitHubToken(); token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}
+}
+
+func findDeployGitHubToken() string {
+	for _, key := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GITHUB_OAUTH"} {
+		if token := strings.TrimSpace(os.Getenv(key)); token != "" {
+			return token
+		}
+	}
+	return ""
 }

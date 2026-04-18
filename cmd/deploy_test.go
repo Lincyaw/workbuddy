@@ -88,6 +88,9 @@ func TestRunDeployInstallWithSystemdWritesManifestAndUnit(t *testing.T) {
 	if got, want := manifest.Systemd.Environment["FOO"], "bar baz"; got != want {
 		t.Fatalf("manifest env FOO = %q, want %q", got, want)
 	}
+	if got, want := fileMode(t, manifestPath), os.FileMode(0o600); got != want {
+		t.Fatalf("manifest mode = %#o, want %#o", got, want)
+	}
 
 	unitPath := filepath.Join(configDir, "systemd", "user", "demo.service")
 	unitBytes, err := os.ReadFile(unitPath)
@@ -106,6 +109,9 @@ func TestRunDeployInstallWithSystemdWritesManifestAndUnit(t *testing.T) {
 	}
 	if !strings.Contains(unit, "WantedBy=default.target") {
 		t.Fatalf("unit file missing user WantedBy:\n%s", unit)
+	}
+	if got, want := fileMode(t, unitPath), os.FileMode(0o600); got != want {
+		t.Fatalf("unit mode = %#o, want %#o", got, want)
 	}
 
 	gotCalls := strings.Join(systemctlCalls, " | ")
@@ -345,6 +351,46 @@ func TestNormalizeDeployCommandArgsDefaultsAndStripsLeadingBinary(t *testing.T) 
 	}
 }
 
+func TestParseDeployEnvRejectsNewlines(t *testing.T) {
+	if _, err := parseDeployEnv([]string{"FOO=line1\nline2"}); err == nil {
+		t.Fatal("expected newline-containing env value to be rejected")
+	}
+}
+
+func TestReadDeploymentManifestRejectsUnsupportedSchemaVersion(t *testing.T) {
+	tempDir := t.TempDir()
+	manifestPath := filepath.Join(tempDir, "demo.json")
+	if err := os.WriteFile(manifestPath, []byte(`{"schema_version":2,"binary_path":"/tmp/workbuddy"}`), 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	if _, err := readDeploymentManifest(manifestPath); err == nil {
+		t.Fatal("expected unsupported schema_version to fail")
+	}
+}
+
+func TestApplyGitHubAuthPrefersGHToken(t *testing.T) {
+	t.Setenv("GH_TOKEN", "gh-token")
+	t.Setenv("GITHUB_TOKEN", "github-token")
+	t.Setenv("GITHUB_OAUTH", "oauth-token")
+
+	req := httptest.NewRequest(http.MethodGet, "https://example.com", nil)
+	applyGitHubAuth(req)
+
+	if got, want := req.Header.Get("Authorization"), "Bearer gh-token"; got != want {
+		t.Fatalf("Authorization = %q, want %q", got, want)
+	}
+}
+
+func TestDeployHTTPClientHasTimeout(t *testing.T) {
+	if deployHTTPClient == nil {
+		t.Fatal("deployHTTPClient is nil")
+	}
+	if deployHTTPClient.Timeout <= 0 {
+		t.Fatalf("deployHTTPClient timeout = %s, want > 0", deployHTTPClient.Timeout)
+	}
+}
+
 func overrideDeployGlobals(t *testing.T, executablePath string) func() {
 	t.Helper()
 	oldExec := deployExecutablePath
@@ -380,6 +426,15 @@ func mustReadManifest(t *testing.T, path string) *deploymentManifest {
 		t.Fatalf("unmarshal manifest: %v", err)
 	}
 	return &manifest
+}
+
+func fileMode(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info.Mode().Perm()
 }
 
 func buildReleaseArchive(t *testing.T, binaryContent string) []byte {
