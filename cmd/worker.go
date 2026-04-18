@@ -371,7 +371,7 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 				Stderr:   err.Error(),
 			}
 			reportCtx, cancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(shutdownTimeout))
-			if rerr := rep.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, workerID, 0, workflowMaxRetries(cfg, task.Workflow), ""); rerr != nil {
+			if rerr := rep.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, workerID, 0, workflowMaxRetries(cfg, task.Workflow), "", ""); rerr != nil {
 				log.Printf("[worker] failed to report worktree failure: %v", rerr)
 			}
 			cancel()

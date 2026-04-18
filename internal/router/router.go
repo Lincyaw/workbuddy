@@ -170,7 +170,7 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 				}
 				reportCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
-				if rerr := r.reporter.Report(reportCtx, req.Repo, req.IssueNum, req.AgentName, result, taskID, "coordinator", 0, 0, ""); rerr != nil {
+				if rerr := r.reporter.Report(reportCtx, req.Repo, req.IssueNum, req.AgentName, result, taskID, "coordinator", 0, 0, "", ""); rerr != nil {
 					log.Printf("[router] failed to report worktree failure: %v", rerr)
 				}
 			}
