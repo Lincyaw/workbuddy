@@ -1004,6 +1004,100 @@ func TestResetDedupConcurrent(t *testing.T) {
 	wg.Wait()
 }
 
+// TestDispatchAgentRespectsIssueClaim covers the integration of
+// SetIssueClaim + DispatchAgent: a concurrent claimer must see the dispatch
+// blocked (with a typed event) while the holder's own dispatch proceeds. This
+// guards REQ-057 AC-5 (coordinator-side acquisition) end-to-end.
+func TestDispatchAgentRespectsIssueClaim(t *testing.T) {
+	// State machine #1 represents the coordinator that holds the claim.
+	sm1, _, dispatch1 := newTestSM(t)
+	sm1.SetIssueClaim("coordinator-a", 5*time.Minute)
+
+	// State machine #2 shares the same Store — simulating a second
+	// coordinator process attached to the same DB — and must be blocked.
+	rec2 := &fakeRecorder{}
+	dispatch2 := make(chan DispatchRequest, 4)
+	wf := testWorkflow()
+	sm2 := NewStateMachine(
+		map[string]*config.WorkflowConfig{"dev-flow": wf},
+		sm1.store,
+		dispatch2,
+		rec2,
+		nil,
+	)
+	sm2.SetIssueClaim("coordinator-b", 5*time.Minute)
+
+	repo := "test/repo"
+	issueNum := 77
+
+	if err := sm1.DispatchAgent(context.Background(), repo, issueNum, "dev-agent", "dev-flow", "developing"); err != nil {
+		t.Fatalf("coord-a DispatchAgent: %v", err)
+	}
+	select {
+	case <-dispatch1:
+		// coord-a's dispatch went through.
+	case <-time.After(time.Second):
+		t.Fatal("expected dispatch from coord-a")
+	}
+
+	// coord-b must be blocked by the persisted claim.
+	if err := sm2.DispatchAgent(context.Background(), repo, issueNum, "dev-agent", "dev-flow", "developing"); err != nil {
+		t.Fatalf("coord-b DispatchAgent: %v", err)
+	}
+	select {
+	case req := <-dispatch2:
+		t.Fatalf("coord-b dispatch should have been blocked, got %+v", req)
+	default:
+	}
+	skipped := rec2.find(eventlog.TypeDispatchSkippedClaim)
+	if len(skipped) != 1 {
+		t.Fatalf("expected 1 dispatch_skipped_claim event on coord-b, got %d", len(skipped))
+	}
+
+	// When coord-a completes the group, it releases the claim so coord-b's
+	// next attempt succeeds.
+	sm1.MarkAgentCompleted(repo, issueNum, "task-1", "dev-agent", 0, []string{"workbuddy", "status:reviewing"})
+
+	if err := sm2.DispatchAgent(context.Background(), repo, issueNum, "dev-agent", "dev-flow", "developing"); err != nil {
+		t.Fatalf("coord-b DispatchAgent after release: %v", err)
+	}
+	select {
+	case <-dispatch2:
+		// coord-b now has the claim.
+	case <-time.After(time.Second):
+		t.Fatal("expected dispatch from coord-b after release")
+	}
+}
+
+// TestDispatchAgentReleasesOnContextCancel ensures a cancelled dispatch does
+// not leave the issue claim stuck — another coordinator can acquire afterwards.
+func TestDispatchAgentReleasesOnContextCancel(t *testing.T) {
+	sm, _, dispatch := newTestSM(t)
+	sm.SetIssueClaim("coord-a", time.Minute)
+
+	// Fill the dispatch channel so the next send blocks.
+	for i := 0; i < cap(dispatch); i++ {
+		dispatch <- DispatchRequest{}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := sm.DispatchAgent(ctx, "test/repo", 1, "dev-agent", "dev-flow", "developing")
+	if err == nil {
+		t.Fatal("expected context.Canceled error from DispatchAgent")
+	}
+
+	// After cancellation the claim should have been released.
+	claim, err := sm.store.QueryIssueClaim("test/repo", 1)
+	if err != nil {
+		t.Fatalf("QueryIssueClaim: %v", err)
+	}
+	if claim != nil {
+		t.Fatalf("expected claim to be released after cancelled dispatch, got %+v", claim)
+	}
+}
+
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }

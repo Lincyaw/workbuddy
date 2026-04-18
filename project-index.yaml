@@ -1797,3 +1797,40 @@ requirements:
       - internal/statemachine/statemachine_test.go
       - internal/store/store_test.go
     deps: [REQ-001, REQ-017, REQ-030]
+
+  - id: REQ-057
+    title: Per-issue worker claim with TTL to prevent worker races
+    description: >
+      On issue #120 two workers (fedora and machine-ddq) were observed taking
+      turns dispatching on the same issue within seconds of each other because
+      the state machine's in-memory inflight map is cleared on every task
+      completion — letting a just-finished-then-immediately-redispatched issue
+      race between workers on each cycle. REQ-057 adds a SQLite-backed
+      issue_claim table so that only one coordinator can hold a dispatch lease
+      on a given (repo, issue) pair at a time. The claim is acquired by the
+      StateMachine before dispatchSingleAgent and released when the inflight
+      group for that issue finishes. Expired claims are transparently
+      overwritten (with a logged claim_expired event) so a crashed coordinator
+      cannot wedge an issue indefinitely.
+    priority: P0
+    version: v0.2.0
+    status: tested
+    acceptance_criteria:
+      - "AC-057-1: New issue_claim(repo, issue_num, worker_id, claim_token, acquired_at, expires_at) table with primary key (repo, issue_num), created by store.createTables"
+      - "AC-057-2: Store.AcquireIssueClaim atomically inserts or extends a claim, returning a claim_token on success or ErrIssueClaimHeldByOther when another worker holds an unexpired lease"
+      - "AC-057-3: Store.ReleaseIssueClaim deletes the claim only when it belongs to the given worker and reports whether a row was removed"
+      - "AC-057-4: Store.RefreshIssueClaim extends expires_at for the current holder, returning false when not held by the worker or already expired"
+      - "AC-057-5: StateMachine.DispatchAgent acquires the claim before dispatchSingleAgent; on contention it logs eventlog.TypeDispatchSkippedClaim and returns cleanly, and MarkAgentCompleted releases the claim when the group advances"
+      - "AC-057-6: An expired claim does not block; the new acquirer overwrites it and emits eventlog.TypeIssueClaimExpired"
+      - "AC-057-7: Default lease is statemachine.DefaultIssueClaimLease (30 minutes); wired through SetIssueClaim from serve.go and repo_runtime.go"
+      - "AC-057-8: Unit tests cover acquire-fresh, self-extend, conflict, expired-overwrite, release, and refresh"
+    code:
+      - internal/store/store.go
+      - internal/statemachine/statemachine.go
+      - internal/eventlog/eventlog.go
+      - cmd/serve.go
+      - cmd/repo_runtime.go
+    tests:
+      - internal/store/store_test.go
+      - internal/statemachine/statemachine_test.go
+    deps: [REQ-017, REQ-027, REQ-030]

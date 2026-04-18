@@ -863,3 +863,231 @@ func TestWorkerHasRunningTask(t *testing.T) {
 		t.Fatal("expected running task to be detected")
 	}
 }
+
+// TestAcquireIssueClaimFresh verifies a first-time acquisition returns a
+// non-empty token and persists an issue_claim row (AC-2, AC-8).
+func TestAcquireIssueClaimFresh(t *testing.T) {
+	s := newTestStore(t)
+
+	res, err := s.AcquireIssueClaim("org/repo", 42, "worker-a", time.Minute)
+	if err != nil {
+		t.Fatalf("AcquireIssueClaim fresh: %v", err)
+	}
+	if res.ClaimToken == "" {
+		t.Fatal("expected non-empty claim token")
+	}
+	if res.Extended || res.OverwrotePrior {
+		t.Fatalf("unexpected flags on fresh acquire: %+v", res)
+	}
+
+	got, err := s.QueryIssueClaim("org/repo", 42)
+	if err != nil {
+		t.Fatalf("QueryIssueClaim: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected persisted claim")
+	}
+	if got.WorkerID != "worker-a" || got.ClaimToken != res.ClaimToken {
+		t.Fatalf("unexpected claim: %+v", got)
+	}
+	if !got.ExpiresAt.After(time.Now().UTC().Add(30 * time.Second)) {
+		t.Fatalf("expected expires_at well into the future, got %v", got.ExpiresAt)
+	}
+}
+
+// TestAcquireIssueClaimSelfExtend verifies that the same worker acquiring an
+// already-held claim extends the existing lease in place (AC-2, AC-8).
+func TestAcquireIssueClaimSelfExtend(t *testing.T) {
+	s := newTestStore(t)
+
+	first, err := s.AcquireIssueClaim("org/repo", 7, "worker-a", 30*time.Second)
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+
+	// Wait a tick so the expires_at comparison is meaningful.
+	time.Sleep(10 * time.Millisecond)
+
+	second, err := s.AcquireIssueClaim("org/repo", 7, "worker-a", 5*time.Minute)
+	if err != nil {
+		t.Fatalf("self re-acquire: %v", err)
+	}
+	if !second.Extended {
+		t.Fatalf("expected Extended=true, got %+v", second)
+	}
+	if second.ClaimToken != first.ClaimToken {
+		t.Fatalf("self-extend should reuse the token: first=%q second=%q", first.ClaimToken, second.ClaimToken)
+	}
+	got, err := s.QueryIssueClaim("org/repo", 7)
+	if err != nil {
+		t.Fatalf("QueryIssueClaim: %v", err)
+	}
+	if got == nil {
+		t.Fatal("claim disappeared after extend")
+	}
+	if !got.ExpiresAt.After(time.Now().UTC().Add(4 * time.Minute)) {
+		t.Fatalf("expected extended expires_at >4m ahead, got %v", got.ExpiresAt)
+	}
+}
+
+// TestAcquireIssueClaimHeldByOther verifies contention returns the sentinel
+// error and does not modify the persisted claim (AC-2, AC-8).
+func TestAcquireIssueClaimHeldByOther(t *testing.T) {
+	s := newTestStore(t)
+
+	first, err := s.AcquireIssueClaim("org/repo", 9, "worker-a", 5*time.Minute)
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+
+	_, err = s.AcquireIssueClaim("org/repo", 9, "worker-b", 5*time.Minute)
+	if !errors.Is(err, ErrIssueClaimHeldByOther) {
+		t.Fatalf("expected ErrIssueClaimHeldByOther, got %v", err)
+	}
+
+	got, err := s.QueryIssueClaim("org/repo", 9)
+	if err != nil {
+		t.Fatalf("QueryIssueClaim: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected existing claim row")
+	}
+	if got.WorkerID != "worker-a" || got.ClaimToken != first.ClaimToken {
+		t.Fatalf("claim should still belong to worker-a with original token, got %+v", got)
+	}
+}
+
+// TestAcquireIssueClaimOverwritesExpired verifies an expired claim is
+// transparently overwritten by a new acquirer (AC-6, AC-8).
+func TestAcquireIssueClaimOverwritesExpired(t *testing.T) {
+	s := newTestStore(t)
+
+	// Acquire with a sub-second lease so we can wait it out.
+	if _, err := s.AcquireIssueClaim("org/repo", 11, "worker-a", time.Millisecond); err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	// SQLite datetime('now') has second resolution, so wait long enough for
+	// the lease to definitively expire.
+	time.Sleep(1100 * time.Millisecond)
+
+	res, err := s.AcquireIssueClaim("org/repo", 11, "worker-b", 5*time.Minute)
+	if err != nil {
+		t.Fatalf("expired re-acquire: %v", err)
+	}
+	if !res.OverwrotePrior {
+		t.Fatalf("expected OverwrotePrior=true, got %+v", res)
+	}
+	if res.PriorWorkerID != "worker-a" {
+		t.Fatalf("expected PriorWorkerID=worker-a, got %q", res.PriorWorkerID)
+	}
+	if res.ClaimToken == "" {
+		t.Fatal("expected non-empty replacement token")
+	}
+	got, err := s.QueryIssueClaim("org/repo", 11)
+	if err != nil {
+		t.Fatalf("QueryIssueClaim: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected current claim row")
+	}
+	if got.WorkerID != "worker-b" || got.ClaimToken != res.ClaimToken {
+		t.Fatalf("claim should now belong to worker-b with new token, got %+v", got)
+	}
+}
+
+// TestReleaseIssueClaim verifies release only succeeds for the holder (AC-3).
+func TestReleaseIssueClaim(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, err := s.AcquireIssueClaim("org/repo", 5, "worker-a", 5*time.Minute); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	// Non-holder release is a no-op.
+	ok, err := s.ReleaseIssueClaim("org/repo", 5, "worker-b")
+	if err != nil {
+		t.Fatalf("non-holder release: %v", err)
+	}
+	if ok {
+		t.Fatal("expected non-holder release to return false")
+	}
+
+	// Holder release succeeds.
+	ok, err = s.ReleaseIssueClaim("org/repo", 5, "worker-a")
+	if err != nil {
+		t.Fatalf("holder release: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected holder release to return true")
+	}
+
+	got, err := s.QueryIssueClaim("org/repo", 5)
+	if err != nil {
+		t.Fatalf("QueryIssueClaim: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("expected claim to be deleted, got %+v", got)
+	}
+
+	// Releasing a missing claim returns false, not an error.
+	ok, err = s.ReleaseIssueClaim("org/repo", 5, "worker-a")
+	if err != nil {
+		t.Fatalf("release after delete: %v", err)
+	}
+	if ok {
+		t.Fatal("expected release of missing claim to return false")
+	}
+}
+
+// TestRefreshIssueClaim verifies refresh extends the holder's lease and is a
+// no-op for other workers or expired claims (AC-4).
+func TestRefreshIssueClaim(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, err := s.AcquireIssueClaim("org/repo", 14, "worker-a", 30*time.Second); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	before, err := s.QueryIssueClaim("org/repo", 14)
+	if err != nil {
+		t.Fatalf("QueryIssueClaim before: %v", err)
+	}
+
+	time.Sleep(1100 * time.Millisecond) // SQLite datetime() second resolution
+
+	ok, err := s.RefreshIssueClaim("org/repo", 14, "worker-a", 10*time.Minute)
+	if err != nil {
+		t.Fatalf("RefreshIssueClaim: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected refresh to succeed for holder")
+	}
+	after, err := s.QueryIssueClaim("org/repo", 14)
+	if err != nil {
+		t.Fatalf("QueryIssueClaim after: %v", err)
+	}
+	if !after.ExpiresAt.After(before.ExpiresAt) {
+		t.Fatalf("expected extended expires_at; before=%v after=%v", before.ExpiresAt, after.ExpiresAt)
+	}
+
+	// Non-holder refresh is a no-op.
+	ok, err = s.RefreshIssueClaim("org/repo", 14, "worker-b", 10*time.Minute)
+	if err != nil {
+		t.Fatalf("non-holder refresh: %v", err)
+	}
+	if ok {
+		t.Fatal("expected non-holder refresh to return false")
+	}
+
+	// Expired self-claim cannot be refreshed (the claim must be re-acquired).
+	if _, err := s.AcquireIssueClaim("org/repo", 15, "worker-a", time.Millisecond); err != nil {
+		t.Fatalf("acquire short: %v", err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	ok, err = s.RefreshIssueClaim("org/repo", 15, "worker-a", 10*time.Minute)
+	if err != nil {
+		t.Fatalf("refresh expired: %v", err)
+	}
+	if ok {
+		t.Fatal("expected refresh of expired self-claim to return false")
+	}
+}

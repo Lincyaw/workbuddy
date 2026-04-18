@@ -2,7 +2,9 @@
 package store
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,6 +51,9 @@ var (
 	ErrTaskAlreadyCompleted   = errors.New("task already completed")
 	ErrTaskNotClaimedByWorker = errors.New("task not claimed by worker")
 	ErrWorkerNotFound         = errors.New("worker not found")
+	// ErrIssueClaimHeldByOther is returned by AcquireIssueClaim when another
+	// worker already holds an unexpired lease on the issue.
+	ErrIssueClaimHeldByOther = errors.New("issue claim held by other worker")
 )
 
 // Store provides typed CRUD access to the workbuddy SQLite database.
@@ -243,6 +248,15 @@ func (s *Store) createTables() error {
 			graph_version INTEGER NOT NULL DEFAULT 0,
 			last_reaction_blocked INTEGER NOT NULL DEFAULT 0,
 			last_evaluated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (repo, issue_num)
+		)`,
+		`CREATE TABLE IF NOT EXISTS issue_claim (
+			repo TEXT NOT NULL,
+			issue_num INTEGER NOT NULL,
+			worker_id TEXT NOT NULL,
+			claim_token TEXT NOT NULL,
+			acquired_at DATETIME NOT NULL,
+			expires_at DATETIME NOT NULL,
 			PRIMARY KEY (repo, issue_num)
 		)`,
 	}
@@ -1673,6 +1687,230 @@ func (s *Store) HasAnyActiveTask(repo string, issueNum int) (bool, error) {
 		return false, fmt.Errorf("store: has any active task: %w", err)
 	}
 	return count > 0, nil
+}
+
+// ---------------------------------------------------------------------------
+// Issue claim (per-issue dispatch lease, REQ-057)
+// ---------------------------------------------------------------------------
+
+// IssueClaimRecord is the snapshot returned by QueryIssueClaim.
+type IssueClaimRecord struct {
+	Repo       string
+	IssueNum   int
+	WorkerID   string
+	ClaimToken string
+	AcquiredAt time.Time
+	ExpiresAt  time.Time
+}
+
+// AcquireIssueClaimResult reports the outcome of AcquireIssueClaim so callers
+// can distinguish a brand-new acquisition, a self-held extension, and an
+// overwrite of a previously-expired claim (for event logging).
+type AcquireIssueClaimResult struct {
+	// ClaimToken is the token that identifies this lease. Callers should store
+	// it if they want to release/refresh later.
+	ClaimToken string
+	// Extended is true when workerID already held the claim and the lease was
+	// extended in place (no overwrite).
+	Extended bool
+	// OverwrotePrior is true when the prior holder's lease had expired and was
+	// replaced by this acquisition.
+	OverwrotePrior bool
+	// PriorWorkerID, when OverwrotePrior is true, identifies the previous
+	// (expired) holder for diagnostic logging.
+	PriorWorkerID string
+}
+
+func generateClaimToken() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("store: generate claim token: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+// AcquireIssueClaim atomically inserts a new claim on (repo, issueNum) for
+// workerID, or extends the lease when workerID already holds the claim, or
+// overwrites an expired claim held by another worker.
+//
+// It returns ErrIssueClaimHeldByOther when another worker currently holds an
+// unexpired claim. The returned token is non-empty on success.
+func (s *Store) AcquireIssueClaim(repo string, issueNum int, workerID string, lease time.Duration) (AcquireIssueClaimResult, error) {
+	if strings.TrimSpace(workerID) == "" {
+		return AcquireIssueClaimResult{}, errors.New("store: acquire issue claim: worker_id is required")
+	}
+	if lease <= 0 {
+		lease = 30 * time.Minute
+	}
+	now := time.Now().UTC()
+	expiresAt := now.Add(lease)
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return AcquireIssueClaimResult{}, fmt.Errorf("store: begin acquire issue claim tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var (
+		holderWorker string
+		holderToken  string
+		holderExpRaw string
+	)
+	row := tx.QueryRow(
+		`SELECT worker_id, claim_token, expires_at
+		 FROM issue_claim
+		 WHERE repo = ? AND issue_num = ?`,
+		repo, issueNum,
+	)
+	err = row.Scan(&holderWorker, &holderToken, &holderExpRaw)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		token, tokErr := generateClaimToken()
+		if tokErr != nil {
+			return AcquireIssueClaimResult{}, tokErr
+		}
+		if _, insErr := tx.Exec(
+			`INSERT INTO issue_claim (repo, issue_num, worker_id, claim_token, acquired_at, expires_at)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			repo, issueNum, workerID, token, now.Format("2006-01-02 15:04:05"), expiresAt.Format("2006-01-02 15:04:05"),
+		); insErr != nil {
+			return AcquireIssueClaimResult{}, fmt.Errorf("store: insert issue claim: %w", insErr)
+		}
+		if commitErr := tx.Commit(); commitErr != nil {
+			return AcquireIssueClaimResult{}, fmt.Errorf("store: commit acquire issue claim: %w", commitErr)
+		}
+		return AcquireIssueClaimResult{ClaimToken: token}, nil
+	case err != nil:
+		return AcquireIssueClaimResult{}, fmt.Errorf("store: query issue claim: %w", err)
+	}
+
+	holderExp, ok := ParseTimestamp(holderExpRaw, "issue_claim.expires_at")
+	if !ok {
+		// Treat unparseable timestamp as expired so we can recover.
+		holderExp = time.Time{}
+	}
+	expired := holderExp.IsZero() || !holderExp.After(now)
+
+	if holderWorker == workerID && !expired {
+		// Self-held: extend in place, keeping the same token for idempotency.
+		if _, updErr := tx.Exec(
+			`UPDATE issue_claim
+			 SET expires_at = ?
+			 WHERE repo = ? AND issue_num = ? AND worker_id = ? AND claim_token = ?`,
+			expiresAt.Format("2006-01-02 15:04:05"), repo, issueNum, workerID, holderToken,
+		); updErr != nil {
+			return AcquireIssueClaimResult{}, fmt.Errorf("store: extend issue claim: %w", updErr)
+		}
+		if commitErr := tx.Commit(); commitErr != nil {
+			return AcquireIssueClaimResult{}, fmt.Errorf("store: commit extend issue claim: %w", commitErr)
+		}
+		return AcquireIssueClaimResult{ClaimToken: holderToken, Extended: true}, nil
+	}
+
+	if !expired {
+		// Held by someone else, not yet expired.
+		if commitErr := tx.Commit(); commitErr != nil {
+			return AcquireIssueClaimResult{}, fmt.Errorf("store: commit conflict rollback: %w", commitErr)
+		}
+		return AcquireIssueClaimResult{}, ErrIssueClaimHeldByOther
+	}
+
+	// Expired — overwrite with a fresh token and the new holder.
+	token, tokErr := generateClaimToken()
+	if tokErr != nil {
+		return AcquireIssueClaimResult{}, tokErr
+	}
+	if _, updErr := tx.Exec(
+		`UPDATE issue_claim
+		 SET worker_id = ?, claim_token = ?, acquired_at = ?, expires_at = ?
+		 WHERE repo = ? AND issue_num = ?`,
+		workerID, token, now.Format("2006-01-02 15:04:05"), expiresAt.Format("2006-01-02 15:04:05"),
+		repo, issueNum,
+	); updErr != nil {
+		return AcquireIssueClaimResult{}, fmt.Errorf("store: overwrite expired issue claim: %w", updErr)
+	}
+	if commitErr := tx.Commit(); commitErr != nil {
+		return AcquireIssueClaimResult{}, fmt.Errorf("store: commit overwrite issue claim: %w", commitErr)
+	}
+	return AcquireIssueClaimResult{
+		ClaimToken:     token,
+		OverwrotePrior: true,
+		PriorWorkerID:  holderWorker,
+	}, nil
+}
+
+// ReleaseIssueClaim removes the claim on (repo, issueNum) if it belongs to
+// workerID. Returns true when a row was deleted.
+func (s *Store) ReleaseIssueClaim(repo string, issueNum int, workerID string) (bool, error) {
+	res, err := s.db.Exec(
+		`DELETE FROM issue_claim
+		 WHERE repo = ? AND issue_num = ? AND worker_id = ?`,
+		repo, issueNum, workerID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("store: release issue claim: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: release issue claim rows affected: %w", err)
+	}
+	return rows > 0, nil
+}
+
+// RefreshIssueClaim extends expires_at for the current holder. Returns true
+// when the row was updated (false when not held by workerID or already expired).
+func (s *Store) RefreshIssueClaim(repo string, issueNum int, workerID string, lease time.Duration) (bool, error) {
+	if lease <= 0 {
+		lease = 30 * time.Minute
+	}
+	now := time.Now().UTC()
+	expiresAt := now.Add(lease).Format("2006-01-02 15:04:05")
+	res, err := s.db.Exec(
+		`UPDATE issue_claim
+		 SET expires_at = ?
+		 WHERE repo = ? AND issue_num = ? AND worker_id = ?
+		   AND expires_at > ?`,
+		expiresAt, repo, issueNum, workerID, now.Format("2006-01-02 15:04:05"),
+	)
+	if err != nil {
+		return false, fmt.Errorf("store: refresh issue claim: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: refresh issue claim rows affected: %w", err)
+	}
+	return rows > 0, nil
+}
+
+// QueryIssueClaim returns the current claim for (repo, issueNum), or nil when
+// no row exists.
+func (s *Store) QueryIssueClaim(repo string, issueNum int) (*IssueClaimRecord, error) {
+	var (
+		workerID, token string
+		acquiredRaw     string
+		expiresRaw      string
+	)
+	err := s.db.QueryRow(
+		`SELECT worker_id, claim_token, acquired_at, expires_at
+		 FROM issue_claim
+		 WHERE repo = ? AND issue_num = ?`,
+		repo, issueNum,
+	).Scan(&workerID, &token, &acquiredRaw, &expiresRaw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: query issue claim: %w", err)
+	}
+	rec := &IssueClaimRecord{
+		Repo:       repo,
+		IssueNum:   issueNum,
+		WorkerID:   workerID,
+		ClaimToken: token,
+	}
+	rec.AcquiredAt, _ = ParseTimestamp(acquiredRaw, "issue_claim.acquired_at")
+	rec.ExpiresAt, _ = ParseTimestamp(expiresRaw, "issue_claim.expires_at")
+	return rec, nil
 }
 
 func boolToInt(v bool) int {

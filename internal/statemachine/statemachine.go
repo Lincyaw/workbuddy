@@ -3,6 +3,7 @@ package statemachine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -59,6 +60,11 @@ const MaxConsecutiveAgentFailures = 3
 // for any agent is refused when this label is present, regardless of the
 // stale workflow state captured in a retry request.
 const DoneLabel = "status:done"
+
+// DefaultIssueClaimLease is the fallback lease duration for per-issue dispatch
+// claims (AC-7 of REQ-057). Long enough to accommodate a dev-agent run, short
+// enough to recover from a crashed coordinator.
+const DefaultIssueClaimLease = 30 * time.Minute
 
 type dispatchGroup struct {
 	workflow string
@@ -117,6 +123,16 @@ type StateMachine struct {
 	completionTimes map[string]completionRecord
 
 	workflowManager *workflow.Manager
+
+	// issueClaim configuration (REQ-057). When claimerID is empty, per-issue
+	// claim acquisition is skipped — useful for tests that don't care and for
+	// backwards compatibility with the existing NewStateMachine signature.
+	// claimTokens tracks the active claim token per issue so MarkAgentCompleted
+	// can release the lease it acquired.
+	issueClaimerID  string
+	issueClaimLease time.Duration
+	claimTokensMu   sync.Mutex
+	claimTokens     map[string]string // key: "repo#issueNum" → active claim token
 }
 
 type completionRecord struct {
@@ -146,7 +162,19 @@ func NewStateMachine(
 		stuckTimeout:    StuckTimeout,
 		completionTimes: make(map[string]completionRecord),
 		workflowManager: workflowManager,
+		claimTokens:     make(map[string]string),
 	}
+}
+
+// SetIssueClaim enables per-issue dispatch-claim acquisition (REQ-057). When
+// claimerID is empty the feature is disabled (useful for tests). When lease is
+// zero or negative, DefaultIssueClaimLease is used.
+func (sm *StateMachine) SetIssueClaim(claimerID string, lease time.Duration) {
+	sm.issueClaimerID = strings.TrimSpace(claimerID)
+	if lease <= 0 {
+		lease = DefaultIssueClaimLease
+	}
+	sm.issueClaimLease = lease
 }
 
 // SetStuckTimeout overrides the stuck timeout (useful for tests).
@@ -406,7 +434,76 @@ func (sm *StateMachine) DispatchAgent(ctx context.Context, repo string, issueNum
 	} else if blocked {
 		return nil
 	}
+	if blocked, err := sm.isBlockedByIssueClaim(repo, issueNum, agentName, workflow, state); err != nil {
+		return err
+	} else if blocked {
+		return nil
+	}
 	return sm.dispatchSingleAgent(ctx, repo, issueNum, agentName, workflow, state)
+}
+
+// isBlockedByIssueClaim acquires (or extends) the persistent per-issue claim
+// for this coordinator so that concurrent coordinators sharing the same SQLite
+// database cannot dispatch overlapping tasks on the same issue. A successful
+// self-extension is transparent; a fresh acquisition on an expired prior
+// holder logs TypeIssueClaimExpired; contention with another live holder logs
+// TypeDispatchSkippedClaim and blocks dispatch.
+func (sm *StateMachine) isBlockedByIssueClaim(repo string, issueNum int, agentName, workflow, state string) (bool, error) {
+	if sm.store == nil || sm.issueClaimerID == "" {
+		return false, nil
+	}
+	lease := sm.issueClaimLease
+	if lease <= 0 {
+		lease = DefaultIssueClaimLease
+	}
+	res, err := sm.store.AcquireIssueClaim(repo, issueNum, sm.issueClaimerID, lease)
+	if err != nil {
+		if errors.Is(err, store.ErrIssueClaimHeldByOther) {
+			other := ""
+			if claim, qErr := sm.store.QueryIssueClaim(repo, issueNum); qErr == nil && claim != nil {
+				other = claim.WorkerID
+			}
+			sm.eventlog.Log(eventlog.TypeDispatchSkippedClaim, repo, issueNum, map[string]any{
+				"agent":    agentName,
+				"workflow": workflow,
+				"state":    state,
+				"claimer":  sm.issueClaimerID,
+				"held_by":  other,
+				"reason":   "issue_claim_held_by_other",
+			})
+			return true, nil
+		}
+		return false, fmt.Errorf("statemachine: acquire issue claim: %w", err)
+	}
+	if res.OverwrotePrior {
+		sm.eventlog.Log(eventlog.TypeIssueClaimExpired, repo, issueNum, map[string]any{
+			"agent":       agentName,
+			"workflow":    workflow,
+			"state":       state,
+			"claimer":     sm.issueClaimerID,
+			"prior_owner": res.PriorWorkerID,
+		})
+	}
+	sm.claimTokensMu.Lock()
+	sm.claimTokens[sm.issueKey(repo, issueNum)] = res.ClaimToken
+	sm.claimTokensMu.Unlock()
+	return false, nil
+}
+
+// releaseIssueClaim drops the persistent claim for (repo, issueNum) when the
+// state machine has finished dispatching work for the current group. No-ops
+// when the feature is disabled.
+func (sm *StateMachine) releaseIssueClaim(repo string, issueNum int) {
+	if sm.store == nil || sm.issueClaimerID == "" {
+		return
+	}
+	key := sm.issueKey(repo, issueNum)
+	sm.claimTokensMu.Lock()
+	delete(sm.claimTokens, key)
+	sm.claimTokensMu.Unlock()
+	if _, err := sm.store.ReleaseIssueClaim(repo, issueNum, sm.issueClaimerID); err != nil {
+		log.Printf("[statemachine] release issue claim for %s#%d failed: %v", repo, issueNum, err)
+	}
 }
 
 // isBlockedByDone refuses dispatch when the issue already carries the
@@ -553,14 +650,21 @@ func (sm *StateMachine) dispatchSingleAgent(ctx context.Context, repo string, is
 		// Context cancelled before dispatch sent. Remove this agent from
 		// the group. If no agents were successfully dispatched, clean up
 		// the entire group.
+		released := false
 		sm.inflightMu.Lock()
 		if g, ok := sm.inflight[issueKey]; ok {
 			delete(g.dispatchedAgents, agentName)
 			if len(g.dispatchedAgents) == 0 {
 				delete(sm.inflight, issueKey)
+				released = true
 			}
 		}
 		sm.inflightMu.Unlock()
+		if released {
+			// Nothing else is pending for this issue — release the lease so
+			// another coordinator/cycle can pick it up.
+			sm.releaseIssueClaim(repo, issueNum)
+		}
 		return ctx.Err()
 	}
 	return nil
@@ -658,6 +762,7 @@ func (sm *StateMachine) MarkAgentCompleted(repo string, issueNum int, taskID, ag
 	group := sm.inflight[issueKey]
 	if group == nil {
 		sm.inflightMu.Unlock()
+		sm.releaseIssueClaim(repo, issueNum)
 		sm.recordStuckCandidate(issueKey, currentLabels)
 		sm.logCompletionEvent(repo, issueNum, taskID, agentName, exitCode)
 		return
@@ -736,6 +841,10 @@ func (sm *StateMachine) MarkAgentCompleted(repo string, issueNum int, taskID, ag
 		delete(sm.inflight, issueKey)
 	}
 	sm.inflightMu.Unlock()
+
+	if shouldAdvance {
+		sm.releaseIssueClaim(repo, issueNum)
+	}
 
 	sm.logCompletionEvent(repo, issueNum, taskID, agentName, exitCode)
 
