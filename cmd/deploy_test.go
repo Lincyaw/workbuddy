@@ -104,8 +104,11 @@ func TestRunDeployInstallWithSystemdWritesManifestAndUnit(t *testing.T) {
 	if !strings.Contains(unit, `Environment="FOO=bar baz"`) {
 		t.Fatalf("unit file missing environment line:\n%s", unit)
 	}
-	if !strings.Contains(unit, `EnvironmentFile="/etc/workbuddy/demo.env"`) {
+	if !strings.Contains(unit, "EnvironmentFile=/etc/workbuddy/demo.env\n") {
 		t.Fatalf("unit file missing environment file line:\n%s", unit)
+	}
+	if !strings.Contains(unit, "WorkingDirectory="+repoDir+"\n") {
+		t.Fatalf("unit file missing unquoted WorkingDirectory line:\n%s", unit)
 	}
 	if !strings.Contains(unit, "WantedBy=default.target") {
 		t.Fatalf("unit file missing user WantedBy:\n%s", unit)

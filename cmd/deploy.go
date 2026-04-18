@@ -692,7 +692,7 @@ func renderSystemdUnit(manifest *deploymentManifest, wantedBy string) (string, e
 
 	b.WriteString("[Service]\n")
 	b.WriteString("Type=simple\n")
-	fmt.Fprintf(&b, "WorkingDirectory=%s\n", systemdQuote(manifest.WorkingDirectory))
+	fmt.Fprintf(&b, "WorkingDirectory=%s\n", systemdSingleValue(manifest.WorkingDirectory))
 	fmt.Fprintf(&b, "ExecStart=%s\n", joinSystemdCommand(execArgs))
 	b.WriteString("Restart=on-failure\n")
 	b.WriteString("RestartSec=5s\n")
@@ -706,7 +706,7 @@ func renderSystemdUnit(manifest *deploymentManifest, wantedBy string) (string, e
 		fmt.Fprintf(&b, "Environment=%s\n", systemdQuote(key+"="+manifest.Systemd.Environment[key]))
 	}
 	for _, envFile := range manifest.Systemd.EnvironmentFiles {
-		fmt.Fprintf(&b, "EnvironmentFile=%s\n", systemdQuote(envFile))
+		fmt.Fprintf(&b, "EnvironmentFile=%s\n", systemdSingleValue(envFile))
 	}
 
 	b.WriteString("\n[Install]\n")
@@ -732,6 +732,15 @@ func systemdQuote(value string) string {
 	value = strings.ReplaceAll(value, `\`, `\\`)
 	value = strings.ReplaceAll(value, `"`, `\"`)
 	return `"` + value + `"`
+}
+
+// systemdSingleValue renders a value for systemd settings that take a single
+// unstructured token (e.g. WorkingDirectory=, EnvironmentFile=). systemd's
+// parser does not strip outer double quotes for these, so we only escape the
+// `%` specifier and collapse newlines instead of wrapping in quotes.
+func systemdSingleValue(value string) string {
+	value = strings.ReplaceAll(value, "\n", " ")
+	return strings.ReplaceAll(value, "%", "%%")
 }
 
 func writeTextFileAtomic(path, contents string, mode os.FileMode) error {

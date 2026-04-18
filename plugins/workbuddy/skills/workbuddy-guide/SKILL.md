@@ -1,40 +1,33 @@
 ---
 name: workbuddy-guide
-description: "Explain how to use workbuddy: single-process serve mode, distributed coordinator+worker mode, multi-repo setup, common operations, and troubleshooting. Use when the user says 'how to use workbuddy', 'workbuddy guide', 'how does workbuddy work', 'teach me workbuddy', 'workbuddy help', '怎么用workbuddy', '使用指南', or asks about deployment, running, or operating workbuddy."
+description: "Explain how to use workbuddy: what it is, which command to reach for, and where to find deeper references. Use when the user says 'how to use workbuddy', 'workbuddy guide', 'how does workbuddy work', 'teach me workbuddy', '怎么用workbuddy', '使用指南', or asks about deployment, running, or operating workbuddy."
 ---
 
 # Workbuddy Guide
 
-Interactive skill that explains how to operate workbuddy — from first run to
-multi-repo distributed deployment. Adapt the depth and detail to what the user
-is actually asking about; don't dump the entire guide when they ask a focused
-question.
+A map of what workbuddy is and which command solves which problem. This
+skill is intentionally terse — **for command details always run
+`workbuddy <cmd> --help`**. The CLI help is the authoritative reference
+and stays in sync with the code; duplicating it here would only drift.
 
 ## Bundled references (read when relevant)
 
-- `references/new-repo-onboarding.md` — Step-by-step checklist for configuring
-  a brand new repository to work with workbuddy. Read this when the user asks
-  how to add a new repo or when troubleshooting initial setup.
-- `references/known-pitfalls.md` — Lessons from real-world testing: SSH vs HTTPS,
-  gitignore, conventional commits, lease expiry, coverage mismatch, and more.
-  Read this when something goes wrong or when advising on best practices.
-- `references/writing-good-issues.md` — How to write issues that agents can
-  process successfully: AC format, label conventions, common mistakes. Read
-  this when the user asks how to create issues or when agents keep failing.
+- `references/new-repo-onboarding.md` — step-by-step checklist for adding a
+  new repo to a workbuddy deployment. Read when setting up a repo.
+- `references/known-pitfalls.md` — real-world failure modes and fixes. Read
+  when something misbehaves.
+- `references/writing-good-issues.md` — how to write issues that agents can
+  actually process. Read when issues keep failing or getting blocked.
 
-## Core concept (always explain first if the user is new)
+## What workbuddy is
 
-Workbuddy is a GitHub Issue-driven agent orchestration platform:
+GitHub Issue-driven agent orchestration. Humans file issues with
+`## Acceptance Criteria` and the `workbuddy`+`status:developing` labels;
+workbuddy polls GitHub, dispatches agents (Claude Code or Codex), and
+reacts to label changes the agents make as they hand off work.
 
-1. **Human** creates a GitHub issue with `## Acceptance Criteria` and labels
-   `workbuddy` + `status:developing`
-2. **Coordinator** polls GitHub, detects the issue, dispatches `dev-agent`
-3. **dev-agent** (codex or claude-code subprocess) reads the issue, writes code,
-   creates a PR, changes label to `status:reviewing`
-4. **Coordinator** detects label change, dispatches `review-agent`
-5. **review-agent** evaluates each acceptance criterion:
-   - All pass → `status:done` (issue auto-closed)
-   - Any fail → `status:developing` (back to dev-agent with feedback, max 3 retries)
+Only two agent roles exist: **`dev-agent`** and **`review-agent`**.
+Runtime (`claude-code` | `codex`) is a config field, not a separate agent.
 
 ```
 developing ⇄ reviewing → done
@@ -42,427 +35,126 @@ developing ⇄ reviewing → done
  blocked  (missing Acceptance Criteria — human fixes, flips back)
 ```
 
-Only two agents exist: `dev-agent` and `review-agent`. Runtime (`claude-code`
-or `codex`) is a config field, not a separate agent. This Codex plugin exposes
-that operational guidance through installable skills.
+Dev writes code + PR → flips to `reviewing`. Review evaluates each AC →
+`done` on pass, `developing` on fail (max 3 retries via REQ-055 cap).
 
-## Deployment modes
+## Deployment modes — pick one
 
-### Mode 1: Single-process (`serve`) — start here
+| Mode | Command | When to use |
+|------|---------|-------------|
+| **Serve** (single process) | `workbuddy serve` | Local dev, single-host setups, testing |
+| **Distributed** (coordinator + workers) | `workbuddy coordinator` + `workbuddy worker` | Workers on different hosts, horizontal scale, multi-repo |
+| **Managed install** (systemd) | `workbuddy deploy install` | Long-lived production; survives reboots; `deploy redeploy`/`deploy upgrade` for updates |
 
-Everything runs in one process. Best for local development and testing.
+All three share the same state machine, SQLite store, and agent configs.
+Run `workbuddy <mode> --help` for flags, `workbuddy deploy install --help`
+for the systemd wrapper examples, etc.
 
-```bash
-# Build
-go build -o workbuddy .
+## Command map — what to reach for
 
-# Run (from the repo root that has .github/workbuddy/ config)
-./workbuddy serve --port 8090 --poll-interval 15s
-```
+Run `workbuddy --help` for the full list. Grouped by intent:
 
-Key flags:
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `--port` | 8080 | HTTP server (health, metrics, dashboard) |
-| `--poll-interval` | 30s | How often to poll GitHub for changes |
-| `--max-parallel-tasks` | auto (min(CPU, 4)) | Concurrent agent executions |
-| `--config-dir` | `.github/workbuddy` | Config directory path |
-| `--db-path` | `.workbuddy/workbuddy.db` | SQLite database |
-| `--coordinator-api` | false | Also expose task claim API for remote workers |
+**Setup a repo**
+- `workbuddy init` — scaffold `.github/workbuddy/` in a new repo
+- `workbuddy validate` — sanity-check config before running
+- `workbuddy repo register` — attach a repo to a running coordinator (no restart)
 
-What it starts internally:
-- Poller → polls `gh issue list` / `gh pr list` every interval
-- StateMachine → reacts to label changes, dispatches agents
-- Router → builds task context (issue body, comments, PRs)
-- Embedded Worker pool → runs agent subprocesses (codex/claude)
-- HTTP server → health, metrics, dashboard, audit API
+**Run workbuddy**
+- `workbuddy serve` — single-process dev mode
+- `workbuddy coordinator` + `workbuddy worker` — distributed mode
+- `workbuddy deploy install|redeploy|upgrade` — managed systemd install
 
-### Mode 2: Distributed (`coordinator` + `worker`)
+**Observe**
+- `workbuddy status` — issues, tasks, events, stuck issues, or watch until done
+- `workbuddy logs <issue>` — per-attempt session logs (stdout/stderr/tool calls)
+- `workbuddy diagnose` — surfaces stuck issues, 3-retry caps, stale claims; `--fix` for safe auto-remediation
 
-Coordinator and Worker(s) run as separate processes, communicating via HTTP
-long-poll. Use this when workers run on different machines or you need to
-scale horizontally.
+**Recover**
+- `workbuddy cache-invalidate` — force re-poll after manual label edits
+- `workbuddy recover` — clean stale processes/worktrees/claims after a crash
+- `workbuddy operator-watch` — auto-dispatch Claude on coordinator incident files
 
-#### Step 1: Start the Coordinator
+**Worker runtime ops**
+- `workbuddy worker repos add|list|remove` — change a running worker's repo bindings without restart
+- `workbuddy coordinator token create|list|revoke` — per-worker auth tokens
 
-```bash
-export WORKBUDDY_AUTH_TOKEN="your-secret-token"
+## Retry and failure semantics (worth knowing)
 
-./workbuddy coordinator \
-  --listen 0.0.0.0:8081 \
-  --config-dir .github/workbuddy \
-  --poll-interval 15s \
-  --auth
-```
+The state machine has several guardrails that change how failures look —
+read the relevant decision docs for depth; the short version:
 
-Key flags:
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `--listen` | `127.0.0.1:8081` | Listen address. Use `0.0.0.0:8081` for remote workers |
-| `--auth` | false | Require `WORKBUDDY_AUTH_TOKEN` for all API calls |
-| `--config-dir` | (none) | Bootstrap with a local repo config on startup |
-| `--loopback-only` | false | Dev mode: skip auth on loopback |
+- **3-retry cap (REQ-055)**: after 3 consecutive agent failures on the same
+  issue, dispatch stops. `workbuddy diagnose` surfaces this explicitly.
+- **Infra vs verdict (REQ-056)**: launcher/runtime crashes are reported with
+  an "Infra Error" comment header and do **not** burn the retry budget. Only
+  agent-decided FAIL verdicts count toward the cap.
+- **Issue-claim with TTL (REQ-057, hardened in REQ-059)**: a SQLite claim
+  prevents two workers from dispatching the same issue concurrently. Stale
+  claims self-heal after TTL expiry.
+- **Worktree isolation (REQ-058)**: every task runs in its own
+  `.workbuddy/worktrees/issue-N/`. If worktree setup fails, the worker
+  reports loudly instead of falling back to CWD.
 
-The Coordinator exposes these APIs:
-- `POST /api/v1/repos/register` — register a repo's config
-- `GET  /api/v1/repos` — list registered repos
-- `DELETE /api/v1/repos/{owner/name}` — deregister a repo
-- `POST /api/v1/workers/register` — register a worker
-- `GET  /api/v1/tasks/poll?worker_id=X&timeout=30s` — long-poll for tasks
-- `POST /api/v1/tasks/{id}/result` — submit task completion
-- `POST /api/v1/tasks/{id}/heartbeat` — keep lease alive
-- `POST /api/v1/tasks/{id}/release` — release task back to queue
-- `GET  /health` — health check with registered repo count
-- `GET  /metrics` — Prometheus metrics
+Impact for operators: if `diagnose` says "failed 3 times in a row", check
+the issue's comments — if they're "Infra Error", the bug is infrastructure
+(usually runtime/launcher), not the acceptance criteria. Fix infra and
+`cache-invalidate` to restart; don't rewrite the issue.
 
-#### Step 2: Start Worker(s)
+## Common workflows
+
+**Create a workbuddy issue**
 
 ```bash
-./workbuddy worker \
-  --coordinator http://coordinator-host:8081 \
-  --token "your-secret-token" \
-  --runtime codex \
-  --repo Owner/RepoName
-```
-
-Key flags:
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `--coordinator` | (required) | Coordinator base URL |
-| `--token` | (required) | Bearer token matching Coordinator's `WORKBUDDY_AUTH_TOKEN` |
-| `--runtime` | `claude-code` | Agent runtime: `claude-code` or `codex` |
-| `--repo` | from config.yaml | Which repo this worker serves |
-| `--role` | from agent configs | Comma-separated roles (e.g., `dev,review`) |
-
-**Important:** The Worker must be run from a directory that has
-`.github/workbuddy/agents/*.md` locally. The Coordinator only sends
-`{task_id, repo, issue_num, agent_name}` — the Worker loads the full
-agent prompt template from its local config.
-
-Worker lifecycle:
-1. Registers with Coordinator (`POST /workers/register`)
-2. Prunes orphaned worktrees from prior crashes
-3. Long-polls for tasks (`GET /tasks/poll`, 30s timeout)
-4. On task received: creates isolated git worktree at `.workbuddy/worktrees/issue-N/`
-5. Launches agent subprocess in the worktree directory
-6. Sends heartbeat every 15s to keep the lease
-7. On completion: submits result, cleans up worktree
-8. On `Ctrl+C`: releases task back to queue (`POST /tasks/{id}/release`)
-
-**Worktree isolation**: Each task runs in its own git worktree, so multiple
-workers can safely process different issues in the same repo checkout without
-git conflicts. The main branch is never modified by agents.
-
-**Scaling with multiple workers**: To increase parallelism, start multiple
-worker processes. Each independently polls and claims tasks:
-```bash
-for i in 1 2 3; do
-  nohup ./workbuddy worker --coordinator http://coord:8081 \
-    --token $TOKEN --repo Owner/Repo \
-    > /tmp/worker-$i.log 2>&1 &
-done
-```
-
-## Multi-repo setup
-
-A single Coordinator can manage multiple repositories. Each repo gets its own
-independent Poller + StateMachine. Workers declare which repo(s) they serve.
-
-### Registering repos
-
-**Method A — Bootstrap at startup (single repo)**
-
-Pass `--config-dir` when starting the Coordinator. It reads the local
-`.github/workbuddy/config.yaml` and auto-registers that repo.
-
-**Method B — Dynamic registration (multiple repos)**
-
-From any repo that has `.github/workbuddy/` config:
-
-```bash
-cd /path/to/repo-B
-export WORKBUDDY_AUTH_TOKEN="your-secret-token"
-workbuddy repo register \
-  --coordinator http://coordinator-host:8081 \
-  --token "$WORKBUDDY_AUTH_TOKEN"
-```
-
-This serializes the local config (config.yaml + agents + workflows) and POSTs
-it to the Coordinator. The Coordinator then starts a dedicated Poller for that
-repo.
-
-**Method C — Direct API call**
-
-```bash
-curl -X POST http://coordinator-host:8081/api/v1/repos/register \
-  -H "Authorization: Bearer $WORKBUDDY_AUTH_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "repo": "Owner/RepoName",
-    "environment": "dev",
-    "agents": [...],
-    "workflows": [...]
-  }'
-```
-
-### Listing registered repos
-
-```bash
-curl -H "Authorization: Bearer $TOKEN" http://coordinator-host:8081/api/v1/repos | jq
-```
-
-### Deregistering a repo
-
-```bash
-curl -X DELETE -H "Authorization: Bearer $TOKEN" \
-  http://coordinator-host:8081/api/v1/repos/Owner/RepoName
-```
-
-### Multi-repo Worker configuration
-
-Each Worker declares which repo(s) it serves at registration time via
-`--repo`. A Worker only receives tasks for its declared repo.
-
-For a fleet serving multiple repos:
-
-```bash
-# Worker A: serves repo-1 only
-./workbuddy worker --coordinator http://coord:8081 --token $TOKEN --repo Owner/repo-1
-
-# Worker B: serves repo-2 only
-./workbuddy worker --coordinator http://coord:8081 --token $TOKEN --repo Owner/repo-2
-
-# Worker C: serves both (via config — the worker registers with repos from config.yaml)
-cd /path/with/multi-repo-config
-./workbuddy worker --coordinator http://coord:8081 --token $TOKEN
-```
-
-## Prerequisites for any repo
-
-Before workbuddy can manage a repo, it needs:
-
-1. **GitHub labels** — create them with `gh label create` or use the
-   `/setup-repo` skill:
-   - `workbuddy` (trigger label, #5319E7)
-   - `status:developing` (#1D76DB)
-   - `status:reviewing` (#D93F0B)
-   - `status:done` (#0E8A16)
-   - `status:blocked` (#BFD4F2)
-
-2. **Config files** in `.github/workbuddy/`:
-   - `config.yaml` — repo name, poll interval, port
-   - `agents/dev-agent.md` — dev agent prompt + triggers
-   - `agents/review-agent.md` — review agent prompt + triggers
-   - `workflows/default.md` — state machine definition
-
-3. **`gh` CLI** authenticated with write access to the repo
-
-4. **Agent runtime** installed: `claude` CLI (for claude-code) or `codex` CLI
-   (for codex runtime)
-
-Use `/setup-repo` to create all of the above automatically.
-
-## Common operations
-
-### Creating a workbuddy issue
-
-```bash
-gh issue create -R Owner/Repo \
-  --title "Your task title" \
+gh issue create -R owner/name \
+  --title "…" \
   --body '## Description
-What needs to be done.
+…
 
 ## Acceptance Criteria
-- [ ] Criterion 1 (must be individually verifiable)
-- [ ] Criterion 2
-- [ ] Tests exist for the above' \
+- [ ] …' \
   --label "workbuddy,status:developing"
 ```
 
-The `workbuddy` label opts the issue into the state machine.
-The `status:developing` label triggers the dev-agent.
-
-### Checking pipeline status
+**Unstick an issue**
 
 ```bash
-# Task queue
-./workbuddy status --tasks
+# Check what's wrong
+workbuddy diagnose --repo owner/name
 
-# Recent events
-./workbuddy status --events --since 10m
-
-# Watch a specific issue until completion
-./workbuddy status --watch --issue 42 --timeout 30m
-
-# Find stuck issues
-./workbuddy status --stuck
-
-# Automated diagnosis
-./workbuddy diagnose
-./workbuddy diagnose --fix   # auto-apply safe fixes
+# Manually nudge state and force re-poll
+gh issue edit N -R owner/name --remove-label status:blocked --add-label status:developing
+workbuddy cache-invalidate --repo owner/name --issue N
 ```
 
-### Viewing session logs
+**Add a repo to a running deployment** (no restart)
 
 ```bash
-# View agent execution logs for an issue
-./workbuddy logs <issue-number>
+cd /path/to/new-repo
+workbuddy repo register --coordinator http://coord:8081
+# For a worker already running:
+workbuddy worker repos add owner/new-repo=/path/to/new-repo
 ```
-
-### Recovering from failures
-
-```bash
-# After unclean shutdown: kill zombies, reset DB, prune worktrees
-./workbuddy recover
-```
-
-### Cache invalidation (force re-poll)
-
-```bash
-# Force the poller to re-process an issue on the next cycle
-./workbuddy cache-invalidate --repo Owner/Repo --issue 42
-```
-
-### Manual label intervention
-
-```bash
-# Restart a stuck issue
-gh issue edit 42 -R Owner/Repo \
-  --remove-label 'status:blocked' \
-  --add-label 'status:developing'
-
-# Force completion
-gh issue edit 42 -R Owner/Repo \
-  --remove-label 'status:reviewing' \
-  --add-label 'status:done'
-```
-
-### Token management (distributed mode)
-
-```bash
-# Create a worker token
-./workbuddy coordinator token create \
-  --worker-id worker-1 --repo Owner/Repo --roles dev,review
-
-# List tokens
-./workbuddy coordinator token list
-
-# Revoke a token
-./workbuddy coordinator token revoke --worker-id worker-1
-```
-
-### Config validation
-
-```bash
-./workbuddy validate
-```
-
-## Endpoints cheat sheet
-
-### serve mode (default port 8080)
-
-| Endpoint | Purpose |
-|----------|---------|
-| `GET /health` | Health check |
-| `GET /metrics` | Prometheus metrics |
-| `GET /events` | Audit event list |
-| `GET /issues/{repo}/{num}/state` | Issue state |
-| `GET /tasks` | Task list |
-| `GET /tasks/watch` | SSE stream for task completion |
-
-### coordinator mode (default port 8081)
-
-| Endpoint | Purpose |
-|----------|---------|
-| `GET /health` | Health + registered repo count |
-| `POST /api/v1/repos/register` | Register repo config |
-| `GET /api/v1/repos` | List repos |
-| `DELETE /api/v1/repos/{owner/name}` | Deregister repo |
-| `POST /api/v1/workers/register` | Register worker |
-| `GET /api/v1/tasks/poll` | Long-poll for tasks |
-| `POST /api/v1/tasks/{id}/result` | Submit result |
-| `POST /api/v1/tasks/{id}/heartbeat` | Heartbeat |
-| `POST /api/v1/tasks/{id}/release` | Release task |
-
-## Configuring a new repository
-
-For a complete step-by-step guide, read `references/new-repo-onboarding.md`.
-Here's the quick summary:
-
-1. Create 5 GitHub labels: `workbuddy`, `status:developing`, `status:reviewing`,
-   `status:done`, `status:blocked`
-2. Create `.github/workbuddy/` with `config.yaml`, `agents/dev-agent.md`,
-   `agents/review-agent.md`, `workflows/default.md`
-3. **Add `.workbuddy/` to `.gitignore`** (easy to forget — causes session file leaks)
-4. Commit + push the config
-5. Validate: `workbuddy validate` (run from repo root)
-6. (Distributed mode) Register: `workbuddy repo register --coordinator URL --token TOKEN`
-7. (Distributed mode) Start worker from the repo directory:
-   `workbuddy worker --coordinator URL --token TOKEN --repo Owner/Repo`
-
-The agent configs (`dev-agent.md`, `review-agent.md`) and workflow (`default.md`)
-are generic — copy them from any existing workbuddy-managed repo. The only
-repo-specific file is `config.yaml` (set `repo:` and `port:`).
-
-Important: the worker must be started from the target repo's root directory
-because it loads agent prompt templates from the local `.github/workbuddy/agents/`.
-
-For known issues and debugging tips, read `references/known-pitfalls.md`.
-
-## Troubleshooting
-
-### Issue created but nothing happens
-
-1. Check labels: must have BOTH `workbuddy` AND `status:developing`
-2. Check poller is running: look for `[poller]` in logs
-3. Check config: `./workbuddy validate`
-4. Force re-poll: `./workbuddy cache-invalidate --repo Owner/Repo --issue N`
-
-### Agent runs but doesn't change labels
-
-The agent subprocess (`codex`/`claude`) is responsible for calling
-`gh issue edit` to change labels. If it doesn't, the state machine stalls.
-Workbuddy auto-detects this and redispatches after the stuck timeout.
-
-Manual fix: change labels yourself with `gh issue edit`.
-
-### Worker can't connect to Coordinator
-
-1. Check Coordinator is listening on the right address (`0.0.0.0` not `127.0.0.1`)
-2. Check token matches `WORKBUDDY_AUTH_TOKEN`
-3. Check firewall/network allows the port
-
-### Worker says "agent not found in local config"
-
-The Worker needs `.github/workbuddy/agents/dev-agent.md` (and review-agent.md)
-in its working directory. The Coordinator only sends the agent name, not the
-full config.
-
-### Too many retries / cycle limit reached
-
-The default workflow allows 3 retry cycles (developing ↔ reviewing). After
-that, the state machine records a `cycle_limit_reached` event. The issue
-stays in its current state for human intervention.
-
-To reset: manually change labels and use `cache-invalidate`.
 
 ## Environment variables
 
-| Variable | Required | Purpose |
-|----------|----------|---------|
-| `WORKBUDDY_AUTH_TOKEN` | For `--auth` mode | Bearer token for coordinator API |
-| `WORKBUDDY_SLACK_WEBHOOK_URL` | Optional | Slack notifications |
-| `WORKBUDDY_FEISHU_WEBHOOK_URL` | Optional | Feishu/Lark notifications |
-| `WORKBUDDY_TELEGRAM_BOT_TOKEN` | Optional | Telegram notifications |
-| `WORKBUDDY_TELEGRAM_CHAT_ID` | Optional | Telegram chat target |
-| `WORKBUDDY_SMTP_HOST` | Optional | Email notification SMTP host |
-| `WORKBUDDY_SMTP_PORT` | Optional | SMTP port |
-| `WORKBUDDY_SMTP_USERNAME` | Optional | SMTP auth |
-| `WORKBUDDY_SMTP_PASSWORD` | Optional | SMTP auth |
-| `WORKBUDDY_SMTP_FROM` | Optional | Sender address |
-| `WORKBUDDY_SMTP_TO` | Optional | Recipient address |
+`workbuddy <cmd> --help` lists the flags each command honors. Globals that
+matter across commands:
+
+| Variable | Purpose |
+|----------|---------|
+| `WORKBUDDY_AUTH_TOKEN` | Bearer token for coordinator auth (used with `--auth`) |
+| `WORKBUDDY_SLACK_WEBHOOK_URL` / `WORKBUDDY_FEISHU_WEBHOOK_URL` / `WORKBUDDY_TELEGRAM_*` | Optional notification sinks |
+| `WORKBUDDY_SMTP_*` | Optional email notifications |
+
+## When you need more detail
+
+1. `workbuddy <cmd> --help` — flags + examples (authoritative)
+2. `references/` in this skill — setup, pitfalls, issue-writing
+3. `docs/decisions/` and `docs/implemented/` in the repo — architecture rationale
+4. `project-index.yaml` — requirements map (REQ-XXX IDs referenced above)
 
 ## Related skills
 
-- `/setup-repo` — create all config files and labels for a new repo
-- `/pipeline-monitor` — watch the pipeline, detect stuck issues, apply fixes
+- `/setup-repo` — fully onboard a new repo (labels + config + validation)
+- `/pipeline-monitor` — watch a running pipeline, diagnose stuck issues
+- `/merge-flow` — batch-merge approved workbuddy PRs with conflict handling
