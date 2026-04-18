@@ -1015,29 +1015,31 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 
 	session, err := deps.launcher.Start(taskCtx, task.Agent, task.Context)
 	if err != nil {
-		log.Printf("[worker] failed to start agent %s: %v", task.AgentName, err)
+		// A Start error is strictly pre-exec (template render / prompt derivation
+		// failure or runtime registration miss). Classify as infra failure: post
+		// a report, update task status for the dispatch failure cap, but do NOT
+		// call StateMachine.MarkAgentCompleted — a launcher-layer error is not
+		// an agent verdict. See issue #131 / AC-3.
+		log.Printf("[worker] failed to start agent %s: %v (treating as infra failure)", task.AgentName, err)
 		if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
 			log.Printf("[worker] failed to update task status: %v", err)
 		}
 		publishTaskCompletion(deps.taskHub, task, store.TaskStatusFailed, 1, startedAt, time.Now().UTC())
-		deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, task.TaskID, task.AgentName, 1, fetchCachedLabels(deps.store, task.Repo, task.IssueNum))
-		go func() {
-			timer := time.NewTimer(60 * time.Second)
-			defer timer.Stop()
-			select {
-			case <-timer.C:
-			case <-taskCtx.Done():
-				return
-			}
-			if deps.closedIssues != nil && deps.closedIssues.IsClosed(task.Repo, task.IssueNum) {
-				return
-			}
-			dispatchCtx, cancel := context.WithTimeout(taskCtx, 30*time.Second)
-			defer cancel()
-			if err := deps.sm.DispatchAgent(dispatchCtx, task.Repo, task.IssueNum, task.AgentName, task.Workflow, task.State); err != nil {
-				log.Printf("[worker] redispatch after start failure for %s#%d: %v", task.Repo, task.IssueNum, err)
-			}
-		}()
+		infraResult := &launcher.Result{
+			ExitCode: -1,
+			Stderr:   err.Error(),
+			Meta: map[string]string{
+				launcher.MetaInfraFailure:       "true",
+				launcher.MetaInfraFailureReason: "launcher Start() failed: " + err.Error(),
+			},
+		}
+		logInfraFailureEvent(deps.store, task, infraResult, "launcher_start_error")
+		reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(agentShutdownWait))
+		if reportErr := deps.reporter.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, infraResult,
+			task.Context.Session.ID, deps.workerID, 0, 3, "", ""); reportErr != nil {
+			log.Printf("[worker] infra-failure report failed: %v", reportErr)
+		}
+		reportCancel()
 		return
 	}
 	var result *launcher.Result
@@ -1126,30 +1128,58 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	if runErr != nil {
 		log.Printf("[worker] agent %s failed: %v", task.AgentName, runErr)
 		if result == nil {
+			// No result at all — the launcher could not produce a verdict we
+			// can reason about. Classify as infra failure (issue #131, AC-3):
+			// post a report comment, update task status (so the dispatch
+			// failure cap still bounds retries), emit an infra_failure event,
+			// but DO NOT call MarkAgentCompleted — this is not an agent verdict.
 			if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
 				log.Printf("[worker] failed to update task status: %v", err)
 			}
 			publishTaskCompletion(deps.taskHub, task, store.TaskStatusFailed, 1, startedAt, time.Now().UTC())
-			deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, task.TaskID, task.AgentName, 1, completionLabels)
-			go func() {
-				timer := time.NewTimer(60 * time.Second)
-				defer timer.Stop()
-				select {
-				case <-timer.C:
-				case <-taskCtx.Done():
-					return
-				}
-				if deps.closedIssues != nil && deps.closedIssues.IsClosed(task.Repo, task.IssueNum) {
-					return
-				}
-				dispatchCtx, cancel := context.WithTimeout(taskCtx, 30*time.Second)
-				defer cancel()
-				if err := deps.sm.DispatchAgent(dispatchCtx, task.Repo, task.IssueNum, task.AgentName, task.Workflow, task.State); err != nil {
-					log.Printf("[worker] redispatch after run failure for %s#%d: %v", task.Repo, task.IssueNum, err)
-				}
-			}()
+			infraResult := &launcher.Result{
+				ExitCode: -1,
+				Stderr:   runErr.Error(),
+				Meta: map[string]string{
+					launcher.MetaInfraFailure:       "true",
+					launcher.MetaInfraFailureReason: "session.Run returned nil result: " + runErr.Error(),
+				},
+			}
+			logInfraFailureEvent(deps.store, task, infraResult, "session_run_nil_result")
+			reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(agentShutdownWait))
+			if reportErr := deps.reporter.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, infraResult,
+				sessionID, deps.workerID, 0, 3, "", ""); reportErr != nil {
+				log.Printf("[worker] infra-failure report failed: %v", reportErr)
+			}
+			reportCancel()
 			return
 		}
+	}
+
+	// Infra failure detected by the launcher itself: the runtime set
+	// Meta[infra_failure] to signal a pre-LLM failure (exec error, scanner
+	// overflow, plugin-cache panic, etc.). Short-circuit before we mark the
+	// state-machine as though the agent returned a FAIL verdict.
+	if launcher.IsInfraFailure(result) {
+		if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
+			log.Printf("[worker] failed to update task status: %v", err)
+		}
+		if err := deps.auditor.Capture(sessionID, task.TaskID, task.Repo, task.IssueNum, task.AgentName, result); err != nil {
+			log.Printf("[worker] audit capture failed: %v", err)
+		}
+		publishTaskCompletion(deps.taskHub, task, store.TaskStatusFailed, result.ExitCode, startedAt, time.Now().UTC())
+		logInfraFailureEvent(deps.store, task, result, "launcher_infra_failure")
+		reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(agentShutdownWait))
+		var reportWorkDir string
+		if task.Context != nil {
+			reportWorkDir = task.Context.WorkDir
+		}
+		if reportErr := deps.reporter.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, result,
+			sessionID, deps.workerID, 0, 3, labelSummary, reportWorkDir); reportErr != nil {
+			log.Printf("[worker] infra-failure report failed: %v", reportErr)
+		}
+		reportCancel()
+		return
 	}
 
 	// Determine task status
@@ -1255,6 +1285,41 @@ func publishTaskCompletion(hub *tasknotify.Hub, task router.WorkerTask, status s
 		StartedAt:   startedAt,
 		CompletedAt: completedAt,
 	})
+}
+
+// logInfraFailureEvent records an eventlog.TypeInfraFailure entry for an
+// agent run that failed at the launcher layer (pre-LLM) rather than
+// returning an agent verdict. The event carries the task identifiers plus
+// the launcher-provided reason, so operators can distinguish these from
+// genuine agent FAIL verdicts in the event stream. See issue #131 / AC-4.
+func logInfraFailureEvent(st *store.Store, task router.WorkerTask, result *launcher.Result, source string) {
+	if st == nil {
+		return
+	}
+	payload := map[string]any{
+		"agent_name": task.AgentName,
+		"task_id":    task.TaskID,
+		"workflow":   task.Workflow,
+		"state":      task.State,
+		"source":     source,
+	}
+	if result != nil {
+		payload["exit_code"] = result.ExitCode
+		if result.Meta != nil {
+			if reason := result.Meta[launcher.MetaInfraFailureReason]; reason != "" {
+				payload["reason"] = reason
+			}
+		}
+		if result.Stderr != "" {
+			// Keep the stderr excerpt short; operators only need a hint.
+			stderr := result.Stderr
+			if len(stderr) > 1024 {
+				stderr = stderr[:1024]
+			}
+			payload["stderr_excerpt"] = stderr
+		}
+	}
+	eventlog.NewEventLogger(st).Log(eventlog.TypeInfraFailure, task.Repo, task.IssueNum, payload)
 }
 
 func newTaskWatchHandler(hub *tasknotify.Hub) http.HandlerFunc {

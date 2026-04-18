@@ -13,7 +13,7 @@ const maxOutputLines = 200
 // ReportData holds the inputs for formatting an execution report.
 type ReportData struct {
 	AgentName    string
-	Status       string // "success", "partial", "failure", "timeout", "retry-limit"
+	Status       string // "success", "partial", "failure", "timeout", "retry-limit", "infra-error"
 	Duration     time.Duration
 	SessionID    string
 	WorkerID     string
@@ -25,6 +25,10 @@ type ReportData struct {
 	SessionURL   string // optional URL to session detail page
 	LabelLine    string // optional label validation summary
 	Verification *VerificationResult
+	// InfraReason is a short operator-facing string describing why this run
+	// was classified as an infra failure (exec error, scanner overflow,
+	// runtime panic, etc.). Only set when Status == "infra-error".
+	InfraReason string
 }
 
 // statusBadge returns a Markdown status badge string.
@@ -40,9 +44,21 @@ func statusBadge(status string) string {
 		return "**Status**: :hourglass: Timeout"
 	case "retry-limit":
 		return "**Status**: :rotating_light: Retry Limit Reached"
+	case "infra-error":
+		return "**Status**: :construction: Infra Error (launcher-layer, not an agent verdict)"
 	default:
 		return fmt.Sprintf("**Status**: %s", status)
 	}
+}
+
+// reportHeader returns the H2 header line for a report. Infra failures get a
+// distinct "Infra Error" header so operators do not read them as agent
+// FAIL verdicts.
+func reportHeader(agentName, status string) string {
+	if status == "infra-error" {
+		return fmt.Sprintf("## Infra Error: %s\n\n", agentName)
+	}
+	return fmt.Sprintf("## Agent Report: %s\n\n", agentName)
 }
 
 // FormatReport generates a rich Markdown report from the given data.
@@ -54,12 +70,24 @@ func FormatReport(d ReportData) string {
 func FormatReportAt(d ReportData, ts time.Time) string {
 	var b strings.Builder
 
-	// Header
-	fmt.Fprintf(&b, "## Agent Report: %s\n\n", d.AgentName)
+	// Header — "Infra Error" for infra-layer failures, "Agent Report" otherwise.
+	b.WriteString(reportHeader(d.AgentName, d.Status))
 
 	// Status badge
 	b.WriteString(statusBadge(d.Status))
 	b.WriteString("\n\n")
+
+	// Infra-error explanation block: surface the launcher reason and make it
+	// explicit that this was NOT an agent verdict, so operators triaging the
+	// issue do not think "the agent disagreed with itself".
+	if d.Status == "infra-error" {
+		b.WriteString("> :construction: **This was not an agent verdict.** ")
+		b.WriteString("The launcher failed to run the agent (e.g. exec error, scanner buffer overflow, runtime panic before any agent output). ")
+		b.WriteString("The state machine is NOT being told the agent FAILED; retries are bounded by the dispatch failure cap only.\n\n")
+		if d.InfraReason != "" {
+			fmt.Fprintf(&b, "**Launcher reason**: `%s`\n\n", d.InfraReason)
+		}
+	}
 
 	// Metadata table
 	b.WriteString("| Field | Value |\n")

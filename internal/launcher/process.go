@@ -39,7 +39,9 @@ func (s *processSession) Run(ctx context.Context, events chan<- launcherevents.E
 
 	cmd, err := s.buildCommand(execCtx)
 	if err != nil {
-		return nil, err
+		infra := &Result{ExitCode: -1, Meta: map[string]string{}}
+		markInfraFailure(infra, "build command failed (template render)")
+		return infra, err
 	}
 	if s.task.WorkDir != "" {
 		cmd.Dir = s.task.WorkDir
@@ -80,7 +82,24 @@ func (s *processSession) Run(ctx context.Context, events chan<- launcherevents.E
 		} else {
 			emitEvent(events, &seq, s.task.Session.ID, s.task.Session.ID, launcherevents.KindError, launcherevents.ErrorPayload{Code: "exec", Message: runErr.Error(), Recoverable: false}, nil)
 			emitEvent(events, &seq, s.task.Session.ID, s.task.Session.ID, launcherevents.KindTurnCompleted, launcherevents.TurnCompletedPayload{TurnID: s.task.Session.ID, Status: "error"}, nil)
-			return nil, fmt.Errorf("launcher: %s: exec: %w", s.runtimeName, runErr)
+			// A non-ExitError from cmd.Run (exec.Error from Start, or an IO/signal
+			// error from Wait) means the process never produced an agent verdict.
+			// Surface it as an infra failure so the reporter does not render it
+			// as "Failure" (which operators read as the agent disagreeing with
+			// itself) and the state-machine is not told a verdict happened.
+			infra := &Result{
+				ExitCode: -1,
+				Stdout:   stdout.String(),
+				Stderr:   stderr.String(),
+				Duration: duration,
+				Meta:     map[string]string{},
+			}
+			reason := "launcher exec error"
+			if isExecStartError(runErr) {
+				reason = "exec start error (binary not runnable)"
+			}
+			markInfraFailure(infra, reason)
+			return infra, fmt.Errorf("launcher: %s: exec: %w", s.runtimeName, runErr)
 		}
 	}
 
@@ -100,6 +119,12 @@ func (s *processSession) Run(ctx context.Context, events chan<- launcherevents.E
 	}
 
 	result := &Result{ExitCode: exitCode, Stdout: stdout.String(), Stderr: stderr.String(), Duration: duration, Meta: meta, SessionPath: sessionPath}
+	// If the process produced no stdout but exited non-zero with a stderr
+	// that looks like a runtime-layer panic/abort, mark this as an infra
+	// failure rather than a FAIL verdict from the agent.
+	if exitCode != 0 && strings.TrimSpace(stdout.String()) == "" && stderrLooksLikeRuntimePanic(stderr.String()) {
+		markInfraFailure(result, "runtime panic/abort before agent output")
+	}
 	if err := validateOutputContract(s.agent, result); err != nil {
 		emitOutputContractFailure(events, &seq, s.task.Session.ID, s.task.Session.ID, err)
 		return result, err

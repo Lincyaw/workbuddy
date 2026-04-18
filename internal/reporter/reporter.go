@@ -334,6 +334,21 @@ func (r *Reporter) report(
 		}
 	}
 
+	// Infra failure takes precedence over "failure" / "timeout" verdicts —
+	// the launcher could not deliver a verdict the coordinator can trust, so
+	// we render this with a distinct header and explicitly disclaim the
+	// agent-verdict interpretation. See issue #131.
+	var infraReason string
+	if launcher.IsInfraFailure(result) {
+		status = "infra-error"
+		if result.Meta != nil {
+			infraReason = result.Meta[launcher.MetaInfraFailureReason]
+		}
+		if result.Stderr != "" {
+			errorDetail = result.Stderr
+		}
+	}
+
 	// Run claim verification for successful runs
 	if status == "success" && verification == nil && r.verifier != nil {
 		output := result.LastMessage
@@ -405,6 +420,7 @@ func (r *Reporter) report(
 		SessionURL:   sessionURL,
 		LabelLine:    labelLine,
 		Verification: verification,
+		InfraReason:  infraReason,
 	}
 
 	body := FormatReportAt(data, time.Now())

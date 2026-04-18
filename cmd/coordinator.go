@@ -312,6 +312,10 @@ type taskResultRequest struct {
 	WorkerID      string   `json:"worker_id"`
 	Status        string   `json:"status"`
 	CurrentLabels []string `json:"current_labels"`
+	// InfraFailure flags launcher-layer failures that must NOT be translated
+	// into a state-machine failure signal. See issue #131 / AC-3.
+	InfraFailure bool   `json:"infra_failure,omitempty"`
+	InfraReason  string `json:"infra_reason,omitempty"`
 }
 
 type taskHeartbeatRequest struct {
@@ -883,7 +887,23 @@ func (s *fullCoordinatorServer) handleTaskResult(w http.ResponseWriter, r *http.
 		IssueNum:  task.IssueNum,
 		AgentName: task.AgentName,
 	}, status, exitCode, time.Now(), time.Now())
-	s.pollers.MarkAgentCompleted(task.Repo, task.IssueNum, task.ID, task.AgentName, exitCode, req.CurrentLabels)
+	if req.InfraFailure {
+		// Launcher-layer failure: the agent never got to decide. Record the
+		// infra event for operator visibility, emit the standard completed
+		// event for bookkeeping, but DO NOT call MarkAgentCompleted — that
+		// would tell the state-machine the agent FAILED, which is the very
+		// mis-classification issue #131 is fixing.
+		s.eventlog.Log(eventlog.TypeInfraFailure, task.Repo, task.IssueNum, map[string]any{
+			"task_id":    task.ID,
+			"worker_id":  req.WorkerID,
+			"agent_name": task.AgentName,
+			"status":     status,
+			"reason":     req.InfraReason,
+			"source":     "worker_submit",
+		})
+	} else {
+		s.pollers.MarkAgentCompleted(task.Repo, task.IssueNum, task.ID, task.AgentName, exitCode, req.CurrentLabels)
+	}
 	s.eventlog.Log(eventlog.TypeCompleted, task.Repo, task.IssueNum, map[string]any{
 		"task_id":    task.ID,
 		"worker_id":  req.WorkerID,

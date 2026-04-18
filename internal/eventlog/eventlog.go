@@ -43,6 +43,7 @@ const (
 	TypeDispatchBlockedByDone       = "dispatch_blocked_by_done"
 	TypeDispatchSkippedClaim        = "dispatch_skipped_claim"
 	TypeIssueClaimExpired           = "issue_claim_expired"
+	TypeInfraFailure                = "infra_failure"
 )
 
 // AllEventTypes lists every recognised event type.
@@ -78,6 +79,7 @@ var AllEventTypes = []string{
 	TypeDispatchBlockedByDone,
 	TypeDispatchSkippedClaim,
 	TypeIssueClaimExpired,
+	TypeInfraFailure,
 }
 
 // EventFilter specifies optional criteria for querying events.
