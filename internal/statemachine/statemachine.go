@@ -424,8 +424,26 @@ func (sm *StateMachine) isBlockedByDone(repo string, issueNum int, agentForLog s
 		return false, nil
 	}
 	var labels []string
-	if err := json.Unmarshal([]byte(ic.Labels), &labels); err != nil {
-		// Malformed cache entry shouldn't wedge dispatch — skip the check.
+	if unmarshalErr := json.Unmarshal([]byte(ic.Labels), &labels); unmarshalErr != nil {
+		// Fall back to a quoted-substring scan of the raw cache entry so a
+		// corrupted labels row still blocks dispatch if it mentions the done
+		// label. Log the corruption separately so operators can fix the cache.
+		sm.eventlog.Log(eventlog.TypeError, repo, issueNum, map[string]any{
+			"source": "issue_cache_labels_unmarshal",
+			"error":  unmarshalErr.Error(),
+		})
+		if strings.Contains(ic.Labels, `"`+DoneLabel+`"`) {
+			sm.eventlog.Log(eventlog.TypeDispatchBlockedByDone, repo, issueNum, map[string]string{
+				"agent":    agentForLog,
+				"label":    DoneLabel,
+				"fallback": "substring_scan_after_unmarshal_error",
+			})
+			sm.publishAlert(alertbus.KindDispatchBlocked, alertbus.SeverityInfo, repo, issueNum, "", map[string]any{
+				"reason": "status_done",
+				"agent":  agentForLog,
+			})
+			return true, nil
+		}
 		return false, nil
 	}
 	for _, l := range labels {

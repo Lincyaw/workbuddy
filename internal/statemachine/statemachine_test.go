@@ -865,6 +865,38 @@ func TestDispatchAgentBlockedByDone(t *testing.T) {
 	}
 }
 
+func TestDispatchAgentBlockedByDoneCorruptedCacheFallback(t *testing.T) {
+	sm, rec, dispatch := newTestSM(t)
+	// Cached labels field is not valid JSON but still contains the quoted
+	// done-label substring. The fallback must block dispatch instead of
+	// silently letting the loop reignite.
+	if err := sm.store.UpsertIssueCache(store.IssueCache{
+		Repo:     "test/repo",
+		IssueNum: 404,
+		Labels:   `workbuddy,"status:done" <-- malformed JSON`,
+		State:    "open",
+	}); err != nil {
+		t.Fatalf("UpsertIssueCache: %v", err)
+	}
+
+	if err := sm.DispatchAgent(context.Background(), "test/repo", 404, "review-agent", "dev-flow", "reviewing"); err != nil {
+		t.Fatalf("DispatchAgent: %v", err)
+	}
+
+	select {
+	case req := <-dispatch:
+		t.Fatalf("dispatch should have been blocked by fallback substring scan, got: %+v", req)
+	default:
+	}
+
+	if got := rec.find(eventlog.TypeDispatchBlockedByDone); len(got) != 1 {
+		t.Fatalf("expected 1 dispatch_blocked_by_done event via fallback, got %d", len(got))
+	}
+	if got := rec.find(eventlog.TypeError); len(got) != 1 {
+		t.Fatalf("expected 1 error event for unmarshal, got %d", len(got))
+	}
+}
+
 func TestDispatchAgentBlockedByFailureCap(t *testing.T) {
 	sm, rec, dispatch := newTestSM(t)
 

@@ -1108,11 +1108,16 @@ func (s *Store) IncrementTransition(repo string, issueNum int, fromState, toStat
 // repeatedly fails (launcher crashes, infra errors, or sustained agent
 // failures) without ever landing a successful run.
 func (s *Store) CountConsecutiveAgentFailures(repo string, issueNum int, agentName string) (int, error) {
+	// Order by rowid DESC for deterministic insertion-order recency. task_queue.id
+	// holds UUIDs (assigned by the router, not monotonic), so id DESC cannot be
+	// used as a tie-break within the same created_at second. SQLite's implicit
+	// rowid is auto-incrementing and unique per insert, so newest-first is
+	// unambiguous even when multiple tasks are recorded in the same second.
 	rows, err := s.db.Query(
 		`SELECT status FROM task_queue
 		 WHERE repo = ? AND issue_num = ? AND agent_name = ?
 		   AND status IN (?, ?, ?)
-		 ORDER BY created_at DESC, id DESC`,
+		 ORDER BY rowid DESC`,
 		repo, issueNum, agentName,
 		TaskStatusCompleted, TaskStatusFailed, TaskStatusTimeout,
 	)

@@ -681,9 +681,10 @@ func TestCountConsecutiveAgentFailures(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("InsertTask(%s): %v", id, err)
 		}
-		// Ensure created_at ordering is stable across fast inserts on SQLite's
-		// CURRENT_TIMESTAMP second resolution. InsertTask assigns created_at at
-		// insert time; id DESC provides the tie-break.
+		// Recency ordering in CountConsecutiveAgentFailures is by rowid DESC,
+		// which is SQLite's implicit monotonic insert counter. That gives a
+		// stable newest-first traversal even when multiple inserts land in the
+		// same CURRENT_TIMESTAMP second.
 	}
 
 	// No tasks yet → 0.
