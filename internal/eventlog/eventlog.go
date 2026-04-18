@@ -39,6 +39,8 @@ const (
 	TypeConfigReloaded              = "config_reloaded"
 	TypeConfigReloadFailed          = "config_reload_failed"
 	TypeReportOverflow              = "report_overflow"
+	TypeDispatchBlockedByFailureCap = "dispatch_blocked_by_failure_cap"
+	TypeDispatchBlockedByDone       = "dispatch_blocked_by_done"
 )
 
 // AllEventTypes lists every recognised event type.
@@ -70,6 +72,8 @@ var AllEventTypes = []string{
 	TypeConfigReloaded,
 	TypeConfigReloadFailed,
 	TypeReportOverflow,
+	TypeDispatchBlockedByFailureCap,
+	TypeDispatchBlockedByDone,
 }
 
 // EventFilter specifies optional criteria for querying events.

@@ -1766,3 +1766,34 @@ requirements:
       - internal/reporter/format_test.go
       - cmd/serve_test.go
     deps: [REQ-005, REQ-006, REQ-024]
+
+  - id: REQ-055
+    title: Dispatch cap on status:done and consecutive agent failures
+    description: >
+      Break runaway re-dispatch loops observed on issues whose agents crash
+      repeatedly at the launcher layer or flip verdicts back and forth. The
+      coordinator now refuses to dispatch an agent when (a) the issue already
+      carries the terminal status:done label, or (b) the same agent has
+      accumulated MaxConsecutiveAgentFailures back-to-back failed/timed-out
+      tasks on the issue since its last successful run. Blocked dispatches
+      emit a typed event and publish a dispatch_blocked alert so operators
+      see the condition instead of quietly piling up comments.
+    priority: P0
+    version: v0.2.0
+    status: tested
+    acceptance_criteria:
+      - "AC-055-1: Store exposes CountConsecutiveAgentFailures(repo, issue, agent) that counts failed/timeout tasks, resetting on the first completed task"
+      - "AC-055-2: DispatchAgent refuses to dispatch when the cached issue labels include status:done, emitting eventlog.TypeDispatchBlockedByDone"
+      - "AC-055-3: DispatchAgent refuses to dispatch when consecutive failures >= MaxConsecutiveAgentFailures, emitting eventlog.TypeDispatchBlockedByFailureCap"
+      - "AC-055-4: Both block paths publish an alertbus.KindDispatchBlocked alert with reason and agent fields"
+      - "AC-055-5: A successful task resets the failure count so the cap does not persist across recoveries"
+      - "AC-055-6: Unit tests cover each block path and the reset-after-success case"
+    code:
+      - internal/statemachine/statemachine.go
+      - internal/store/store.go
+      - internal/eventlog/eventlog.go
+      - internal/alertbus/alertbus.go
+    tests:
+      - internal/statemachine/statemachine_test.go
+      - internal/store/store_test.go
+    deps: [REQ-001, REQ-017, REQ-030]

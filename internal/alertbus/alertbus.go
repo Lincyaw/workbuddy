@@ -22,6 +22,7 @@ const (
 	KindAgentExitNonZero       = "agent_exit_non_zero"
 	KindRepeatedFailure        = "repeated_failure"
 	KindTaskCompletedSuccess    = "task_completed"
+	KindDispatchBlocked         = "dispatch_blocked"
 )
 
 // AlertEvent is the payload emitted by system components for notification.

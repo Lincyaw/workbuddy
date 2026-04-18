@@ -667,6 +667,74 @@ func TestQueryTasksFilteredAndDeleteIssueDependencyState(t *testing.T) {
 	}
 }
 
+func TestCountConsecutiveAgentFailures(t *testing.T) {
+	s := newTestStore(t)
+
+	insert := func(id, agent, status string) {
+		t.Helper()
+		if err := s.InsertTask(TaskRecord{
+			ID:        id,
+			Repo:      "owner/repo",
+			IssueNum:  1,
+			AgentName: agent,
+			Status:    status,
+		}); err != nil {
+			t.Fatalf("InsertTask(%s): %v", id, err)
+		}
+		// Ensure created_at ordering is stable across fast inserts on SQLite's
+		// CURRENT_TIMESTAMP second resolution. InsertTask assigns created_at at
+		// insert time; id DESC provides the tie-break.
+	}
+
+	// No tasks yet → 0.
+	n, err := s.CountConsecutiveAgentFailures("owner/repo", 1, "review-agent")
+	if err != nil {
+		t.Fatalf("CountConsecutiveAgentFailures: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("empty = %d, want 0", n)
+	}
+
+	// Chronological sequence for review-agent:
+	//   1: failed, 2: failed, 3: completed, 4: failed, 5: timeout, 6: failed
+	// Only the trailing 3 failures after task 3 should be counted.
+	insert("t1", "review-agent", TaskStatusFailed)
+	insert("t2", "review-agent", TaskStatusFailed)
+	insert("t3", "review-agent", TaskStatusCompleted)
+	insert("t4", "review-agent", TaskStatusFailed)
+	insert("t5", "review-agent", TaskStatusTimeout)
+	insert("t6", "review-agent", TaskStatusFailed)
+
+	// Unrelated agent and pending rows must not affect the count.
+	insert("t7", "dev-agent", TaskStatusFailed)
+	insert("t8", "review-agent", TaskStatusPending)
+	insert("t9", "review-agent", TaskStatusRunning)
+
+	n, err = s.CountConsecutiveAgentFailures("owner/repo", 1, "review-agent")
+	if err != nil {
+		t.Fatalf("CountConsecutiveAgentFailures: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("count = %d, want 3", n)
+	}
+
+	// Filters by repo + issue + agent.
+	n, err = s.CountConsecutiveAgentFailures("owner/repo", 1, "dev-agent")
+	if err != nil {
+		t.Fatalf("CountConsecutiveAgentFailures(dev-agent): %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("dev-agent count = %d, want 1", n)
+	}
+	n, err = s.CountConsecutiveAgentFailures("owner/repo", 2, "review-agent")
+	if err != nil {
+		t.Fatalf("CountConsecutiveAgentFailures(issue 2): %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("other-issue count = %d, want 0", n)
+	}
+}
+
 // TestWALMode verifies that WAL mode is enabled.
 func TestWALMode(t *testing.T) {
 	s := newTestStore(t)
