@@ -58,7 +58,8 @@ var (
 
 // Store provides typed CRUD access to the workbuddy SQLite database.
 type Store struct {
-	db *sql.DB
+	db      *sql.DB
+	nowFunc func() time.Time
 }
 
 type TaskFilter struct {
@@ -86,7 +87,10 @@ func NewStore(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("store: enable WAL: %w", err)
 	}
 
-	s := &Store{db: db}
+	s := &Store{
+		db:      db,
+		nowFunc: time.Now,
+	}
 	if err := s.createTables(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("store: create tables: %w", err)
@@ -102,6 +106,23 @@ func (s *Store) Close() error {
 // DB returns the underlying *sql.DB for advanced use cases.
 func (s *Store) DB() *sql.DB {
 	return s.db
+}
+
+// SetNowFunc overrides the clock used for time-sensitive store operations.
+// Tests can inject a deterministic clock; passing nil restores time.Now.
+func (s *Store) SetNowFunc(nowFunc func() time.Time) {
+	if nowFunc == nil {
+		s.nowFunc = time.Now
+		return
+	}
+	s.nowFunc = nowFunc
+}
+
+func (s *Store) now() time.Time {
+	if s != nil && s.nowFunc != nil {
+		return s.nowFunc().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func (s *Store) createTables() error {
@@ -1772,7 +1793,7 @@ func (s *Store) AcquireIssueClaim(repo string, issueNum int, workerID string, le
 }
 
 func (s *Store) acquireIssueClaimOnce(repo string, issueNum int, workerID string, lease time.Duration) (AcquireIssueClaimResult, error) {
-	now := time.Now().UTC()
+	now := s.now()
 	expiresAt := now.Add(lease)
 
 	tx, err := s.db.Begin()
@@ -1864,7 +1885,7 @@ func (s *Store) acquireIssueClaimOnce(repo string, issueNum int, workerID string
 	if !expired {
 		// Held by someone else, not yet expired.
 		if commitErr := tx.Commit(); commitErr != nil {
-			return AcquireIssueClaimResult{}, fmt.Errorf("store: commit conflict rollback: %w", commitErr)
+			return AcquireIssueClaimResult{}, fmt.Errorf("store: commit held-by-other issue claim check: %w", commitErr)
 		}
 		return AcquireIssueClaimResult{}, ErrIssueClaimHeldByOther
 	}
@@ -1894,12 +1915,12 @@ func (s *Store) acquireIssueClaimOnce(repo string, issueNum int, workerID string
 }
 
 // ReleaseIssueClaim removes the claim on (repo, issueNum) if it belongs to
-// workerID. Returns true when a row was deleted.
-func (s *Store) ReleaseIssueClaim(repo string, issueNum int, workerID string) (bool, error) {
+// workerID and claimToken. Returns true when a row was deleted.
+func (s *Store) ReleaseIssueClaim(repo string, issueNum int, workerID, claimToken string) (bool, error) {
 	res, err := s.db.Exec(
 		`DELETE FROM issue_claim
-		 WHERE repo = ? AND issue_num = ? AND worker_id = ?`,
-		repo, issueNum, workerID,
+		 WHERE repo = ? AND issue_num = ? AND worker_id = ? AND claim_token = ?`,
+		repo, issueNum, workerID, claimToken,
 	)
 	if err != nil {
 		return false, fmt.Errorf("store: release issue claim: %w", err)
@@ -1912,19 +1933,19 @@ func (s *Store) ReleaseIssueClaim(repo string, issueNum int, workerID string) (b
 }
 
 // RefreshIssueClaim extends expires_at for the current holder. Returns true
-// when the row was updated (false when not held by workerID or already expired).
-func (s *Store) RefreshIssueClaim(repo string, issueNum int, workerID string, lease time.Duration) (bool, error) {
+// when the row was updated (false when not held by workerID/claimToken or already expired).
+func (s *Store) RefreshIssueClaim(repo string, issueNum int, workerID, claimToken string, lease time.Duration) (bool, error) {
 	if lease <= 0 {
 		lease = 30 * time.Minute
 	}
-	now := time.Now().UTC()
+	now := s.now()
 	expiresAt := now.Add(lease).Format("2006-01-02 15:04:05")
 	res, err := s.db.Exec(
 		`UPDATE issue_claim
 		 SET expires_at = ?
-		 WHERE repo = ? AND issue_num = ? AND worker_id = ?
+		 WHERE repo = ? AND issue_num = ? AND worker_id = ? AND claim_token = ?
 		   AND expires_at > ?`,
-		expiresAt, repo, issueNum, workerID, now.Format("2006-01-02 15:04:05"),
+		expiresAt, repo, issueNum, workerID, claimToken, now.Format("2006-01-02 15:04:05"),
 	)
 	if err != nil {
 		return false, fmt.Errorf("store: refresh issue claim: %w", err)

@@ -1069,6 +1069,67 @@ func TestDispatchAgentRespectsIssueClaim(t *testing.T) {
 	}
 }
 
+func TestMarkAgentCompletedKeepsReplacedIssueClaim(t *testing.T) {
+	sm, _, dispatch := newTestSM(t)
+	sm.SetIssueClaim("coordinator-a", time.Minute)
+
+	repo := "test/repo"
+	issueNum := 78
+
+	if err := sm.DispatchAgent(context.Background(), repo, issueNum, "dev-agent", "dev-flow", "developing"); err != nil {
+		t.Fatalf("DispatchAgent: %v", err)
+	}
+	select {
+	case <-dispatch:
+	case <-time.After(time.Second):
+		t.Fatal("expected initial dispatch")
+	}
+
+	claim, err := sm.store.QueryIssueClaim(repo, issueNum)
+	if err != nil {
+		t.Fatalf("QueryIssueClaim before replace: %v", err)
+	}
+	if claim == nil {
+		t.Fatal("expected persisted issue claim")
+	}
+
+	replacementToken := "replacement-token"
+	_, err = sm.store.DB().Exec(
+		`UPDATE issue_claim
+		 SET claim_token = ?, acquired_at = ?, expires_at = ?
+		 WHERE repo = ? AND issue_num = ? AND worker_id = ?`,
+		replacementToken,
+		"2026-04-18 12:00:00",
+		"2026-04-18 13:00:00",
+		repo,
+		issueNum,
+		claim.WorkerID,
+	)
+	if err != nil {
+		t.Fatalf("replace issue claim token: %v", err)
+	}
+
+	sm.MarkAgentCompleted(repo, issueNum, "task-1", "dev-agent", 0, []string{"workbuddy", "status:reviewing"})
+
+	after, err := sm.store.QueryIssueClaim(repo, issueNum)
+	if err != nil {
+		t.Fatalf("QueryIssueClaim after completion: %v", err)
+	}
+	if after == nil {
+		t.Fatal("expected replacement claim to remain after stale completion")
+	}
+	if after.ClaimToken != replacementToken {
+		t.Fatalf("expected replacement token %q to remain, got %+v", replacementToken, after)
+	}
+
+	sm.claimTokensMu.Lock()
+	_, stillTracked := sm.claimTokens[sm.issueKey(repo, issueNum)]
+	sm.claimTokensMu.Unlock()
+	if stillTracked {
+		t.Fatal("expected stale in-memory claim token to be removed after completion")
+	}
+}
+
 // TestDispatchStateAgentsRespectsIssueClaim covers the Copilot-flagged gap:
 // workflow-driven multi-agent dispatch goes through dispatchStateAgents, not
 // DispatchAgent. Without the claim check on that path, two coordinators

@@ -528,16 +528,13 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	// Enable persistent per-issue dispatch claim (REQ-057). In embedded serve
 	// mode the claim holder is the in-process worker so a second serve process
 	// sharing the same SQLite DB cannot race on redispatch of the same issue.
-	// Pure coordinator mode (opts.coordinatorAPI) uses a coordinator-scoped id.
+	// The claim holder must be process-scoped so restarts or multiple local
+	// coordinators on the same host never look like the same claimant.
 	claimerID := workerID
 	if claimerID == "" {
-		hostname, _ := os.Hostname()
-		if hostname == "" {
-			hostname = "unknown"
-		}
-		claimerID = "coordinator-" + hostname
+		claimerID = "coordinator-" + hostnameOrUnknown()
 	}
-	sm.SetIssueClaim(claimerID, statemachine.DefaultIssueClaimLease)
+	sm.SetIssueClaim(buildIssueClaimerID(claimerID, os.Getpid()), statemachine.DefaultIssueClaimLease)
 	depResolver := dependency.NewResolver(st, ghReader, evlog, alertBus)
 
 	// Workspace isolation is only needed for the embedded worker path.

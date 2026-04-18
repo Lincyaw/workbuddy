@@ -499,9 +499,13 @@ func (sm *StateMachine) releaseIssueClaim(repo string, issueNum int) {
 	}
 	key := sm.issueKey(repo, issueNum)
 	sm.claimTokensMu.Lock()
+	token := sm.claimTokens[key]
 	delete(sm.claimTokens, key)
 	sm.claimTokensMu.Unlock()
-	if _, err := sm.store.ReleaseIssueClaim(repo, issueNum, sm.issueClaimerID); err != nil {
+	if token == "" {
+		return
+	}
+	if _, err := sm.store.ReleaseIssueClaim(repo, issueNum, sm.issueClaimerID, token); err != nil {
 		log.Printf("[statemachine] release issue claim for %s#%d failed: %v", repo, issueNum, err)
 	}
 }
