@@ -683,6 +683,16 @@ func (sm *StateMachine) dispatchStateAgents(ctx context.Context, repo string, is
 		return nil
 	}
 
+	// Acquire the per-issue claim once for the whole group so concurrent
+	// coordinators sharing the same SQLite database cannot both dispatch a
+	// workflow state onto the same issue. The claim is released together
+	// with the dispatch group in MarkAgentCompleted.
+	if blocked, err := sm.isBlockedByIssueClaim(repo, issueNum, agents[0], wfName, state); err != nil {
+		return err
+	} else if blocked {
+		return nil
+	}
+
 	issueKey := sm.issueKey(repo, issueNum)
 	join := stateDef.Join // already normalized by config loader
 	if join == "" {

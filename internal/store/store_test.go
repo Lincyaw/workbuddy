@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -1089,5 +1090,57 @@ func TestRefreshIssueClaim(t *testing.T) {
 	}
 	if ok {
 		t.Fatal("expected refresh of expired self-claim to return false")
+	}
+}
+
+// TestAcquireIssueClaimConcurrent exercises the primary-key conflict path
+// in AcquireIssueClaim: N goroutines racing on the same (repo, issueNum)
+// with distinct worker IDs must produce exactly one ClaimToken winner and
+// N-1 ErrIssueClaimHeldByOther results. Without the PK-conflict handler the
+// losers surface a raw "UNIQUE constraint failed" error.
+func TestAcquireIssueClaimConcurrent(t *testing.T) {
+	s := newTestStore(t)
+
+	const goroutines = 8
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		wins     int
+		conflict int
+		other    []error
+	)
+	start := make(chan struct{})
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		worker := fmt.Sprintf("worker-%d", i)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := s.AcquireIssueClaim("org/repo", 77, worker, 5*time.Minute)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				wins++
+			case errors.Is(err, ErrIssueClaimHeldByOther):
+				conflict++
+			default:
+				other = append(other, err)
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	if wins != 1 {
+		t.Fatalf("expected exactly one winner, got %d (conflicts=%d other=%v)", wins, conflict, other)
+	}
+	if len(other) > 0 {
+		t.Fatalf("unexpected errors from racing acquirers (conflicts=%d wins=%d): %v", conflict, wins, other)
+	}
+	if conflict != goroutines-1 {
+		t.Fatalf("expected %d conflicts, got %d", goroutines-1, conflict)
 	}
 }

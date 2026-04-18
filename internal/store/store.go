@@ -743,6 +743,19 @@ func isSQLiteBusyError(err error) bool {
 		strings.Contains(msg, "sqlite_busy")
 }
 
+// isSQLiteUniqueConstraint reports whether err came from a primary-key or
+// unique-index violation. modernc/sqlite surfaces these as textual errors
+// containing phrases like "UNIQUE constraint failed" or "constraint failed".
+func isSQLiteUniqueConstraint(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unique constraint failed") ||
+		strings.Contains(msg, "primary key") ||
+		strings.Contains(msg, "constraint failed")
+}
+
 func (s *Store) ensureTaskOwnership(tx *sql.Tx, taskID, workerID string) (*TaskRecord, error) {
 	row := tx.QueryRow(`SELECT
 		id, repo, issue_num, agent_name, NULL, role, runtime, workflow, state,
@@ -1735,6 +1748,12 @@ func generateClaimToken() (string, error) {
 //
 // It returns ErrIssueClaimHeldByOther when another worker currently holds an
 // unexpired claim. The returned token is non-empty on success.
+//
+// Under contention (multiple processes racing on the same row) SQLite can
+// return SQLITE_BUSY if the deferred transaction cannot upgrade to a writer
+// lock, and can also return a UNIQUE-constraint error when a concurrent
+// inserter beat us between our SELECT and INSERT. Both cases are handled
+// with a bounded retry loop modelled on ClaimNextTask.
 func (s *Store) AcquireIssueClaim(repo string, issueNum int, workerID string, lease time.Duration) (AcquireIssueClaimResult, error) {
 	if strings.TrimSpace(workerID) == "" {
 		return AcquireIssueClaimResult{}, errors.New("store: acquire issue claim: worker_id is required")
@@ -1742,6 +1761,17 @@ func (s *Store) AcquireIssueClaim(repo string, issueNum int, workerID string, le
 	if lease <= 0 {
 		lease = 30 * time.Minute
 	}
+	for attempt := 0; attempt < 5; attempt++ {
+		res, err := s.acquireIssueClaimOnce(repo, issueNum, workerID, lease)
+		if err == nil || !isSQLiteBusyError(err) {
+			return res, err
+		}
+		time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+	}
+	return s.acquireIssueClaimOnce(repo, issueNum, workerID, lease)
+}
+
+func (s *Store) acquireIssueClaimOnce(repo string, issueNum int, workerID string, lease time.Duration) (AcquireIssueClaimResult, error) {
 	now := time.Now().UTC()
 	expiresAt := now.Add(lease)
 
@@ -1769,17 +1799,41 @@ func (s *Store) AcquireIssueClaim(repo string, issueNum int, workerID string, le
 		if tokErr != nil {
 			return AcquireIssueClaimResult{}, tokErr
 		}
-		if _, insErr := tx.Exec(
+		_, insErr := tx.Exec(
 			`INSERT INTO issue_claim (repo, issue_num, worker_id, claim_token, acquired_at, expires_at)
 			 VALUES (?, ?, ?, ?, ?, ?)`,
 			repo, issueNum, workerID, token, now.Format("2006-01-02 15:04:05"), expiresAt.Format("2006-01-02 15:04:05"),
-		); insErr != nil {
+		)
+		if insErr == nil {
+			if commitErr := tx.Commit(); commitErr != nil {
+				return AcquireIssueClaimResult{}, fmt.Errorf("store: commit acquire issue claim: %w", commitErr)
+			}
+			return AcquireIssueClaimResult{ClaimToken: token}, nil
+		}
+		// A concurrent acquirer may have inserted between our SELECT and our
+		// INSERT. Re-read to find the winner; if its lease is still live the
+		// contract says we return ErrIssueClaimHeldByOther. If the winner's
+		// lease is already expired (very short leases), fall through to the
+		// normal expired-holder path by overwriting below.
+		if !isSQLiteUniqueConstraint(insErr) {
 			return AcquireIssueClaimResult{}, fmt.Errorf("store: insert issue claim: %w", insErr)
 		}
-		if commitErr := tx.Commit(); commitErr != nil {
-			return AcquireIssueClaimResult{}, fmt.Errorf("store: commit acquire issue claim: %w", commitErr)
+		if scanErr := tx.QueryRow(
+			`SELECT worker_id, claim_token, expires_at
+			 FROM issue_claim
+			 WHERE repo = ? AND issue_num = ?`,
+			repo, issueNum,
+		).Scan(&holderWorker, &holderToken, &holderExpRaw); scanErr != nil {
+			if errors.Is(scanErr, sql.ErrNoRows) {
+				// Extremely unlikely — row disappeared between the PK conflict
+				// and our re-read. Surface the original insert error so the
+				// caller can retry if desired.
+				return AcquireIssueClaimResult{}, fmt.Errorf("store: insert issue claim: %w", insErr)
+			}
+			return AcquireIssueClaimResult{}, fmt.Errorf("store: query issue claim after insert conflict: %w", scanErr)
 		}
-		return AcquireIssueClaimResult{ClaimToken: token}, nil
+		// Fall through to the holder-classification branch below with the
+		// re-read values populated.
 	case err != nil:
 		return AcquireIssueClaimResult{}, fmt.Errorf("store: query issue claim: %w", err)
 	}

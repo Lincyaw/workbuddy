@@ -1069,6 +1069,72 @@ func TestDispatchAgentRespectsIssueClaim(t *testing.T) {
 	}
 }
 
+// TestDispatchStateAgentsRespectsIssueClaim covers the Copilot-flagged gap:
+// workflow-driven multi-agent dispatch goes through dispatchStateAgents, not
+// DispatchAgent. Without the claim check on that path, two coordinators
+// sharing the same DB could both dispatch the same state group. This test
+// exercises the path by triggering a label event that maps to a parallel
+// state; the second coordinator must be blocked.
+func TestDispatchStateAgentsRespectsIssueClaim(t *testing.T) {
+	st := newTestStore(t)
+
+	rec1 := &fakeRecorder{}
+	dispatch1 := make(chan DispatchRequest, 4)
+	sm1 := NewStateMachine(
+		map[string]*config.WorkflowConfig{"parallel-flow": newParallelWorkflow(config.JoinAllPassed)},
+		st,
+		dispatch1,
+		rec1,
+		nil,
+	)
+	sm1.SetIssueClaim("coordinator-a", 5*time.Minute)
+
+	rec2 := &fakeRecorder{}
+	dispatch2 := make(chan DispatchRequest, 4)
+	sm2 := NewStateMachine(
+		map[string]*config.WorkflowConfig{"parallel-flow": newParallelWorkflow(config.JoinAllPassed)},
+		st,
+		dispatch2,
+		rec2,
+		nil,
+	)
+	sm2.SetIssueClaim("coordinator-b", 5*time.Minute)
+
+	event := ChangeEvent{
+		Type:     poller.EventLabelAdded,
+		Repo:     "test/repo",
+		IssueNum: 88,
+		Labels:   []string{"workbuddy", "status:developing"},
+		Detail:   "status:developing",
+	}
+
+	if err := sm1.HandleEvent(context.Background(), event); err != nil {
+		t.Fatalf("coord-a HandleEvent: %v", err)
+	}
+	// Drain whatever coord-a dispatched.
+	deadline := time.After(500 * time.Millisecond)
+drain:
+	for {
+		select {
+		case <-dispatch1:
+		case <-deadline:
+			break drain
+		}
+	}
+
+	if err := sm2.HandleEvent(context.Background(), event); err != nil {
+		t.Fatalf("coord-b HandleEvent: %v", err)
+	}
+	select {
+	case req := <-dispatch2:
+		t.Fatalf("coord-b should be blocked by issue claim, got %+v", req)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if got := rec2.find(eventlog.TypeDispatchSkippedClaim); len(got) != 1 {
+		t.Fatalf("expected 1 dispatch_skipped_claim event on coord-b via dispatchStateAgents, got %d", len(got))
+	}
+}
+
 // TestDispatchAgentReleasesOnContextCancel ensures a cancelled dispatch does
 // not leave the issue claim stuck — another coordinator can acquire afterwards.
 func TestDispatchAgentReleasesOnContextCancel(t *testing.T) {
