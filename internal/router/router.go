@@ -9,10 +9,12 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/launcher"
 	"github.com/Lincyaw/workbuddy/internal/registry"
+	"github.com/Lincyaw/workbuddy/internal/reporter"
 	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/workspace"
@@ -43,6 +45,7 @@ type Router struct {
 	taskChan           chan<- WorkerTask
 	wsMgr              *workspace.Manager // nil = no workspace isolation
 	dispatchToEmbedded bool
+	reporter           *reporter.Reporter
 }
 
 // NewRouter creates a Router for v0.1.0 channel-based dispatch.
@@ -67,6 +70,11 @@ func NewRouter(
 		wsMgr:              wsMgr,
 		dispatchToEmbedded: dispatchToEmbedded,
 	}
+}
+
+// SetReporter sets the optional reporter used to post worktree failure comments.
+func (r *Router) SetReporter(rep *reporter.Reporter) {
+	r.reporter = rep
 }
 
 // Run reads from the dispatch channel and routes tasks. Blocks until ctx is cancelled.
@@ -143,27 +151,43 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 		log.Printf("[router] warning: could not fetch related PRs: %v", err)
 	}
 
-	// Determine WorkDir: use an isolated worktree if workspace manager is set,
-	// otherwise fall back to CWD.
+	// Determine WorkDir: use an isolated worktree if workspace manager is set.
+	// If worktree setup fails, the task is failed and reported — never fall back to CWD.
+	var repoRoot string
 	var workDir string
 	var worktreePath string
 	if r.wsMgr != nil {
 		wt, err := r.wsMgr.Create(req.IssueNum, taskID)
 		if err != nil {
-			log.Printf("[router] failed to create worktree for issue #%d: %v, falling back to CWD", req.IssueNum, err)
-			workDir, _ = os.Getwd()
-		} else {
-			workDir = wt
-			worktreePath = wt
+			log.Printf("[router] failed to create worktree for issue #%d: %v", req.IssueNum, err)
+			if uerr := r.store.UpdateTaskStatus(taskID, store.TaskStatusFailed); uerr != nil {
+				log.Printf("[router] failed to update task status to failed: %v", uerr)
+			}
+			if r.reporter != nil {
+				result := &launcher.Result{
+					ExitCode: 1,
+					Stderr:   err.Error(),
+				}
+				reportCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if rerr := r.reporter.Report(reportCtx, req.Repo, req.IssueNum, req.AgentName, result, taskID, "coordinator", 0, 0, "", ""); rerr != nil {
+					log.Printf("[router] failed to report worktree failure: %v", rerr)
+				}
+			}
+			return
 		}
+		repoRoot = wt
+		workDir = wt
+		worktreePath = wt
 	} else {
+		repoRoot = r.repoRoot
 		workDir, _ = os.Getwd()
 	}
 
 	taskCtx := &launcher.TaskContext{
 		Issue:          issueCtx,
 		Repo:           req.Repo,
-		RepoRoot:       r.repoRoot,
+		RepoRoot:       repoRoot,
 		WorkDir:        workDir,
 		RelatedPRs:     relatedPRs,
 		RelatedPRsText: formatRelatedPRs(relatedPRs),

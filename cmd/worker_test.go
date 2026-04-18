@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -24,6 +25,53 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/workerclient"
 	"github.com/spf13/cobra"
 )
+
+type failingWorkspaceManager struct {
+	err error
+}
+
+func (m *failingWorkspaceManager) Create(_ int, _ string) (string, error) {
+	return "", m.err
+}
+
+func (m *failingWorkspaceManager) Remove(string) error {
+	return nil
+}
+
+func (m *failingWorkspaceManager) Prune() error {
+	return nil
+}
+
+// initGitRepo creates a bare-minimum git repo in a temp directory for worker tests
+// that need workspace isolation.
+func initGitRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s: %v", args, out, err)
+		}
+	}
+	marker := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(marker, []byte("test repo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	_ = cmd.Run()
+	cmd = exec.Command("git", "commit", "-m", "init")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %s: %v", out, err)
+	}
+	return dir
+}
 
 func TestParseWorkerFlags(t *testing.T) {
 	cmd := &cobra.Command{Use: "worker"}
@@ -177,7 +225,7 @@ func TestWorkerRejectsInvalidToken(t *testing.T) {
 		runtime:           config.RuntimeClaudeCode,
 		repo:              repo,
 		configDir:         configDir,
-		workDir:           t.TempDir(),
+		workDir:           initGitRepo(t),
 		dbPath:            filepath.Join(t.TempDir(), "worker.db"),
 		sessionsDir:       filepath.Join(t.TempDir(), "sessions"),
 		pollTimeout:       100 * time.Millisecond,
@@ -253,7 +301,7 @@ func TestWorkerPairsWithCoordinatorAndCompletesTask(t *testing.T) {
 			runtime:           config.RuntimeClaudeCode,
 			repo:              repo,
 			configDir:         configDir,
-			workDir:           t.TempDir(),
+			workDir:           initGitRepo(t),
 			dbPath:            filepath.Join(t.TempDir(), "worker.db"),
 			sessionsDir:       filepath.Join(t.TempDir(), "sessions"),
 			pollTimeout:       100 * time.Millisecond,
@@ -363,7 +411,7 @@ func TestWorkerShutdownRequeuesInFlightTask(t *testing.T) {
 			runtime:           config.RuntimeClaudeCode,
 			repo:              repo,
 			configDir:         configDir,
-			workDir:           t.TempDir(),
+			workDir:           initGitRepo(t),
 			dbPath:            filepath.Join(t.TempDir(), "worker.db"),
 			sessionsDir:       filepath.Join(t.TempDir(), "sessions"),
 			pollTimeout:       100 * time.Millisecond,
@@ -425,8 +473,8 @@ func TestWorkerUsesMappedRepoPathAndCleansAddrFile(t *testing.T) {
 	setupFakeGHCLI(t)
 
 	repo := "owner/test-repo"
-	repoPath := t.TempDir()
-	controlDir := t.TempDir()
+	repoPath := initGitRepo(t)
+	controlDir := initGitRepo(t)
 	configDir := setupTestConfigDir(t, repo)
 	addrFile := workerAddrFile(controlDir)
 
@@ -469,8 +517,9 @@ func TestWorkerUsesMappedRepoPathAndCleansAddrFile(t *testing.T) {
 	}
 
 	mockRT := &mockRuntime{name: config.RuntimeClaudeCode, resultFn: func(_ context.Context, _ *config.AgentConfig, task *launcher.TaskContext) (*launcher.Result, error) {
-		if task.RepoRoot != repoPath || task.WorkDir != repoPath {
-			t.Fatalf("task context paths = %q / %q, want %q", task.RepoRoot, task.WorkDir, repoPath)
+		// With workspace isolation, WorkDir/RepoRoot are the worktree path.
+		if !strings.HasPrefix(task.RepoRoot, repoPath) || !strings.HasPrefix(task.WorkDir, repoPath) {
+			t.Fatalf("task context paths = %q / %q, expected prefix %q", task.RepoRoot, task.WorkDir, repoPath)
 		}
 		return &launcher.Result{ExitCode: 0, LastMessage: "done", Meta: map[string]string{}}, nil
 	}}
@@ -562,7 +611,7 @@ func TestWorkerReleasesUnmappedTask(t *testing.T) {
 			runtime:           config.RuntimeClaudeCode,
 			repo:              repo,
 			configDir:         configDir,
-			workDir:           t.TempDir(),
+			workDir:           initGitRepo(t),
 			dbPath:            filepath.Join(t.TempDir(), "worker.db"),
 			sessionsDir:       filepath.Join(t.TempDir(), "sessions"),
 			pollTimeout:       20 * time.Millisecond,
@@ -599,9 +648,9 @@ func TestWorkerDynamicRepoAddUpdatesCoordinatorAndDispatchesTask(t *testing.T) {
 
 	repoA := "owner/repo-a"
 	repoB := "owner/repo-b"
-	controlDir := t.TempDir()
-	repoAPath := t.TempDir()
-	repoBPath := t.TempDir()
+	controlDir := initGitRepo(t)
+	repoAPath := initGitRepo(t)
+	repoBPath := initGitRepo(t)
 	configDir := setupNamedConfigDir(t, repoA, "dev-agent", "workflow")
 	configDirB := setupNamedConfigDir(t, repoB, "dev-agent", "workflow")
 	port := getFreePort(t)
@@ -639,7 +688,8 @@ func TestWorkerDynamicRepoAddUpdatesCoordinatorAndDispatchesTask(t *testing.T) {
 
 	taskCompleted := make(chan struct{})
 	mockRT := &mockRuntime{name: config.RuntimeClaudeCode, resultFn: func(_ context.Context, _ *config.AgentConfig, task *launcher.TaskContext) (*launcher.Result, error) {
-		if task.Repo != repoB || task.WorkDir != repoBPath || task.RepoRoot != repoBPath {
+		// With workspace isolation, WorkDir/RepoRoot are the worktree path under repoBPath.
+		if task.Repo != repoB || !strings.HasPrefix(task.WorkDir, repoBPath) || !strings.HasPrefix(task.RepoRoot, repoBPath) {
 			t.Fatalf("unexpected task context: repo=%s workdir=%s reporoot=%s", task.Repo, task.WorkDir, task.RepoRoot)
 		}
 		select {
@@ -837,6 +887,102 @@ func TestExecuteRemoteTaskStopsHeartbeatAfterKilledProcess(t *testing.T) {
 	}
 }
 
+func TestExecuteRemoteTaskRequeuesWorktreeSetupFailure(t *testing.T) {
+	var (
+		releaseReq   workerclient.ReleaseRequest
+		releaseCount int
+		resultCount  int
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/release"):
+			releaseCount++
+			if err := json.NewDecoder(r.Body).Decode(&releaseReq); err != nil {
+				t.Fatalf("decode release: %v", err)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/result"):
+			resultCount++
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	cfg := &config.FullConfig{
+		Agents: map[string]*config.AgentConfig{
+			"dev-agent": {
+				Name:    "dev-agent",
+				Role:    "dev",
+				Runtime: config.RuntimeClaudeCode,
+				Command: "echo hello",
+			},
+		},
+	}
+	task := &workerclient.Task{
+		TaskID:    "task-worktree-fail",
+		Repo:      "owner/test-repo",
+		IssueNum:  14,
+		AgentName: "dev-agent",
+		Workflow:  "workflow",
+	}
+	reader := &mockGHReader{
+		issues: []poller.Issue{
+			{Number: 14, Body: "body", Labels: []string{"workbuddy", "status:developing"}},
+		},
+		labelSnapshots: [][]string{
+			{"workbuddy", "status:developing"},
+		},
+	}
+	comments := &mockCommentWriter{}
+	rep := reporter.NewReporter(comments)
+	auditor := audit.NewAuditor(nil, filepath.Join(t.TempDir(), "sessions"))
+	client := workerclient.New(server.URL, "", server.Client())
+	wsErr := errors.New("missing but already registered worktree")
+
+	err := executeRemoteTask(
+		context.Background(),
+		task,
+		client,
+		cfg,
+		launcher.NewLauncher(),
+		auditor,
+		rep,
+		reader,
+		t.TempDir(),
+		filepath.Join(t.TempDir(), "sessions"),
+		"worker-1",
+		"",
+		20*time.Millisecond,
+		200*time.Millisecond,
+		&failingWorkspaceManager{err: wsErr},
+	)
+	if err == nil || !strings.Contains(err.Error(), "worktree setup failed") {
+		t.Fatalf("executeRemoteTask error = %v, want worktree setup failure", err)
+	}
+	if releaseCount != 1 {
+		t.Fatalf("release count = %d, want 1", releaseCount)
+	}
+	if resultCount != 0 {
+		t.Fatalf("result count = %d, want 0", resultCount)
+	}
+	if releaseReq.WorkerID != "worker-1" {
+		t.Fatalf("release worker_id = %q, want worker-1", releaseReq.WorkerID)
+	}
+	if !strings.Contains(releaseReq.Reason, wsErr.Error()) {
+		t.Fatalf("release reason = %q, want to contain %q", releaseReq.Reason, wsErr.Error())
+	}
+
+	allComments := comments.Comments()
+	if len(allComments) != 1 {
+		t.Fatalf("comment count = %d, want 1", len(allComments))
+	}
+	if !strings.Contains(allComments[0], wsErr.Error()) {
+		t.Fatalf("comment missing worktree error: %s", allComments[0])
+	}
+}
+
 func TestWorkerRecoversAfterKilledTaskWhenResultSubmitFails(t *testing.T) {
 	setupFakeGHCLI(t)
 
@@ -921,7 +1067,7 @@ func TestWorkerRecoversAfterKilledTaskWhenResultSubmitFails(t *testing.T) {
 			runtime:           config.RuntimeClaudeCode,
 			repo:              repo,
 			configDir:         configDir,
-			workDir:           t.TempDir(),
+			workDir:           initGitRepo(t),
 			dbPath:            filepath.Join(t.TempDir(), "worker.db"),
 			sessionsDir:       filepath.Join(t.TempDir(), "sessions"),
 			pollTimeout:       20 * time.Millisecond,

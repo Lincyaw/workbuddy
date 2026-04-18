@@ -562,6 +562,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	rep.SetBaseURL(fmt.Sprintf("http://localhost:%d", cfg.Global.Port))
 	rep.SetEventRecorder(evlog)
 	rep.SetVerifier(reporter.NewGHClaimVerifier())
+	rt.SetReporter(rep)
 
 	// Poller
 	p := poller.NewPoller(ghReader, st, cfg.Global.Repo, cfg.Global.PollInterval)

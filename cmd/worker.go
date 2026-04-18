@@ -355,18 +355,42 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 		agentCopy.Runtime = runtimeAlias
 	}
 
+	launchCtx := buildRemoteTaskContext(task, reader, workDir)
+	sessionID := launchCtx.Session.ID
+
 	// Create an isolated worktree for this task so multiple agents
 	// don't interfere with each other's git state.
 	var worktreePath string
 	if wsMgr != nil {
 		wt, err := wsMgr.Create(task.IssueNum, task.TaskID)
 		if err != nil {
-			log.Printf("[worker] failed to create worktree for issue #%d: %v, falling back to CWD", task.IssueNum, err)
-		} else {
-			workDir = wt
-			worktreePath = wt
-			log.Printf("[worker] using worktree %s for issue #%d", wt, task.IssueNum)
+			log.Printf("[worker] failed to create worktree for issue #%d: %v", task.IssueNum, err)
+			// Report the worktree failure as a user-visible comment.
+			result := &launcher.Result{
+				ExitCode: 1,
+				Stderr:   err.Error(),
+			}
+			reportCtx, cancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(shutdownTimeout))
+			if rerr := rep.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, workerID, 0, workflowMaxRetries(cfg, task.Workflow), "", ""); rerr != nil {
+				log.Printf("[worker] failed to report worktree failure: %v", rerr)
+			}
+			cancel()
+			// Requeue the claimed task so it can be retried after the worktree issue is fixed.
+			releaseCtx, cancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(shutdownTimeout))
+			if rerr := client.ReleaseTask(releaseCtx, task.TaskID, workerclient.ReleaseRequest{
+				WorkerID: workerID,
+				Reason:   fmt.Sprintf("worktree setup failed: %v", err),
+			}); rerr != nil {
+				log.Printf("[worker] failed to release task after worktree setup failure: %v", rerr)
+			}
+			cancel()
+			return fmt.Errorf("worker: worktree setup failed for issue #%d: %w", task.IssueNum, err)
 		}
+		workDir = wt
+		worktreePath = wt
+		launchCtx.RepoRoot = wt
+		launchCtx.WorkDir = wt
+		log.Printf("[worker] using worktree %s for issue #%d", wt, task.IssueNum)
 	}
 	defer func() {
 		if worktreePath != "" && wsMgr != nil {
@@ -425,9 +449,7 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 		}
 	}()
 	defer stopHeartbeat()
-
-	launchCtx := buildRemoteTaskContext(task, reader, workDir)
-	sessionID := launchCtx.Session.ID
+	sessionID = launchCtx.Session.ID
 	if err := rep.ReportStarted(taskCtx, task.Repo, task.IssueNum, task.AgentName, sessionID, workerID); err != nil {
 		log.Printf("[worker] report started failed: %v", err)
 	}

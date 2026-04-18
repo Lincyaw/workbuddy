@@ -31,6 +31,11 @@ func NewManager(baseDir string) *Manager {
 // The worktree is created at .workbuddy/worktrees/<issue>/ branching from
 // the current HEAD (or from origin/workbuddy/issue-<issue> if it exists).
 // Branch names are deterministic per issue so work persists across cycles.
+//
+// Before every add, it runs `git worktree prune` to clean stale metadata.
+// If the worktree path already exists and is on the expected branch with
+// no uncommitted changes, it is reused. Otherwise, the call fails loudly
+// and never falls back to the main working tree.
 func (m *Manager) Create(issueNum int, taskID string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -38,20 +43,40 @@ func (m *Manager) Create(issueNum int, taskID string) (string, error) {
 	branchName := fmt.Sprintf("workbuddy/issue-%d", issueNum)
 	wtPath := filepath.Join(m.baseDir, worktreeDir, fmt.Sprintf("issue-%d", issueNum))
 
-	// Remove any existing worktree for this issue to avoid conflicts.
-	if existing := m.findWorktreePath(branchName); existing != "" {
-		_ = exec.Command("git", "worktree", "remove", "--force", existing).Run()
-		_ = exec.Command("git", "worktree", "prune").Run()
+	// 1. Prune stale worktree metadata (cheap, idempotent).
+	pruneCmd := exec.Command("git", "worktree", "prune")
+	pruneCmd.Dir = m.baseDir
+	if out, err := pruneCmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("workspace: git worktree prune: %s: %w", strings.TrimSpace(string(out)), err)
 	}
-	_ = os.RemoveAll(wtPath)
 
-	// Ensure parent directory exists.
+	// 2. Path exists — validate branch and cleanliness, then reuse or fail.
+	if _, err := os.Stat(wtPath); err == nil {
+		if !m.isRegisteredWorktree(wtPath) {
+			return "", fmt.Errorf("workspace: path %s exists but is not a registered git worktree", wtPath)
+		}
+		curBranch, err := m.gitCurrentBranch(wtPath)
+		if err != nil {
+			return "", fmt.Errorf("workspace: path %s exists but is not a valid worktree: %w", wtPath, err)
+		}
+		if curBranch != branchName {
+			return "", fmt.Errorf("workspace: worktree %s is on branch %q, expected %q — refusing to reuse", wtPath, curBranch, branchName)
+		}
+		if !m.gitIsClean(wtPath) {
+			return "", fmt.Errorf("workspace: worktree %s has uncommitted changes — refusing to reuse", wtPath)
+		}
+		if err := m.syncExistingWorktree(wtPath, branchName); err != nil {
+			return "", err
+		}
+		log.Printf("[workspace] reused worktree %s (branch %s) for issue #%d", wtPath, branchName, issueNum)
+		return wtPath, nil
+	}
+
+	// 3. Path does not exist — try add.
 	if err := os.MkdirAll(filepath.Dir(wtPath), 0755); err != nil {
 		return "", fmt.Errorf("workspace: mkdir: %w", err)
 	}
 
-	// If the local branch already exists, create worktree from it directly.
-	// Otherwise branch from origin/branch (if it exists) or HEAD.
 	if m.localBranchExists(branchName) {
 		cmd := exec.Command("git", "worktree", "add", wtPath, branchName)
 		cmd.Dir = m.baseDir
@@ -74,6 +99,52 @@ func (m *Manager) Create(issueNum int, taskID string) (string, error) {
 			wtPath, branchName, baseRef, issueNum)
 	}
 	return wtPath, nil
+}
+
+func (m *Manager) isRegisteredWorktree(wtPath string) bool {
+	foundPath := m.findWorktreePathForPath(wtPath)
+	return foundPath != ""
+}
+
+func (m *Manager) syncExistingWorktree(wtPath, branchName string) error {
+	checkoutCmd := exec.Command("git", "checkout", branchName)
+	checkoutCmd.Dir = wtPath
+	if out, err := checkoutCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("workspace: checkout %s in %s: %s: %w", branchName, wtPath, strings.TrimSpace(string(out)), err)
+	}
+
+	if !m.remoteBranchExists(branchName) {
+		return nil
+	}
+
+	pullCmd := exec.Command("git", "pull", "--ff-only", "origin", branchName)
+	pullCmd.Dir = wtPath
+	if out, err := pullCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("workspace: sync reused worktree %s on %s: %s: %w", wtPath, branchName, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// gitCurrentBranch returns the current branch in the given worktree directory.
+func (m *Manager) gitCurrentBranch(wtPath string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = wtPath
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// gitIsClean reports whether the given worktree directory has no uncommitted changes.
+func (m *Manager) gitIsClean(wtPath string) bool {
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = wtPath
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == ""
 }
 
 // Remove cleans up a worktree and its associated branch.
@@ -128,6 +199,14 @@ func (m *Manager) Remove(wtPath string) error {
 // findWorktreePath returns the filesystem path of an existing worktree for the
 // given branch, or empty string if none exists.
 func (m *Manager) findWorktreePath(branchName string) string {
+	return m.findWorktreePathForPathAndBranch("", branchName)
+}
+
+func (m *Manager) findWorktreePathForPath(wtPath string) string {
+	return m.findWorktreePathForPathAndBranch(wtPath, "")
+}
+
+func (m *Manager) findWorktreePathForPathAndBranch(wtPath, branchName string) string {
 	cmd := exec.Command("git", "worktree", "list", "--porcelain")
 	cmd.Dir = m.baseDir
 	out, err := cmd.Output()
@@ -135,6 +214,10 @@ func (m *Manager) findWorktreePath(branchName string) string {
 		return ""
 	}
 
+	absTargetPath := ""
+	if wtPath != "" {
+		absTargetPath, _ = filepath.Abs(wtPath)
+	}
 	lines := strings.Split(string(out), "\n")
 	var currentPath string
 	for _, line := range lines {
@@ -144,7 +227,17 @@ func (m *Manager) findWorktreePath(branchName string) string {
 		if strings.HasPrefix(line, "branch ") {
 			ref := strings.TrimPrefix(line, "branch ")
 			localBranch := strings.TrimPrefix(ref, "refs/heads/")
-			if localBranch == branchName && currentPath != "" {
+			branchMatches := branchName == "" || localBranch == branchName
+			pathMatches := false
+			if currentPath != "" {
+				if absTargetPath == "" {
+					pathMatches = true
+				} else {
+					absCurrentPath, _ := filepath.Abs(currentPath)
+					pathMatches = absCurrentPath == absTargetPath
+				}
+			}
+			if branchMatches && pathMatches && currentPath != "" {
 				return currentPath
 			}
 		}

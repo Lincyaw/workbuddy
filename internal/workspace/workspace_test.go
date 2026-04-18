@@ -42,6 +42,38 @@ func initTestRepo(t *testing.T) string {
 	return dir
 }
 
+func initBareRemote(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "remote.git")
+	cmd := exec.Command("git", "init", "--bare", dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %s: %v", out, err)
+	}
+	return dir
+}
+
+func gitCurrentBranch(t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.Command("git", "branch", "--show-current")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git branch --show-current: %s: %v", out, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func gitRun(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %s: %v", args, out, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func TestCreateAndRemove(t *testing.T) {
 	repoDir := initTestRepo(t)
 	mgr := NewManager(repoDir)
@@ -125,3 +157,198 @@ func TestMultipleWorktrees(t *testing.T) {
 	_ = mgr.Remove(wt2)
 }
 
+func TestCreate_StaleMetadataPruneRescue(t *testing.T) {
+	repoDir := initTestRepo(t)
+	mgr := NewManager(repoDir)
+
+	// Create a worktree.
+	wtPath, err := mgr.Create(1, "task-1")
+	if err != nil {
+		t.Fatalf("Create first: %v", err)
+	}
+
+	// Simulate unclean shutdown: delete the worktree directory but leave git metadata.
+	if err := os.RemoveAll(wtPath); err != nil {
+		t.Fatalf("RemoveAll worktree dir: %v", err)
+	}
+
+	// Re-create should succeed because prune cleans stale metadata.
+	wtPath2, err := mgr.Create(1, "task-2")
+	if err != nil {
+		t.Fatalf("Create after stale metadata: %v", err)
+	}
+	if wtPath != wtPath2 {
+		t.Fatalf("worktree path changed: %s vs %s", wtPath, wtPath2)
+	}
+	if _, err := os.Stat(wtPath2); os.IsNotExist(err) {
+		t.Fatalf("worktree path does not exist after re-create: %s", wtPath2)
+	}
+
+	_ = mgr.Remove(wtPath2)
+}
+
+func TestCreate_ExistingCleanReuse(t *testing.T) {
+	repoDir := initTestRepo(t)
+	mgr := NewManager(repoDir)
+
+	wtPath, err := mgr.Create(1, "task-1")
+	if err != nil {
+		t.Fatalf("Create first: %v", err)
+	}
+
+	// Re-create for the same issue should reuse the existing worktree.
+	wtPath2, err := mgr.Create(1, "task-2")
+	if err != nil {
+		t.Fatalf("Create reuse: %v", err)
+	}
+	if wtPath != wtPath2 {
+		t.Fatalf("worktree path changed on reuse: %s vs %s", wtPath, wtPath2)
+	}
+
+	_ = mgr.Remove(wtPath)
+}
+
+func TestCreate_ExistingCleanReuseFastForwardsFromOrigin(t *testing.T) {
+	repoDir := initTestRepo(t)
+	remoteDir := initBareRemote(t)
+	gitRun(t, repoDir, "remote", "add", "origin", remoteDir)
+	gitRun(t, repoDir, "push", "-u", "origin", gitCurrentBranch(t, repoDir))
+
+	mgr := NewManager(repoDir)
+	wtPath, err := mgr.Create(1, "task-1")
+	if err != nil {
+		t.Fatalf("Create first: %v", err)
+	}
+	gitRun(t, wtPath, "push", "-u", "origin", "workbuddy/issue-1")
+
+	cloneDir := filepath.Join(t.TempDir(), "clone")
+	gitRun(t, t.TempDir(), "clone", remoteDir, cloneDir)
+	gitRun(t, cloneDir, "config", "user.email", "test@test.com")
+	gitRun(t, cloneDir, "config", "user.name", "Test")
+	gitRun(t, cloneDir, "checkout", "workbuddy/issue-1")
+	if err := os.WriteFile(filepath.Join(cloneDir, "README.md"), []byte("updated upstream"), 0o644); err != nil {
+		t.Fatalf("WriteFile README.md: %v", err)
+	}
+	gitRun(t, cloneDir, "commit", "-am", "update upstream")
+	gitRun(t, cloneDir, "push", "origin", "workbuddy/issue-1")
+
+	wtPath2, err := mgr.Create(1, "task-2")
+	if err != nil {
+		t.Fatalf("Create reuse: %v", err)
+	}
+	if wtPath != wtPath2 {
+		t.Fatalf("worktree path changed on reuse: %s vs %s", wtPath, wtPath2)
+	}
+
+	readme, err := os.ReadFile(filepath.Join(wtPath2, "README.md"))
+	if err != nil {
+		t.Fatalf("ReadFile README.md: %v", err)
+	}
+	if strings.TrimSpace(string(readme)) != "updated upstream" {
+		t.Fatalf("README.md = %q, want updated upstream", strings.TrimSpace(string(readme)))
+	}
+
+	_ = mgr.Remove(wtPath)
+}
+
+func TestCreate_ExistingDirtyRefuse(t *testing.T) {
+	repoDir := initTestRepo(t)
+	mgr := NewManager(repoDir)
+
+	wtPath, err := mgr.Create(1, "task-1")
+	if err != nil {
+		t.Fatalf("Create first: %v", err)
+	}
+
+	// Dirty the worktree.
+	if err := os.WriteFile(filepath.Join(wtPath, "dirty.txt"), []byte("x"), 0644); err != nil {
+		t.Fatalf("write dirty file: %v", err)
+	}
+
+	// Re-create should fail because the worktree has uncommitted changes.
+	_, err = mgr.Create(1, "task-2")
+	if err == nil {
+		t.Fatal("expected error for dirty worktree, got nil")
+	}
+	if !strings.Contains(err.Error(), "uncommitted changes") {
+		t.Fatalf("expected 'uncommitted changes' in error, got: %v", err)
+	}
+
+	_ = mgr.Remove(wtPath)
+}
+
+func TestCreate_ExistingWrongBranchRefuse(t *testing.T) {
+	repoDir := initTestRepo(t)
+	mgr := NewManager(repoDir)
+
+	wtPath, err := mgr.Create(1, "task-1")
+	if err != nil {
+		t.Fatalf("Create first: %v", err)
+	}
+
+	cmd := exec.Command("git", "checkout", "-b", "workbuddy/issue-999")
+	cmd.Dir = wtPath
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git checkout -b: %s: %v", out, err)
+	}
+
+	_, err = mgr.Create(1, "task-2")
+	if err == nil {
+		t.Fatal("expected error for wrong-branch worktree, got nil")
+	}
+	if !strings.Contains(err.Error(), `expected "workbuddy/issue-1"`) {
+		t.Fatalf("expected branch mismatch error, got: %v", err)
+	}
+
+	_ = mgr.Remove(wtPath)
+}
+
+func TestCreate_StaleAddFailure(t *testing.T) {
+	repoDir := initTestRepo(t)
+	mgr := NewManager(repoDir)
+
+	wtPath := filepath.Join(repoDir, ".workbuddy", "worktrees", "issue-1")
+	// Create a file (not directory) at the worktree path.
+	// os.Stat sees it exists, but git commands fail because it's not a directory.
+	if err := os.MkdirAll(filepath.Dir(wtPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(wtPath, []byte("stale"), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	_, err := mgr.Create(1, "task-1")
+	if err == nil {
+		t.Fatal("expected error for invalid existing path, got nil")
+	}
+	if !strings.Contains(err.Error(), "not a registered git worktree") {
+		t.Fatalf("expected registered worktree error, got: %v", err)
+	}
+}
+
+func TestCreate_ExistingGitRepoButNotRegisteredWorktreeRefuse(t *testing.T) {
+	repoDir := initTestRepo(t)
+	mgr := NewManager(repoDir)
+
+	wtPath := filepath.Join(repoDir, ".workbuddy", "worktrees", "issue-1")
+	if err := os.MkdirAll(wtPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	gitRun(t, wtPath, "init")
+	gitRun(t, wtPath, "config", "user.email", "test@test.com")
+	gitRun(t, wtPath, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(wtPath, "README.md"), []byte("nested repo"), 0o644); err != nil {
+		t.Fatalf("WriteFile README.md: %v", err)
+	}
+	gitRun(t, wtPath, "add", ".")
+	gitRun(t, wtPath, "commit", "-m", "init nested")
+	gitRun(t, wtPath, "checkout", "-b", "workbuddy/issue-1")
+
+	_, err := mgr.Create(1, "task-1")
+	if err == nil {
+		t.Fatal("expected error for unregistered nested repo, got nil")
+	}
+	if !strings.Contains(err.Error(), "not a registered git worktree") {
+		t.Fatalf("expected registered worktree error, got: %v", err)
+	}
+}
