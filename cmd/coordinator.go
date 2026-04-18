@@ -68,8 +68,30 @@ type tokenRevokeOpts struct {
 
 var coordinatorCmd = &cobra.Command{
 	Use:   "coordinator",
-	Short: "Run the remote coordinator HTTP API",
-	RunE:  runCoordinatorCmd,
+	Short: "Run the remote coordinator HTTP API (distributed mode)",
+	Long: `Start the workbuddy coordinator as a standalone HTTP service. The
+coordinator polls GitHub, runs the label-driven state machine, persists
+tasks/events/claims in SQLite, and hands tasks to remote workers via
+long-poll.
+
+Use this for distributed deployments (coordinator on one host, workers on
+others). For single-host development use 'workbuddy serve' instead.
+
+Authentication: pass --auth to require WORKBUDDY_AUTH_TOKEN on the worker
+and repo registration endpoints. Use --loopback-only for auth-free local
+testing. Use 'workbuddy coordinator token' to mint per-worker tokens.
+
+Multi-repo: register additional repos at runtime with 'workbuddy repo
+register' from each repo's root; the coordinator spawns a dedicated poller
+per repo.`,
+	Example: `  # Local coordinator, loopback-only (auth-free dev mode)
+  workbuddy coordinator --listen 127.0.0.1:8081 --loopback-only
+
+  # Production coordinator (bind all interfaces + auth)
+  export WORKBUDDY_AUTH_TOKEN=$(openssl rand -hex 24)
+  workbuddy coordinator --listen 0.0.0.0:8081 --auth \
+    --poll-interval 15s --trusted-authors alice,bob`,
+	RunE: runCoordinatorCmd,
 }
 
 var coordinatorTokenCmd = &cobra.Command{

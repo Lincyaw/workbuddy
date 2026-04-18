@@ -18,8 +18,21 @@ type operatorWatchOpts struct {
 
 var operatorWatchCmd = &cobra.Command{
 	Use:   "operator-watch",
-	Short: "Watch the local operator inbox and dispatch Claude incident handlers",
-	RunE:  runOperatorWatchCmd,
+	Short: "Watch the operator inbox and dispatch Claude to handle incidents",
+	Long: `Tail the operator incident inbox (written by the coordinator when
+dispatch is capped, workers are lost, or other out-of-band situations
+arise) and spawn a Claude CLI session per incident file. Each handler
+gets the incident payload and operates against the live workbuddy
+deployment to triage or recover.
+
+Use --dry-run to see which incidents would be handled without actually
+launching Claude. Use --claude to point at a specific CLI binary.`,
+	Example: `  # Watch the default inbox (~/.workbuddy/operator/inbox)
+  workbuddy operator-watch
+
+  # Dry run against a custom inbox
+  workbuddy operator-watch --inbox /tmp/inbox --dry-run`,
+	RunE: runOperatorWatchCmd,
 }
 
 func init() {

@@ -27,8 +27,22 @@ type initOpts struct {
 
 var initCmd = &cobra.Command{
 	Use:   "init",
-	Short: "Scaffold workbuddy configuration for a repository",
-	RunE:  runInitCmd,
+	Short: "Scaffold .github/workbuddy/ config for a new repository",
+	Long: `Write a minimal, working workbuddy configuration into .github/workbuddy/:
+config.yaml (repo identity + poll settings), agents/dev-agent.md and
+agents/review-agent.md (prompt templates), and workflows/default.md (the
+label-driven state machine). The scaffold is generic — tune it to the repo
+afterwards. Combine with label creation to fully onboard a repo.`,
+	Example: `  # Infer repo from git origin
+  cd /path/to/my/repo
+  workbuddy init
+
+  # Explicit repo name
+  workbuddy init --repo owner/name
+
+  # Overwrite existing scaffold files
+  workbuddy init --force`,
+	RunE: runInitCmd,
 }
 
 func init() {

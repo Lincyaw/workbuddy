@@ -32,7 +32,25 @@ type diagnoseResult struct {
 var diagnoseCmd = &cobra.Command{
 	Use:   "diagnose",
 	Short: "Scan the local SQLite store for common pipeline failures",
-	RunE:  runDiagnoseCmd,
+	Long: `Inspect the coordinator's SQLite state and surface actionable findings
+such as issues stuck in an intermediate state, consecutive-agent-failure caps
+hit (REQ-055), stale inflight claims, and repos missing config.
+
+Each finding includes a severity, a plain-English diagnosis, and a suggested
+fix. Pass --fix to apply safe automated remediations (for example cache
+invalidation for stuck issues); destructive actions are never auto-applied.
+
+Use --json when piping into another tool. Exit code is non-zero if any
+error-severity findings remain after --fix.`,
+	Example: `  # Scan all repos
+  workbuddy diagnose
+
+  # Focus on one repo, emit JSON
+  workbuddy diagnose --repo owner/name --json
+
+  # Apply safe fixes (cache invalidation, etc.)
+  workbuddy diagnose --fix`,
+	RunE: runDiagnoseCmd,
 }
 
 func init() {

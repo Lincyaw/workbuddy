@@ -213,20 +213,23 @@ ps aux | grep "workbuddy worker" | grep -v grep
 - **Cause:** Worker's heartbeat goroutine doesn't exit when codex dies unexpectedly.
 - **Fix:** Kill the worker process (`kill -9`), clean up stale running tasks in DB, start new worker.
 
-### J. Inflight dedup blocks re-dispatch after failure
-- **Symptom:** Task failed, labels unchanged, cache invalidated, but no new task created.
-- **Cause:** State machine's in-memory inflight map still marks the agent as "already dispatched".
-- **Fix:** Manually insert a pending task:
-  ```bash
-  sqlite3 .workbuddy/workbuddy.db \
-    "INSERT INTO task_queue (id, repo, issue_num, agent_name, role, runtime, status, created_at, updated_at)
-     VALUES ('retry-N-$(date +%s)', 'Owner/Repo', N, 'dev-agent', 'dev', 'codex', 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);"
-  ```
+### J. Issue claim stuck after coordinator crash
+- **Symptom:** No dispatch after cache-invalidate; `diagnose` shows a claim still held by a dead coordinator/worker.
+- **Cause:** Per-issue claim (REQ-057/059) wasn't released cleanly.
+- **Self-heal:** Claims have a TTL — wait for expiry and the next poll overwrites with a `claim_expired` event.
+- **Force:** `workbuddy recover` clears stale runtime state (processes, worktrees, claims).
 
-### K. Worktree not created (older binary)
-- **Symptom:** Multiple agents pollute the same working directory, switching branches on each other.
-- **Cause:** Worker binary predates the worktree isolation fix.
-- **Fix:** Rebuild: `go build -o workbuddy .` — new workers auto-create worktrees at `.workbuddy/worktrees/issue-N/`.
+### K. Consecutive-failure cap reached (REQ-055)
+- **Symptom:** `workbuddy diagnose` reports "dev-agent has failed 3 times in a row"; dispatch stops.
+- **First check:** is it infra or verdict? Read the latest few comments on the issue:
+  - "Infra Error" header → launcher/runtime crash (REQ-056). Fix infra, `cache-invalidate`, retry.
+  - "Failure" header → agent disagrees with the AC. Tighten AC or intervene manually.
+- **Reset:** fix the root cause, flip label back to `status:developing`, `cache-invalidate`.
+
+### L. Worktree setup failed — worker refuses to run
+- **Symptom:** Issue comment: "worktree setup failed"; task marked failed.
+- **Cause:** Stale `.workbuddy/worktrees/issue-N/` metadata, dirty tree, or wrong branch (REQ-058 refuses CWD fallback by design).
+- **Fix:** `workbuddy recover` (prunes stale worktrees) then re-dispatch.
 
 ## Monitoring strategies
 

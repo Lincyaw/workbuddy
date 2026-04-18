@@ -32,8 +32,22 @@ type cacheInvalidateResult struct {
 
 var cacheInvalidateCmd = &cobra.Command{
 	Use:   "cache-invalidate",
-	Short: "Invalidate cached issue state in the local SQLite store",
-	RunE:  runCacheInvalidateCmd,
+	Short: "Force the poller to re-process issues on the next cycle",
+	Long: `Clear the poller's cached issue snapshot so the next poll treats each
+listed issue as new. Use this when an issue's labels changed on GitHub but
+workbuddy didn't react (poller de-dup kept it out of the state machine),
+or after manually editing labels to kick off a retry.
+
+Omit --issue to invalidate all cached issues for the repo.`,
+	Example: `  # Force re-poll of one issue
+  workbuddy cache-invalidate --repo owner/name --issue 42
+
+  # Invalidate several issues at once
+  workbuddy cache-invalidate --repo owner/name --issue 42,43,44
+
+  # Invalidate every cached issue for a repo
+  workbuddy cache-invalidate --repo owner/name`,
+	RunE: runCacheInvalidateCmd,
 }
 
 func init() {

@@ -31,19 +31,35 @@ type repoListOpts struct {
 
 var repoCmd = &cobra.Command{
 	Use:   "repo",
-	Short: "Manage repo registrations with a coordinator",
+	Short: "Manage repo registrations on a running coordinator",
+	Long: `Dynamically attach/detach repositories from a running coordinator without
+restarting it. 'repo register' serializes the local .github/workbuddy/
+directory (config.yaml + agents + workflows) and POSTs it; the coordinator
+then spawns a dedicated poller and state machine for that repo. 'repo list'
+enumerates what's currently registered.
+
+Run this from inside the target repo's root so the config directory is
+discoverable (override with --config-dir).`,
 }
 
 var repoRegisterCmd = &cobra.Command{
 	Use:   "register",
-	Short: "Register the current repo config with a coordinator",
-	RunE:  runRepoRegisterCmd,
+	Short: "Register the current repo's config with a coordinator",
+	Long: `Package .github/workbuddy/{config.yaml,agents,workflows} from the local
+repo and register it with the coordinator. Safe to re-run — the coordinator
+replaces the existing registration atomically and only starts polling the
+new config once validation passes.`,
+	Example: `  export WORKBUDDY_AUTH_TOKEN=...
+  cd /path/to/my/repo
+  workbuddy repo register --coordinator http://coord:8081`,
+	RunE: runRepoRegisterCmd,
 }
 
 var repoListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List repos registered with a coordinator",
-	RunE:  runRepoListCmd,
+	Use:     "list",
+	Short:   "List repos currently registered with a coordinator",
+	Example: `  workbuddy repo list --coordinator http://coord:8081`,
+	RunE:    runRepoListCmd,
 }
 
 func init() {

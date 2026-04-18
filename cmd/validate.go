@@ -18,7 +18,16 @@ type validateOpts struct {
 var validateCmd = &cobra.Command{
 	Use:   "validate",
 	Short: "Validate workbuddy config files and workflow references",
-	RunE:  runValidateCmd,
+	Long: `Parse .github/workbuddy/config.yaml, agent markdown files, and workflow
+definitions, then check that every referenced agent/role/state resolves.
+Reports any undefined references or schema errors. Run this before 'serve'
+or 'repo register' to catch config mistakes early.`,
+	Example: `  # Validate the repo in the current directory
+  workbuddy validate
+
+  # Validate a specific config directory
+  workbuddy validate --config-dir /path/to/repo/.github/workbuddy`,
+	RunE: runValidateCmd,
 }
 
 func init() {

@@ -77,8 +77,37 @@ type statusEventRow struct {
 
 var statusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Summarize issue status from the local audit server",
-	RunE:  runStatusCmd,
+	Short: "Summarize issue and task state from SQLite or a remote coordinator",
+	Long: `Query the local workbuddy store (or a remote coordinator via --coordinator)
+for issue state, task queue entries, structured events, and registered repos.
+
+The flag combinations select the view:
+  (no flag)       — issues and their current state machine position
+  --tasks         — task queue entries; filter with --status
+  --events        — recent audit events; filter with --type and --since
+  --stuck         — only issues stuck in an intermediate state for >1h
+  --watch         — block until the next matching task completes
+  --repos         — list repos registered on a coordinator (needs --coordinator)
+
+Combine with --repo to scope by repository and --json for machine output.`,
+	Example: `  # Current issue state
+  workbuddy status --repo owner/name
+
+  # Task queue, pending only
+  workbuddy status --tasks --status pending
+
+  # Recent events, last 10 minutes
+  workbuddy status --events --since 10m
+
+  # Stuck issues (candidates for intervention)
+  workbuddy status --stuck
+
+  # Block until issue #42's next task finishes
+  workbuddy status --watch --repo owner/name --issue 42 --timeout 30m
+
+  # Repos registered on a remote coordinator
+  workbuddy status --coordinator http://coord:8081 --repos`,
+	RunE: runStatusCmd,
 }
 
 func init() {

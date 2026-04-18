@@ -64,7 +64,7 @@ func TestValidateHelp(t *testing.T) {
 		t.Fatalf("Execute help: %v", err)
 	}
 	help := out.String()
-	if !strings.Contains(help, "Validate workbuddy config files") {
+	if !strings.Contains(help, ".github/workbuddy/config.yaml") {
 		t.Fatalf("help output missing command description: %q", help)
 	}
 	if !strings.Contains(help, "--config-dir") {
