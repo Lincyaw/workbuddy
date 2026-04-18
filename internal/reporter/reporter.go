@@ -157,6 +157,8 @@ type Reporter struct {
 	reactions ReactionManager
 	baseURL   string // e.g. "http://localhost:8080", empty to omit session links
 	eventlog  EventRecorder
+	verifier  ClaimVerifier
+	now       func() time.Time
 }
 
 var (
@@ -174,7 +176,7 @@ var (
 // reaction manager defaults to a GHCLIReactionManager; callers may override
 // it via SetReactionManager (e.g., tests).
 func NewReporter(gh GHCommentWriter) *Reporter {
-	return &Reporter{gh: gh, reactions: &GHCLIReactionManager{}}
+	return &Reporter{gh: gh, reactions: &GHCLIReactionManager{}, now: time.Now}
 }
 
 // SetReactionManager replaces the default ReactionManager (used by tests).
@@ -199,6 +201,29 @@ func (r *Reporter) SetBlockedReaction(ctx context.Context, repo string, issueNum
 // SetBaseURL sets the base URL for session detail links in reports.
 func (r *Reporter) SetBaseURL(baseURL string) {
 	r.baseURL = baseURL
+}
+
+// SetVerifier sets the claim verifier used to check agent side-effects.
+func (r *Reporter) SetVerifier(v ClaimVerifier) {
+	r.verifier = v
+}
+
+// Verify runs claim verification against the agent result.
+// It returns nil when the verifier is not configured or the run did not succeed.
+func (r *Reporter) Verify(ctx context.Context, repo string, issueNum int, result *launcher.Result) (*VerificationResult, error) {
+	if r.verifier == nil || result == nil || result.ExitCode != 0 {
+		return nil, nil
+	}
+	output := result.LastMessage
+	if output == "" {
+		output = result.Stdout
+	}
+	finishedAt := r.now()
+	return r.verifier.Verify(ctx, repo, issueNum, VerificationInput{
+		Output:    output,
+		StartedAt: finishedAt.Add(-result.Duration),
+		EndedAt:   finishedAt,
+	})
 }
 
 // ReportStarted posts an "Agent Started" comment with a session link before execution begins.
@@ -236,6 +261,60 @@ func (r *Reporter) Report(
 	labelLine string,
 	workDir string,
 ) error {
+	_, err := r.ReportWithVerification(ctx, repo, issueNum, agentName, result, sessionID, workerID, retryCount, maxRetries, labelLine, workDir)
+	return err
+}
+
+// ReportVerified formats and posts an agent execution report using a
+// precomputed verification result. This avoids running the same external
+// verification commands twice when the caller already needed the result for
+// control-flow decisions.
+func (r *Reporter) ReportVerified(
+	ctx context.Context,
+	repo string,
+	issueNum int,
+	agentName string,
+	result *launcher.Result,
+	sessionID, workerID string,
+	retryCount, maxRetries int,
+	labelLine string,
+	workDir string,
+	verification *VerificationResult,
+) error {
+	_, err := r.report(ctx, repo, issueNum, agentName, result, sessionID, workerID, retryCount, maxRetries, labelLine, workDir, verification)
+	return err
+}
+
+// ReportWithVerification is like Report but runs claim verification for
+// successful exits and returns the verification result. Callers should treat
+// a non-nil VerificationResult with Partial == true as a failed run for
+// state-machine purposes.
+func (r *Reporter) ReportWithVerification(
+	ctx context.Context,
+	repo string,
+	issueNum int,
+	agentName string,
+	result *launcher.Result,
+	sessionID, workerID string,
+	retryCount, maxRetries int,
+	labelLine string,
+	workDir string,
+) (*VerificationResult, error) {
+	return r.report(ctx, repo, issueNum, agentName, result, sessionID, workerID, retryCount, maxRetries, labelLine, workDir, nil)
+}
+
+func (r *Reporter) report(
+	ctx context.Context,
+	repo string,
+	issueNum int,
+	agentName string,
+	result *launcher.Result,
+	sessionID, workerID string,
+	retryCount, maxRetries int,
+	labelLine string,
+	workDir string,
+	verification *VerificationResult,
+) (*VerificationResult, error) {
 	status := "success"
 	var errorDetail string
 	if result.ExitCode != 0 {
@@ -252,6 +331,44 @@ func (r *Reporter) Report(
 		}
 		if result.Meta["retry_limit"] == "true" {
 			status = "retry-limit"
+		}
+	}
+
+	// Run claim verification for successful runs
+	if status == "success" && verification == nil && r.verifier != nil {
+		output := result.LastMessage
+		if output == "" {
+			output = result.Stdout
+		}
+		finishedAt := r.now()
+		vRes, vErr := r.verifier.Verify(ctx, repo, issueNum, VerificationInput{
+			Output:    output,
+			StartedAt: finishedAt.Add(-result.Duration),
+			EndedAt:   finishedAt,
+		})
+		if vErr != nil {
+			if r.eventlog != nil {
+				r.eventlog.Log(eventlog.TypeError, repo, issueNum, map[string]any{
+					"source": "claim_verification",
+					"error":  vErr.Error(),
+				})
+			}
+		} else {
+			verification = vRes
+			if verification != nil && verification.Partial {
+				status = "partial"
+				if len(verification.Checks) > 0 {
+					var sb strings.Builder
+					sb.WriteString("Claim verification failed:\n")
+					for _, c := range verification.Checks {
+						if c.OK {
+							continue
+						}
+						sb.WriteString(fmt.Sprintf("- %s: claimed %q, actual %q\n", c.Type, c.Claim, c.Actual))
+					}
+					errorDetail = sb.String()
+				}
+			}
 		}
 	}
 
@@ -275,25 +392,26 @@ func (r *Reporter) Report(
 	}
 
 	data := ReportData{
-		AgentName:   agentName,
-		Status:      status,
-		Duration:    result.Duration,
-		SessionID:   sessionID,
-		WorkerID:    workerID,
-		RetryCount:  retryCount,
-		MaxRetries:  maxRetries,
-		Output:      output,
-		PRLink:      prLink,
-		ErrorDetail: errorDetail,
-		SessionURL:  sessionURL,
-		LabelLine:   labelLine,
+		AgentName:    agentName,
+		Status:       status,
+		Duration:     result.Duration,
+		SessionID:    sessionID,
+		WorkerID:     workerID,
+		RetryCount:   retryCount,
+		MaxRetries:   maxRetries,
+		Output:       output,
+		PRLink:       prLink,
+		ErrorDetail:  errorDetail,
+		SessionURL:   sessionURL,
+		LabelLine:    labelLine,
+		Verification: verification,
 	}
 
 	body := FormatReportAt(data, time.Now())
 	if bodySizeBytes(body) > maxCommentBodyBytes {
-		return r.reportWithOverflow(ctx, repo, issueNum, agentName, body, workDir)
+		return verification, r.reportWithOverflow(ctx, repo, issueNum, agentName, body, workDir)
 	}
-	return r.writeWithRateLimitRetry(ctx, repo, issueNum, "report", func() error {
+	return verification, r.writeWithRateLimitRetry(ctx, repo, issueNum, "report", func() error {
 		return r.gh.WriteComment(repo, issueNum, body)
 	})
 }

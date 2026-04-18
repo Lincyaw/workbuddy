@@ -1658,6 +1658,78 @@ func TestExecuteTask_PersistsPartialResultOnRunError(t *testing.T) {
 	}
 }
 
+// TestExecuteTask_VerificationPartialMarksFailed verifies that when the agent
+// exits cleanly but claim verification detects missing side-effects, the task
+// is marked as failed and the state machine treats it as a failure.
+func TestExecuteTask_VerificationPartialMarksFailed(t *testing.T) {
+	setupFakeGHCLI(t)
+
+	rt := &mockRuntime{name: config.RuntimeClaudeCode, resultFn: func(_ context.Context, _ *config.AgentConfig, _ *launcher.TaskContext) (*launcher.Result, error) {
+		return &launcher.Result{
+			ExitCode:    0,
+			LastMessage: "I posted a review comment on PR #4 and flipped labels to status:done",
+			Duration:    50 * time.Millisecond,
+			Meta:        map[string]string{},
+		}, nil
+	}}
+	gh := &mockGHReader{
+		labelSnapshots: [][]string{
+			{"workbuddy", "status:developing"},
+			{"workbuddy", "status:developing"},
+		},
+	}
+	deps, st, comments := newWorkerTestDepsWithComments(t, rt, gh)
+
+	// Set up a verifier that claims the side-effects are missing.
+	deps.reporter.SetVerifier(&mockVerifier{
+		result: &reporter.VerificationResult{
+			Partial: true,
+			Checks: []reporter.ClaimCheck{
+				{Type: reporter.ClaimCommentPR, Claim: "posted comment on PR #4", Actual: "no comments on PR", OK: false},
+				{Type: reporter.ClaimLabels, Claim: "added status:done", Actual: "label not found", OK: false},
+			},
+		},
+	})
+
+	task := newWorkerTestTask(t, st, "owner/repo", 15, "task-partial")
+	executeTask(context.Background(), task, deps)
+
+	// Task should be marked as failed despite clean exit code.
+	statuses := taskStatusesByID(t, st)
+	if statuses["task-partial"] != store.TaskStatusFailed {
+		t.Fatalf("task status = %q, want %q", statuses["task-partial"], store.TaskStatusFailed)
+	}
+
+	// Report comment should indicate Partial status with claim-vs-reality table.
+	allComments := comments.Comments()
+	if len(allComments) != 2 {
+		t.Fatalf("expected started + final report comments, got %d", len(allComments))
+	}
+	lastComment := allComments[len(allComments)-1]
+	if !strings.Contains(lastComment, "Partial") {
+		t.Fatalf("expected Partial status in report comment: %s", lastComment)
+	}
+	if !strings.Contains(lastComment, "Claim Verification") {
+		t.Fatalf("expected claim verification table in report comment: %s", lastComment)
+	}
+	if !strings.Contains(lastComment, "no comments on PR") {
+		t.Fatalf("expected claim-vs-reality detail in report comment: %s", lastComment)
+	}
+	if !strings.Contains(lastComment, "label not found") {
+		t.Fatalf("expected label claim detail in report comment: %s", lastComment)
+	}
+}
+
+// mockVerifier is a test double for reporter.ClaimVerifier.
+type mockVerifier struct {
+	result *reporter.VerificationResult
+	err    error
+}
+
+func (m *mockVerifier) Verify(_ context.Context, _ string, _ int, _ reporter.VerificationInput) (*reporter.VerificationResult, error) {
+	return m.result, m.err
+}
+
 func TestExecuteTask_LabelValidationAudit(t *testing.T) {
 	tests := []struct {
 		name               string
