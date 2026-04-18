@@ -303,6 +303,8 @@ func (r *Reporter) reportWithOverflow(ctx context.Context, repo string, issueNum
 	var commitErr error
 	if workDir != "" {
 		artifactURL, commitErr = r.commitOverflowArtifact(ctx, workDir, repo, issueNum, agentName, body)
+	} else {
+		commitErr = fmt.Errorf("workDir is empty")
 	}
 
 	if r.eventlog != nil {

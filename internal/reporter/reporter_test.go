@@ -395,6 +395,13 @@ func TestReport_OverflowWithoutWorkDir(t *testing.T) {
 	if bodyBytes <= maxCommentBodyBytes {
 		t.Fatalf("expected overflow payload body_bytes > %d, got %d", maxCommentBodyBytes, bodyBytes)
 	}
+	commitErr, ok := p["commit_error"].(string)
+	if !ok || commitErr == "" {
+		t.Fatalf("expected commit_error for empty workDir, got %v", p["commit_error"])
+	}
+	if !strings.Contains(commitErr, "workDir is empty") {
+		t.Fatalf("expected empty workDir reason, got %q", commitErr)
+	}
 }
 
 func initGitRepo(t *testing.T, dir string) string {
