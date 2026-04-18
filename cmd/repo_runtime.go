@@ -230,11 +230,9 @@ func (pm *pollerManager) StartOrUpdate(rec store.RepoRegistrationRecord) error {
 	sm := statemachine.NewStateMachine(cfg.Workflows, pm.store, dispatchCh, pm.eventlog, pm.alertBus)
 	// Enable the per-issue dispatch claim (REQ-057) so concurrent coordinators
 	// on different machines cannot race each other through the same SQLite DB.
-	hostname, _ := os.Hostname()
-	if hostname == "" {
-		hostname = "unknown"
-	}
-	sm.SetIssueClaim("coordinator-"+hostname, statemachine.DefaultIssueClaimLease)
+	// The claimer id is process-scoped so two coordinators on the same host do
+	// not collapse onto the same logical owner.
+	sm.SetIssueClaim(buildIssueClaimerID("coordinator-"+hostnameOrUnknown(), os.Getpid()), statemachine.DefaultIssueClaimLease)
 	depResolver := dependency.NewResolver(pm.store, pm.ghReader, pm.eventlog, pm.alertBus)
 	rt := router.NewRouter(cfg.Agents, pm.registry, pm.store, rec.Repo, pm.repoRoot, nil, nil, false)
 	runCtx, cancel := context.WithCancel(pm.rootCtx)

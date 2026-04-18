@@ -1908,3 +1908,35 @@ requirements:
       - cmd/worker_test.go
       - internal/router/router_test.go
     deps: [REQ-028, REQ-017]
+
+  - id: REQ-059
+    title: Issue claim token fencing and deterministic lease tests
+    description: >
+      Harden REQ-057 so issue-claim release and refresh operations are fenced
+      by both worker_id and claim_token, preventing a restarted coordinator or
+      reused hostname-based id from mutating a claim it no longer owns. Make
+      claimer IDs process-scoped in serve/coordinator runtime paths, and add a
+      configurable store clock so expiry tests advance logical time instantly
+      instead of sleeping on wall time.
+    priority: P0
+    version: v0.2.0
+    status: tested
+    acceptance_criteria:
+      - "AC-059-1: Store.ReleaseIssueClaim deletes only when repo, issue_num, worker_id, and claim_token all match"
+      - "AC-059-2: Store.RefreshIssueClaim extends expires_at only when worker_id and claim_token match the current unexpired holder"
+      - "AC-059-3: StateMachine wires claimTokens through releaseIssueClaim so stale in-memory completions cannot delete a replaced claim, and stale map entries are removed"
+      - "AC-059-4: cmd/serve.go and cmd/repo_runtime.go derive claimer IDs with a process-unique suffix so two coordinator processes on the same host never share a logical owner id"
+      - "AC-059-5: Store exposes a configurable clock used by issue-claim expiry logic so tests advance logical time without >100ms wall-time sleeps"
+      - "AC-059-6: AcquireIssueClaim's held-by-other commit error names the operation accurately instead of referring to a rollback conflict"
+      - "AC-059-7: Unit tests cover token-aware release/refresh, stale-token state-machine release protection, process-scoped claimer IDs, and deterministic expiry/refresh timing"
+    code:
+      - internal/store/store.go
+      - internal/statemachine/statemachine.go
+      - cmd/claim_id.go
+      - cmd/serve.go
+      - cmd/repo_runtime.go
+    tests:
+      - internal/store/store_test.go
+      - internal/statemachine/statemachine_test.go
+      - cmd/claim_id_test.go
+    deps: [REQ-057]
