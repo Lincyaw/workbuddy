@@ -318,6 +318,9 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 	}
 
 	lastMessage := readOptionalFile(s.lastMsgPath)
+	if lastMessage == "" {
+		lastMessage = strings.TrimSpace(mapper.lastMessage)
+	}
 	result := &Result{
 		ExitCode:    exitCode,
 		Stdout:      stdoutBuf.String(),
@@ -426,6 +429,7 @@ type codexEventMapper struct {
 	sessionID        string
 	sessionRef       SessionRef
 	turnID           string
+	lastMessage      string
 	tokenUsage       *launcherevents.TokenUsagePayload
 	turnCompleteSaw  bool
 	turnCompleted    *launcherevents.TurnCompletedPayload
@@ -451,6 +455,45 @@ func (m *codexEventMapper) Map(line []byte, seq *uint64) []launcherevents.Event 
 
 	msgType := rawString(raw, "type")
 	switch msgType {
+	case "thread.started":
+		if threadID := rawString(raw, "thread_id"); threadID != "" {
+			m.sessionRef = SessionRef{ID: threadID, Kind: "codex-thread"}
+		}
+		return nil
+
+	case "turn.started":
+		turnID := firstNonEmpty(rawString(raw, "turn_id"), rawString(raw, "task_id"), m.effectiveTurnID())
+		m.turnID = turnID
+		if refID := firstNonEmpty(rawString(raw, "thread_id"), rawString(raw, "session_id")); refID != "" {
+			kind := "codex-session"
+			if rawString(raw, "thread_id") != "" {
+				kind = "codex-thread"
+			}
+			m.sessionRef = SessionRef{ID: refID, Kind: kind}
+		}
+		return []launcherevents.Event{m.makeEvent(seq, launcherevents.KindTurnStarted, launcherevents.TurnStartedPayload{TurnID: turnID}, line)}
+
+	case "item.started", "item.completed":
+		return m.mapItemEvent(raw, msgType == "item.completed", line, seq)
+
+	case "turn.completed":
+		status := firstNonEmpty(rawString(raw, "status"), "ok")
+		m.turnCompleteSaw = true
+		payload := launcherevents.TurnCompletedPayload{TurnID: m.effectiveTurnID(), Status: status}
+		m.turnCompleted = &payload
+		m.turnCompletedRaw = cloneRaw(line)
+
+		var out []launcherevents.Event
+		if usage := codexTurnUsage(rawObject(raw, "usage")); usage != nil {
+			m.tokenUsage = usage
+			out = append(out, m.makeEvent(seq, launcherevents.KindTokenUsage, *usage, line))
+		}
+		out = append(out, m.makeEvent(seq, launcherevents.KindTaskComplete, launcherevents.TaskCompletePayload{
+			TurnID: m.effectiveTurnID(),
+			Status: status,
+		}, line))
+		return out
+
 	case "task_started":
 		turnID := rawString(raw, "task_id")
 		if turnID == "" {
@@ -574,6 +617,82 @@ func (m *codexEventMapper) Map(line []byte, seq *uint64) []launcherevents.Event 
 	}
 }
 
+func (m *codexEventMapper) mapItemEvent(raw map[string]json.RawMessage, completed bool, line []byte, seq *uint64) []launcherevents.Event {
+	item := rawObject(raw, "item")
+	if item == nil {
+		return []launcherevents.Event{m.makeEvent(seq, launcherevents.KindLog, launcherevents.LogPayload{Stream: "stdout", Line: string(line)}, line)}
+	}
+
+	itemType := rawString(item, "type")
+	itemID := rawString(item, "id")
+	switch itemType {
+	case "agent_message":
+		text := strings.TrimSpace(rawString(item, "text"))
+		if text == "" {
+			return nil
+		}
+		if completed {
+			m.lastMessage = text
+		}
+		return []launcherevents.Event{m.makeEvent(seq, launcherevents.KindAgentMessage, launcherevents.AgentMessagePayload{Text: text, Delta: false, Final: completed}, line)}
+
+	case "reasoning", "agent_reasoning":
+		text := strings.TrimSpace(rawString(item, "text"))
+		if text == "" {
+			return nil
+		}
+		return []launcherevents.Event{m.makeEvent(seq, launcherevents.KindReasoning, launcherevents.ReasoningPayload{Text: text, Delta: false}, line)}
+
+	case "command_execution":
+		if !completed {
+			return []launcherevents.Event{m.makeEvent(seq, launcherevents.KindCommandExec, launcherevents.CommandExecPayload{
+				Cmd:    rawStringSlice(item, "command"),
+				CWD:    rawString(item, "cwd"),
+				CallID: itemID,
+			}, line)}
+		}
+		ok := true
+		if code, hasCode := rawInt(item, "exit_code"); hasCode {
+			ok = code == 0
+		}
+		var out []launcherevents.Event
+		if output := rawString(item, "aggregated_output"); output != "" {
+			out = append(out, m.makeEvent(seq, launcherevents.KindCommandOutput, launcherevents.CommandOutputPayload{
+				CallID: itemID,
+				Stream: "stdout",
+				Data:   output,
+			}, line))
+		}
+		out = append(out, m.makeEvent(seq, launcherevents.KindToolResult, launcherevents.ToolResultPayload{
+			CallID: itemID,
+			OK:     ok,
+			Result: append(json.RawMessage(nil), line...),
+		}, line))
+		return out
+
+	case "mcp_tool_call":
+		if !completed {
+			return []launcherevents.Event{m.makeEvent(seq, launcherevents.KindToolCall, launcherevents.ToolCallPayload{
+				Name:   rawString(item, "tool"),
+				CallID: itemID,
+				Args:   cloneRaw(item["arguments"]),
+			}, line)}
+		}
+		result := cloneRaw(item["result"])
+		if len(result) == 0 {
+			result = append(json.RawMessage(nil), line...)
+		}
+		return []launcherevents.Event{m.makeEvent(seq, launcherevents.KindToolResult, launcherevents.ToolResultPayload{
+			CallID: itemID,
+			OK:     rawString(item, "status") != "failed" && !rawBool(item, "is_error"),
+			Result: result,
+		}, line)}
+
+	default:
+		return []launcherevents.Event{m.makeEvent(seq, launcherevents.KindLog, launcherevents.LogPayload{Stream: "stdout", Line: string(line)}, line)}
+	}
+}
+
 func (m *codexEventMapper) taskCompleteObserved() bool {
 	return m.turnCompleteSaw
 }
@@ -653,6 +772,19 @@ func rawObject(raw map[string]json.RawMessage, key string) map[string]json.RawMe
 		return nil
 	}
 	return value
+}
+
+func codexTurnUsage(raw map[string]json.RawMessage) *launcherevents.TokenUsagePayload {
+	if len(raw) == 0 {
+		return nil
+	}
+	payload := &launcherevents.TokenUsagePayload{
+		Input:  rawIntValue(raw, "input_tokens"),
+		Output: rawIntValue(raw, "output_tokens"),
+		Cached: rawIntValue(raw, "cached_input_tokens"),
+	}
+	payload.Total = payload.Input + payload.Output
+	return payload
 }
 
 func cloneRaw(data []byte) json.RawMessage {

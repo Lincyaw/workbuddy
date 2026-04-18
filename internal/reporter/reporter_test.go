@@ -85,10 +85,10 @@ func TestReport_Success(t *testing.T) {
 	r := NewReporter(gh)
 
 	result := &launcher.Result{
-		ExitCode: 0,
-		Stdout:   "all good",
-		Duration: 5 * time.Second,
-		Meta:     map[string]string{"pr_url": "https://github.com/test/repo/pull/1"},
+		ExitCode:    0,
+		LastMessage: "all good",
+		Duration:    5 * time.Second,
+		Meta:        map[string]string{"pr_url": "https://github.com/test/repo/pull/1"},
 	}
 
 	err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-123", "worker-1", 1, 3, "Label transition: developing -> reviewing (OK)", "")
@@ -275,6 +275,25 @@ func TestReport_PrefersLastMessage(t *testing.T) {
 	}
 }
 
+func TestReport_DoesNotFallbackToStdout(t *testing.T) {
+	gh := &mockGHWriter{}
+	r := NewReporter(gh)
+
+	result := &launcher.Result{
+		ExitCode: 0,
+		Stdout:   "{\"type\":\"turn.started\"}\n{\"type\":\"item.completed\"}",
+		Duration: time.Second,
+	}
+
+	if err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-no-stdout", "worker-1", 0, 3, "", ""); err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	body := gh.comments[0]
+	if strings.Contains(body, "{\"type\":\"turn.started\"}") {
+		t.Fatalf("expected raw stdout to be omitted from report: %s", body)
+	}
+}
+
 func TestReportWithVerification_Partial(t *testing.T) {
 	gh := &mockGHWriter{}
 	r := NewReporter(gh)
@@ -384,6 +403,28 @@ func TestReporterVerify_UsesRunWindow(t *testing.T) {
 	}
 }
 
+func TestReporterVerify_DoesNotFallbackToStdout(t *testing.T) {
+	r := NewReporter(&mockGHWriter{})
+	v := &mockVerifier{result: &VerificationResult{}}
+	r.SetVerifier(v)
+
+	result := &launcher.Result{
+		ExitCode: 0,
+		Stdout:   "{\"type\":\"turn.started\"}",
+		Duration: time.Second,
+	}
+
+	if _, err := r.Verify(context.Background(), "test/repo", 42, result); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if v.calls != 1 {
+		t.Fatalf("expected verifier call, got %d", v.calls)
+	}
+	if got := v.inputs[0].Output; got != "" {
+		t.Fatalf("output = %q, want empty string", got)
+	}
+}
+
 func TestReport_RetryOnRateLimit(t *testing.T) {
 	gh := &mockGHWriter{failN: 2}
 	r := NewReporter(gh)
@@ -394,9 +435,9 @@ func TestReport_RetryOnRateLimit(t *testing.T) {
 	rateLimitRetryDelays = []time.Duration{1 * time.Millisecond}
 	defer func() { rateLimitRetryDelays = saved }()
 	result := &launcher.Result{
-		ExitCode: 0,
-		Stdout:   "ok",
-		Duration: 1 * time.Second,
+		ExitCode:    0,
+		LastMessage: "ok",
+		Duration:    1 * time.Second,
 	}
 	err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-789", "worker-1", 0, 3, "", "")
 	if err != nil {
@@ -424,9 +465,9 @@ func TestReport_RateLimitPayloadRedactsToken(t *testing.T) {
 	defer func() { rateLimitRetryDelays = saved }()
 
 	result := &launcher.Result{
-		ExitCode: 0,
-		Stdout:   "ok",
-		Duration: 1 * time.Second,
+		ExitCode:    0,
+		LastMessage: "ok",
+		Duration:    1 * time.Second,
 	}
 	err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-redact", "worker-1", 0, 3, "", "")
 	if err != nil {
@@ -463,9 +504,9 @@ func TestReport_RetryCancelsWithContext(t *testing.T) {
 	}()
 
 	result := &launcher.Result{
-		ExitCode: 0,
-		Stdout:   "ok",
-		Duration: 1 * time.Second,
+		ExitCode:    0,
+		LastMessage: "ok",
+		Duration:    1 * time.Second,
 	}
 	err := r.Report(ctx, "test/repo", 42, "dev-agent", result, "sess-cancel", "worker-1", 0, 3, "", "")
 	if err == nil {
@@ -565,9 +606,9 @@ func TestReport_UnderLimit(t *testing.T) {
 
 	// Body under the limit should be posted verbatim.
 	result := &launcher.Result{
-		ExitCode: 0,
-		Stdout:   "short output",
-		Duration: time.Second,
+		ExitCode:    0,
+		LastMessage: "short output",
+		Duration:    time.Second,
 	}
 	if err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-1", "worker-1", 0, 3, "", ""); err != nil {
 		t.Fatalf("Report: %v", err)
@@ -591,9 +632,9 @@ func TestReport_OverflowWithoutWorkDir(t *testing.T) {
 
 	longOutput := strings.Repeat("a", 70000)
 	result := &launcher.Result{
-		ExitCode: 0,
-		Stdout:   longOutput,
-		Duration: time.Second,
+		ExitCode:    0,
+		LastMessage: longOutput,
+		Duration:    time.Second,
 	}
 
 	if err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-2", "worker-1", 0, 3, "", ""); err != nil {
@@ -683,9 +724,9 @@ func TestReport_OverflowWithWorkDir(t *testing.T) {
 
 	longOutput := strings.Repeat("b", 70000)
 	result := &launcher.Result{
-		ExitCode: 0,
-		Stdout:   longOutput,
-		Duration: time.Second,
+		ExitCode:    0,
+		LastMessage: longOutput,
+		Duration:    time.Second,
 	}
 
 	if err := r.Report(context.Background(), "owner/repo", 42, "dev-agent", result, "sess-3", "worker-1", 0, 3, "", tmpDir); err != nil {
@@ -771,9 +812,9 @@ func TestReport_OverflowWithUnsafeAgentName(t *testing.T) {
 	r := NewReporter(gh)
 
 	result := &launcher.Result{
-		ExitCode: 0,
-		Stdout:   strings.Repeat("unsafe", 12000),
-		Duration: time.Second,
+		ExitCode:    0,
+		LastMessage: strings.Repeat("unsafe", 12000),
+		Duration:    time.Second,
 	}
 
 	if err := r.Report(context.Background(), "owner/repo", 42, "review/agent", result, "sess-unsafe", "worker-1", 0, 3, "", tmpDir); err != nil {
@@ -807,9 +848,9 @@ func TestReport_OverflowWithWorkDirButNotGitRepo(t *testing.T) {
 
 	longOutput := strings.Repeat("c", 70000)
 	result := &launcher.Result{
-		ExitCode: 0,
-		Stdout:   longOutput,
-		Duration: time.Second,
+		ExitCode:    0,
+		LastMessage: longOutput,
+		Duration:    time.Second,
 	}
 
 	tmpDir := t.TempDir()
@@ -851,9 +892,9 @@ func TestReport_OverflowUsesByteCountForUTF8(t *testing.T) {
 	// the character count is below the byte guard.
 	longOutput := strings.Repeat("你", 25000)
 	result := &launcher.Result{
-		ExitCode: 0,
-		Stdout:   longOutput,
-		Duration: time.Second,
+		ExitCode:    0,
+		LastMessage: longOutput,
+		Duration:    time.Second,
 	}
 
 	if err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-utf8", "worker-1", 0, 3, "", ""); err != nil {

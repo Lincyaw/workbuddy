@@ -15,7 +15,7 @@ import (
 )
 
 func TestCodexEventMapperFixture(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "codex-exec-events.jsonl"))
+	data, err := os.ReadFile(filepath.Join("testdata", "codex-exec-events-v2.jsonl"))
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
@@ -30,21 +30,18 @@ func TestCodexEventMapperFixture(t *testing.T) {
 	if mapper.sessionRef.ID != "thread-abc" {
 		t.Fatalf("session ref = %+v", mapper.sessionRef)
 	}
-	if mapper.turnID != "task-123" {
+	if mapper.turnID != "turn-123" {
 		t.Fatalf("turn id = %q", mapper.turnID)
 	}
 
 	wantKinds := []launcherevents.EventKind{
 		launcherevents.KindTurnStarted,
 		launcherevents.KindAgentMessage,
-		launcherevents.KindAgentMessage,
-		launcherevents.KindReasoning,
 		launcherevents.KindCommandExec,
 		launcherevents.KindCommandOutput,
 		launcherevents.KindToolResult,
 		launcherevents.KindToolCall,
 		launcherevents.KindToolResult,
-		launcherevents.KindFileChange,
 		launcherevents.KindTokenUsage,
 		launcherevents.KindTaskComplete,
 	}
@@ -58,22 +55,17 @@ func TestCodexEventMapperFixture(t *testing.T) {
 	}
 
 	var usage launcherevents.TokenUsagePayload
-	if err := json.Unmarshal(got[10].Payload, &usage); err != nil {
+	if err := json.Unmarshal(got[7].Payload, &usage); err != nil {
 		t.Fatalf("usage payload: %v", err)
 	}
 	if usage.Total != 16 || usage.Cached != 2 {
 		t.Fatalf("unexpected usage: %+v", usage)
 	}
-
-	var change launcherevents.FileChangePayload
-	if err := json.Unmarshal(got[9].Payload, &change); err != nil {
-		t.Fatalf("file change payload: %v", err)
-	}
-	if change.Path != "file.txt" || change.ChangeKind != "modify" {
-		t.Fatalf("unexpected file change: %+v", change)
-	}
 	if mapper.turnCompleted == nil || mapper.turnCompleted.Status != "ok" {
 		t.Fatalf("pending turn completion = %+v", mapper.turnCompleted)
+	}
+	if mapper.lastMessage != "PONG" {
+		t.Fatalf("last message = %q", mapper.lastMessage)
 	}
 }
 
@@ -133,7 +125,9 @@ func TestLaunch_CodexRuntimeUsesPrompt(t *testing.T) {
 		t.Fatalf("read session path: %v", err)
 	}
 	if !strings.Contains(string(data), `"type":"task_complete"`) {
-		t.Fatalf("expected codex jsonl artifact, got: %s", string(data))
+		if !strings.Contains(string(data), `"type":"turn.completed"`) {
+			t.Fatalf("expected codex jsonl artifact, got: %s", string(data))
+		}
 	}
 }
 
@@ -204,6 +198,31 @@ func TestCodexSessionRunEmitsEventsAndArtifact(t *testing.T) {
 	lastMsgPath := filepath.Join(filepath.Dir(result.SessionPath), "codex-last-message.txt")
 	if _, err := os.Stat(lastMsgPath); err != nil {
 		t.Fatalf("expected last message file: %v", err)
+	}
+}
+
+func TestLaunch_CodexRuntimeRecoversLastMessageFromV2Stream(t *testing.T) {
+	restore := installFakeCodexNoLastMessage(t)
+	defer restore()
+
+	launcher := NewLauncher()
+	task := newTestTask(t)
+	agent := &config.AgentConfig{
+		Name:    "codex-agent",
+		Runtime: config.RuntimeCodexExec,
+		Prompt:  "Reply with exactly PONG",
+		Policy: config.PolicyConfig{
+			Sandbox:  "read-only",
+			Approval: "never",
+		},
+		Timeout: 10 * time.Second,
+	}
+	result, err := launcher.Launch(context.Background(), agent, task)
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	if result.LastMessage != "PONG" {
+		t.Fatalf("last message = %q", result.LastMessage)
 	}
 }
 
@@ -502,7 +521,7 @@ func installFakeCodex(t *testing.T) func() {
 	t.Helper()
 
 	fixturePath := filepath.Join(t.TempDir(), "codex-exec-events.jsonl")
-	data, err := os.ReadFile(filepath.Join("testdata", "codex-exec-events.jsonl"))
+	data, err := os.ReadFile(filepath.Join("testdata", "codex-exec-events-v2.jsonl"))
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
@@ -544,11 +563,40 @@ func installFakeCodex(t *testing.T) func() {
 	}
 }
 
+func installFakeCodexNoLastMessage(t *testing.T) func() {
+	t.Helper()
+
+	fixturePath := filepath.Join(t.TempDir(), "codex-exec-events.jsonl")
+	data, err := os.ReadFile(filepath.Join("testdata", "codex-exec-events-v2.jsonl"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	if err := os.WriteFile(fixturePath, data, 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	binDir := t.TempDir()
+	scriptPath := filepath.Join(binDir, "codex")
+	script := "#!/bin/sh\n" +
+		"cat \"" + fixturePath + "\"\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	if err := os.Setenv("PATH", binDir+string(os.PathListSeparator)+oldPath); err != nil {
+		t.Fatalf("set PATH: %v", err)
+	}
+	return func() {
+		_ = os.Setenv("PATH", oldPath)
+	}
+}
+
 func installFakeCodexLastMessage(t *testing.T, lastMessage string) func() {
 	t.Helper()
 
 	fixturePath := filepath.Join(t.TempDir(), "codex-exec-events.jsonl")
-	data, err := os.ReadFile(filepath.Join("testdata", "codex-exec-events.jsonl"))
+	data, err := os.ReadFile(filepath.Join("testdata", "codex-exec-events-v2.jsonl"))
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
