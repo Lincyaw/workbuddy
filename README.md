@@ -27,6 +27,17 @@ claude plugin marketplace add https://github.com/Lincyaw/workbuddy
 claude plugin install workbuddy
 ```
 
+### Codex Plugin
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Lincyaw/workbuddy/main/install-codex-plugin.sh | bash
+```
+
+This installs the repo-packaged Codex plugin into:
+
+- `~/plugins/workbuddy`
+- `~/.agents/plugins/marketplace.json`
+
 ## Skills
 
 After installing the plugin, the following skills are available in Claude Code:

@@ -35,14 +35,20 @@ CI enforces that these generated files stay in sync with
 If you want to install this plugin outside the repository, follow the
 home-local convention from the `plugin-creator` skill:
 
-1. Generate the bundle from the repo root:
+```bash
+curl -fsSL https://raw.githubusercontent.com/Lincyaw/workbuddy/main/install-codex-plugin.sh | bash
+```
 
-   ```bash
-   python3 scripts/sync_codex_plugin.py
-   ```
+The installer downloads the repository archive, copies `plugins/workbuddy`
+into `~/plugins/workbuddy`, and merges the `workbuddy` entry into
+`~/.agents/plugins/marketplace.json` without replacing unrelated local plugin
+entries.
 
-2. Copy the plugin bundle to `~/plugins/workbuddy`.
-3. Copy the marketplace file to `~/.agents/plugins/marketplace.json`.
+If you are iterating locally from a clone instead, regenerate the bundle first:
+
+```bash
+python3 scripts/sync_codex_plugin.py
+```
 
 The home-local marketplace convention is:
 
@@ -55,8 +61,10 @@ Example:
 ```bash
 mkdir -p ~/.agents/plugins ~/plugins
 cp -R plugins/workbuddy ~/plugins/workbuddy
-cp .agents/plugins/marketplace.json ~/.agents/plugins/marketplace.json
 ```
+
+When copying manually, merge the `workbuddy` entry into your existing
+`~/.agents/plugins/marketplace.json` instead of overwriting the file.
 
 If your local Codex runtime needs additional skill registration beyond the
 packaged plugin layout, treat that as runtime-specific setup rather than part
