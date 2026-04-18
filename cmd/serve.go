@@ -1024,7 +1024,6 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 		if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
 			log.Printf("[worker] failed to update task status: %v", err)
 		}
-		publishTaskCompletion(deps.taskHub, task, store.TaskStatusFailed, 1, startedAt, time.Now().UTC())
 		infraResult := &launcher.Result{
 			ExitCode: -1,
 			Stderr:   err.Error(),
@@ -1033,6 +1032,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 				launcher.MetaInfraFailureReason: "launcher Start() failed: " + err.Error(),
 			},
 		}
+		publishTaskCompletion(deps.taskHub, task, store.TaskStatusFailed, infraResult.ExitCode, startedAt, time.Now().UTC())
 		logInfraFailureEvent(deps.store, task, infraResult, "launcher_start_error")
 		reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(agentShutdownWait))
 		if reportErr := deps.reporter.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, infraResult,
@@ -1136,7 +1136,6 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 			if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
 				log.Printf("[worker] failed to update task status: %v", err)
 			}
-			publishTaskCompletion(deps.taskHub, task, store.TaskStatusFailed, 1, startedAt, time.Now().UTC())
 			infraResult := &launcher.Result{
 				ExitCode: -1,
 				Stderr:   runErr.Error(),
@@ -1145,6 +1144,7 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 					launcher.MetaInfraFailureReason: "session.Run returned nil result: " + runErr.Error(),
 				},
 			}
+			publishTaskCompletion(deps.taskHub, task, store.TaskStatusFailed, infraResult.ExitCode, startedAt, time.Now().UTC())
 			logInfraFailureEvent(deps.store, task, infraResult, "session_run_nil_result")
 			reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(agentShutdownWait))
 			if reportErr := deps.reporter.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, infraResult,
