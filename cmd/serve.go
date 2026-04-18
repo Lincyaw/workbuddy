@@ -411,8 +411,8 @@ func parseServeFlags(cmd *cobra.Command) (*serveOpts, error) {
 	coordinatorAPI, _ := cmd.Flags().GetBool("coordinator-api")
 	trustedAuthors, _ := cmd.Flags().GetString("trusted-authors")
 	trustedAuthorsSet := cmd.Flags().Changed("trusted-authors")
-	if maxParallelTasks <= 0 {
-		return nil, fmt.Errorf("serve: --max-parallel-tasks must be > 0")
+	if maxParallelTasks < 0 {
+		return nil, fmt.Errorf("serve: --max-parallel-tasks must be >= 0")
 	}
 
 	return &serveOpts{
