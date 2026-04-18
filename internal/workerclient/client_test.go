@@ -113,3 +113,41 @@ func TestClientRetriesTransientFailures(t *testing.T) {
 		t.Fatalf("calls = %d, want 2", got)
 	}
 }
+
+func TestClientUnregister(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Method != http.MethodDelete {
+			t.Fatalf("method = %s, want DELETE", r.Method)
+		}
+		if r.URL.Path != "/api/v1/workers/worker-1" {
+			t.Fatalf("path = %s, want /api/v1/workers/worker-1", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"unregistered"}`))
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "", srv.Client())
+	if err := client.Unregister(context.Background(), "worker-1"); err != nil {
+		t.Fatalf("Unregister: %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("calls = %d, want 1", got)
+	}
+}
+
+func TestClientUnregisterNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"worker not found"}`))
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "", srv.Client())
+	err := client.Unregister(context.Background(), "missing-worker")
+	if err == nil {
+		t.Fatal("expected error for 404")
+	}
+}

@@ -1673,3 +1673,36 @@ requirements:
       - internal/poller/poller_test.go
       - internal/security/security_test.go
     deps: [REQ-001, REQ-017, REQ-027]
+
+  - id: REQ-052
+    title: Worker unregister from coordinator registry
+    description: >
+      Allow operators to explicitly and permanently remove a worker record
+      from the coordinator registry. The feature must expose an authenticated
+      API endpoint, registry/store delete operations, a CLI command, and
+      define clear behavior when the worker has an in-flight task.
+    priority: P0
+    version: v0.2.0
+    status: tested
+    acceptance_criteria:
+      - "AC-052-1: Coordinator exposes authenticated DELETE /api/v1/workers/{worker_id}"
+      - "AC-052-2: A registered worker can be removed from the registry by worker ID"
+      - "AC-052-3: After successful unregister, the worker no longer appears in registry queries / worker lookup paths"
+      - "AC-052-4: Polling or heartbeat from an unregistered worker fails with a clear error"
+      - "AC-052-5: Unregistering a non-existent worker returns a clear not-found response"
+      - "AC-052-6: Unregistering a worker with a running task returns a conflict error (conservative policy)"
+      - "AC-052-7: CLI provides workbuddy worker unregister --coordinator <url> --token <token> --id <worker-id>"
+      - "AC-052-8: Relevant docs describe registration vs unregister behavior"
+    code:
+      - cmd/coordinator.go
+      - cmd/worker.go
+      - internal/registry/registry.go
+      - internal/store/store.go
+      - internal/workerclient/client.go
+    tests:
+      - cmd/coordinator_test.go
+      - cmd/worker_test.go
+      - internal/registry/registry_test.go
+      - internal/store/store_test.go
+      - internal/workerclient/client_test.go
+    deps: [REQ-025, REQ-026]

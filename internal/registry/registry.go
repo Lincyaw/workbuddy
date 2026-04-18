@@ -3,12 +3,20 @@ package registry
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/store"
+)
+
+var (
+	// ErrWorkerNotFound indicates the worker does not exist in the registry.
+	ErrWorkerNotFound = errors.New("worker not found")
+	// ErrWorkerHasRunningTask indicates the worker owns a running task and cannot be unregistered.
+	ErrWorkerHasRunningTask = errors.New("worker has a running task")
 )
 
 // Registry manages worker registration, heartbeat, and online/offline detection.
@@ -62,7 +70,13 @@ func (r *Registry) RegisterWithRepos(id, repo string, repos []string, roles []st
 
 // Heartbeat updates the last_heartbeat timestamp for a worker.
 func (r *Registry) Heartbeat(id string) error {
-	return r.store.UpdateWorkerHeartbeat(id)
+	if err := r.store.UpdateWorkerHeartbeat(id); err != nil {
+		if errors.Is(err, store.ErrWorkerNotFound) {
+			return ErrWorkerNotFound
+		}
+		return err
+	}
+	return nil
 }
 
 // MarkStaleOffline finds workers that are online but whose last_heartbeat
@@ -129,6 +143,26 @@ func (r *Registry) FindWorkers(repo, role string) ([]store.WorkerRecord, error) 
 		}
 	}
 	return matched, nil
+}
+
+// Unregister removes a worker from the registry.
+// It refuses to unregister a worker that currently owns a running task (conservative policy).
+func (r *Registry) Unregister(workerID string) error {
+	hasTask, err := r.store.WorkerHasRunningTask(workerID)
+	if err != nil {
+		return fmt.Errorf("registry: check worker task: %w", err)
+	}
+	if hasTask {
+		return ErrWorkerHasRunningTask
+	}
+	deleted, err := r.store.DeleteWorker(workerID)
+	if err != nil {
+		return fmt.Errorf("registry: unregister worker: %w", err)
+	}
+	if !deleted {
+		return ErrWorkerNotFound
+	}
+	return nil
 }
 
 // RegisterEmbedded registers an embedded (in-process) worker for v0.1.0.

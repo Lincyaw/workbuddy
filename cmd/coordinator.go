@@ -493,6 +493,7 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	mux.Handle("/api/v1/repos/", api.wrapAuth(http.HandlerFunc(api.handleRepoByPath)))
 	mux.Handle("/api/v1/repos", api.wrapAuth(http.HandlerFunc(api.handleListRepos)))
 	mux.Handle("/api/v1/workers/register", api.wrapAuth(http.HandlerFunc(api.handleRegisterWorker)))
+	mux.Handle("/api/v1/workers/", api.wrapAuth(http.HandlerFunc(api.handleWorkerByPath)))
 	mux.Handle("/api/v1/config/reload", api.wrapAuth(http.HandlerFunc(api.handleConfigReload)))
 	mux.Handle("/api/v1/tasks/poll", api.wrapAuth(http.HandlerFunc(api.handlePollTask)))
 	mux.Handle("/api/v1/tasks/", api.wrapAuth(http.HandlerFunc(api.handleTaskAction)))
@@ -687,6 +688,32 @@ func (s *fullCoordinatorServer) handleRepoByPath(w http.ResponseWriter, r *http.
 			return
 		}
 		coordWriteJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	default:
+		coordWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+	}
+}
+
+func (s *fullCoordinatorServer) handleWorkerByPath(w http.ResponseWriter, r *http.Request) {
+	workerID := strings.TrimPrefix(r.URL.Path, "/api/v1/workers/")
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodDelete:
+		if err := s.registry.Unregister(workerID); err != nil {
+			switch {
+			case errors.Is(err, registry.ErrWorkerNotFound):
+				coordWriteJSON(w, http.StatusNotFound, map[string]string{"error": "worker not found"})
+			case errors.Is(err, registry.ErrWorkerHasRunningTask):
+				coordWriteJSON(w, http.StatusConflict, map[string]string{"error": "worker has a running task"})
+			default:
+				coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			}
+			return
+		}
+		coordWriteJSON(w, http.StatusOK, map[string]string{"status": "unregistered"})
 	default:
 		coordWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 	}
@@ -894,6 +921,10 @@ func (s *fullCoordinatorServer) handleTaskHeartbeat(w http.ResponseWriter, r *ht
 		log.Printf("[coordinator] task heartbeat DB update failed for %s: %v", taskID, err)
 	}
 	if err := s.registry.Heartbeat(req.WorkerID); err != nil {
+		if errors.Is(err, registry.ErrWorkerNotFound) {
+			coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown worker"})
+			return
+		}
 		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}

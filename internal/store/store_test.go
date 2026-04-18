@@ -111,8 +111,14 @@ func TestCreateAndReadWrite(t *testing.T) {
 	if err := s.UpdateWorkerHeartbeat("w-1"); err != nil {
 		t.Fatalf("UpdateWorkerHeartbeat: %v", err)
 	}
+	if err := s.UpdateWorkerHeartbeat("missing-worker"); !errors.Is(err, ErrWorkerNotFound) {
+		t.Fatalf("UpdateWorkerHeartbeat missing worker = %v, want ErrWorkerNotFound", err)
+	}
 	if err := s.UpdateWorkerStatus("w-1", "offline"); err != nil {
 		t.Fatalf("UpdateWorkerStatus: %v", err)
+	}
+	if err := s.UpdateWorkerStatus("missing-worker", "offline"); !errors.Is(err, ErrWorkerNotFound) {
+		t.Fatalf("UpdateWorkerStatus missing worker = %v, want ErrWorkerNotFound", err)
 	}
 	workers, _ = s.QueryWorkers("")
 	if workers[0].Status != "offline" {
@@ -718,5 +724,73 @@ func TestWorkerTokenLifecycle(t *testing.T) {
 	}
 	if listed[0].RevokedAt == nil {
 		t.Fatalf("expected revoked timestamp after revoke: %+v", listed[0])
+	}
+}
+
+func TestDeleteWorker(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.InsertWorker(WorkerRecord{ID: "w-del", Repo: "org/repo", Roles: `["dev"]`, Hostname: "host1", Status: "online"}); err != nil {
+		t.Fatalf("InsertWorker: %v", err)
+	}
+
+	deleted, err := s.DeleteWorker("w-del")
+	if err != nil {
+		t.Fatalf("DeleteWorker: %v", err)
+	}
+	if !deleted {
+		t.Fatal("expected worker to be deleted")
+	}
+
+	workers, err := s.QueryWorkers("")
+	if err != nil {
+		t.Fatalf("QueryWorkers: %v", err)
+	}
+	if len(workers) != 0 {
+		t.Fatalf("expected 0 workers after delete, got %d", len(workers))
+	}
+
+	// Deleting a non-existent worker should return false without error.
+	deleted, err = s.DeleteWorker("w-missing")
+	if err != nil {
+		t.Fatalf("DeleteWorker non-existent: %v", err)
+	}
+	if deleted {
+		t.Fatal("expected deleted=false for missing worker")
+	}
+}
+
+func TestWorkerHasRunningTask(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.InsertWorker(WorkerRecord{ID: "w-run", Repo: "org/repo", Roles: `["dev"]`, Hostname: "host1", Status: "online"}); err != nil {
+		t.Fatalf("InsertWorker: %v", err)
+	}
+
+	hasTask, err := s.WorkerHasRunningTask("w-run")
+	if err != nil {
+		t.Fatalf("WorkerHasRunningTask: %v", err)
+	}
+	if hasTask {
+		t.Fatal("expected no running task")
+	}
+
+	if err := s.InsertTask(TaskRecord{ID: "task-run", Repo: "org/repo", IssueNum: 1, AgentName: "dev", Status: TaskStatusPending}); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+	claimed, err := s.ClaimTask("task-run", "w-run")
+	if err != nil {
+		t.Fatalf("ClaimTask: %v", err)
+	}
+	if !claimed {
+		t.Fatal("expected claim to succeed")
+	}
+
+	hasTask, err = s.WorkerHasRunningTask("w-run")
+	if err != nil {
+		t.Fatalf("WorkerHasRunningTask after claim: %v", err)
+	}
+	if !hasTask {
+		t.Fatal("expected running task to be detected")
 	}
 }

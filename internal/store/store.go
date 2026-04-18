@@ -48,6 +48,7 @@ var (
 	ErrTaskClaimConflict      = errors.New("task claim conflict")
 	ErrTaskAlreadyCompleted   = errors.New("task already completed")
 	ErrTaskNotClaimedByWorker = errors.New("task not claimed by worker")
+	ErrWorkerNotFound         = errors.New("worker not found")
 )
 
 // Store provides typed CRUD access to the workbuddy SQLite database.
@@ -933,7 +934,7 @@ func (s *Store) UpdateWorkerHeartbeat(workerID string) error {
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("store: update worker heartbeat: worker %q not found", workerID)
+		return fmt.Errorf("store: update worker heartbeat: %w", ErrWorkerNotFound)
 	}
 	return nil
 }
@@ -949,9 +950,33 @@ func (s *Store) UpdateWorkerStatus(workerID, status string) error {
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("store: update worker status: worker %q not found", workerID)
+		return fmt.Errorf("store: update worker status: %w", ErrWorkerNotFound)
 	}
 	return nil
+}
+
+// DeleteWorker removes a worker record from the registry.
+// Returns true if a row was deleted, false if the worker did not exist.
+func (s *Store) DeleteWorker(workerID string) (bool, error) {
+	res, err := s.db.Exec(`DELETE FROM workers WHERE id = ?`, workerID)
+	if err != nil {
+		return false, fmt.Errorf("store: delete worker: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// WorkerHasRunningTask returns true if the worker currently owns a running task.
+func (s *Store) WorkerHasRunningTask(workerID string) (bool, error) {
+	var count int
+	err := s.db.QueryRow(
+		`SELECT COUNT(1) FROM task_queue WHERE worker_id = ? AND status = ?`,
+		workerID, TaskStatusRunning,
+	).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("store: check worker running task: %w", err)
+	}
+	return count > 0, nil
 }
 
 // ---------------------------------------------------------------------------
