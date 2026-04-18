@@ -201,7 +201,9 @@ func (s *processSession) runClaudeStream(ctx context.Context, timeout time.Durat
 
 	cmd, err := s.buildCommand(execCtx)
 	if err != nil {
-		return nil, err
+		infra := &Result{ExitCode: -1, Meta: map[string]string{}}
+		markInfraFailure(infra, "build command failed (template render)")
+		return infra, err
 	}
 	if s.task.WorkDir != "" {
 		cmd.Dir = s.task.WorkDir
@@ -213,14 +215,24 @@ func (s *processSession) runClaudeStream(ctx context.Context, timeout time.Durat
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("launcher: %s: stdout pipe: %w", s.runtimeName, err)
+		infra := &Result{ExitCode: -1, Meta: map[string]string{}}
+		markInfraFailure(infra, "stdout pipe setup failed")
+		return infra, fmt.Errorf("launcher: %s: stdout pipe: %w", s.runtimeName, err)
 	}
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		return nil, fmt.Errorf("launcher: %s: stderr pipe: %w", s.runtimeName, err)
+		infra := &Result{ExitCode: -1, Meta: map[string]string{}}
+		markInfraFailure(infra, "stderr pipe setup failed")
+		return infra, fmt.Errorf("launcher: %s: stderr pipe: %w", s.runtimeName, err)
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("launcher: %s: start: %w", s.runtimeName, err)
+		infra := &Result{ExitCode: -1, Meta: map[string]string{}}
+		reason := "claude process start failed"
+		if isExecStartError(err) {
+			reason = "claude binary not runnable (exec start error)"
+		}
+		markInfraFailure(infra, reason)
+		return infra, fmt.Errorf("launcher: %s: start: %w", s.runtimeName, err)
 	}
 
 	start := time.Now()
@@ -275,7 +287,15 @@ func (s *processSession) runClaudeStream(ctx context.Context, timeout time.Durat
 	duration := time.Since(start)
 
 	if stdoutErr != nil {
-		return nil, fmt.Errorf("launcher: %s: read stdout: %w", s.runtimeName, stdoutErr)
+		infra := &Result{
+			ExitCode: -1,
+			Stdout:   stdout.String(),
+			Stderr:   stderr.String(),
+			Duration: duration,
+			Meta:     map[string]string{},
+		}
+		markInfraFailure(infra, "stdout stream read error")
+		return infra, fmt.Errorf("launcher: %s: read stdout: %w", s.runtimeName, stdoutErr)
 	}
 
 	if execCtx.Err() == context.DeadlineExceeded {
@@ -317,7 +337,18 @@ func (s *processSession) runClaudeStream(ctx context.Context, timeout time.Durat
 	if runErr != nil {
 		exitErr, ok := runErr.(*exec.ExitError)
 		if !ok {
-			return nil, fmt.Errorf("launcher: %s: wait: %w", s.runtimeName, runErr)
+			infra := &Result{
+				ExitCode:    -1,
+				Stdout:      stdout.String(),
+				Stderr:      stderr.String(),
+				Duration:    duration,
+				LastMessage: mapper.lastMessage,
+				TokenUsage:  mapper.tokenUsage,
+				SessionRef:  mapper.sessionRef,
+				Meta:        map[string]string{},
+			}
+			markInfraFailure(infra, "claude wait error (non-exit)")
+			return infra, fmt.Errorf("launcher: %s: wait: %w", s.runtimeName, runErr)
 		}
 		exitCode = exitErr.ExitCode()
 	}
@@ -348,7 +379,7 @@ func (s *processSession) runClaudeStream(ctx context.Context, timeout time.Durat
 		}
 	}
 
-	return &Result{
+	result := &Result{
 		ExitCode:    exitCode,
 		Stdout:      stdout.String(),
 		Stderr:      stderr.String(),
@@ -357,7 +388,18 @@ func (s *processSession) runClaudeStream(ctx context.Context, timeout time.Durat
 		LastMessage: mapper.lastMessage,
 		TokenUsage:  mapper.tokenUsage,
 		SessionRef:  mapper.sessionRef,
-	}, nil
+	}
+	// Claude exited non-zero but we never observed an agent turn completion
+	// and never saw any assistant message. If the stderr looks like a Rust
+	// plugin-cache panic or similar runtime abort, this is an infra failure,
+	// not an agent verdict. We gate on (!turnCompleteSaw AND empty
+	// lastMessage) to avoid mis-classifying an agent that emitted tool calls
+	// but crashed partway through; in that case we still have agent output
+	// to attribute the failure to.
+	if exitCode != 0 && !mapper.turnCompleteSaw && mapper.lastMessage == "" && stderrLooksLikeRuntimePanic(stderr.String()) {
+		markInfraFailure(result, "claude runtime panic/abort before agent output")
+	}
+	return result, nil
 }
 
 func claudeTokenUsage(raw map[string]json.RawMessage) *launcherevents.TokenUsagePayload {

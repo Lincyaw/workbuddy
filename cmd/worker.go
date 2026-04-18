@@ -491,10 +491,16 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 	}
 	stopHeartbeat()
 	if result == nil {
+		// session.Run returned nil — we have no verdict to attribute. Classify
+		// as infra failure so the coordinator does not mark the agent as
+		// having FAILED. See issue #131 / AC-3.
 		result = &launcher.Result{
-			ExitCode: 1,
+			ExitCode: -1,
 			Stderr:   runErrString(runErr),
-			Meta:     map[string]string{},
+			Meta: map[string]string{
+				launcher.MetaInfraFailure:       "true",
+				launcher.MetaInfraFailureReason: "session.Run returned nil result",
+			},
 		}
 	}
 	if result.Meta == nil {
@@ -549,12 +555,21 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 		status = store.TaskStatusFailed
 	}
 
+	// Detect launcher-layer infra failure so the coordinator does not treat
+	// this as an agent FAIL verdict. See issue #131 / AC-3.
+	infraFailure := launcher.IsInfraFailure(result)
+	infraReason := ""
+	if infraFailure && result.Meta != nil {
+		infraReason = result.Meta[launcher.MetaInfraFailureReason]
+	}
 	submitCtx, cancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(shutdownTimeout))
 	defer cancel()
 	if err := client.SubmitResult(submitCtx, task.TaskID, workerclient.ResultRequest{
 		WorkerID:      workerID,
 		Status:        status,
 		CurrentLabels: currentLabels,
+		InfraFailure:  infraFailure,
+		InfraReason:   infraReason,
 	}); err != nil {
 		log.Printf("[worker] submit result failed for task %s: %v", task.TaskID, err)
 		return nil

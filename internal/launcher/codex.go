@@ -114,11 +114,15 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("launcher: codex-exec: stdout pipe: %w", err)
+		infra := &Result{ExitCode: -1, Meta: map[string]string{}}
+		markInfraFailure(infra, "stdout pipe setup failed")
+		return infra, fmt.Errorf("launcher: codex-exec: stdout pipe: %w", err)
 	}
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		return nil, fmt.Errorf("launcher: codex-exec: stderr pipe: %w", err)
+		infra := &Result{ExitCode: -1, Meta: map[string]string{}}
+		markInfraFailure(infra, "stderr pipe setup failed")
+		return infra, fmt.Errorf("launcher: codex-exec: stderr pipe: %w", err)
 	}
 
 	var stdoutFile *os.File
@@ -142,7 +146,13 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 	log.Printf("[codex-debug] args=%d env=%d prompt=%d", argSize, envSize, len(s.prompt))
 
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("launcher: codex-exec: start: %w", err)
+		infra := &Result{ExitCode: -1, Meta: map[string]string{}}
+		reason := "codex process start failed"
+		if isExecStartError(err) {
+			reason = "codex binary not runnable (exec start error)"
+		}
+		markInfraFailure(infra, reason)
+		return infra, fmt.Errorf("launcher: codex-exec: start: %w", err)
 	}
 	start := time.Now()
 
@@ -234,7 +244,22 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 	// The stdout pipe may be closed when the child process exits; that is the
 	// expected termination for the scanner, not a real read error.
 	if scanErr != nil && !errors.Is(scanErr, os.ErrClosed) {
-		return nil, fmt.Errorf("launcher: codex-exec: read stdout: %w", scanErr)
+		infra := &Result{
+			ExitCode:    -1,
+			Stdout:      stdoutBuf.String(),
+			Stderr:      stderrBuf.String(),
+			Duration:    duration,
+			SessionPath: s.stdoutPath,
+			SessionRef:  mapper.sessionRef,
+			TokenUsage:  mapper.tokenUsage,
+			Meta:        map[string]string{},
+		}
+		reason := "codex stdout scanner error"
+		if isScannerBufferOverflow(scanErr) {
+			reason = "codex stdout scanner buffer overflow (bufio.ErrTooLong)"
+		}
+		markInfraFailure(infra, reason)
+		return infra, fmt.Errorf("launcher: codex-exec: read stdout: %w", scanErr)
 	}
 
 	if execCtx.Err() == context.DeadlineExceeded {
@@ -276,7 +301,18 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 	if runErr != nil {
 		exitErr, ok := runErr.(*exec.ExitError)
 		if !ok {
-			return nil, fmt.Errorf("launcher: codex-exec: wait: %w", runErr)
+			infra := &Result{
+				ExitCode:    -1,
+				Stdout:      stdoutBuf.String(),
+				Stderr:      stderrBuf.String(),
+				Duration:    duration,
+				SessionPath: s.stdoutPath,
+				SessionRef:  mapper.sessionRef,
+				TokenUsage:  mapper.tokenUsage,
+				Meta:        map[string]string{},
+			}
+			markInfraFailure(infra, "codex wait error (non-exit)")
+			return infra, fmt.Errorf("launcher: codex-exec: wait: %w", runErr)
 		}
 		exitCode = exitErr.ExitCode()
 	}
@@ -291,6 +327,15 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 		LastMessage: lastMessage,
 		SessionRef:  mapper.sessionRef,
 		TokenUsage:  mapper.tokenUsage,
+	}
+	// Codex exited non-zero without observing task_complete and without an
+	// agent last-message. If stderr looks like a Rust plugin-cache panic or
+	// similar runtime abort, mark this as an infra failure so the reporter
+	// does not attribute a FAIL verdict to the agent. We gate on the
+	// absence of both task_complete and last-message to avoid mis-classifying
+	// a codex run that did speak to the LLM before crashing.
+	if exitCode != 0 && !mapper.taskCompleteObserved() && strings.TrimSpace(lastMessage) == "" && stderrLooksLikeRuntimePanic(stderrBuf.String()) {
+		markInfraFailure(result, "codex runtime panic/abort before agent output")
 	}
 	s.cachedResult = result
 

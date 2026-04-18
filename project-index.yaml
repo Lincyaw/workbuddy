@@ -1798,6 +1798,51 @@ requirements:
       - internal/store/store_test.go
     deps: [REQ-001, REQ-017, REQ-030]
 
+  - id: REQ-056
+    title: Distinguish launcher infra failures from agent FAIL verdicts
+    description: >
+      The 107-comment runaway loop on issue #120 was driven by the reporter
+      treating launcher-layer crashes (fork/exec failures, missing env vars,
+      Rust plugin-cache panics, Go bufio scanner buffer-too-long conditions,
+      15-minute codex timeouts) as agent-decided FAIL verdicts. PR #130
+      capped these at MaxConsecutiveAgentFailures back-to-back failures, but
+      the report comments still misled operators — they read like "the agent
+      disagreed with itself," not "the worker is misconfigured." This
+      requirement splits the two concepts at the launcher seam: runtimes tag
+      pre-LLM failures with Result.Meta[infra_failure]="true"; the reporter
+      renders a distinct "Infra Error" header with an explicit "not an agent
+      verdict" disclaimer; and the worker paths post the report but do NOT
+      call StateMachine.MarkAgentCompleted (which would induce a verdict
+      transition). The store still records a failed task so REQ-055's
+      dispatch cap continues to bound retries.
+    priority: P0
+    version: v0.2.0
+    status: tested
+    acceptance_criteria:
+      - "AC-056-1: Runtime detection sets Result.Meta[infra_failure]=true when the process cannot be started (exec.Error pre-LLM), a Rust plugin panic fires before any agent output, or the Go scanner hits a buffer-too-long condition; applies to both Claude and Codex runtimes"
+      - "AC-056-2: Reporter renders a distinct 'Infra Error' header (not 'Failure') for infra-failure results; body surfaces the launcher reason and explicitly states this was not an agent verdict"
+      - "AC-056-3: In cmd/serve.go and cmd/worker.go an infra-failure still posts a report comment but does NOT call StateMachine.MarkAgentCompleted with a failure signal; the #130 failure-cap bounds retries"
+      - "AC-056-4: A dedicated eventlog entry (eventlog.TypeInfraFailure) is emitted for every infra-failure run"
+      - "AC-056-5: Unit tests cover pre-exec launcher error producing Meta[infra_failure] and an 'Infra Error' rendered comment; genuine agent exit!=0 NOT producing Meta[infra_failure] and still rendering as 'Failure'; worker path infra-failure does not call MarkAgentCompleted's fail path"
+    code:
+      - internal/launcher/infra_failure.go
+      - internal/launcher/process.go
+      - internal/launcher/claude_stream.go
+      - internal/launcher/codex.go
+      - internal/reporter/format.go
+      - internal/reporter/reporter.go
+      - internal/eventlog/eventlog.go
+      - internal/workerclient/client.go
+      - cmd/coordinator.go
+      - cmd/serve.go
+      - cmd/worker.go
+    tests:
+      - internal/launcher/infra_failure_test.go
+      - internal/reporter/reporter_test.go
+      - cmd/serve_infra_failure_test.go
+      - cmd/coordinator_infra_failure_test.go
+    deps: [REQ-055]
+
   - id: REQ-057
     title: Per-issue worker claim with TTL to prevent worker races
     description: >

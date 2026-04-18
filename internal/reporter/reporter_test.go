@@ -137,6 +137,119 @@ func TestReport_Failure(t *testing.T) {
 	if !strings.Contains(body, "Failure") && !strings.Contains(body, "failure") {
 		t.Error("comment should indicate failure")
 	}
+	// Backwards compatibility (issue #131 / AC-5): genuine agent FAIL
+	// verdicts must NOT be rendered as "Infra Error" even when stderr is
+	// populated. The Infra Error header is reserved for launcher-layer
+	// failures that set Meta[infra_failure] = "true".
+	if strings.Contains(body, "Infra Error") {
+		t.Errorf("genuine failure rendered as Infra Error, body=%s", body)
+	}
+}
+
+// TestReport_InfraFailureRendersDistinctHeader covers issue #131 / AC-2:
+// when the launcher marks Meta[infra_failure] = "true", the reporter
+// must render a distinct "Infra Error" header and explicitly disclaim
+// the agent-verdict interpretation in the body.
+func TestReport_InfraFailureRendersDistinctHeader(t *testing.T) {
+	gh := &mockGHWriter{}
+	r := NewReporter(gh)
+
+	result := &launcher.Result{
+		ExitCode: -1,
+		Stderr:   "codex: thread main panicked at plugin-cache",
+		Duration: 500 * time.Millisecond,
+		Meta: map[string]string{
+			launcher.MetaInfraFailure:       "true",
+			launcher.MetaInfraFailureReason: "codex runtime panic/abort before agent output",
+		},
+	}
+
+	if err := r.Report(context.Background(), "test/repo", 99, "dev-agent", result, "sess-infra", "worker-1", 0, 3, "", ""); err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if len(gh.comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(gh.comments))
+	}
+	body := gh.comments[0]
+
+	// Distinct header: "Infra Error: dev-agent", NOT "Agent Report: dev-agent".
+	if !strings.Contains(body, "## Infra Error: dev-agent") {
+		t.Errorf("expected 'Infra Error: dev-agent' H2, got:\n%s", body)
+	}
+	if strings.Contains(body, "## Agent Report: dev-agent") {
+		t.Errorf("infra-error report must NOT use the Agent Report header, got:\n%s", body)
+	}
+
+	// Status badge: "Infra Error (launcher-layer, not an agent verdict)".
+	if !strings.Contains(body, "Infra Error (launcher-layer, not an agent verdict)") {
+		t.Errorf("expected infra-error badge, got:\n%s", body)
+	}
+
+	// Disclaimer body: explicitly calls out that this is NOT an agent verdict.
+	if !strings.Contains(body, "not an agent verdict") {
+		t.Errorf("expected explicit 'not an agent verdict' disclaimer, got:\n%s", body)
+	}
+
+	// Launcher reason must appear so operators can triage quickly.
+	if !strings.Contains(body, "codex runtime panic") {
+		t.Errorf("expected launcher reason in body, got:\n%s", body)
+	}
+
+	// The generic "Failure" word should NOT replace the Infra Error label.
+	// (The stderr excerpt may legitimately contain the word "failure", so
+	// we only guard the top-line status rendering.)
+	if strings.Contains(body, "Status**: :x: Failure") {
+		t.Errorf("infra-error body must not render the plain Failure badge, got:\n%s", body)
+	}
+}
+
+// TestReport_InfraFailureBackwardsCompatibleFailure re-asserts AC-5's
+// backwards-compat invariant side-by-side with the infra case: given
+// two launcher.Result values that differ ONLY in Meta[infra_failure],
+// the reporter must render them under different headers.
+func TestReport_InfraFailureBackwardsCompatibleFailure(t *testing.T) {
+	cases := []struct {
+		name      string
+		meta      map[string]string
+		wantInfra bool
+	}{
+		{
+			name:      "plain failure",
+			meta:      nil,
+			wantInfra: false,
+		},
+		{
+			name: "infra failure",
+			meta: map[string]string{
+				launcher.MetaInfraFailure:       "true",
+				launcher.MetaInfraFailureReason: "exec start error",
+			},
+			wantInfra: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gh := &mockGHWriter{}
+			r := NewReporter(gh)
+			result := &launcher.Result{
+				ExitCode: 1,
+				Stderr:   "some failure output",
+				Duration: time.Second,
+				Meta:     tc.meta,
+			}
+			if err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-1", "worker-1", 0, 3, "", ""); err != nil {
+				t.Fatalf("Report: %v", err)
+			}
+			if len(gh.comments) != 1 {
+				t.Fatalf("expected 1 comment, got %d", len(gh.comments))
+			}
+			body := gh.comments[0]
+			isInfra := strings.Contains(body, "## Infra Error:")
+			if isInfra != tc.wantInfra {
+				t.Fatalf("isInfra=%v, want %v; body=%s", isInfra, tc.wantInfra, body)
+			}
+		})
+	}
 }
 
 func TestReport_PrefersLastMessage(t *testing.T) {

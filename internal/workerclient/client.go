@@ -48,6 +48,16 @@ type ResultRequest struct {
 	WorkerID      string   `json:"worker_id"`
 	Status        string   `json:"status"`
 	CurrentLabels []string `json:"current_labels"`
+	// InfraFailure marks runs that failed at the launcher layer (exec error,
+	// scanner overflow, runtime panic before agent output) rather than
+	// returning an agent verdict. Coordinators must NOT translate this into
+	// a state-machine failure — the agent never got to decide. See issue
+	// #131 / AC-3.
+	InfraFailure bool `json:"infra_failure,omitempty"`
+	// InfraReason carries a short operator-facing reason for the infra
+	// failure (e.g. "exec start error", "scanner buffer overflow"). Only
+	// meaningful when InfraFailure is true.
+	InfraReason string `json:"infra_reason,omitempty"`
 }
 
 type HeartbeatRequest struct {
