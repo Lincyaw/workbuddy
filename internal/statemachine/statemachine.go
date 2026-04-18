@@ -47,6 +47,19 @@ const StuckTimeout = 5 * time.Minute
 
 const defaultJoinStrategy = config.JoinAllPassed
 
+// MaxConsecutiveAgentFailures is the number of back-to-back failed or timed-out
+// tasks the same agent may accumulate on one issue before the coordinator
+// refuses to dispatch again. It exists to break runaway re-dispatch cycles
+// caused by launcher-layer crashes, sustained infra errors, or agents whose
+// verdict flips failure-pass-failure on repeat. Humans must intervene to
+// clear the condition (fix the worker, change labels, or close the issue).
+const MaxConsecutiveAgentFailures = 3
+
+// DoneLabel is the canonical terminal label for completed issues. Dispatch
+// for any agent is refused when this label is present, regardless of the
+// stale workflow state captured in a retry request.
+const DoneLabel = "status:done"
+
 type dispatchGroup struct {
 	workflow string
 	state    string
@@ -378,12 +391,85 @@ func (sm *StateMachine) ensureWorkflowInstance(workflowName, repo string, issueN
 
 // DispatchAgent sends a dispatch request for the given agent, respecting in-flight group locking.
 func (sm *StateMachine) DispatchAgent(ctx context.Context, repo string, issueNum int, agentName, workflow, state string) error {
+	if blocked, err := sm.isBlockedByDone(repo, issueNum, agentName); err != nil {
+		return err
+	} else if blocked {
+		return nil
+	}
+	if blocked, err := sm.isBlockedByFailureCap(repo, issueNum, agentName); err != nil {
+		return err
+	} else if blocked {
+		return nil
+	}
 	if blocked, err := sm.isBlockedByDependency(repo, issueNum, agentName); err != nil {
 		return err
 	} else if blocked {
 		return nil
 	}
 	return sm.dispatchSingleAgent(ctx, repo, issueNum, agentName, workflow, state)
+}
+
+// isBlockedByDone refuses dispatch when the issue already carries the
+// terminal DoneLabel in the cached label snapshot. This guards against stale
+// redispatch paths that carry a pre-completion state value.
+func (sm *StateMachine) isBlockedByDone(repo string, issueNum int, agentForLog string) (bool, error) {
+	if sm.store == nil {
+		return false, nil
+	}
+	ic, err := sm.store.QueryIssueCache(repo, issueNum)
+	if err != nil {
+		return false, fmt.Errorf("statemachine: query issue cache: %w", err)
+	}
+	if ic == nil || ic.Labels == "" {
+		return false, nil
+	}
+	var labels []string
+	if err := json.Unmarshal([]byte(ic.Labels), &labels); err != nil {
+		// Malformed cache entry shouldn't wedge dispatch — skip the check.
+		return false, nil
+	}
+	for _, l := range labels {
+		if l == DoneLabel {
+			sm.eventlog.Log(eventlog.TypeDispatchBlockedByDone, repo, issueNum, map[string]string{
+				"agent": agentForLog,
+				"label": DoneLabel,
+			})
+			sm.publishAlert(alertbus.KindDispatchBlocked, alertbus.SeverityInfo, repo, issueNum, "", map[string]any{
+				"reason": "status_done",
+				"agent":  agentForLog,
+			})
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// isBlockedByFailureCap refuses dispatch when this agent has accumulated
+// MaxConsecutiveAgentFailures back-to-back failed or timed-out tasks on
+// the issue since its last successful run.
+func (sm *StateMachine) isBlockedByFailureCap(repo string, issueNum int, agentName string) (bool, error) {
+	if sm.store == nil {
+		return false, nil
+	}
+	count, err := sm.store.CountConsecutiveAgentFailures(repo, issueNum, agentName)
+	if err != nil {
+		return false, fmt.Errorf("statemachine: count consecutive failures: %w", err)
+	}
+	if count < MaxConsecutiveAgentFailures {
+		return false, nil
+	}
+	sm.eventlog.Log(eventlog.TypeDispatchBlockedByFailureCap, repo, issueNum, map[string]any{
+		"agent":             agentName,
+		"consecutive_fails": count,
+		"cap":               MaxConsecutiveAgentFailures,
+	})
+	sm.publishAlert(alertbus.KindDispatchBlocked, alertbus.SeverityError, repo, issueNum, "", map[string]any{
+		"reason":            "failure_cap",
+		"agent":             agentName,
+		"consecutive_fails": count,
+		"cap":               MaxConsecutiveAgentFailures,
+	})
+	return true, nil
 }
 
 // isBlockedByDependency checks if the issue is blocked by a dependency.

@@ -1099,6 +1099,45 @@ func (s *Store) IncrementTransition(repo string, issueNum int, fromState, toStat
 	return count, nil
 }
 
+// CountConsecutiveAgentFailures returns the number of most-recent tasks for
+// (repo, issueNum, agentName) whose status is failed or timeout, stopping as
+// soon as a task with status = completed is seen. The count resets to 0 once
+// the agent has a successful run.
+//
+// Used by the coordinator to cap runaway re-dispatch cycles when an agent
+// repeatedly fails (launcher crashes, infra errors, or sustained agent
+// failures) without ever landing a successful run.
+func (s *Store) CountConsecutiveAgentFailures(repo string, issueNum int, agentName string) (int, error) {
+	rows, err := s.db.Query(
+		`SELECT status FROM task_queue
+		 WHERE repo = ? AND issue_num = ? AND agent_name = ?
+		   AND status IN (?, ?, ?)
+		 ORDER BY created_at DESC, id DESC`,
+		repo, issueNum, agentName,
+		TaskStatusCompleted, TaskStatusFailed, TaskStatusTimeout,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("store: count consecutive agent failures: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	count := 0
+	for rows.Next() {
+		var status string
+		if err := rows.Scan(&status); err != nil {
+			return 0, fmt.Errorf("store: scan task status: %w", err)
+		}
+		if status == TaskStatusCompleted {
+			break
+		}
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("store: iterate task statuses: %w", err)
+	}
+	return count, nil
+}
+
 // QueryTransitionCounts returns all transition counts for a repo+issue.
 func (s *Store) QueryTransitionCounts(repo string, issueNum int) ([]TransitionCount, error) {
 	rows, err := s.db.Query(

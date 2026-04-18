@@ -839,6 +839,112 @@ func TestDispatchBlockedByDependencyVerdict(t *testing.T) {
 	}
 }
 
+func TestDispatchAgentBlockedByDone(t *testing.T) {
+	sm, rec, dispatch := newTestSM(t)
+	if err := sm.store.UpsertIssueCache(store.IssueCache{
+		Repo:     "test/repo",
+		IssueNum: 101,
+		Labels:   `["workbuddy","status:done"]`,
+		State:    "open",
+	}); err != nil {
+		t.Fatalf("UpsertIssueCache: %v", err)
+	}
+
+	if err := sm.DispatchAgent(context.Background(), "test/repo", 101, "review-agent", "dev-flow", "reviewing"); err != nil {
+		t.Fatalf("DispatchAgent: %v", err)
+	}
+
+	select {
+	case req := <-dispatch:
+		t.Fatalf("dispatch should have been blocked for done issue, got: %+v", req)
+	default:
+	}
+
+	if got := rec.find(eventlog.TypeDispatchBlockedByDone); len(got) != 1 {
+		t.Fatalf("expected 1 dispatch_blocked_by_done event, got %d", len(got))
+	}
+}
+
+func TestDispatchAgentBlockedByFailureCap(t *testing.T) {
+	sm, rec, dispatch := newTestSM(t)
+
+	// Seed exactly MaxConsecutiveAgentFailures failures for review-agent on the issue.
+	for i := 0; i < MaxConsecutiveAgentFailures; i++ {
+		if err := sm.store.InsertTask(store.TaskRecord{
+			ID:        fmt.Sprintf("task-%d", i),
+			Repo:      "test/repo",
+			IssueNum:  202,
+			AgentName: "review-agent",
+			Status:    store.TaskStatusFailed,
+		}); err != nil {
+			t.Fatalf("InsertTask: %v", err)
+		}
+	}
+
+	if err := sm.DispatchAgent(context.Background(), "test/repo", 202, "review-agent", "dev-flow", "reviewing"); err != nil {
+		t.Fatalf("DispatchAgent: %v", err)
+	}
+
+	select {
+	case req := <-dispatch:
+		t.Fatalf("dispatch should have been blocked by failure cap, got: %+v", req)
+	default:
+	}
+
+	events := rec.find(eventlog.TypeDispatchBlockedByFailureCap)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 dispatch_blocked_by_failure_cap event, got %d", len(events))
+	}
+	payload, ok := events[0].Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", events[0].Payload)
+	}
+	if payload["agent"] != "review-agent" {
+		t.Fatalf("payload agent = %v, want review-agent", payload["agent"])
+	}
+	if payload["consecutive_fails"] != MaxConsecutiveAgentFailures {
+		t.Fatalf("payload consecutive_fails = %v, want %d", payload["consecutive_fails"], MaxConsecutiveAgentFailures)
+	}
+}
+
+func TestDispatchAgentResetsFailureCountAfterSuccess(t *testing.T) {
+	sm, _, dispatch := newTestSM(t)
+
+	// Past failures, followed by a success, followed by one more failure.
+	// The cap should not fire because the success reset the count.
+	statuses := []string{
+		store.TaskStatusFailed,
+		store.TaskStatusFailed,
+		store.TaskStatusFailed,
+		store.TaskStatusCompleted,
+		store.TaskStatusFailed,
+	}
+	for i, st := range statuses {
+		if err := sm.store.InsertTask(store.TaskRecord{
+			ID:        fmt.Sprintf("task-%d", i),
+			Repo:      "test/repo",
+			IssueNum:  303,
+			AgentName: "review-agent",
+			Status:    st,
+		}); err != nil {
+			t.Fatalf("InsertTask: %v", err)
+		}
+	}
+
+	if err := sm.DispatchAgent(context.Background(), "test/repo", 303, "review-agent", "dev-flow", "reviewing"); err != nil {
+		t.Fatalf("DispatchAgent: %v", err)
+	}
+
+	select {
+	case req := <-dispatch:
+		if req.AgentName != "review-agent" || req.IssueNum != 303 {
+			t.Fatalf("unexpected dispatch: %+v", req)
+		}
+	default:
+		t.Fatal("expected dispatch to be sent when failure count reset after success")
+	}
+}
+
 // Test 10: ResetDedup is safe for concurrent access
 func TestResetDedupConcurrent(t *testing.T) {
 	sm, _, _ := newTestSM(t)
