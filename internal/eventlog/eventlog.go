@@ -38,6 +38,7 @@ const (
 	TypeAlert                       = "alert"
 	TypeConfigReloaded              = "config_reloaded"
 	TypeConfigReloadFailed          = "config_reload_failed"
+	TypeReportOverflow              = "report_overflow"
 )
 
 // AllEventTypes lists every recognised event type.
@@ -68,6 +69,7 @@ var AllEventTypes = []string{
 	TypeAlert,
 	TypeConfigReloaded,
 	TypeConfigReloadFailed,
+	TypeReportOverflow,
 }
 
 // EventFilter specifies optional criteria for querying events.

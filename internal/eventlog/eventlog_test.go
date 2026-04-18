@@ -154,6 +154,19 @@ func TestTypeRateLimitInAllEventTypes(t *testing.T) {
 	}
 }
 
+func TestTypeReportOverflowInAllEventTypes(t *testing.T) {
+	found := false
+	for _, t := range AllEventTypes {
+		if t == TypeReportOverflow {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("TypeReportOverflow is missing from AllEventTypes")
+	}
+}
+
 func TestWriteRateLimitEvent(t *testing.T) {
 	logger := newTestLogger(t)
 	logger.Log(TypeRateLimit, "owner/repo", 17, map[string]string{"source": "poller"})
@@ -167,5 +180,24 @@ func TestWriteRateLimitEvent(t *testing.T) {
 	}
 	if events[0].Type != TypeRateLimit {
 		t.Fatalf("expected type %q got %q", TypeRateLimit, events[0].Type)
+	}
+}
+
+func TestWriteReportOverflowEvent(t *testing.T) {
+	logger := newTestLogger(t)
+	logger.Log(TypeReportOverflow, "owner/repo", 17, map[string]any{
+		"body_bytes": 70001,
+		"committed":  true,
+	})
+
+	events, err := logger.Query(EventFilter{Type: TypeReportOverflow, Repo: "owner/repo", IssueNum: 17})
+	if err != nil {
+		t.Fatalf("Query report overflow event: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 report_overflow event, got %d", len(events))
+	}
+	if events[0].Type != TypeReportOverflow {
+		t.Fatalf("expected type %q got %q", TypeReportOverflow, events[0].Type)
 	}
 }

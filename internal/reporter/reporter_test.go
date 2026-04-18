@@ -3,9 +3,13 @@ package reporter
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/launcher"
@@ -74,7 +78,7 @@ func TestReport_Success(t *testing.T) {
 		Meta:     map[string]string{"pr_url": "https://github.com/test/repo/pull/1"},
 	}
 
-	err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-123", "worker-1", 1, 3, "Label transition: developing -> reviewing (OK)")
+	err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-123", "worker-1", 1, 3, "Label transition: developing -> reviewing (OK)", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -112,7 +116,7 @@ func TestReport_Failure(t *testing.T) {
 		Duration: 2 * time.Second,
 	}
 
-	err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-456", "worker-1", 0, 3, "")
+	err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-456", "worker-1", 0, 3, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -133,7 +137,7 @@ func TestReport_PrefersLastMessage(t *testing.T) {
 		Duration:    time.Second,
 	}
 
-	if err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-last", "worker-1", 0, 3, ""); err != nil {
+	if err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-last", "worker-1", 0, 3, "", ""); err != nil {
 		t.Fatalf("Report: %v", err)
 	}
 	body := gh.comments[0]
@@ -159,7 +163,7 @@ func TestReport_RetryOnRateLimit(t *testing.T) {
 		Stdout:   "ok",
 		Duration: 1 * time.Second,
 	}
-	err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-789", "worker-1", 0, 3, "")
+	err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-789", "worker-1", 0, 3, "", "")
 	if err != nil {
 		t.Fatalf("report should succeed after retries, got: %v", err)
 	}
@@ -189,7 +193,7 @@ func TestReport_RateLimitPayloadRedactsToken(t *testing.T) {
 		Stdout:   "ok",
 		Duration: 1 * time.Second,
 	}
-	err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-redact", "worker-1", 0, 3, "")
+	err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-redact", "worker-1", 0, 3, "", "")
 	if err != nil {
 		t.Fatalf("report should succeed after retries, got: %v", err)
 	}
@@ -228,7 +232,7 @@ func TestReport_RetryCancelsWithContext(t *testing.T) {
 		Stdout:   "ok",
 		Duration: 1 * time.Second,
 	}
-	err := r.Report(ctx, "test/repo", 42, "dev-agent", result, "sess-cancel", "worker-1", 0, 3, "")
+	err := r.Report(ctx, "test/repo", 42, "dev-agent", result, "sess-cancel", "worker-1", 0, 3, "", "")
 	if err == nil {
 		t.Fatal("expected report to fail when context canceled")
 	}
@@ -317,5 +321,366 @@ func TestReportStartedUsesWriter(t *testing.T) {
 func TestReactionConfusedConstant(t *testing.T) {
 	if ReactionConfused != "confused" {
 		t.Fatalf("ReactionConfused = %q, want %q", ReactionConfused, "confused")
+	}
+}
+
+func TestReport_UnderLimit(t *testing.T) {
+	gh := &mockGHWriter{}
+	r := NewReporter(gh)
+
+	// Body under the limit should be posted verbatim.
+	result := &launcher.Result{
+		ExitCode: 0,
+		Stdout:   "short output",
+		Duration: time.Second,
+	}
+	if err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-1", "worker-1", 0, 3, "", ""); err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if len(gh.comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(gh.comments))
+	}
+	if !strings.Contains(gh.comments[0], "short output") {
+		t.Error("comment should contain original output")
+	}
+	if strings.Contains(gh.comments[0], "truncated") {
+		t.Error("under-limit comment should not mention truncation")
+	}
+}
+
+func TestReport_OverflowWithoutWorkDir(t *testing.T) {
+	gh := &mockGHWriter{}
+	r := NewReporter(gh)
+	rec := &mockEventRecorder{}
+	r.SetEventRecorder(rec)
+
+	longOutput := strings.Repeat("a", 70000)
+	result := &launcher.Result{
+		ExitCode: 0,
+		Stdout:   longOutput,
+		Duration: time.Second,
+	}
+
+	if err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-2", "worker-1", 0, 3, "", ""); err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if len(gh.comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(gh.comments))
+	}
+	body := gh.comments[0]
+	if bodySizeBytes(body) > maxCommentBodyBytes {
+		t.Fatalf("truncated comment should be under %d bytes, got %d", maxCommentBodyBytes, bodySizeBytes(body))
+	}
+	if !strings.Contains(body, "truncated") {
+		t.Error("comment should indicate truncation")
+	}
+	if !strings.Contains(body, "could not be committed") {
+		t.Error("comment should mention that full report could not be committed")
+	}
+	if !rec.Has(eventlog.TypeReportOverflow) {
+		t.Fatalf("expected report_overflow event")
+	}
+	payload, ok := rec.findPayload(eventlog.TypeReportOverflow)
+	if !ok {
+		t.Fatalf("expected report_overflow payload")
+	}
+	p, ok := payload.(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected payload type: %T", payload)
+	}
+	bodyBytes, ok := p["body_bytes"].(int)
+	if !ok {
+		t.Fatalf("expected body_bytes int payload, got %T", p["body_bytes"])
+	}
+	if bodyBytes <= maxCommentBodyBytes {
+		t.Fatalf("expected overflow payload body_bytes > %d, got %d", maxCommentBodyBytes, bodyBytes)
+	}
+}
+
+func initGitRepo(t *testing.T, dir string) string {
+	t.Helper()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	readme := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(readme, []byte("# test\n"), 0644); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	runGit(t, dir, "add", "README.md")
+	runGit(t, dir, "commit", "-m", "init")
+	cmd := exec.Command("git", "-C", dir, "branch", "--show-current")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("get branch: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %s: %v", args, out, err)
+	}
+}
+
+func TestReport_OverflowWithWorkDir(t *testing.T) {
+	// Set up a bare remote so push succeeds.
+	remoteDir := t.TempDir()
+	runGit(t, remoteDir, "init", "--bare")
+
+	// Set up local repo with a remote.
+	tmpDir := t.TempDir()
+	branch := initGitRepo(t, tmpDir)
+	if err := os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte(".workbuddy/\n"), 0644); err != nil {
+		t.Fatalf("write gitignore: %v", err)
+	}
+	runGit(t, tmpDir, "add", ".gitignore")
+	runGit(t, tmpDir, "commit", "-m", "add gitignore")
+	runGit(t, tmpDir, "remote", "add", "origin", remoteDir)
+	runGit(t, tmpDir, "push", "-u", "origin", branch)
+
+	gh := &mockGHWriter{}
+	r := NewReporter(gh)
+	rec := &mockEventRecorder{}
+	r.SetEventRecorder(rec)
+
+	longOutput := strings.Repeat("b", 70000)
+	result := &launcher.Result{
+		ExitCode: 0,
+		Stdout:   longOutput,
+		Duration: time.Second,
+	}
+
+	if err := r.Report(context.Background(), "owner/repo", 42, "dev-agent", result, "sess-3", "worker-1", 0, 3, "", tmpDir); err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if len(gh.comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(gh.comments))
+	}
+	body := gh.comments[0]
+	if bodySizeBytes(body) > maxCommentBodyBytes {
+		t.Fatalf("truncated comment should be under %d bytes, got %d", maxCommentBodyBytes, bodySizeBytes(body))
+	}
+	if !strings.Contains(body, "truncated") {
+		t.Error("comment should indicate truncation")
+	}
+	if !strings.Contains(body, "View full report") {
+		t.Error("comment should contain link to full report")
+	}
+	if !rec.Has(eventlog.TypeReportOverflow) {
+		t.Fatalf("expected report_overflow event")
+	}
+
+	payload, ok := rec.findPayload(eventlog.TypeReportOverflow)
+	if !ok {
+		t.Fatalf("expected report_overflow payload")
+	}
+	p, ok := payload.(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected payload type: %T", payload)
+	}
+	bodyBytes, ok := p["body_bytes"].(int)
+	if !ok || bodyBytes <= maxCommentBodyBytes {
+		t.Fatalf("expected body_bytes > %d in overflow event, got %v", maxCommentBodyBytes, p["body_bytes"])
+	}
+	if committed, ok := p["committed"].(bool); !ok || !committed {
+		t.Fatalf("expected committed=true in overflow event, got %v", p)
+	}
+	artifactURL, ok := p["artifact_url"].(string)
+	if !ok || artifactURL == "" {
+		t.Fatalf("expected artifact_url in overflow event, got %v", p)
+	}
+	if !strings.Contains(artifactURL, "owner/repo") {
+		t.Errorf("artifact_url should contain repo, got %q", artifactURL)
+	}
+
+	// Verify the report file exists on disk.
+	reportsDir := filepath.Join(tmpDir, overflowReportsDir)
+	entries, err := os.ReadDir(reportsDir)
+	if err != nil {
+		t.Fatalf("read reports dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 report file, got %d", len(entries))
+	}
+	content, err := os.ReadFile(filepath.Join(reportsDir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("read report file: %v", err)
+	}
+	if !strings.Contains(string(content), longOutput) {
+		t.Error("report file should contain the full original output")
+	}
+
+	statusCmd := exec.Command("git", "-C", tmpDir, "status", "--short")
+	statusOut, err := statusCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status: %s: %v", statusOut, err)
+	}
+	if len(strings.TrimSpace(string(statusOut))) != 0 {
+		t.Fatalf("expected clean worktree after overflow commit, got %q", string(statusOut))
+	}
+}
+
+func TestReport_OverflowWithUnsafeAgentName(t *testing.T) {
+	remoteDir := t.TempDir()
+	runGit(t, remoteDir, "init", "--bare")
+
+	tmpDir := t.TempDir()
+	branch := initGitRepo(t, tmpDir)
+	runGit(t, tmpDir, "remote", "add", "origin", remoteDir)
+	runGit(t, tmpDir, "push", "-u", "origin", branch)
+
+	gh := &mockGHWriter{}
+	r := NewReporter(gh)
+
+	result := &launcher.Result{
+		ExitCode: 0,
+		Stdout:   strings.Repeat("unsafe", 12000),
+		Duration: time.Second,
+	}
+
+	if err := r.Report(context.Background(), "owner/repo", 42, "review/agent", result, "sess-unsafe", "worker-1", 0, 3, "", tmpDir); err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+
+	reportsDir := filepath.Join(tmpDir, overflowReportsDir)
+	entries, err := os.ReadDir(reportsDir)
+	if err != nil {
+		t.Fatalf("read reports dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 report file, got %d", len(entries))
+	}
+	if strings.Contains(entries[0].Name(), "/") {
+		t.Fatalf("expected sanitized filename, got %q", entries[0].Name())
+	}
+	if !strings.Contains(entries[0].Name(), "review-agent") {
+		t.Fatalf("expected sanitized agent segment in filename, got %q", entries[0].Name())
+	}
+	if !strings.Contains(gh.comments[0], "View full report") {
+		t.Fatalf("expected comment to include artifact link: %s", gh.comments[0])
+	}
+}
+
+func TestReport_OverflowWithWorkDirButNotGitRepo(t *testing.T) {
+	gh := &mockGHWriter{}
+	r := NewReporter(gh)
+	rec := &mockEventRecorder{}
+	r.SetEventRecorder(rec)
+
+	longOutput := strings.Repeat("c", 70000)
+	result := &launcher.Result{
+		ExitCode: 0,
+		Stdout:   longOutput,
+		Duration: time.Second,
+	}
+
+	tmpDir := t.TempDir()
+	if err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-4", "worker-1", 0, 3, "", tmpDir); err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if len(gh.comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(gh.comments))
+	}
+	body := gh.comments[0]
+	if !strings.Contains(body, "truncated") {
+		t.Error("comment should indicate truncation")
+	}
+	if !strings.Contains(body, "could not be committed") {
+		t.Error("comment should mention that full report could not be committed")
+	}
+	if !rec.Has(eventlog.TypeReportOverflow) {
+		t.Fatalf("expected report_overflow event")
+	}
+	payload, _ := rec.findPayload(eventlog.TypeReportOverflow)
+	p, ok := payload.(map[string]interface{})
+	if ok {
+		if bodyBytes, ok := p["body_bytes"].(int); !ok || bodyBytes <= maxCommentBodyBytes {
+			t.Fatalf("expected body_bytes > %d in overflow event, got %v", maxCommentBodyBytes, p["body_bytes"])
+		}
+		if committed, ok := p["committed"].(bool); ok && committed {
+			t.Fatal("expected committed=false when workDir is not a git repo")
+		}
+	}
+}
+
+func TestReport_OverflowUsesByteCountForUTF8(t *testing.T) {
+	gh := &mockGHWriter{}
+	r := NewReporter(gh)
+	rec := &mockEventRecorder{}
+	r.SetEventRecorder(rec)
+
+	// 25000 runes but 75000 bytes in UTF-8, so this must overflow even though
+	// the character count is below the byte guard.
+	longOutput := strings.Repeat("你", 25000)
+	result := &launcher.Result{
+		ExitCode: 0,
+		Stdout:   longOutput,
+		Duration: time.Second,
+	}
+
+	if err := r.Report(context.Background(), "test/repo", 42, "dev-agent", result, "sess-utf8", "worker-1", 0, 3, "", ""); err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if len(gh.comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(gh.comments))
+	}
+	if !strings.Contains(gh.comments[0], "truncated") {
+		t.Fatalf("expected truncated comment for UTF-8 overflow: %s", gh.comments[0])
+	}
+
+	payload, ok := rec.findPayload(eventlog.TypeReportOverflow)
+	if !ok {
+		t.Fatalf("expected report_overflow event")
+	}
+	p, ok := payload.(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected payload type: %T", payload)
+	}
+	bodyBytes, ok := p["body_bytes"].(int)
+	if !ok {
+		t.Fatalf("expected body_bytes int payload, got %T", p["body_bytes"])
+	}
+	if bodyBytes <= maxCommentBodyBytes {
+		t.Fatalf("expected UTF-8 body_bytes > %d, got %d", maxCommentBodyBytes, bodyBytes)
+	}
+}
+
+func TestTruncateReport(t *testing.T) {
+	body := strings.Repeat("x", 10000)
+	url := "https://github.com/owner/repo/blob/main/scripts/review-reports/issue-42-dev-agent-123.md"
+	short := truncateReport(body, url)
+	if bodySizeBytes(short) > maxCommentBodyBytes {
+		t.Fatalf("truncated report should be under %d bytes, got %d", maxCommentBodyBytes, bodySizeBytes(short))
+	}
+	if !strings.Contains(short, "truncated") {
+		t.Error("should contain truncation warning")
+	}
+	if !strings.Contains(short, url) {
+		t.Error("should contain artifact URL")
+	}
+	if strings.Contains(short, strings.Repeat("x", 5000)) {
+		t.Error("should not contain the tail of the original body")
+	}
+}
+
+func TestTruncateReport_NoArtifactURL(t *testing.T) {
+	body := strings.Repeat("y", 10000)
+	short := truncateReport(body, "")
+	if !strings.Contains(short, "could not be committed") {
+		t.Error("should mention commit failure when no artifact URL")
+	}
+	if strings.Contains(short, "View full report") {
+		t.Error("should not contain link when no artifact URL")
+	}
+}
+
+func TestTruncateReport_PreservesUTF8(t *testing.T) {
+	body := strings.Repeat("你", 1000)
+	short := truncateReport(body, "")
+	if !utf8.ValidString(short) {
+		t.Fatalf("expected valid UTF-8, got %q", short)
 	}
 }

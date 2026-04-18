@@ -547,7 +547,7 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 	}
 	reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(shutdownTimeout))
 	defer reportCancel()
-	if err := rep.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, workerID, 0, workflowMaxRetries(cfg, task.Workflow), ""); err != nil {
+	if err := rep.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, workerID, 0, workflowMaxRetries(cfg, task.Workflow), "", workDir); err != nil {
 		log.Printf("[worker] report failed: %v", err)
 	}
 	return nil
