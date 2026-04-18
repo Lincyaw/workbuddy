@@ -46,7 +46,7 @@ workbuddy worker --coordinator http://A:8080 --token <secret> --role dev --repo 
 | `workbuddy cache-invalidate` | 清除 issue 缓存强制重新评估 | REQ-034 | v0.2.0 |
 | `workbuddy diagnose` | 自动诊断 pipeline 问题（stuck/orphaned/repeated failure） | REQ-037 | v0.2.0 |
 | `workbuddy recover` | 重启恢复（清理僵尸进程、重置运行时状态） | REQ-032 | v0.2.0 |
-| `workbuddy worker unregister` | 从 Coordinator 注销指定 Worker | REQ-051 | v0.2.0 |
+| `workbuddy worker unregister` | 从 Coordinator 注销指定 Worker | REQ-052 | v0.2.0 |
 
 ## Coordinator HTTP API
 
