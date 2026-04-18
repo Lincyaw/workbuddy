@@ -17,3 +17,9 @@
 - `[L2]` REQ-007 now requests `return_run_details=true` on workflow dispatch and polls the returned run ID directly, removing the branch/time-window heuristic that could attach concurrent workflow_dispatch runs to the wrong remote session.
 - `[L2]` Remote runner success now requires an ingested session artifact (`events-v1.jsonl` or `codex-exec.jsonl`); flattened Actions logs remain diagnostic output only and are no longer accepted as a fake session capture.
 - `[L2]` `workbuddy recover --kill-zombies` only targets `codex` and `workbuddy serve` processes whose `/proc/<pid>/cwd` is inside the current repo's shared git root, which keeps recovery scoped to this repo instead of killing unrelated sessions on the host.
+
+## 2026-04-18
+
+- `[L3]` The Codex installer now syncs `plugins/workbuddy/skills` into `~/.codex/skills` instead of relying on repo-local plugin marketplace paths, because local verification confirmed the file-based skills directory is the only runtime shape we can confidently target from this repository alone.
+- `[L2]` The installer records a workbuddy-specific state file at `~/.codex/.workbuddy-installed-skills.json` and treats it as the managed set, which makes repeated installs idempotent and lets upgrades add, overwrite, or prune only workbuddy-owned skills without touching unrelated local skills.
+- `[L4]` `WORKBUDDY_KEEP_REMOVED=1` preserves retired upstream workbuddy skills locally but keeps them in the managed set, so a later default sync can still prune them; this favors reversible operator control over a simpler but lossy state model.

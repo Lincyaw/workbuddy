@@ -33,10 +33,16 @@ claude plugin install workbuddy
 curl -fsSL https://raw.githubusercontent.com/Lincyaw/workbuddy/main/install-codex-plugin.sh | bash
 ```
 
-This installs the repo-packaged Codex plugin into:
+This syncs the repo-packaged workbuddy skills into:
 
-- `~/plugins/workbuddy`
-- `~/.agents/plugins/marketplace.json`
+- `~/.codex/skills/`
+- `~/.codex/.workbuddy-installed-skills.json`
+
+Re-running the installer is idempotent:
+
+- existing workbuddy-managed skills are overwritten in place
+- newly added upstream skills are installed automatically
+- removed upstream workbuddy skills are pruned by default
 
 ## Skills
 

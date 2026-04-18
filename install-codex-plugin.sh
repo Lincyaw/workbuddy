@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
-# Install the workbuddy Codex plugin from GitHub.
+# Install the workbuddy Codex skills from GitHub into the local Codex skills directory.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/Lincyaw/workbuddy/main/install-codex-plugin.sh | bash
 #
 # Options (env vars):
-#   WORKBUDDY_REPO    - GitHub repo in owner/name form (default: Lincyaw/workbuddy)
-#   WORKBUDDY_REF     - Git ref to install from (default: main)
-#   PLUGINS_DIR       - plugin install path (default: ~/plugins)
-#   MARKETPLACE_PATH  - marketplace JSON path (default: ~/.agents/plugins/marketplace.json)
-#   GITHUB_TOKEN      - GitHub token for API calls or archive downloads
+#   WORKBUDDY_REPO         - GitHub repo in owner/name form (default: Lincyaw/workbuddy)
+#   WORKBUDDY_REF          - Git ref to install from (default: main)
+#   WORKBUDDY_ARCHIVE_URL  - Override the archive URL (useful for local testing)
+#   CODEX_HOME             - Codex home directory (default: ~/.codex)
+#   SKILLS_DIR             - Skills install path (default: $CODEX_HOME/skills)
+#   WORKBUDDY_KEEP_REMOVED - Set to 1 to keep previously managed skills that no longer exist upstream
+#   GITHUB_TOKEN           - GitHub token for archive downloads
 
 set -euo pipefail
 
 REPO="${WORKBUDDY_REPO:-Lincyaw/workbuddy}"
 REF="${WORKBUDDY_REF:-main}"
-PLUGINS_DIR="${PLUGINS_DIR:-$HOME/plugins}"
-MARKETPLACE_PATH="${MARKETPLACE_PATH:-$HOME/.agents/plugins/marketplace.json}"
+ARCHIVE_URL="${WORKBUDDY_ARCHIVE_URL:-https://github.com/${REPO}/archive/${REF}.tar.gz}"
+CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+SKILLS_DIR="${SKILLS_DIR:-$CODEX_HOME/skills}"
+STATE_FILE="${CODEX_HOME}/.workbuddy-installed-skills.json"
+KEEP_REMOVED="${WORKBUDDY_KEEP_REMOVED:-0}"
 PLUGIN_NAME="workbuddy"
 TMPDIR_ROOT=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_ROOT"' EXIT
@@ -45,83 +50,103 @@ main() {
   need python3
   setup_auth
 
-  local archive_url archive extract_dir plugin_src plugin_dest marketplace_dir
-  archive_url="https://github.com/${REPO}/archive/${REF}.tar.gz"
+  local archive extract_dir repo_root skills_src
   archive="${TMPDIR_ROOT}/repo.tar.gz"
   extract_dir="${TMPDIR_ROOT}/extract"
-  plugin_dest="${PLUGINS_DIR}/${PLUGIN_NAME}"
-  marketplace_dir=$(dirname "$MARKETPLACE_PATH")
 
-  log "Installing ${PLUGIN_NAME} Codex plugin from ${REPO}@${REF}"
-  curl -fsSL "${auth_header[@]}" "$archive_url" -o "$archive" \
+  log "Syncing ${PLUGIN_NAME} Codex skills from ${REPO}@${REF}"
+  curl -fsSL "${auth_header[@]}" "$ARCHIVE_URL" -o "$archive" \
     || die "Download failed. Check that ${REPO}@${REF} exists and is public."
 
   mkdir -p "$extract_dir"
   tar -xzf "$archive" -C "$extract_dir"
 
-  plugin_src=$(find "$extract_dir" -path "*/plugins/${PLUGIN_NAME}" -type d | head -1)
-  [ -n "$plugin_src" ] || die "Plugin bundle plugins/${PLUGIN_NAME} not found in ${REPO}@${REF}"
-  [ -f "$plugin_src/.codex-plugin/plugin.json" ] || die "Plugin manifest missing at ${plugin_src}/.codex-plugin/plugin.json"
+  repo_root=$(find "$extract_dir" -mindepth 1 -maxdepth 1 -type d | head -1)
+  [ -n "$repo_root" ] || die "Could not determine extracted repository root for ${REPO}@${REF}"
+  skills_src="${repo_root}/plugins/${PLUGIN_NAME}/skills"
+  [ -d "$skills_src" ] || die "Skill bundle plugins/${PLUGIN_NAME}/skills not found in ${REPO}@${REF}"
 
-  mkdir -p "$PLUGINS_DIR" "$marketplace_dir"
-  rm -rf "$plugin_dest"
-  cp -R "$plugin_src" "$plugin_dest"
+  mkdir -p "$CODEX_HOME" "$SKILLS_DIR"
 
-  python3 - "$MARKETPLACE_PATH" <<'PY'
+  python3 - "$skills_src" "$SKILLS_DIR" "$STATE_FILE" "$REPO" "$REF" "$KEEP_REMOVED" <<'PY'
 import json
+import shutil
 import sys
 from pathlib import Path
 
-marketplace_path = Path(sys.argv[1]).expanduser()
-entry = {
-    "name": "workbuddy",
-    "source": {
-        "source": "local",
-        "path": "./plugins/workbuddy",
-    },
-    "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL",
-    },
-    "category": "Productivity",
-}
+skills_src = Path(sys.argv[1])
+skills_dir = Path(sys.argv[2]).expanduser()
+state_file = Path(sys.argv[3]).expanduser()
+repo = sys.argv[4]
+ref = sys.argv[5]
+keep_removed = sys.argv[6] == "1"
 
-if marketplace_path.exists():
-    data = json.loads(marketplace_path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise SystemExit("marketplace.json must contain a JSON object")
+if not skills_src.is_dir():
+    raise SystemExit(f"skills source directory missing: {skills_src}")
+
+current_skills = []
+for child in sorted(skills_src.iterdir()):
+    if not child.is_dir():
+        continue
+    skill_file = child / "SKILL.md"
+    if not skill_file.is_file():
+        continue
+    current_skills.append(child.name)
+
+if not current_skills:
+    raise SystemExit("no installable skills found in plugin bundle")
+
+previous_skills = []
+if state_file.exists():
+    data = json.loads(state_file.read_text(encoding="utf-8"))
+    if isinstance(data, dict):
+        skills = data.get("skills", [])
+        if isinstance(skills, list):
+            previous_skills = [str(item) for item in skills]
+
+installed = []
+for skill_name in current_skills:
+    src = skills_src / skill_name
+    dest = skills_dir / skill_name
+    tmp_dest = skills_dir / f".{skill_name}.tmp-workbuddy"
+    if tmp_dest.exists():
+        shutil.rmtree(tmp_dest)
+    shutil.copytree(src, tmp_dest)
+    if dest.exists():
+        shutil.rmtree(dest)
+    tmp_dest.replace(dest)
+    installed.append(skill_name)
+
+removed = []
+managed_skills = list(current_skills)
+if not keep_removed:
+    current_set = set(current_skills)
+    for skill_name in previous_skills:
+        if skill_name in current_set:
+            continue
+        dest = skills_dir / skill_name
+        if dest.exists():
+            shutil.rmtree(dest)
+            removed.append(skill_name)
 else:
-    data = {
-        "name": "local-marketplace",
-        "interface": {"displayName": "Local Plugins"},
-        "plugins": [],
-    }
+    managed_skills = sorted(set(previous_skills).union(current_skills))
 
-data.setdefault("name", "local-marketplace")
-interface = data.setdefault("interface", {})
-if not isinstance(interface, dict):
-    raise SystemExit("marketplace interface must be a JSON object")
-interface.setdefault("displayName", "Local Plugins")
-plugins = data.setdefault("plugins", [])
-if not isinstance(plugins, list):
-    raise SystemExit("marketplace plugins must be a JSON array")
+state = {
+    "repo": repo,
+    "ref": ref,
+    "skills": managed_skills,
+}
+state_file.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
 
-updated = False
-for idx, plugin in enumerate(plugins):
-    if isinstance(plugin, dict) and plugin.get("name") == entry["name"]:
-        plugins[idx] = entry
-        updated = True
-        break
-if not updated:
-    plugins.append(entry)
-
-marketplace_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+print(json.dumps({
+    "installed": installed,
+    "removed": removed,
+    "state_file": str(state_file),
+}, indent=2))
 PY
 
-  log "Installed plugin to ${plugin_dest}"
-  log "Updated marketplace at ${MARKETPLACE_PATH}"
   echo
-  warn "Restart Codex to pick up the new plugin."
+  warn "Restart Codex to pick up updated skills."
 }
 
 main

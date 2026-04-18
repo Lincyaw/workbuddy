@@ -32,17 +32,23 @@ CI enforces that these generated files stay in sync with
 
 ## Home-local install
 
-If you want to install this plugin outside the repository, follow the
-home-local convention from the `plugin-creator` skill:
+If you want to use these skills with a local Codex CLI session, install them
+directly into `~/.codex/skills`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Lincyaw/workbuddy/main/install-codex-plugin.sh | bash
 ```
 
-The installer downloads the repository archive, copies `plugins/workbuddy`
-into `~/plugins/workbuddy`, and merges the `workbuddy` entry into
-`~/.agents/plugins/marketplace.json` without replacing unrelated local plugin
-entries.
+The installer downloads the repository archive, copies each skill from
+`plugins/workbuddy/skills/` into `~/.codex/skills/`, and records the managed
+skill set in `~/.codex/.workbuddy-installed-skills.json`.
+
+Upgrade behavior is intentionally idempotent:
+
+- re-running the installer overwrites the same workbuddy skill directories
+- newly added upstream workbuddy skills are installed automatically
+- upstream workbuddy skills that were removed are pruned by default
+- set `WORKBUDDY_KEEP_REMOVED=1` if you want to keep retired workbuddy skills locally
 
 If you are iterating locally from a clone instead, regenerate the bundle first:
 
@@ -50,21 +56,16 @@ If you are iterating locally from a clone instead, regenerate the bundle first:
 python3 scripts/sync_codex_plugin.py
 ```
 
-The home-local marketplace convention is:
-
-- plugin path: `~/plugins/workbuddy`
-- marketplace path: `~/.agents/plugins/marketplace.json`
-- marketplace entry source path: `./plugins/workbuddy`
-
 Example:
 
 ```bash
-mkdir -p ~/.agents/plugins ~/plugins
-cp -R plugins/workbuddy ~/plugins/workbuddy
+mkdir -p ~/.codex/skills
+cp -R plugins/workbuddy/skills/* ~/.codex/skills/
 ```
 
-When copying manually, merge the `workbuddy` entry into your existing
-`~/.agents/plugins/marketplace.json` instead of overwriting the file.
+If you copy manually, keep in mind that future installer runs treat the
+installer-managed set as authoritative and may prune workbuddy skills that no
+longer exist upstream.
 
 If your local Codex runtime needs additional skill registration beyond the
 packaged plugin layout, treat that as runtime-specific setup rather than part
