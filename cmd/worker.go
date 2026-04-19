@@ -34,6 +34,14 @@ const (
 	defaultWorkerHeartbeat        = 15 * time.Second
 	defaultWorkerShutdownDeadline = 5 * time.Second
 	defaultWorkerTaskAPITimeout   = 5 * time.Second
+	// postSessionDrainTimeout bounds how long executeRemoteTask waits for
+	// the stale-inference proxy and the event-log writer to drain after
+	// session.Run returns. Under normal load both complete within
+	// milliseconds; a longer wait means a channel is wedged (slow disk,
+	// full channel back-pressure). When the bound trips we force-abort the
+	// drain so the worker slot can be released promptly — the cost is a
+	// truncated events log tail.
+	postSessionDrainTimeout = 5 * time.Second
 )
 
 type workerOpts struct {
@@ -519,13 +527,39 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 	}
 
 	result, runErr := session.Run(taskCtx, sessionCh)
+	// Drain the stale-inference proxy. A closed sessionCh (= proxyCh) only
+	// makes the proxy's `for evt := range proxyCh` loop exit when the body
+	// isn't currently blocked on `eventsCh <- evt`. Under concurrent load
+	// eventsCh can back up (streamSessionEvents writes to disk, proxy has
+	// cap=64 input/output); when it does, the proxy parks inside the
+	// select{} and close(sessionCh) is not enough to release it. Bound the
+	// wait and fall back to taskCancel — the proxy has a
+	// `case <-taskCtx.Done()` escape that drains without sending. Without
+	// this, proxy wedges, <-proxyDone hangs, executeRemoteTask never returns,
+	// and the worker slot is held forever with heartbeat still firing.
+	// See #143 follow-up: post-session zombie.
 	if proxyDone != nil {
-		close(sessionCh) // close proxy channel, triggers proxy goroutine drain
-		<-proxyDone      // wait for all events to be forwarded to eventsCh
+		close(sessionCh)
+		select {
+		case <-proxyDone:
+		case <-time.After(postSessionDrainTimeout):
+			log.Printf("[worker] proxy drain timed out for task %s after %s; cancelling task ctx to unblock", task.TaskID, postSessionDrainTimeout)
+			taskCancel()
+			<-proxyDone
+		}
 	}
 	close(eventsCh)
-	if waitErr := waitEvents(); waitErr != nil {
-		log.Printf("[worker] event capture failed: %v", waitErr)
+	// Same story for the events writer: bound the wait so a slow consumer
+	// cannot trap executeRemoteTask in the cleanup phase.
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- waitEvents() }()
+	select {
+	case werr := <-waitDone:
+		if werr != nil {
+			log.Printf("[worker] event capture failed: %v", werr)
+		}
+	case <-time.After(postSessionDrainTimeout):
+		log.Printf("[worker] event stream drain timed out for task %s after %s; dropping tail of events log", task.TaskID, postSessionDrainTimeout)
 	}
 	stopHeartbeat()
 	if result == nil {
