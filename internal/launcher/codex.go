@@ -53,6 +53,13 @@ type codexSession struct {
 var (
 	codexTaskCompleteGracePeriod = time.Minute
 	codexTaskCompleteKillDelay   = 10 * time.Second
+	// codexScannerDrainTimeout bounds how long the stdout scanner is allowed
+	// to stay alive after the child process exits. Normally the scanner
+	// flushes any buffered events and exits within milliseconds. If it
+	// hasn't exited within this window it is stuck on an events-channel
+	// send (slow downstream), and we cancel execCtx to unblock it so
+	// session.Run can return and free the worker slot.
+	codexScannerDrainTimeout = 5 * time.Second
 )
 
 func newCodexSession(agent *config.AgentConfig, task *TaskContext, prompt string) *codexSession {
@@ -213,7 +220,12 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 				if events != nil {
 					select {
 					case events <- evt:
-					case <-ctx.Done():
+					case <-execCtx.Done():
+						// execCtx is cancelled either by parent ctx (task
+						// shutdown) or by the explicit cancel() after
+						// cmd.Wait returns below — both must unblock the
+						// scanner so session.Run can return and the worker
+						// slot can be released.
 						return
 					}
 				}
@@ -235,7 +247,25 @@ func (s *codexSession) Run(ctx context.Context, events chan<- launcherevents.Eve
 	}()
 
 	runErr := cmd.Wait()
-	wg.Wait()
+	// After the child has exited, give the scanner a grace period to drain
+	// any events that are already buffered in stdoutPipe. If the scanner is
+	// still running past the grace, it is almost certainly trapped in an
+	// `events <- evt` send because the downstream reader pipeline is slow
+	// (a full events channel cascades back through the stale-inference
+	// proxy and freezes the scanner). In that case we cancel execCtx so
+	// the scanner unblocks via its `case <-execCtx.Done()` branch, letting
+	// session.Run return and releasing the worker slot. Without this, a
+	// blocked scanner holds wg.Wait forever and the task sits in 'running'
+	// until the worker restarts. See #143 follow-up: post-session zombie.
+	drainDone := make(chan struct{})
+	go func() { wg.Wait(); close(drainDone) }()
+	select {
+	case <-drainDone:
+	case <-time.After(codexScannerDrainTimeout):
+		log.Printf("[codex] scanner drain timed out %s after child exit; cancelling execCtx to unblock", codexScannerDrainTimeout)
+		cancel()
+		<-drainDone
+	}
 	if handle := s.task.SessionHandle(); handle != nil && stderrBuf.Len() > 0 {
 		_ = handle.WriteStderr(stderrBuf.Bytes())
 	}
