@@ -1195,3 +1195,48 @@ func TestAcquireIssueClaimConcurrent(t *testing.T) {
 		t.Fatalf("expected %d conflicts, got %d", goroutines-1, conflict)
 	}
 }
+
+// Regression test for the #141/#143 late-submit bug: once a task is in a
+// terminal status, a coordinator submit path must not silently overwrite
+// it back to a non-terminal status. TransitionTaskStatusIfRunning returns
+// ErrTaskStatusTerminal so the caller can return an explicit 409.
+func TestTransitionTaskStatusIfRunningRejectsTerminal(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.InsertTask(TaskRecord{
+		ID:        "task-terminal",
+		Repo:      "org/repo",
+		IssueNum:  101,
+		AgentName: "dev-agent",
+		Role:      "dev",
+		Status:    TaskStatusRunning,
+	}); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+
+	// Normal transition: running → completed must succeed.
+	if err := s.TransitionTaskStatusIfRunning("task-terminal", TaskStatusCompleted); err != nil {
+		t.Fatalf("first transition failed: %v", err)
+	}
+
+	// Second attempt: completed is terminal; must be rejected with the
+	// sentinel so the coordinator returns 409 instead of overwriting.
+	err := s.TransitionTaskStatusIfRunning("task-terminal", TaskStatusFailed)
+	if !errors.Is(err, ErrTaskStatusTerminal) {
+		t.Fatalf("expected ErrTaskStatusTerminal for terminal task, got %v", err)
+	}
+
+	// The status must remain completed — the zombie submit must not have
+	// overwritten it.
+	got, err := s.GetTask("task-terminal")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.Status != TaskStatusCompleted {
+		t.Fatalf("status overwritten after terminal rejection: got %q, want %q", got.Status, TaskStatusCompleted)
+	}
+
+	// Unknown task must still surface a clear error (not the sentinel).
+	if err := s.TransitionTaskStatusIfRunning("missing", TaskStatusFailed); err == nil || errors.Is(err, ErrTaskStatusTerminal) {
+		t.Fatalf("expected not-found error, got %v", err)
+	}
+}

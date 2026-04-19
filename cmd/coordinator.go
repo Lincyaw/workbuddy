@@ -892,7 +892,16 @@ func (s *fullCoordinatorServer) handleTaskResult(w http.ResponseWriter, r *http.
 		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "status must be completed, failed, or timeout"})
 		return
 	}
-	if err := s.store.UpdateTaskStatus(taskID, status); err != nil {
+	if err := s.store.TransitionTaskStatusIfRunning(taskID, status); err != nil {
+		if errors.Is(err, store.ErrTaskStatusTerminal) {
+			// Late submit from a zombie goroutine after the task was already
+			// settled (by another goroutine of the same worker, by operator
+			// cleanup, etc.). Reject without rewriting the terminal status.
+			// See #143 / #141 for the dup-claim race that produces these.
+			log.Printf("[coordinator] rejecting late submit for task %s: %v", taskID, err)
+			coordWriteJSON(w, http.StatusConflict, map[string]string{"error": "task already in terminal status"})
+			return
+		}
 		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}

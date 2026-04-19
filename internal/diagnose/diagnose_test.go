@@ -147,6 +147,74 @@ func TestAnalyze(t *testing.T) {
 		}
 		assertFinding(t, findings, KindOrphanedTask, 9, false)
 	})
+
+	// Regression for #142: heartbeat-only zombie — running task whose
+	// dispatch state is for 'developing', but the issue label has already
+	// flipped to 'reviewing'. The UpdatedAt-based check cannot fire because
+	// worker heartbeats keep UpdatedAt fresh; the label-state cross-check
+	// must catch it.
+	t.Run("orphan detected when task state differs from current issue state", func(t *testing.T) {
+		st := newDiagnoseStore(t)
+		if err := st.UpsertIssueCache(store.IssueCache{
+			Repo:     "owner/repo",
+			IssueNum: 10,
+			Labels:   `["workbuddy","status:reviewing"]`,
+			State:    "open",
+		}); err != nil {
+			t.Fatalf("UpsertIssueCache: %v", err)
+		}
+		if err := st.InsertTask(store.TaskRecord{
+			ID:        "task-10",
+			Repo:      "owner/repo",
+			IssueNum:  10,
+			AgentName: "dev-agent",
+			State:     "developing",
+			Status:    store.TaskStatusRunning,
+		}); err != nil {
+			t.Fatalf("InsertTask: %v", err)
+		}
+		// Heartbeat is fresh — the UpdatedAt path cannot catch this.
+		if _, err := st.DB().Exec(`UPDATE task_queue SET updated_at = ? WHERE id = ?`,
+			now.Format("2006-01-02 15:04:05"), "task-10"); err != nil {
+			t.Fatalf("update task: %v", err)
+		}
+		findings, err := analyzeWithTimeouts(st, "owner/repo", now, agentTimeouts)
+		if err != nil {
+			t.Fatalf("Analyze: %v", err)
+		}
+		assertFinding(t, findings, KindOrphanedTask, 10, true)
+	})
+
+	t.Run("orphan NOT flagged when task state matches current issue state", func(t *testing.T) {
+		st := newDiagnoseStore(t)
+		if err := st.UpsertIssueCache(store.IssueCache{
+			Repo:     "owner/repo",
+			IssueNum: 11,
+			Labels:   `["workbuddy","status:developing"]`,
+			State:    "open",
+		}); err != nil {
+			t.Fatalf("UpsertIssueCache: %v", err)
+		}
+		if err := st.InsertTask(store.TaskRecord{
+			ID:        "task-11",
+			Repo:      "owner/repo",
+			IssueNum:  11,
+			AgentName: "dev-agent",
+			State:     "developing",
+			Status:    store.TaskStatusRunning,
+		}); err != nil {
+			t.Fatalf("InsertTask: %v", err)
+		}
+		if _, err := st.DB().Exec(`UPDATE task_queue SET updated_at = ? WHERE id = ?`,
+			now.Format("2006-01-02 15:04:05"), "task-11"); err != nil {
+			t.Fatalf("update task: %v", err)
+		}
+		findings, err := analyzeWithTimeouts(st, "owner/repo", now, agentTimeouts)
+		if err != nil {
+			t.Fatalf("Analyze: %v", err)
+		}
+		assertFinding(t, findings, KindOrphanedTask, 11, false)
+	})
 }
 
 func seedDiagnoseIssue(t *testing.T, st *store.Store, issueNum int, status string, eventAt time.Time) {

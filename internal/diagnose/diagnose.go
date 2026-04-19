@@ -107,6 +107,28 @@ func analyzeWithTimeouts(st *store.Store, repo string, now time.Time, agentTimeo
 		}
 	}
 
+	// Build issue-state lookup for the cross-check below. An orphan signal
+	// that does NOT flow through worker heartbeat (which keeps UpdatedAt
+	// fresh even when the codex child is dead) is: the task is for state X
+	// but the issue's labels have already transitioned past X. This catches
+	// the "heartbeat-only zombie" class (see #142): the worker's heartbeat
+	// goroutine is happily refreshing updated_at while the actual agent
+	// work is long done and committed, so the UpdatedAt-based check below
+	// can never fire. The label-state cross-check is a non-heartbeat signal.
+	//
+	// Note: currentState() returns the full label ("status:developing"),
+	// but task.State stores the bare workflow-state name ("developing").
+	// We strip the "status:" prefix so the two can be compared.
+	issueCurrentState := make(map[string]string, len(caches))
+	for _, cache := range caches {
+		cur := currentState(cache.Labels, cache.State)
+		cur = strings.TrimPrefix(cur, "status:")
+		if cur == "" {
+			continue
+		}
+		issueCurrentState[issueKey(cache.Repo, cache.IssueNum)] = cur
+	}
+
 	for _, task := range tasks {
 		if repo != "" && task.Repo != repo {
 			continue
@@ -122,6 +144,31 @@ func analyzeWithTimeouts(st *store.Store, repo string, now time.Time, agentTimeo
 				Diagnosis:    fmt.Sprintf("task %s has been running without updates for %s", task.ID, now.Sub(task.UpdatedAt).Round(time.Minute)),
 				SuggestedFix: "escalate to operator; inspect worker or restart serve",
 			})
+			continue
+		}
+		// Heartbeat-only zombie detection: running task whose dispatch state
+		// is no longer the issue's current state. The agent has demonstrably
+		// finished (label already flipped) even though the DB row never
+		// transitioned off 'running'.
+		if task.Status == store.TaskStatusRunning && strings.TrimSpace(task.State) != "" {
+			key := issueKey(task.Repo, task.IssueNum)
+			if cur, ok := issueCurrentState[key]; ok && cur != "" && cur != task.State {
+				findings = append(findings, Finding{
+					Kind:      KindOrphanedTask,
+					Repo:      task.Repo,
+					IssueNum:  task.IssueNum,
+					AgentName: task.AgentName,
+					Severity:  SeverityError,
+					Diagnosis: fmt.Sprintf("task %s (%s) is running for state %q but issue is now in %q — agent already done",
+						task.ID, task.AgentName, task.State, cur),
+					// Not auto-fixable by cache-invalidate (the default diagnose
+					// --fix action): we need to mark the task completed so its
+					// worker slot is released. Leave this to the operator; they
+					// can verify the dev agent truly succeeded (PR created,
+					// label flipped) before unblocking.
+					SuggestedFix: "mark task completed so slot is released; restart worker if heartbeat is stuck",
+				})
+			}
 		}
 	}
 

@@ -358,6 +358,71 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 	launchCtx := buildRemoteTaskContext(task, reader, workDir)
 	sessionID := launchCtx.Session.ID
 
+	// Start heartbeat BEFORE worktree setup. `git worktree add` on a large
+	// repo with many concurrent claims can block well past the 30s task lease;
+	// a silent lease expiry there lets the same worker re-claim the same task
+	// from its own poll loop, producing two parallel goroutines for one task
+	// (see issue #143 and the chain to #141).
+	taskCtx, taskCancel := context.WithCancel(ctx)
+	defer taskCancel()
+
+	var released atomic.Bool
+	releaseDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			releaseCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer cancel()
+			if err := client.ReleaseTask(releaseCtx, task.TaskID, workerclient.ReleaseRequest{WorkerID: workerID, Reason: "worker shutdown"}); err == nil {
+				released.Store(true)
+			}
+			taskCancel()
+		case <-releaseDone:
+		}
+	}()
+	defer close(releaseDone)
+
+	heartbeatStop := make(chan struct{})
+	heartbeatDone := make(chan struct{})
+	var heartbeatStopOnce sync.Once
+	stopHeartbeat := func() {
+		heartbeatStopOnce.Do(func() {
+			close(heartbeatStop)
+		})
+		<-heartbeatDone
+	}
+	go func() {
+		defer close(heartbeatDone)
+		ticker := time.NewTicker(heartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				hbCtx, cancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(heartbeatInterval))
+				err := client.Heartbeat(hbCtx, task.TaskID, workerclient.HeartbeatRequest{WorkerID: workerID})
+				cancel()
+				if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, workerclient.ErrUnauthorized) {
+					// Coordinator returns HTTP 400 "worker_id does not match claimed task"
+					// when another claimer (often this same worker's poll loop after a
+					// lease expiry) has taken over. Stop executing: a second goroutine
+					// already owns this task and will run it; continuing here just
+					// races against it on the same worktree. See #143.
+					if isTaskOwnershipLost(err) {
+						log.Printf("[worker] heartbeat reports ownership lost for task %s: %v — cancelling local execution", task.TaskID, err)
+						taskCancel()
+						return
+					}
+					log.Printf("[worker] heartbeat failed for task %s: %v", task.TaskID, err)
+				}
+			case <-heartbeatStop:
+				return
+			case <-taskCtx.Done():
+				return
+			}
+		}
+	}()
+	defer stopHeartbeat()
+
 	// Create an isolated worktree for this task so multiple agents
 	// don't interfere with each other's git state.
 	var worktreePath string
@@ -400,55 +465,6 @@ func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *wor
 		}
 	}()
 
-	taskCtx, taskCancel := context.WithCancel(ctx)
-	defer taskCancel()
-
-	var released atomic.Bool
-	releaseDone := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			releaseCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-			defer cancel()
-			if err := client.ReleaseTask(releaseCtx, task.TaskID, workerclient.ReleaseRequest{WorkerID: workerID, Reason: "worker shutdown"}); err == nil {
-				released.Store(true)
-			}
-			taskCancel()
-		case <-releaseDone:
-		}
-	}()
-	defer close(releaseDone)
-
-	heartbeatStop := make(chan struct{})
-	heartbeatDone := make(chan struct{})
-	var heartbeatStopOnce sync.Once
-	stopHeartbeat := func() {
-		heartbeatStopOnce.Do(func() {
-			close(heartbeatStop)
-		})
-		<-heartbeatDone
-	}
-	go func() {
-		defer close(heartbeatDone)
-		ticker := time.NewTicker(heartbeatInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				hbCtx, cancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(heartbeatInterval))
-				err := client.Heartbeat(hbCtx, task.TaskID, workerclient.HeartbeatRequest{WorkerID: workerID})
-				cancel()
-				if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, workerclient.ErrUnauthorized) {
-					log.Printf("[worker] heartbeat failed for task %s: %v", task.TaskID, err)
-				}
-			case <-heartbeatStop:
-				return
-			case <-taskCtx.Done():
-				return
-			}
-		}
-	}()
-	defer stopHeartbeat()
 	sessionID = launchCtx.Session.ID
 	if err := rep.ReportStarted(taskCtx, task.Repo, task.IssueNum, task.AgentName, sessionID, workerID); err != nil {
 		log.Printf("[worker] report started failed: %v", err)
@@ -609,6 +625,21 @@ func boundedWorkerTaskAPITimeout(timeout time.Duration) time.Duration {
 		return defaultWorkerTaskAPITimeout
 	}
 	return timeout
+}
+
+// isTaskOwnershipLost returns true when err from a coordinator task endpoint
+// indicates this worker no longer owns the task — typically because the lease
+// expired and another claimer (or this worker's own poll loop) took over.
+// Heartbeat/submit callers should stop executing when this is true.
+func isTaskOwnershipLost(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "worker_id does not match claimed task") ||
+		strings.Contains(msg, "task already completed") ||
+		strings.Contains(msg, "not claimable by this worker") ||
+		strings.Contains(msg, "task is no longer owned by worker")
 }
 
 func buildRemoteTaskContext(task *workerclient.Task, reader workerIssueReader, workDir string) *launcher.TaskContext {

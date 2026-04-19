@@ -1105,3 +1105,32 @@ func TestWorkerRecoversAfterKilledTaskWhenResultSubmitFails(t *testing.T) {
 		t.Fatalf("expected worker to return to poll loop, got %d poll(s)", pollCount.Load())
 	}
 }
+
+// Regression for #143: the heartbeat loop must recognize
+// "ownership lost" error strings returned by the coordinator so it can
+// cancel the local task context. Without this, a zombie goroutine keeps
+// running (and potentially writing to a worktree already being claimed
+// by a newer goroutine).
+func TestIsTaskOwnershipLost(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"worker mismatch", errors.New(`workerclient: unexpected status 400: {"error":"worker_id does not match claimed task"}`), true},
+		{"already completed", errors.New("store: complete task: task already completed"), true},
+		{"not claimable", errors.New(`workerclient: unexpected status 409: {"error":"task is not claimable by this worker"}`), true},
+		{"no longer owned", errors.New("store: complete task: task is no longer owned by worker or lease expired"), true},
+		{"unrelated", errors.New("connection refused"), false},
+		{"http 500", errors.New(`workerclient: unexpected status 500: {"error":"internal"}`), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isTaskOwnershipLost(tc.err)
+			if got != tc.want {
+				t.Fatalf("isTaskOwnershipLost(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}

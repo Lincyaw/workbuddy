@@ -589,6 +589,49 @@ func (s *Store) UpdateTaskStatus(taskID, status string) error {
 	return nil
 }
 
+// ErrTaskStatusTerminal is returned by TransitionTaskStatusIfRunning when the
+// target task is already in a terminal status (completed/failed/timeout).
+// Used by coordinator submit handling to reject late submissions from zombie
+// worker goroutines that would otherwise overwrite a settled task — e.g. a
+// stuck codex in a dup-claim race finally returning hours after the task was
+// already resolved by another goroutine or by operator cleanup.
+var ErrTaskStatusTerminal = errors.New("store: task is already in terminal status")
+
+// TransitionTaskStatusIfRunning updates status only when the task is currently
+// in pending or running state. If the task is already in a terminal state,
+// returns ErrTaskStatusTerminal without modifying the row.
+func (s *Store) TransitionTaskStatusIfRunning(taskID, status string) error {
+	res, err := s.db.Exec(
+		`UPDATE task_queue
+		 SET status = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ?
+		   AND status IN (?, ?)`,
+		status, taskID,
+		TaskStatusPending, TaskStatusRunning,
+	)
+	if err != nil {
+		return fmt.Errorf("store: transition task status: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		var existing string
+		row := s.db.QueryRow(`SELECT status FROM task_queue WHERE id = ?`, taskID)
+		if scanErr := row.Scan(&existing); scanErr != nil {
+			if errors.Is(scanErr, sql.ErrNoRows) {
+				return fmt.Errorf("store: transition task status: task %q not found", taskID)
+			}
+			return fmt.Errorf("store: transition task status: inspect existing: %w", scanErr)
+		}
+		switch existing {
+		case TaskStatusCompleted, TaskStatusFailed, TaskStatusTimeout:
+			return ErrTaskStatusTerminal
+		default:
+			return fmt.Errorf("store: transition task status: task %q has unexpected status %q", taskID, existing)
+		}
+	}
+	return nil
+}
+
 // ClaimTask atomically assigns a pending task to a worker and marks it running.
 // It returns true when the claim succeeded, or false when the task was no longer pending.
 func (s *Store) ClaimTask(taskID, workerID string) (bool, error) {
