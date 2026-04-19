@@ -3,9 +3,12 @@ package launcher
 import (
 	"context"
 	"fmt"
+	"log"
+	"os"
 	"sort"
 	"strings"
 
+	"github.com/Lincyaw/workbuddy/internal/agent/codex"
 	"github.com/Lincyaw/workbuddy/internal/config"
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 )
@@ -19,7 +22,21 @@ type Launcher struct {
 func NewLauncher() *Launcher {
 	l := &Launcher{runtimes: make(map[string]Runtime)}
 	l.Register(&ClaudeRuntime{}, config.RuntimeClaudeCode, config.RuntimeClaudeShot)
-	l.Register(&CodexRuntime{}, config.RuntimeCodex, config.RuntimeCodexExec)
+
+	// When WORKBUDDY_CODEX_BACKEND=mcp-server, use the unified agent backend
+	// for codex runtimes instead of the subprocess-based CodexRuntime.
+	if os.Getenv("WORKBUDDY_CODEX_BACKEND") == "mcp-server" {
+		backend, err := codex.NewBackend(codex.Config{})
+		if err != nil {
+			log.Printf("[launcher] codex mcp-server backend init failed, falling back to exec: %v", err)
+			l.Register(&CodexRuntime{}, config.RuntimeCodex, config.RuntimeCodexExec)
+		} else {
+			bridge := &agentBridgeRuntime{backend: backend, runtimeName: config.RuntimeCodexExec}
+			l.Register(bridge, config.RuntimeCodex, config.RuntimeCodexExec, config.RuntimeCodexMCP)
+		}
+	} else {
+		l.Register(&CodexRuntime{}, config.RuntimeCodex, config.RuntimeCodexExec)
+	}
 	return l
 }
 
