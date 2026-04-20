@@ -124,6 +124,24 @@ var deployRedeployCmd = &cobra.Command{
 	RunE:  runDeployRedeployCmd,
 }
 
+var deployStopCmd = &cobra.Command{
+	Use:   "stop",
+	Short: "Stop a deployed systemd service without disabling it",
+	RunE:  runDeployStopCmd,
+}
+
+var deployStartCmd = &cobra.Command{
+	Use:   "start",
+	Short: "Start a deployed systemd service without enabling it",
+	RunE:  runDeployStartCmd,
+}
+
+var deployDeleteCmd = &cobra.Command{
+	Use:   "delete",
+	Short: "Delete a recorded deployment and remove its systemd unit",
+	RunE:  runDeployDeleteCmd,
+}
+
 var deployUpgradeCmd = &cobra.Command{
 	Use:   "upgrade",
 	Short: "Download a release binary into an existing deployment and restart it",
@@ -145,12 +163,21 @@ func init() {
 	deployRedeployCmd.Flags().String("name", defaultDeployName, "Deployment name")
 	deployRedeployCmd.Flags().String("scope", defaultDeployScope, "Deployment scope: user or system")
 
+	deployStopCmd.Flags().String("name", defaultDeployName, "Deployment name")
+	deployStopCmd.Flags().String("scope", defaultDeployScope, "Deployment scope: user or system")
+
+	deployStartCmd.Flags().String("name", defaultDeployName, "Deployment name")
+	deployStartCmd.Flags().String("scope", defaultDeployScope, "Deployment scope: user or system")
+
+	deployDeleteCmd.Flags().String("name", defaultDeployName, "Deployment name")
+	deployDeleteCmd.Flags().String("scope", defaultDeployScope, "Deployment scope: user or system")
+
 	deployUpgradeCmd.Flags().String("name", defaultDeployName, "Deployment name")
 	deployUpgradeCmd.Flags().String("scope", defaultDeployScope, "Deployment scope: user or system")
 	deployUpgradeCmd.Flags().String("version", "latest", "Release version to install (for example latest or v0.2.0)")
 	deployUpgradeCmd.Flags().String("repository", defaultUpgradeRepo, "GitHub repository used for release upgrades in OWNER/NAME form")
 
-	deployCmd.AddCommand(deployInstallCmd, deployRedeployCmd, deployUpgradeCmd)
+	deployCmd.AddCommand(deployInstallCmd, deployRedeployCmd, deployStopCmd, deployStartCmd, deployDeleteCmd, deployUpgradeCmd)
 	rootCmd.AddCommand(deployCmd)
 }
 
@@ -168,6 +195,30 @@ func runDeployRedeployCmd(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	return runDeployRedeployWithOpts(cmd.Context(), opts, cmd.OutOrStdout())
+}
+
+func runDeployStopCmd(cmd *cobra.Command, _ []string) error {
+	opts, err := parseDeployLookupFlags(cmd)
+	if err != nil {
+		return err
+	}
+	return runDeployStopWithOpts(cmd.Context(), opts, cmd.OutOrStdout())
+}
+
+func runDeployStartCmd(cmd *cobra.Command, _ []string) error {
+	opts, err := parseDeployLookupFlags(cmd)
+	if err != nil {
+		return err
+	}
+	return runDeployStartWithOpts(cmd.Context(), opts, cmd.OutOrStdout())
+}
+
+func runDeployDeleteCmd(cmd *cobra.Command, _ []string) error {
+	opts, err := parseDeployLookupFlags(cmd)
+	if err != nil {
+		return err
+	}
+	return runDeployDeleteWithOpts(cmd.Context(), opts, cmd.OutOrStdout())
 }
 
 func runDeployUpgradeCmd(cmd *cobra.Command, _ []string) error {
@@ -370,20 +421,117 @@ func runDeployRedeployWithOpts(ctx context.Context, opts *deployLookupOpts, stdo
 	if manifest.Systemd == nil {
 		return nil
 	}
+	if err := syncSystemdDeploymentState(ctx, "deploy redeploy", manifest, stdout); err != nil {
+		return err
+	}
+	return nil
+}
+
+func runDeployStopWithOpts(ctx context.Context, opts *deployLookupOpts, stdout io.Writer) error {
+	if opts == nil {
+		return fmt.Errorf("deploy stop: options are required")
+	}
+	manifest, _, manifestPath, err := loadDeploymentForScope(opts.name, opts.scope)
+	if err != nil {
+		return fmt.Errorf("deploy stop: %w", err)
+	}
+	if manifest.Systemd == nil {
+		return fmt.Errorf("deploy stop: deployment %q is not managed by systemd", manifest.Name)
+	}
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("deploy stop: systemd deployment is only supported on Linux")
+	}
+
+	serviceName := manifest.Systemd.ServiceName + ".service"
+	if err := deployRunSystemctl(ctx, manifest.Scope, "stop", serviceName); err != nil {
+		return fmt.Errorf("deploy stop: %w", err)
+	}
+	_ = deployRunSystemctl(ctx, manifest.Scope, "reset-failed", serviceName)
+	manifest.Systemd.Started = false
+	if err := writeDeploymentManifest(manifestPath, manifest); err != nil {
+		return fmt.Errorf("deploy stop: write manifest: %w", err)
+	}
+	if _, err := fmt.Fprintf(stdout, "stopped %s\n", serviceName); err != nil {
+		return fmt.Errorf("deploy stop: write output: %w", err)
+	}
+	return nil
+}
+
+func runDeployStartWithOpts(ctx context.Context, opts *deployLookupOpts, stdout io.Writer) error {
+	if opts == nil {
+		return fmt.Errorf("deploy start: options are required")
+	}
+	manifest, _, manifestPath, err := loadDeploymentForScope(opts.name, opts.scope)
+	if err != nil {
+		return fmt.Errorf("deploy start: %w", err)
+	}
+	if manifest.Systemd == nil {
+		return fmt.Errorf("deploy start: deployment %q is not managed by systemd", manifest.Name)
+	}
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("deploy start: systemd deployment is only supported on Linux")
+	}
+
 	if err := deployRunSystemctl(ctx, manifest.Scope, "daemon-reload"); err != nil {
-		return fmt.Errorf("deploy redeploy: %w", err)
+		return fmt.Errorf("deploy start: %w", err)
 	}
 	serviceName := manifest.Systemd.ServiceName + ".service"
-	if manifest.Systemd.Enabled {
-		if err := deployRunSystemctl(ctx, manifest.Scope, "enable", serviceName); err != nil {
-			return fmt.Errorf("deploy redeploy: %w", err)
+	if err := deployRunSystemctl(ctx, manifest.Scope, "start", serviceName); err != nil {
+		return fmt.Errorf("deploy start: %w", err)
+	}
+	manifest.Systemd.Started = true
+	if err := writeDeploymentManifest(manifestPath, manifest); err != nil {
+		return fmt.Errorf("deploy start: write manifest: %w", err)
+	}
+	if _, err := fmt.Fprintf(stdout, "started %s\n", serviceName); err != nil {
+		return fmt.Errorf("deploy start: write output: %w", err)
+	}
+	return nil
+}
+
+func runDeployDeleteWithOpts(ctx context.Context, opts *deployLookupOpts, stdout io.Writer) error {
+	if opts == nil {
+		return fmt.Errorf("deploy delete: options are required")
+	}
+	manifest, _, manifestPath, err := loadDeploymentForScope(opts.name, opts.scope)
+	if err != nil {
+		return fmt.Errorf("deploy delete: %w", err)
+	}
+
+	unitRemoved := false
+	if manifest.Systemd != nil {
+		if runtime.GOOS != "linux" {
+			return fmt.Errorf("deploy delete: systemd deployment is only supported on Linux")
+		}
+		serviceName := manifest.Systemd.ServiceName + ".service"
+		if err := deployRunSystemctl(ctx, manifest.Scope, "disable", "--now", serviceName); err != nil {
+			return fmt.Errorf("deploy delete: %w", err)
+		}
+		_ = deployRunSystemctl(ctx, manifest.Scope, "reset-failed", serviceName)
+		if manifest.Systemd.UnitPath != "" {
+			if err := os.Remove(manifest.Systemd.UnitPath); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("deploy delete: remove unit %s: %w", manifest.Systemd.UnitPath, err)
+			}
+			unitRemoved = true
+		}
+		if err := deployRunSystemctl(ctx, manifest.Scope, "daemon-reload"); err != nil {
+			return fmt.Errorf("deploy delete: %w", err)
 		}
 	}
-	if err := deployRunSystemctl(ctx, manifest.Scope, "restart", serviceName); err != nil {
-		return fmt.Errorf("deploy redeploy: %w", err)
+
+	if err := os.Remove(manifestPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("deploy delete: remove manifest %s: %w", manifestPath, err)
 	}
-	if _, err := fmt.Fprintf(stdout, "restarted %s\n", serviceName); err != nil {
-		return fmt.Errorf("deploy redeploy: write output: %w", err)
+	if _, err := fmt.Fprintf(stdout, "deleted deployment manifest %s\n", manifestPath); err != nil {
+		return fmt.Errorf("deploy delete: write output: %w", err)
+	}
+	if unitRemoved {
+		if _, err := fmt.Fprintf(stdout, "removed systemd unit %s\n", manifest.Systemd.UnitPath); err != nil {
+			return fmt.Errorf("deploy delete: write output: %w", err)
+		}
+	}
+	if _, err := fmt.Fprintf(stdout, "left binary in place at %s\n", manifest.BinaryPath); err != nil {
+		return fmt.Errorf("deploy delete: write output: %w", err)
 	}
 	return nil
 }
@@ -433,20 +581,40 @@ func runDeployUpgradeWithOpts(ctx context.Context, opts *deployUpgradeOpts, stdo
 	if manifest.Systemd == nil {
 		return nil
 	}
-	if err := deployRunSystemctl(ctx, manifest.Scope, "daemon-reload"); err != nil {
-		return fmt.Errorf("deploy upgrade: %w", err)
+	if err := syncSystemdDeploymentState(ctx, "deploy upgrade", manifest, stdout); err != nil {
+		return err
 	}
+	return nil
+}
+
+func syncSystemdDeploymentState(ctx context.Context, op string, manifest *deploymentManifest, stdout io.Writer) error {
+	if manifest == nil || manifest.Systemd == nil {
+		return nil
+	}
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("%s: systemd deployment is only supported on Linux", op)
+	}
+	if err := deployRunSystemctl(ctx, manifest.Scope, "daemon-reload"); err != nil {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+
 	serviceName := manifest.Systemd.ServiceName + ".service"
 	if manifest.Systemd.Enabled {
 		if err := deployRunSystemctl(ctx, manifest.Scope, "enable", serviceName); err != nil {
-			return fmt.Errorf("deploy upgrade: %w", err)
+			return fmt.Errorf("%s: %w", op, err)
 		}
 	}
+	if !manifest.Systemd.Started {
+		if _, err := fmt.Fprintf(stdout, "left %s stopped\n", serviceName); err != nil {
+			return fmt.Errorf("%s: write output: %w", op, err)
+		}
+		return nil
+	}
 	if err := deployRunSystemctl(ctx, manifest.Scope, "restart", serviceName); err != nil {
-		return fmt.Errorf("deploy upgrade: %w", err)
+		return fmt.Errorf("%s: %w", op, err)
 	}
 	if _, err := fmt.Fprintf(stdout, "restarted %s\n", serviceName); err != nil {
-		return fmt.Errorf("deploy upgrade: write output: %w", err)
+		return fmt.Errorf("%s: write output: %w", op, err)
 	}
 	return nil
 }

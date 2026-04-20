@@ -29,6 +29,7 @@ const (
 	RuntimeClaudeCode  = "claude-code"
 	RuntimeClaudeShot  = "claude-oneshot"
 	RuntimeCodex       = "codex"
+	RuntimeCodexExec   = "codex-exec"
 	RuntimeCodexServer = "codex-appserver"
 )
 
@@ -41,6 +42,7 @@ var validRuntimes = map[string]bool{
 	RuntimeClaudeCode:  true,
 	RuntimeClaudeShot:  true,
 	RuntimeCodex:       true,
+	RuntimeCodexExec:   true,
 	RuntimeCodexServer: true,
 }
 
@@ -255,7 +257,7 @@ func normalizeAgentConfig(agent *AgentConfig) ([]Warning, error) {
 	var warnings []Warning
 
 	switch agent.Runtime {
-	case RuntimeCodex, RuntimeCodexServer:
+	case RuntimeCodex, RuntimeCodexExec, RuntimeCodexServer:
 		agent.Runtime = RuntimeCodex
 	}
 

@@ -42,6 +42,17 @@ workbuddy deploy redeploy --name workbuddy --scope user
 workbuddy deploy upgrade --name workbuddy --scope user --version latest
 ```
 
+Managed deployments can also be paused, resumed, or removed in place:
+
+```bash
+workbuddy deploy stop --name workbuddy --scope user
+workbuddy deploy start --name workbuddy --scope user
+workbuddy deploy delete --name workbuddy --scope user
+```
+
+`deploy delete` removes the recorded manifest and systemd unit, but leaves the
+installed binary in place.
+
 `deploy install` defaults to `workbuddy serve`, but you can record dedicated
 distributed roles by passing the runtime command after `--`.
 

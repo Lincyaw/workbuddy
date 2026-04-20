@@ -127,6 +127,56 @@ func TestParseWorkerFlags(t *testing.T) {
 	}
 }
 
+func TestParseWorkerFlagsFallsBackToEnvToken(t *testing.T) {
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", "env-secret")
+
+	cmd := &cobra.Command{Use: "worker"}
+	cmd.Flags().String("coordinator", "", "")
+	cmd.Flags().String("token", "", "")
+	cmd.Flags().String("role", "", "")
+	cmd.Flags().String("runtime", config.RuntimeClaudeCode, "")
+	cmd.Flags().String("repo", "", "")
+	cmd.Flags().String("repos", "", "")
+	cmd.Flags().String("id", "", "")
+	cmd.Flags().String("mgmt-addr", defaultWorkerMgmtAddr, "")
+	cmd.Flags().Int("concurrency", 1, "")
+	if err := cmd.Flags().Set("coordinator", "http://localhost:9999"); err != nil {
+		t.Fatal(err)
+	}
+
+	opts, err := parseWorkerFlags(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := opts.token, "env-secret"; got != want {
+		t.Fatalf("opts.token = %q, want %q", got, want)
+	}
+}
+
+func TestParseWorkerFlagsRequiresTokenWhenFlagAndEnvMissing(t *testing.T) {
+	cmd := &cobra.Command{Use: "worker"}
+	cmd.Flags().String("coordinator", "", "")
+	cmd.Flags().String("token", "", "")
+	cmd.Flags().String("role", "", "")
+	cmd.Flags().String("runtime", config.RuntimeClaudeCode, "")
+	cmd.Flags().String("repo", "", "")
+	cmd.Flags().String("repos", "", "")
+	cmd.Flags().String("id", "", "")
+	cmd.Flags().String("mgmt-addr", defaultWorkerMgmtAddr, "")
+	cmd.Flags().Int("concurrency", 1, "")
+	if err := cmd.Flags().Set("coordinator", "http://localhost:9999"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := parseWorkerFlags(cmd)
+	if err == nil {
+		t.Fatal("expected missing token to fail")
+	}
+	if !strings.Contains(err.Error(), "--token or WORKBUDDY_AUTH_TOKEN is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestWorkerUnregisterCmd(t *testing.T) {
 	var method string
 	var path string

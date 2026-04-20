@@ -1196,6 +1196,36 @@ prompt: |
 	}
 }
 
+func TestLoadConfig_CodexExecLegacyAliasAccepted(t *testing.T) {
+	agent := `---
+name: legacy-agent
+description: Legacy Codex agent
+triggers:
+  - label: "status:developing"
+    event: labeled
+role: dev
+runtime: codex-exec
+policy:
+  sandbox: workspace-write
+  approval: via-approver
+prompt: |
+  implement issue {{.Issue.Number}}
+---
+## Agent
+`
+	dir := setupConfigDir(t, map[string]string{"agents/legacy.md": agent, "workflows/feature-dev.md": validWorkflow})
+	cfg, warnings, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
+	}
+	if cfg.Agents["legacy-agent"].Runtime != RuntimeCodex {
+		t.Fatalf("runtime = %q", cfg.Agents["legacy-agent"].Runtime)
+	}
+}
+
 func TestLoadConfig_OutputContractSchemaPathResolved(t *testing.T) {
 	agent := `---
 name: contract-agent

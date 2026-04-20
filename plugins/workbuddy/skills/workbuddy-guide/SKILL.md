@@ -44,7 +44,7 @@ Dev writes code + PR → flips to `reviewing`. Review evaluates each AC →
 |------|---------|-------------|
 | **Serve** (single process) | `workbuddy serve` | Local dev, single-host setups, testing |
 | **Distributed** (coordinator + workers) | `workbuddy coordinator` + `workbuddy worker` | Workers on different hosts, horizontal scale, multi-repo |
-| **Managed install** (systemd) | `workbuddy deploy install` | Long-lived production; survives reboots; `deploy redeploy`/`deploy upgrade` for updates |
+| **Managed install** (systemd) | `workbuddy deploy install` | Long-lived production; survives reboots; `deploy redeploy`/`deploy upgrade` update it, and `deploy stop`/`deploy start`/`deploy delete` pause, resume, or remove it |
 
 All three share the same state machine, SQLite store, and agent configs.
 Run `workbuddy <mode> --help` for flags, `workbuddy deploy install --help`
@@ -62,7 +62,7 @@ Run `workbuddy --help` for the full list. Grouped by intent:
 **Run workbuddy**
 - `workbuddy serve` — single-process dev mode
 - `workbuddy coordinator` + `workbuddy worker` — distributed mode
-- `workbuddy deploy install|redeploy|upgrade` — managed systemd install
+- `workbuddy deploy install|redeploy|upgrade|stop|start|delete` — managed systemd install lifecycle
 
 **Observe**
 - `workbuddy status` — issues, tasks, events, stuck issues, or watch until done
