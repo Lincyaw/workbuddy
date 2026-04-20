@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,6 +52,7 @@ type statusOpts struct {
 
 type statusClient struct {
 	baseURL string
+	token   string
 	http    *http.Client
 }
 
@@ -64,6 +68,19 @@ type statusIssue struct {
 type statusResponse struct {
 	Repo   string        `json:"repo"`
 	Issues []statusIssue `json:"issues"`
+}
+
+type statusHTTPStatusError struct {
+	path   string
+	status int
+	body   string
+}
+
+func (e *statusHTTPStatusError) Error() string {
+	if e == nil {
+		return "status: request failed"
+	}
+	return fmt.Sprintf("status: %s returned %d: %s", e.path, e.status, strings.TrimSpace(e.body))
 }
 
 type statusEventRow struct {
@@ -139,6 +156,7 @@ func runStatusCmd(cmd *cobra.Command, _ []string) error {
 	}
 	client := &statusClient{
 		baseURL: opts.baseURL,
+		token:   opts.token,
 		http:    &http.Client{Timeout: httpTimeout},
 	}
 	return runStatusWithOpts(cmd.Context(), opts, client, os.Stdout)
@@ -235,9 +253,12 @@ func parseStatusFlags(cmd *cobra.Command) (*statusOpts, error) {
 		return nil, fmt.Errorf("status: repo is required")
 	}
 
-	port := cfg.Global.Port
-	if port == 0 {
-		port = defaultPort
+	baseURL, resolvedToken, err := resolveStatusBaseURL(repo, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if token == "" {
+		token = resolvedToken
 	}
 
 	return &statusOpts{
@@ -252,7 +273,8 @@ func parseStatusFlags(cmd *cobra.Command) (*statusOpts, error) {
 		since:      since,
 		issue:      issue,
 		timeout:    timeout,
-		baseURL:    fmt.Sprintf("http://127.0.0.1:%d", port),
+		baseURL:    baseURL,
+		token:      token,
 		now:        time.Now,
 	}, nil
 }
@@ -271,6 +293,311 @@ func loadStatusConfig(explicitRepo string) (*config.FullConfig, error) {
 		return cfg, nil
 	}
 	return nil, fmt.Errorf("status: load config: %w", err)
+}
+
+func resolveStatusBaseURL(repo string, cfg *config.FullConfig) (string, string, error) {
+	if target, ok := discoverManagedStatusTarget(repo); ok {
+		return target.baseURL, target.token, nil
+	}
+	port := cfg.Global.Port
+	if port == 0 {
+		port = defaultPort
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d", port), "", nil
+}
+
+type statusManagedTarget struct {
+	baseURL string
+	token   string
+	score   int
+}
+
+func discoverManagedStatusTarget(repo string) (*statusManagedTarget, bool) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
+	manifestDirs := make([]string, 0, 2)
+	for _, scope := range []string{"user", "system"} {
+		_, paths, err := resolveDeployScopePaths(scope)
+		if err != nil || paths == nil || strings.TrimSpace(paths.manifestDir) == "" {
+			continue
+		}
+		manifestDirs = append(manifestDirs, paths.manifestDir)
+	}
+
+	var best *statusManagedTarget
+	for _, manifestDir := range manifestDirs {
+		entries, err := filepath.Glob(filepath.Join(manifestDir, "*.json"))
+		if err != nil {
+			continue
+		}
+		for _, manifestPath := range entries {
+			manifest, err := readDeploymentManifest(manifestPath)
+			if err != nil {
+				continue
+			}
+			baseURL, score := statusTargetFromManifest(manifest, repo, cwd)
+			if score < 0 || baseURL == "" {
+				continue
+			}
+			candidate := &statusManagedTarget{
+				baseURL: baseURL,
+				token:   resolveDeploymentAuthToken(manifest),
+				score:   score,
+			}
+			if best == nil || candidate.score > best.score {
+				best = candidate
+			}
+		}
+	}
+
+	if best == nil {
+		return nil, false
+	}
+	return best, true
+}
+
+func statusTargetFromManifest(manifest *deploymentManifest, repo, cwd string) (string, int) {
+	if manifest == nil {
+		return "", -1
+	}
+	command := trimStringSlice(manifest.Command)
+	if len(command) == 0 {
+		command = []string{"serve"}
+	}
+	runtime := strings.TrimSpace(command[0])
+	if runtime == "" {
+		runtime = "serve"
+	}
+
+	baseURL := strings.TrimSpace(statusBaseURLFromCommand(runtime, command[1:]))
+	if baseURL == "" {
+		return "", -1
+	}
+
+	score := 0
+	switch runtime {
+	case "serve":
+		score = 35
+	case "coordinator":
+		score = 40
+	case "worker":
+		score = 25
+	default:
+		return "", -1
+	}
+
+	if cwd != "" && strings.TrimSpace(manifest.WorkingDirectory) != "" && pathWithin(manifest.WorkingDirectory, cwd) {
+		score += 40
+	}
+	if repo != "" && manifestMatchesStatusRepo(manifest, runtime, repo, cwd) {
+		score += 80
+	}
+	return baseURL, score
+}
+
+func manifestMatchesStatusRepo(manifest *deploymentManifest, runtime, repo, cwd string) bool {
+	args := deploymentCommandArgs(manifest)
+	switch runtime {
+	case "worker":
+		return workerManifestMatchesRepo(args[1:], repo, cwd)
+	case "serve", "coordinator":
+		configRepo := strings.TrimSpace(loadDeploymentRepo(manifest))
+		if configRepo != "" {
+			return configRepo == repo
+		}
+		return cwd != "" && strings.TrimSpace(manifest.WorkingDirectory) != "" && pathWithin(manifest.WorkingDirectory, cwd)
+	default:
+		return false
+	}
+}
+
+func loadDeploymentRepo(manifest *deploymentManifest) string {
+	if manifest == nil {
+		return ""
+	}
+	args := deploymentCommandArgs(manifest)
+	configDir := ".github/workbuddy"
+	if value, ok := commandFlagValue(args[1:], "--config-dir"); ok && strings.TrimSpace(value) != "" {
+		configDir = strings.TrimSpace(value)
+	}
+	if !filepath.IsAbs(configDir) {
+		configDir = filepath.Join(manifest.WorkingDirectory, configDir)
+	}
+	cfg, _, err := config.LoadConfig(configDir)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.Global.Repo)
+}
+
+func workerManifestMatchesRepo(args []string, repo, cwd string) bool {
+	if value, ok := commandFlagValue(args, "--repo"); ok && strings.TrimSpace(value) == repo {
+		return true
+	}
+	if value, ok := commandFlagValue(args, "--repos"); ok {
+		for _, binding := range strings.Split(value, ",") {
+			binding = strings.TrimSpace(binding)
+			if binding == "" {
+				continue
+			}
+			repoName, repoPath, hasPath := strings.Cut(binding, "=")
+			if strings.TrimSpace(repoName) != repo {
+				continue
+			}
+			if !hasPath {
+				return true
+			}
+			repoPath = strings.TrimSpace(repoPath)
+			if repoPath == "" || cwd == "" {
+				return true
+			}
+			return pathWithin(repoPath, cwd)
+		}
+	}
+	return false
+}
+
+func deploymentCommandArgs(manifest *deploymentManifest) []string {
+	if manifest == nil {
+		return []string{"serve"}
+	}
+	args := trimStringSlice(manifest.Command)
+	if len(args) == 0 {
+		return []string{"serve"}
+	}
+	return args
+}
+
+func statusBaseURLFromCommand(runtime string, args []string) string {
+	switch runtime {
+	case "serve":
+		port := intFlagValue(args, "--port", defaultPort)
+		return fmt.Sprintf("http://127.0.0.1:%d", port)
+	case "coordinator":
+		if listenAddr, ok := commandFlagValue(args, "--listen"); ok {
+			return statusBaseURLFromListen(listenAddr)
+		}
+		port := intFlagValue(args, "--port", 8081)
+		return fmt.Sprintf("http://127.0.0.1:%d", port)
+	case "worker":
+		if coordinatorURL, ok := commandFlagValue(args, "--coordinator"); ok {
+			return strings.TrimRight(strings.TrimSpace(coordinatorURL), "/")
+		}
+	}
+	return ""
+}
+
+func statusBaseURLFromListen(listenAddr string) string {
+	listenAddr = strings.TrimSpace(listenAddr)
+	if listenAddr == "" {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return ""
+	}
+	host = strings.TrimSpace(host)
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+		host = "127.0.0.1"
+	}
+	return fmt.Sprintf("http://%s:%s", host, port)
+}
+
+func commandFlagValue(args []string, flag string) (string, bool) {
+	flag = strings.TrimSpace(flag)
+	if flag == "" {
+		return "", false
+	}
+	for idx := 0; idx < len(args); idx++ {
+		arg := strings.TrimSpace(args[idx])
+		if arg == flag {
+			if idx+1 >= len(args) {
+				return "", true
+			}
+			return strings.TrimSpace(args[idx+1]), true
+		}
+		if strings.HasPrefix(arg, flag+"=") {
+			return strings.TrimSpace(strings.TrimPrefix(arg, flag+"=")), true
+		}
+	}
+	return "", false
+}
+
+func intFlagValue(args []string, flag string, fallback int) int {
+	value, ok := commandFlagValue(args, flag)
+	if !ok || strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func resolveDeploymentAuthToken(manifest *deploymentManifest) string {
+	if manifest == nil || manifest.Systemd == nil {
+		return ""
+	}
+	if value := strings.TrimSpace(manifest.Systemd.Environment["WORKBUDDY_AUTH_TOKEN"]); value != "" {
+		return value
+	}
+	for _, envFile := range manifest.Systemd.EnvironmentFiles {
+		if value := readEnvVarFile(envFile, "WORKBUDDY_AUTH_TOKEN"); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func readEnvVarFile(path, key string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		name, value, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(name) != key {
+			continue
+		}
+		return strings.Trim(strings.TrimSpace(value), `"'`)
+	}
+	return ""
+}
+
+func pathWithin(root, path string) bool {
+	root = strings.TrimSpace(root)
+	path = strings.TrimSpace(path)
+	if root == "" || path == "" {
+		return false
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(rootAbs, pathAbs)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
 func runStatusWithOpts(ctx context.Context, opts *statusOpts, client *statusClient, stdout io.Writer) error {
@@ -365,6 +692,10 @@ func runStatusSummary(ctx context.Context, opts *statusOpts, client *statusClien
 	for _, issueNum := range issueNums {
 		issue, err := client.issueState(ctx, opts.repo, issueNum)
 		if err != nil {
+			var statusErr *statusHTTPStatusError
+			if errors.As(err, &statusErr) && statusErr.status == http.StatusNotFound {
+				continue
+			}
 			return err
 		}
 		if issue.IssueState != "open" {
@@ -558,7 +889,7 @@ func (c *statusClient) listEvents(ctx context.Context, repo, eventType string, s
 }
 
 func (c *statusClient) issueState(ctx context.Context, repo string, issueNum int) (*audit.IssueStateResponse, error) {
-	path := fmt.Sprintf("%s/issues/%s/%d/state", c.baseURL, url.PathEscape(repo), issueNum)
+	path := fmt.Sprintf("%s/issues/%s/%d/state", c.baseURL, escapeRepoPath(repo), issueNum)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("status: build issue state request: %w", err)
@@ -586,6 +917,7 @@ func (c *statusClient) watchTask(ctx context.Context, repo string, issue int) (*
 	if err != nil {
 		return nil, fmt.Errorf("status: build watch request: %w", err)
 	}
+	c.applyAuth(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, &cliExitError{msg: "Cannot connect to workbuddy server", code: 1}
@@ -632,6 +964,7 @@ func (c *statusClient) watchTask(ctx context.Context, repo string, issue int) (*
 }
 
 func (c *statusClient) doJSON(req *http.Request, out any) error {
+	c.applyAuth(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("status: request %s: %w", req.URL.Path, err)
@@ -640,12 +973,47 @@ func (c *statusClient) doJSON(req *http.Request, out any) error {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("status: %s returned %d: %s", req.URL.Path, resp.StatusCode, strings.TrimSpace(string(body)))
+		return &statusHTTPStatusError{
+			path:   req.URL.Path,
+			status: resp.StatusCode,
+			body:   strings.TrimSpace(string(body)),
+		}
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		return fmt.Errorf("status: decode %s: %w", req.URL.Path, err)
 	}
 	return nil
+}
+
+func (c *statusClient) applyAuth(req *http.Request) {
+	if c == nil || req == nil {
+		return
+	}
+	if req.Header.Get("Authorization") != "" {
+		return
+	}
+	token := strings.TrimSpace(c.token)
+	if token == "" {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+}
+
+func escapeRepoPath(repo string) string {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return ""
+	}
+	parts := strings.Split(repo, "/")
+	escaped := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		escaped = append(escaped, url.PathEscape(part))
+	}
+	return strings.Join(escaped, "/")
 }
 
 func renderStatusTable(w io.Writer, resp statusResponse) {

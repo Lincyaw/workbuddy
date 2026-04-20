@@ -264,6 +264,42 @@ func TestRunStatusWithOpts_Integration(t *testing.T) {
 	})
 }
 
+func TestRunStatusWithOpts_SkipsMissingIssueState(t *testing.T) {
+	st := newStatusTestStore(t)
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     "owner/repo",
+		IssueNum: 1,
+		Labels:   `["workbuddy","status:developing"]`,
+		State:    "open",
+	}); err != nil {
+		t.Fatalf("UpsertIssueCache: %v", err)
+	}
+	insertEventAt(t, st, "owner/repo", 1, time.Now().UTC().Add(-5*time.Minute))
+	insertEventAt(t, st, "owner/repo", 999, time.Now().UTC().Add(-2*time.Minute))
+
+	mux := http.NewServeMux()
+	audit.NewHTTPHandler(st).Register(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client := &statusClient{baseURL: srv.URL, http: srv.Client()}
+	var out bytes.Buffer
+	err := runStatusWithOpts(context.Background(), &statusOpts{
+		repo:    "owner/repo",
+		baseURL: srv.URL,
+	}, client, &out)
+	if err != nil {
+		t.Fatalf("runStatusWithOpts: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "#1") {
+		t.Fatalf("expected live issue in output:\n%s", got)
+	}
+	if strings.Contains(got, "#999") {
+		t.Fatalf("unexpected stale issue in output:\n%s", got)
+	}
+}
+
 func newStatusTestStore(t *testing.T) *store.Store {
 	t.Helper()
 	st, err := store.NewStore(filepath.Join(t.TempDir(), "status.db"))
@@ -366,6 +402,7 @@ func insertEventAt(t *testing.T, st *store.Store, repo string, issueNum int, ts 
 }
 
 func TestParseStatusFlags_UsesConfigDefaults(t *testing.T) {
+	isolateStatusConfigHome(t)
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, ".github", "workbuddy", "config.yaml"), "repo: cfg/repo\nport: 9123\npoll_interval: 30s\n")
 
@@ -395,6 +432,7 @@ func TestParseStatusFlags_UsesConfigDefaults(t *testing.T) {
 }
 
 func TestParseStatusFlags_UsesExplicitRepoWithoutConfig(t *testing.T) {
+	isolateStatusConfigHome(t)
 	dir := t.TempDir()
 
 	prevWD, err := filepath.Abs(".")
@@ -422,6 +460,56 @@ func TestParseStatusFlags_UsesExplicitRepoWithoutConfig(t *testing.T) {
 	}
 	if opts.baseURL != "http://127.0.0.1:8080" {
 		t.Fatalf("baseURL = %q", opts.baseURL)
+	}
+}
+
+func TestParseStatusFlags_UsesManagedCoordinatorDeployment(t *testing.T) {
+	dir := t.TempDir()
+	configHome := filepath.Join(t.TempDir(), ".config")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+
+	writeFile(t, filepath.Join(dir, ".github", "workbuddy", "config.yaml"), "repo: owner/repo\nport: 8090\npoll_interval: 30s\n")
+	envFile := filepath.Join(configHome, "workbuddy", "workbuddy.env")
+	writeFile(t, envFile, "WORKBUDDY_AUTH_TOKEN=file-token\n")
+
+	manifest := &deploymentManifest{
+		SchemaVersion:    deploymentManifestVer,
+		Name:             "workbuddy-coordinator",
+		Scope:            "user",
+		BinaryPath:       "/tmp/workbuddy",
+		WorkingDirectory: dir,
+		Command:          []string{"coordinator", "--listen", "127.0.0.1:8081", "--config-dir", ".github/workbuddy", "--auth"},
+		Systemd: &deploymentSystemd{
+			EnvironmentFiles: []string{envFile},
+		},
+	}
+	manifestPath := filepath.Join(configHome, "workbuddy", "deployments", "workbuddy-coordinator.json")
+	if err := writeDeploymentManifest(manifestPath, manifest); err != nil {
+		t.Fatalf("writeDeploymentManifest: %v", err)
+	}
+
+	prevWD, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatalf("Abs(.): %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(prevWD)
+	})
+
+	cmd := newStatusFlagCommand()
+	opts, err := parseStatusFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseStatusFlags: %v", err)
+	}
+	if opts.baseURL != "http://127.0.0.1:8081" {
+		t.Fatalf("baseURL = %q, want http://127.0.0.1:8081", opts.baseURL)
+	}
+	if opts.token != "file-token" {
+		t.Fatalf("token = %q, want file-token", opts.token)
 	}
 }
 
@@ -537,6 +625,86 @@ func TestRunStatusWithOpts_Watch(t *testing.T) {
 			t.Fatalf("unexpected error: %#v", err)
 		}
 	})
+}
+
+func TestStatusClient_AppliesAuthHeader(t *testing.T) {
+	t.Run("json requests", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if auth := r.Header.Get("Authorization"); auth != "Bearer file-token" {
+				t.Fatalf("authorization = %q", auth)
+			}
+			_, _ = fmt.Fprint(w, `{"events":[]}`)
+		}))
+		defer srv.Close()
+
+		client := &statusClient{baseURL: srv.URL, token: "file-token", http: srv.Client()}
+		var out bytes.Buffer
+		err := runStatusWithOpts(context.Background(), &statusOpts{
+			repo:    "owner/repo",
+			events:  true,
+			baseURL: srv.URL,
+		}, client, &out)
+		if err != nil {
+			t.Fatalf("runStatusWithOpts: %v", err)
+		}
+		if strings.TrimSpace(out.String()) != "No events found." {
+			t.Fatalf("unexpected output: %q", out.String())
+		}
+	})
+
+	t.Run("watch requests", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if auth := r.Header.Get("Authorization"); auth != "Bearer file-token" {
+				t.Fatalf("authorization = %q", auth)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", mustJSON(t, tasknotify.TaskEvent{
+				Repo:       "owner/repo",
+				IssueNum:   11,
+				AgentName:  "dev-agent",
+				Status:     store.TaskStatusCompleted,
+				ExitCode:   0,
+				DurationMS: int64(time.Second.Milliseconds()),
+			}))
+		}))
+		defer srv.Close()
+
+		client := &statusClient{baseURL: srv.URL, token: "file-token", http: srv.Client()}
+		err := runStatusWithOpts(context.Background(), &statusOpts{
+			repo:    "owner/repo",
+			watch:   true,
+			timeout: time.Second,
+			baseURL: srv.URL,
+		}, client, io.Discard)
+		if err != nil {
+			t.Fatalf("runStatusWithOpts: %v", err)
+		}
+	})
+}
+
+func TestStatusClient_IssueStateUsesSegmentedRepoPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.RequestURI, "/issues/owner/repo%20name/7/state"; got != want {
+			t.Fatalf("path = %q, want %q", got, want)
+		}
+		_, _ = fmt.Fprint(w, `{"repo":"owner/repo name","issue_num":7,"issue_state":"open","current_state":"status:developing","cycle_count":1,"dependency_verdict":"ready"}`)
+	}))
+	defer srv.Close()
+
+	client := &statusClient{baseURL: srv.URL, http: srv.Client()}
+	resp, err := client.issueState(context.Background(), "owner/repo name", 7)
+	if err != nil {
+		t.Fatalf("issueState: %v", err)
+	}
+	if resp.Repo != "owner/repo name" || resp.IssueNum != 7 {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+}
+
+func isolateStatusConfigHome(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), ".config"))
 }
 
 func newStatusFlagCommand() *cobra.Command {
