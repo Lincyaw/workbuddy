@@ -5,8 +5,9 @@
 ## 背景
 
 当前 session artifact 已统一写到仓库根 `.workbuddy/sessions/session-<sid>/`。
-`internal/launcher/codex.go` 的 runtime 原始产物和 `cmd/serve.go:streamSessionEvents`
-生成的 `events-v1.jsonl` 都不再依赖 `task.WorkDir`，因此 worktree 清理不会删除它们。
+launcher 产出的 `stdout` / `stderr` / `tool-calls.jsonl` 与
+`cmd/serve.go:streamSessionEvents` 生成的 `events-v1.jsonl` 都不再依赖 `task.WorkDir`，
+因此 worktree 清理不会删除它们。
 
 ## 当前行为
 
@@ -32,9 +33,9 @@ worktree 只装 agent 改的代码，不再装事件流。
    "main worktree / coordinator 启动时的仓库根"。
 2. `internal/router/router.go`：构造 `TaskContext` 时填入 `RepoRoot = repoDir`。
    `cmd/run.go` 的直接运行路径也把 `RepoRoot` 设为当前工作目录。
-3. `internal/launcher/codex.go:newCodexSession`：artifact baseDir 优先取 `task.RepoRoot`，
-   为空时回退到 `WorkDir` 以兼容现有测试和简化调用方。
-4. `cmd/serve.go:streamSessionEvents`：统一通过 `sessionArtifactsBaseDir(...)` 把
+3. `cmd/serve.go`：以 `<RepoRoot>/.workbuddy/sessions/` 初始化 `SessionManager`，
+   由 launcher/runtime 统一向该目录写入 stdout / stderr / tool-calls / metadata。
+4. `cmd/serve.go:streamSessionEvents`：统一通过 `SessionHandle.EventsPath()` 把
    `events-v1.jsonl` 写到 `<RepoRoot>/.workbuddy/sessions/session-<sid>/`。
 
 ### 2. 错误路径下 artifact 不丢
@@ -57,8 +58,10 @@ worktree 只装 agent 改的代码，不再装事件流。
 │   ├── sessions/
 │   │   └── session-<sid>/
 │   │       ├── events-v1.jsonl   # workbuddy 统一 Event Schema v1
-│   │       ├── codex-exec.jsonl   # runtime 原始 JSONL（仅 codex-exec）
-│   │       ├── codex-last-message.txt
+│   │       ├── stdout            # runtime 原始 stdout / JSONL capture
+│   │       ├── stderr
+│   │       ├── tool-calls.jsonl
+│   │       ├── metadata.json
 │   │       └── ...               # auditor 归档/复制出的文件
 │   └── worktrees/
 │       └── issue-<N>-<taskShort>/  # 仅代码和临时分支
@@ -70,7 +73,6 @@ worktree 只装 agent 改的代码，不再装事件流。
 - `TaskContext.RepoRoot` 为空时回退到 `WorkDir`（本地单元测试场景），保持现有
   测试可跑。
 - artifact 迁移不涉及磁盘 schema 变更，旧 session 目录可以直接保留，不需要迁移脚本。
-- 不影响 `runtime: codex` → `codex-exec` 的既有 normalize 逻辑。
 
 ## 验证结果
 

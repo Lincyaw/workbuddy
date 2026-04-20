@@ -31,7 +31,8 @@ type Session interface {
 - `internal/launcher/types.go`
 - `internal/launcher/launcher.go`
 - `internal/launcher/claude.go`
-- `internal/launcher/codex.go`
+- `internal/launcher/agent_bridge.go`
+- `internal/agent/codex/backend.go`
 - `internal/launcher/process.go`
 
 ## 当前主链路

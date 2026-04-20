@@ -129,7 +129,7 @@ If `lease_expires_at` is far in the past but `status` is still `running`, the he
 # Find codex processes with no child processes
 pstree -p <codex-pid>  # only threads, no bash/rg children = stuck in inference
 # Check session file staleness
-stat -c '%Y' .workbuddy/sessions/session-<id>/codex-exec.jsonl
+stat -c '%Y' .workbuddy/sessions/session-<id>/events-v1.jsonl
 ```
 
 **Workaround**: Kill the codex process. If labels already changed, mark the task as completed in the DB. Then restart the worker.

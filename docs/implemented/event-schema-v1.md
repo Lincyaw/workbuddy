@@ -53,28 +53,26 @@ type Event struct {
 
 ## 当前 runtime 映射
 
-### Codex `exec --json`
+### Codex app-server JSON-RPC
 
-Codex runtime 会逐行读取 JSONL，并映射成统一事件：
+Codex runtime 会消费 `codex app-server --listen stdio://` 的 JSON-RPC 通知，并映射成统一事件：
 
-- `task_started` -> `turn.started`
-- `agent_message*` -> `agent.message`
-- `agent_reasoning*` -> `reasoning`
-- `exec_command_begin` -> `command.exec`
-- `exec_command_output_delta` -> `command.output`
-- `exec_command_end` -> `tool.result`
-- `mcp_tool_call_begin` -> `tool.call`
-- `mcp_tool_call_end` -> `tool.result`
-- `patch_apply_begin` -> `file.change`
-- `token_count` -> `token.usage`
-- `task_complete` -> `turn.completed`
+- `turn/started` -> `turn.started`
+- `item/agentMessage/delta` / `item/completed(agentMessage)` -> `agent.message`
+- `item/reasoning/*` / `item/completed(reasoning)` -> `reasoning`
+- `item/started(commandExecution)` -> `command.exec`
+- `item/commandExecution/outputDelta` / `item/completed(commandExecution)` -> `command.output`
+- `item/completed(commandExecution|mcpToolCall|dynamicToolCall)` -> `tool.result`
+- `item/started(mcpToolCall|dynamicToolCall)` -> `tool.call`
+- `item/completed(fileChange)` -> `file.change`
+- `thread/tokenUsage/updated` -> `token.usage`
+- `turn/completed` -> `turn.completed` + `task.complete`
 - `error` -> `error`
-- 其它未知行 -> `log`
 
 代码：
 
-- `internal/launcher/codex.go`
-- `internal/launcher/codex_test.go`
+- `internal/agent/codex/events.go`
+- `internal/agent/codex/events_test.go`
 
 ### Claude prompt `stream-json`
 
@@ -132,7 +130,8 @@ Codex runtime 会逐行读取 JSONL，并映射成统一事件：
 ## 相关代码
 
 - `internal/launcher/events/`
-- `internal/launcher/codex.go`
+- `internal/launcher/agent_bridge.go`
+- `internal/agent/codex/events.go`
 - `internal/launcher/claude_stream.go`
 - `internal/launcher/process.go`
 - `cmd/serve.go`

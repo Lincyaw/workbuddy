@@ -47,7 +47,7 @@ func initGitRepo(t *testing.T) string {
 
 func TestParseProcessList(t *testing.T) {
 	raw := `
-  101 1 45 codex exec --model gpt-5
+  101 1 45 codex app-server --listen stdio://
   202 1 120 /tmp/workbuddy serve --port 8080
   303 1 5 bash -lc echo nope
 `
@@ -73,7 +73,7 @@ func TestIsRecoverableProcess(t *testing.T) {
 	t.Run("skips current session child", func(t *testing.T) {
 		processes := []Process{
 			{PID: 7, PPID: 1000, ElapsedSeconds: 10, Args: []string{"bash"}},
-			{PID: 42, PPID: 7, ElapsedSeconds: 3, Args: []string{"codex", "exec"}},
+			{PID: 42, PPID: 7, ElapsedSeconds: 3, Args: []string{"codex", "app-server", "--listen", "stdio://"}},
 		}
 		if isRecoverableProcess(processes, processes[1], 100, 7, 10, true) {
 			t.Fatalf("expected current-session child to be skipped")
@@ -81,7 +81,7 @@ func TestIsRecoverableProcess(t *testing.T) {
 	})
 
 	t.Run("matches orphaned target", func(t *testing.T) {
-		proc := Process{PID: 42, PPID: 1, ElapsedSeconds: 1, Args: []string{"codex", "exec"}}
+		proc := Process{PID: 42, PPID: 1, ElapsedSeconds: 1, Args: []string{"codex", "app-server", "--listen", "stdio://"}}
 		if !isRecoverableProcess([]Process{proc}, proc, 100, 7, 10, true) {
 			t.Fatalf("expected orphaned target to be recoverable")
 		}

@@ -55,8 +55,8 @@ ps aux | grep "workbuddy worker" | grep -v grep
    ls -lt .workbuddy/sessions/
    
    # Check latest activity in a session
-   tail -3 .workbuddy/sessions/session-<ID>/codex-exec.jsonl | \
-     python3 -c "import sys,json; [print(json.loads(l).get('item',{}).get('command','')[:100] or json.loads(l).get('item',{}).get('type','')) for l in sys.stdin]"
+   tail -3 .workbuddy/sessions/session-<ID>/events-v1.jsonl | \
+     python3 -c "import sys,json; [print((json.loads(l).get('kind') or '') + ' ' + str(json.loads(l).get('payload', {}))[:120]) for l in sys.stdin]"
    ```
 
 ### Serve mode checks
@@ -198,7 +198,7 @@ ps aux | grep "workbuddy worker" | grep -v grep
 - **Diagnosis:**
   ```bash
   # Check JSONL staleness
-  for f in $(find .workbuddy -name "codex-exec.jsonl" -newer /tmp/workbuddy-worker*.log); do
+  for f in $(find .workbuddy -name "events-v1.jsonl" -newer /tmp/workbuddy-worker*.log); do
     age=$(( $(date +%s) - $(stat -c '%Y' "$f") ))
     if [ $age -gt 600 ]; then echo "STALE ($age s): $f"; fi
   done
@@ -241,7 +241,7 @@ watch -n 60 "gh issue view N -R Owner/Repo --json labels --jq '[.labels[].name]'
 ### Strategy 2: Monitor session log growth (agent is working)
 ```bash
 # Track codex activity
-watch -n 10 "wc -l .workbuddy/sessions/session-*/codex-exec.jsonl 2>/dev/null"
+watch -n 10 "wc -l .workbuddy/sessions/session-*/events-v1.jsonl 2>/dev/null"
 ```
 
 ### Strategy 3: Monitor with until-loop (wait for completion)

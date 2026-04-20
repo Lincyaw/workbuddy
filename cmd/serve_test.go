@@ -1114,7 +1114,7 @@ func seedServeAuditFixture(st *store.Store, repo string) (string, error) {
 	if err := os.WriteFile(filepath.Join(sessionDir, "events-v1.jsonl"), []byte("{\"kind\":\"log\"}\n"), 0o644); err != nil {
 		return "", err
 	}
-	rawPath := filepath.Join(sessionDir, "codex-exec.jsonl")
+	rawPath := filepath.Join(sessionDir, "raw-session.jsonl")
 	if err := os.WriteFile(rawPath, []byte("{\"type\":\"task_started\"}\n"), 0o644); err != nil {
 		return "", err
 	}
@@ -1557,7 +1557,7 @@ func TestExecuteTask_PersistsPartialResultOnRunError(t *testing.T) {
 	repoRoot := t.TempDir()
 	sessionID := "session-partial"
 	artifactDir := filepath.Join(repoRoot, ".workbuddy", "sessions", sessionID)
-	artifactPath := filepath.Join(artifactDir, "codex-exec.jsonl")
+	artifactPath := filepath.Join(artifactDir, "raw-session.jsonl")
 	writeFile(t, artifactPath, "{\"type\":\"task_started\"}\n")
 
 	st, err := store.NewStore(filepath.Join(t.TempDir(), "test.db"))

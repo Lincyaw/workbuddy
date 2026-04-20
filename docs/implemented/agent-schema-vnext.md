@@ -17,7 +17,8 @@
 - `internal/config/types.go`
 - `internal/config/loader.go`
 - `internal/launcher/process.go`
-- `internal/launcher/codex.go`
+- `internal/launcher/agent_bridge.go`
+- `internal/agent/codex/backend.go`
 - `internal/launcher/output_contract.go`
 
 ## 当前兼容边界
@@ -25,8 +26,7 @@
 v0.1.x 当前实现是：
 
 - `runtime` 为空时默认仍为 `claude-code`
-- 对外 runtime key 继续接受 `claude-code`、`codex`、`codex-appserver`
-- `codex` 在 loader 中规范化为内部实现名 `codex-exec`
+- 对外 runtime key 继续接受 `claude-code`、`codex`
 - 现有 `command` 配置继续可用（仅为兼容历史数据）
 - runtime 优先读取 `prompt`，缺失时回退到 `command`
 
@@ -36,8 +36,8 @@ v0.1.x 当前实现是：
 
 - Claude runtime:
   `danger-full-access` 会映射到 `claude --dangerously-skip-permissions`
-- Codex exec runtime:
-  `sandbox` / `approval` / `model` 会映射到 `codex exec` flag
+- Codex runtime:
+  `sandbox` / `approval` / `model` 会映射到 `codex app-server` 的 session / turn 参数
 - `policy.timeout` 会同步到 agent 的运行超时
 
 不支持的 policy 组合会在加载阶段直接报错。
@@ -75,7 +75,7 @@ dev-agent 的工件形态自由（代码、文档、依赖升级、报告、rele
 当前实现边界：
 
 - Claude runtime: `prompt` 存在时直接走 stdin prompt 模式
-- Codex runtime: `prompt` 存在时直接作为 `codex exec` 的输入 prompt
+- Codex runtime: `prompt` 存在时直接作为 app-server `turn/start` 的 text input
 - `command` 仍保留，兼容旧 agent 和旧测试数据
 
 **`command` 是 legacy shim，已弃用：** 早期版本用 `command` 字段直接拼 shell 命令，
@@ -95,5 +95,5 @@ deprecation warning 并最终移除。
 - 对 `command` 输出 deprecation warning
 - 移除 `command` 字段
 - 移除 `output_contract` 字段（等确认没有历史数据依赖后）
-- 落地 long-lived `codex-appserver` runtime
+- 评估是否需要 worker 级别的 Codex app-server 连接池
 - Coordinator 侧基于 issue label 的 sandbox / approval 动态分派
