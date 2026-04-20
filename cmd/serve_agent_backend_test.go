@@ -10,7 +10,7 @@ import (
 
 func TestLauncherCodexBackendFlagDefault(t *testing.T) {
 	// Without WORKBUDDY_CODEX_BACKEND env var, NewLauncher should register
-	// the codex-exec runtime (not the mcp-server bridge).
+	// the codex-exec runtime (not the app-server bridge).
 	os.Unsetenv("WORKBUDDY_CODEX_BACKEND")
 	l := launcher.NewLauncher()
 
@@ -49,10 +49,10 @@ func TestLauncherCodexBackendFlagDefault(t *testing.T) {
 	}
 }
 
-func TestLauncherCodexBackendFlagMCPServer(t *testing.T) {
-	// With WORKBUDDY_CODEX_BACKEND=mcp-server, NewLauncher should try to
-	// register the mcp-server bridge (or fall back to exec if codex unavailable).
-	t.Setenv("WORKBUDDY_CODEX_BACKEND", "mcp-server")
+func TestLauncherCodexBackendFlagAppServer(t *testing.T) {
+	// With WORKBUDDY_CODEX_BACKEND=app-server, NewLauncher should register
+	// the JSON-RPC app-server bridge for codex runtimes.
+	t.Setenv("WORKBUDDY_CODEX_BACKEND", "app-server")
 	l := launcher.NewLauncher()
 
 	if l == nil {
@@ -80,7 +80,7 @@ func TestLauncherCodexBackendFlagMCPServer(t *testing.T) {
 	}
 	errMsg := err.Error()
 	if contains(errMsg, "unsupported runtime") {
-		t.Fatalf("codex runtime not registered with mcp-server flag: %v", err)
+		t.Fatalf("codex runtime not registered with app-server flag: %v", err)
 	}
 }
 

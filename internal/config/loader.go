@@ -31,7 +31,6 @@ const (
 	RuntimeCodex       = "codex"
 	RuntimeCodexExec   = "codex-exec"
 	RuntimeCodexServer = "codex-appserver"
-	RuntimeCodexMCP    = "codex-mcp-server"
 )
 
 const (
@@ -45,7 +44,6 @@ var validRuntimes = map[string]bool{
 	RuntimeCodex:       true,
 	RuntimeCodexExec:   true,
 	RuntimeCodexServer: true,
-	RuntimeCodexMCP:    true,
 }
 
 var publicRuntimes = []string{RuntimeClaudeCode, RuntimeCodex, RuntimeCodexServer}
@@ -261,8 +259,6 @@ func normalizeAgentConfig(agent *AgentConfig) ([]Warning, error) {
 	switch agent.Runtime {
 	case RuntimeCodex:
 		agent.Runtime = RuntimeCodexExec
-	case RuntimeCodexMCP:
-		// Keep as-is; the launcher will route to the MCP backend.
 	}
 
 	if agent.Policy.Timeout > 0 {
@@ -345,17 +341,6 @@ func normalizeAgentConfig(agent *AgentConfig) ([]Warning, error) {
 		default:
 			return warnings, fmt.Errorf("unsupported policy.approval %q for runtime %q", agent.Policy.Approval, agent.Runtime)
 		}
-	case RuntimeCodexMCP:
-		switch agent.Policy.Sandbox {
-		case "read-only", "workspace-write", "danger-full-access":
-		default:
-			return warnings, fmt.Errorf("unsupported policy.sandbox %q for runtime %q", agent.Policy.Sandbox, agent.Runtime)
-		}
-		switch agent.Policy.Approval {
-		case "never", "on-failure", "on-request":
-		default:
-			return warnings, fmt.Errorf("unsupported policy.approval %q for runtime %q", agent.Policy.Approval, agent.Runtime)
-		}
 	default:
 		return warnings, fmt.Errorf("unsupported runtime %q", agent.Runtime)
 	}
@@ -387,8 +372,6 @@ func defaultSandboxForRuntime(runtime string) string {
 		return "read-only"
 	case RuntimeCodexServer:
 		return "read-only"
-	case RuntimeCodexMCP:
-		return "read-only"
 	default:
 		return ""
 	}
@@ -396,7 +379,7 @@ func defaultSandboxForRuntime(runtime string) string {
 
 func defaultApprovalForRuntime(runtime string) string {
 	switch runtime {
-	case RuntimeClaudeCode, RuntimeClaudeShot, RuntimeCodexExec, RuntimeCodexServer, RuntimeCodexMCP:
+	case RuntimeClaudeCode, RuntimeClaudeShot, RuntimeCodexExec, RuntimeCodexServer:
 		return "never"
 	default:
 		return ""

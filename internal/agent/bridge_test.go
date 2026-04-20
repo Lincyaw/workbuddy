@@ -31,9 +31,9 @@ func newMockSession(id string, result Result) *mockSession {
 }
 
 func (s *mockSession) ID() string                      { return s.id }
-func (s *mockSession) Events() <-chan Event             { return s.events }
-func (s *mockSession) Interrupt(context.Context) error  { return nil }
-func (s *mockSession) Close() error                     { return nil }
+func (s *mockSession) Events() <-chan Event            { return s.events }
+func (s *mockSession) Interrupt(context.Context) error { return nil }
+func (s *mockSession) Close() error                    { return nil }
 
 func (s *mockSession) Wait(_ context.Context) (Result, error) {
 	<-s.done
@@ -41,6 +41,7 @@ func (s *mockSession) Wait(_ context.Context) (Result, error) {
 }
 
 type mockHandle struct {
+	path    string
 	written [][]byte
 }
 
@@ -50,6 +51,8 @@ func (h *mockHandle) WriteStdout(data []byte) error {
 	h.written = append(h.written, cp)
 	return nil
 }
+
+func (h *mockHandle) StdoutPath() string { return h.path }
 
 // --- Tests ---
 
@@ -71,7 +74,7 @@ func TestTranslateKind(t *testing.T) {
 		{"token.usage", launcherevents.KindTokenUsage},
 		{"task.complete", launcherevents.KindTaskComplete},
 		{"log", launcherevents.KindLog},
-		{"internal", ""},                   // skip
+		{"internal", ""},                         // skip
 		{"unknown.kind", launcherevents.KindLog}, // default to log
 	}
 
@@ -92,13 +95,13 @@ func TestBridgeSessionRun(t *testing.T) {
 		Duration: 5 * time.Second,
 	})
 
-	handle := &mockHandle{}
-	bs := &BridgeSession{Sess: sess, Handle: handle}
+	handle := &mockHandle{path: "/tmp/raw.jsonl"}
+	bs := &BridgeSession{SessionID: "wb-session-1", Sess: sess, Handle: handle}
 
 	// Send some events then close channel and signal done.
-	sess.events <- Event{Kind: "turn.started", Body: json.RawMessage(`{"msg":"start"}`)}
-	sess.events <- Event{Kind: "agent.message", Body: json.RawMessage(`{"text":"hello"}`)}
-	sess.events <- Event{Kind: "turn.completed", Body: json.RawMessage(`{"msg":"end"}`)}
+	sess.events <- Event{Kind: "turn.started", TurnID: "turn-1", Body: json.RawMessage(`{"msg":"start"}`), Raw: json.RawMessage(`{"raw":"start"}`)}
+	sess.events <- Event{Kind: "agent.message", TurnID: "turn-1", Body: json.RawMessage(`{"text":"hello"}`), Raw: json.RawMessage(`{"raw":"hello"}`)}
+	sess.events <- Event{Kind: "turn.completed", TurnID: "turn-1", Body: json.RawMessage(`{"msg":"end"}`), Raw: json.RawMessage(`{"raw":"end"}`)}
 	close(sess.events)
 
 	// Signal done after a brief delay so the goroutine can drain events.
@@ -122,16 +125,22 @@ func TestBridgeSessionRun(t *testing.T) {
 	if result.Duration != 5*time.Second {
 		t.Fatalf("Duration = %v, want %v", result.Duration, 5*time.Second)
 	}
+	if result.SessionPath != "/tmp/raw.jsonl" {
+		t.Fatalf("SessionPath = %q, want %q", result.SessionPath, "/tmp/raw.jsonl")
+	}
 
 	// Verify handle received JSONL.
 	if len(handle.written) != 3 {
 		t.Fatalf("handle.written count = %d, want 3", len(handle.written))
 	}
+	if string(handle.written[0]) != "{\"raw\":\"start\"}\n" {
+		t.Fatalf("first raw write = %q", handle.written[0])
+	}
 }
 
 func TestBridgeSessionRunNilEvents(t *testing.T) {
 	sess := newMockSession("test-session-2", Result{ExitCode: 0})
-	bs := &BridgeSession{Sess: sess, Handle: nil}
+	bs := &BridgeSession{SessionID: "wb-session-2", Sess: sess, Handle: nil}
 
 	sess.events <- Event{Kind: "agent.message", Body: json.RawMessage(`{"text":"hi"}`)}
 	close(sess.events)
@@ -156,6 +165,7 @@ func TestBridgeResultTranslation(t *testing.T) {
 		FinalMsg:     "error occurred",
 		FilesChanged: []string{"a.go", "b.go", "c.go"},
 		Duration:     10 * time.Second,
+		SessionRef:   SessionRef{ID: "thread-7", Kind: "codex-thread"},
 	})
 
 	bs := &BridgeSession{Sess: sess}
@@ -182,6 +192,9 @@ func TestBridgeResultTranslation(t *testing.T) {
 	if result.Meta["files_changed"] != "a.go,b.go,c.go" {
 		t.Fatalf("Meta[files_changed] = %q, want %q", result.Meta["files_changed"], "a.go,b.go,c.go")
 	}
+	if result.SessionRef.ID != "thread-7" {
+		t.Fatalf("SessionRef.ID = %q, want %q", result.SessionRef.ID, "thread-7")
+	}
 }
 
 func TestBridgeResultNoFilesChanged(t *testing.T) {
@@ -204,14 +217,14 @@ func TestBridgeResultNoFilesChanged(t *testing.T) {
 
 func TestBridgeEventTranslation(t *testing.T) {
 	sess := newMockSession("test-session-5", Result{ExitCode: 0})
-	bs := &BridgeSession{Sess: sess}
+	bs := &BridgeSession{SessionID: "wb-session-5", Sess: sess}
 
 	testEvents := []Event{
-		{Kind: "turn.started", Body: json.RawMessage(`{}`)},
-		{Kind: "agent.message", Body: json.RawMessage(`{"text":"hi"}`)},
+		{Kind: "turn.started", TurnID: "turn-5", Body: json.RawMessage(`{}`)},
+		{Kind: "agent.message", TurnID: "turn-5", Body: json.RawMessage(`{"text":"hi"}`)},
 		{Kind: "internal", Body: json.RawMessage(`{}`)}, // should be skipped
-		{Kind: "tool.call", Body: json.RawMessage(`{"name":"bash"}`)},
-		{Kind: "turn.completed", Body: json.RawMessage(`{}`)},
+		{Kind: "tool.call", TurnID: "turn-5", Body: json.RawMessage(`{"name":"bash"}`)},
+		{Kind: "turn.completed", TurnID: "turn-5", Body: json.RawMessage(`{}`)},
 	}
 
 	for _, e := range testEvents {
@@ -263,8 +276,11 @@ func TestBridgeEventTranslation(t *testing.T) {
 
 	// Verify session ID.
 	for i, e := range got {
-		if e.SessionID != "test-session-5" {
-			t.Fatalf("event[%d].SessionID = %q, want %q", i, e.SessionID, "test-session-5")
+		if e.SessionID != "wb-session-5" {
+			t.Fatalf("event[%d].SessionID = %q, want %q", i, e.SessionID, "wb-session-5")
+		}
+		if e.TurnID != "turn-5" {
+			t.Fatalf("event[%d].TurnID = %q, want %q", i, e.TurnID, "turn-5")
 		}
 	}
 }

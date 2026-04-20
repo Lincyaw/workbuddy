@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestMapCodexEvent(t *testing.T) {
+func TestMapNotificationKinds(t *testing.T) {
 	tests := []struct {
 		name     string
 		method   string
@@ -14,133 +14,87 @@ func TestMapCodexEvent(t *testing.T) {
 	}{
 		{
 			name:     "turn started",
-			method:   "codex/event/turn_started",
-			params:   `{"thread_id":"t1"}`,
+			method:   "turn/started",
+			params:   `{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"inProgress"}}`,
 			wantKind: "turn.started",
 		},
 		{
-			name:     "agent message",
-			method:   "codex/event/agent_message",
-			params:   `{"text":"hello"}`,
+			name:     "agent delta",
+			method:   "item/agentMessage/delta",
+			params:   `{"threadId":"t1","turnId":"turn-1","itemId":"msg-1","delta":"hello"}`,
 			wantKind: "agent.message",
 		},
 		{
-			name:     "tool call",
-			method:   "codex/event/tool_call",
-			params:   `{"name":"bash"}`,
-			wantKind: "tool.call",
-		},
-		{
-			name:     "tool result",
-			method:   "codex/event/tool_result",
-			params:   `{"output":"ok"}`,
-			wantKind: "tool.result",
+			name:     "command output",
+			method:   "item/commandExecution/outputDelta",
+			params:   `{"threadId":"t1","turnId":"turn-1","itemId":"cmd-1","delta":"ls\n"}`,
+			wantKind: "command.output",
 		},
 		{
 			name:     "turn completed",
-			method:   "codex/event/turn_completed",
-			params:   `{"status":"done"}`,
+			method:   "turn/completed",
+			params:   `{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"completed"}}`,
 			wantKind: "turn.completed",
 		},
 		{
 			name:     "error",
-			method:   "codex/event/error",
-			params:   `{"message":"oops"}`,
+			method:   "error",
+			params:   `{"threadId":"t1","turnId":"turn-1","willRetry":false,"error":{"message":"oops","codexErrorInfo":"badRequest"}}`,
 			wantKind: "error",
-		},
-		{
-			name:     "reasoning",
-			method:   "codex/event/reasoning",
-			params:   `{"text":"thinking..."}`,
-			wantKind: "reasoning",
-		},
-		{
-			name:     "command exec",
-			method:   "codex/event/command_exec",
-			params:   `{"command":"ls"}`,
-			wantKind: "command.exec",
-		},
-		{
-			name:     "command output",
-			method:   "codex/event/command_output",
-			params:   `{"output":"file.txt"}`,
-			wantKind: "command.output",
-		},
-		{
-			name:     "file change",
-			method:   "codex/event/file_change",
-			params:   `{"path":"main.go"}`,
-			wantKind: "file.change",
-		},
-		{
-			name:     "token usage",
-			method:   "codex/event/token_usage",
-			params:   `{"input":100,"output":50}`,
-			wantKind: "token.usage",
-		},
-		{
-			name:     "unknown method",
-			method:   "codex/event/unknown",
-			params:   `{}`,
-			wantKind: "log",
-		},
-		{
-			name:     "non-codex method",
-			method:   "something/else",
-			params:   `{}`,
-			wantKind: "log",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			evt := mapNotification(tt.method, json.RawMessage(tt.params))
-			if evt.Kind != tt.wantKind {
-				t.Fatalf("mapNotification(%q).Kind = %q, want %q", tt.method, evt.Kind, tt.wantKind)
+			events := mapNotification(tt.method, json.RawMessage(tt.params), json.RawMessage(`{"method":"`+tt.method+`"}`))
+			if len(events) == 0 {
+				t.Fatalf("mapNotification(%q) returned no events", tt.method)
 			}
-			if !json.Valid(evt.Body) {
-				t.Fatalf("mapNotification(%q).Body is not valid JSON: %s", tt.method, evt.Body)
+			if events[0].Kind != tt.wantKind {
+				t.Fatalf("mapNotification(%q).Kind = %q, want %q", tt.method, events[0].Kind, tt.wantKind)
+			}
+			if !json.Valid(events[0].Body) {
+				t.Fatalf("event body is not valid JSON: %s", events[0].Body)
+			}
+			if !json.Valid(events[0].Raw) {
+				t.Fatalf("event raw is not valid JSON: %s", events[0].Raw)
 			}
 		})
 	}
 }
 
-func TestMapNotificationEmptyParams(t *testing.T) {
-	evt := mapNotification("codex/event/turn_started", nil)
-	if evt.Kind != "turn.started" {
-		t.Fatalf("Kind = %q, want %q", evt.Kind, "turn.started")
+func TestMapNotificationTurnCompletedSynthesizesTaskComplete(t *testing.T) {
+	events := mapNotification(
+		"turn/completed",
+		json.RawMessage(`{"threadId":"t1","turn":{"id":"turn-1","items":[],"status":"completed"}}`),
+		json.RawMessage(`{"method":"turn/completed"}`),
+	)
+	if len(events) != 2 {
+		t.Fatalf("turn/completed emitted %d events, want 2", len(events))
 	}
-	// Empty params should default to "{}".
-	if string(evt.Body) != "{}" {
-		t.Fatalf("Body = %s, want {}", evt.Body)
+	if events[0].Kind != "turn.completed" || events[1].Kind != "task.complete" {
+		t.Fatalf("turn/completed events = %q, %q", events[0].Kind, events[1].Kind)
 	}
 }
 
-func TestNotificationKind(t *testing.T) {
-	// Test the internal notificationKind function directly.
+func TestExtractThreadID(t *testing.T) {
 	tests := []struct {
-		method string
+		name   string
+		params string
 		want   string
 	}{
-		{"codex/event/turn_started", "turn.started"},
-		{"codex/event/agent_message", "agent.message"},
-		{"codex/event/tool_call", "tool.call"},
-		{"codex/event/tool_result", "tool.result"},
-		{"codex/event/turn_completed", "turn.completed"},
-		{"codex/event/error", "error"},
-		{"codex/event/reasoning", "reasoning"},
-		{"codex/event/command_exec", "command.exec"},
-		{"codex/event/command_output", "command.output"},
-		{"codex/event/file_change", "file.change"},
-		{"codex/event/token_usage", "token.usage"},
-		{"", "log"},
-		{"something/other", "log"},
+		{name: "camelCase", params: `{"threadId":"abc-123"}`, want: "abc-123"},
+		{name: "nested thread", params: `{"thread":{"id":"nested-1"}}`, want: "nested-1"},
+		{name: "conversation fallback", params: `{"conversationId":"conv-1"}`, want: "conv-1"},
+		{name: "invalid json", params: `not json`, want: ""},
 	}
 
 	for _, tt := range tests {
-		got := notificationKind(tt.method)
-		if got != tt.want {
-			t.Fatalf("notificationKind(%q) = %q, want %q", tt.method, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractThreadID(json.RawMessage(tt.params))
+			if got != tt.want {
+				t.Fatalf("extractThreadID(%s) = %q, want %q", tt.params, got, tt.want)
+			}
+		})
 	}
 }

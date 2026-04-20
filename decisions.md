@@ -25,3 +25,8 @@
 - `[L4]` `WORKBUDDY_KEEP_REMOVED=1` preserves retired upstream workbuddy skills locally but keeps them in the managed set, so a later default sync can still prune them; this favors reversible operator control over a simpler but lossy state model.
 - `[L2]` Deployment state is now persisted as a per-scope manifest (`$XDG_CONFIG_HOME/workbuddy/deployments` for user scope, `/etc/workbuddy/deployments` for system scope), so `workbuddy deploy install`, `redeploy`, and `upgrade` can share one recorded service definition instead of forcing operators to re-enter paths and command arguments.
 - `[L4]` The deploy surface records the `workbuddy` runtime arguments after `--` and defaults to a valid `serve` invocation, which keeps the CLI compact while still covering `serve`, `coordinator`, and `worker` deployments without separate systemd wrappers for each topology.
+
+## 2026-04-20
+
+- `[L3]` Issue/PR #143/#144 assumed Codex should be driven through `codex mcp-server`, but local schema generation from `codex app-server` and live handshake validation showed the supported control plane is the app-server JSON-RPC protocol (`initialize`, `thread/start`, `turn/start`, `turn/interrupt`, server requests, framed notifications), so the backend was rewritten around that contract instead of retrofitting MCP semantics.
+- `[L4][flagged]` The new Codex app-server backend currently spawns one app-server child per agent session instead of multiplexing a worker-wide singleton, because workbuddy depends on per-agent scoped env/token isolation and the app-server protocol does not expose per-thread environment injection; this favors correctness and simpler cancellation over the thread-resume benefits of a shared process.

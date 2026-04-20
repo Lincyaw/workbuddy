@@ -12,27 +12,38 @@ import (
 // SessionHandle is the subset of launcher.ManagedSession the bridge uses.
 type SessionHandle interface {
 	WriteStdout([]byte) error
+	StdoutPath() string
 }
 
 // BridgeSession wraps an agent.Session and translates its Events into
 // launcher events, writing JSONL to a SessionHandle if available.
 type BridgeSession struct {
-	Sess   Session
-	Handle SessionHandle
+	SessionID string
+	Sess      Session
+	Handle    SessionHandle
 }
 
 // Run reads events from the agent session, translates them to launcher events,
 // writes JSONL to the session handle, and blocks until the session completes.
 func (bs *BridgeSession) Run(ctx context.Context, events chan<- launcherevents.Event) (*BridgeResult, error) {
 	var seq uint64
-	sessionID := bs.Sess.ID()
+	sessionID := bs.SessionID
+	if sessionID == "" {
+		sessionID = bs.Sess.ID()
+	}
 
 	// Drain events from agent session.
+	pumpDone := make(chan struct{})
 	go func() {
+		defer close(pumpDone)
 		for evt := range bs.Sess.Events() {
 			// Write raw JSONL to session handle.
-			if bs.Handle != nil && len(evt.Body) > 0 {
-				line := append(append([]byte(nil), evt.Body...), '\n')
+			raw := evt.Raw
+			if len(raw) == 0 {
+				raw = evt.Body
+			}
+			if bs.Handle != nil && len(raw) > 0 {
+				line := append(append([]byte(nil), raw...), '\n')
 				_ = bs.Handle.WriteStdout(line)
 			}
 
@@ -50,16 +61,24 @@ func (bs *BridgeSession) Run(ctx context.Context, events chan<- launcherevents.E
 			if len(body) == 0 {
 				body = json.RawMessage("{}")
 			}
+			raw = evt.Raw
+			if len(raw) == 0 {
+				raw = body
+			}
+			turnID := evt.TurnID
+			if turnID == "" {
+				turnID = sessionID
+			}
 
 			seq++
 			le := launcherevents.Event{
 				Kind:      kind,
 				Timestamp: time.Now().UTC(),
 				SessionID: sessionID,
-				TurnID:    sessionID,
+				TurnID:    turnID,
 				Seq:       seq,
 				Payload:   body,
-				Raw:       body,
+				Raw:       raw,
 			}
 			select {
 			case events <- le:
@@ -70,6 +89,10 @@ func (bs *BridgeSession) Run(ctx context.Context, events chan<- launcherevents.E
 	}()
 
 	result, err := bs.Sess.Wait(ctx)
+	if err != nil && ctx.Err() != nil {
+		_ = bs.Sess.Close()
+	}
+	<-pumpDone
 
 	br := &BridgeResult{
 		ExitCode:    result.ExitCode,
@@ -81,6 +104,8 @@ func (bs *BridgeSession) Run(ctx context.Context, events chan<- launcherevents.E
 			"files_changed": strings.Join(result.FilesChanged, ","),
 		}
 	}
+	br.SessionPath = sessionArtifactPath(bs.Handle)
+	br.SessionRef = result.SessionRef
 	return br, err
 }
 
@@ -95,6 +120,15 @@ type BridgeResult struct {
 	Duration    time.Duration
 	LastMessage string
 	Meta        map[string]string
+	SessionPath string
+	SessionRef  SessionRef
+}
+
+func sessionArtifactPath(handle SessionHandle) string {
+	if handle == nil {
+		return ""
+	}
+	return handle.StdoutPath()
 }
 
 // translateKind maps agent.Event.Kind strings to launcher events.EventKind.

@@ -51,18 +51,27 @@ func TestNewBackendFromConfigCodexNoEnv(t *testing.T) {
 	}
 }
 
-func TestNewBackendFromConfigCodexMCPEnv(t *testing.T) {
-	// With WORKBUDDY_CODEX_BACKEND=mcp-server, should attempt to create codex backend.
-	// Will return error if codex binary not in PATH, which is expected in test env.
-	t.Setenv("WORKBUDDY_CODEX_BACKEND", "mcp-server")
-	b, err := newBackendFromConfig(config.RuntimeCodex)
+func TestNewBackendFromConfigCodexAppServerRuntime(t *testing.T) {
+	b, err := newBackendFromConfig(config.RuntimeCodexServer)
 	if err != nil {
-		// Expected: codex binary not found.
-		t.Logf("newBackendFromConfig with mcp-server env: %v (expected in test env)", err)
+		t.Logf("newBackendFromConfig(%q): %v (expected when codex is not installed)", config.RuntimeCodexServer, err)
 		return
 	}
 	if b == nil {
-		t.Fatal("newBackendFromConfig with mcp-server env returned nil backend")
+		t.Fatal("newBackendFromConfig(codex-appserver) returned nil backend")
+	}
+}
+
+func TestNewBackendFromConfigCodexAppServerEnv(t *testing.T) {
+	// With WORKBUDDY_CODEX_BACKEND=app-server, should attempt to create codex backend.
+	t.Setenv("WORKBUDDY_CODEX_BACKEND", "app-server")
+	b, err := newBackendFromConfig(config.RuntimeCodex)
+	if err != nil {
+		t.Logf("newBackendFromConfig with app-server env: %v (expected when codex is not installed)", err)
+		return
+	}
+	if b == nil {
+		t.Fatal("newBackendFromConfig with app-server env returned nil backend")
 	}
 	_ = b.Shutdown(context.Background())
 }

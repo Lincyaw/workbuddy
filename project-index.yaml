@@ -418,13 +418,28 @@ requirements:
       - "AC-006-13: 未知 runtime 值时返回明确错误（'unsupported runtime: X, supported: claude-code, codex'）"
       - "AC-006-14: 单元测试：正常执行、超时终止、模板渲染、取消、Meta 解析成功、Meta 缺失、claude-code runtime、codex runtime、未知 runtime 9 种场景"
     code:
+      - internal/agent/agent.go
+      - internal/agent/bridge.go
+      - internal/agent/claude/backend.go
+      - internal/agent/codex/backend.go
+      - internal/agent/codex/events.go
+      - internal/agent/codex/jsonrpc.go
       - internal/launcher/launcher.go
+      - internal/launcher/agent_bridge.go
       - internal/launcher/template.go
       - internal/launcher/claude.go
       - internal/launcher/codex.go
       - internal/launcher/meta.go
       - internal/launcher/types.go
     tests:
+      - cmd/serve_agent_backend_test.go
+      - internal/agent/agent_test.go
+      - internal/agent/bridge_test.go
+      - internal/agent/claude/backend_test.go
+      - internal/agent/codex/backend_test.go
+      - internal/agent/codex/events_test.go
+      - internal/agent/codex/jsonrpc_test.go
+      - internal/launcher/agent_bridge_test.go
       - internal/launcher/launcher_test.go
       - internal/launcher/codex_test.go
     deps: []

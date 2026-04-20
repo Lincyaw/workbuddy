@@ -1,11 +1,12 @@
 // Package codex implements the agent.Backend interface via the
-// `codex mcp-server` JSON-RPC protocol.
+// `codex app-server` JSON-RPC protocol.
 package codex
 
 import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,46 +17,59 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/agent"
-	"github.com/google/uuid"
 )
 
-// Config holds optional configuration for the Codex MCP backend.
+const (
+	defaultClientName    = "workbuddy"
+	defaultClientVersion = "dev"
+)
+
+// Config holds optional configuration for the Codex app-server backend.
 type Config struct {
 	// Binary overrides the codex binary path (default: "codex").
 	Binary string
+	// ClientName populates the JSON-RPC initialize handshake.
+	ClientName string
+	// ClientVersion populates the JSON-RPC initialize handshake.
+	ClientVersion string
 }
 
-// Backend manages a single `codex mcp-server` child process and
-// multiplexes sessions (threads) over it.
+// Backend validates that the codex binary is available and spawns one
+// `codex app-server` child per session. This keeps agent-specific environment
+// scoping intact while still using the framed JSON-RPC protocol.
 type Backend struct {
-	cfg    Config
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout io.ReadCloser
-
-	mu       sync.Mutex
-	nextID   atomic.Int64
-	pending  map[int64]chan Response   // request ID -> response channel
-	threads  map[string]chan agent.Event // thread ID -> event channel
-	closed   bool
-	done     chan struct{}
+	cfg Config
 }
 
-// NewBackend starts `codex mcp-server` and returns a Backend.
+// NewBackend verifies the codex binary is present.
 func NewBackend(cfg Config) (*Backend, error) {
 	bin := cfg.Binary
 	if bin == "" {
 		bin = "codex"
 	}
-
-	// Check if codex binary is available.
 	if _, err := exec.LookPath(bin); err != nil {
 		return nil, fmt.Errorf("codex: binary %q not found: %w", bin, err)
 	}
+	if cfg.ClientName == "" {
+		cfg.ClientName = defaultClientName
+	}
+	if cfg.ClientVersion == "" {
+		cfg.ClientVersion = defaultClientVersion
+	}
+	cfg.Binary = bin
+	return &Backend{cfg: cfg}, nil
+}
 
-	cmd := exec.Command(bin, "mcp-server")
+func (b *Backend) NewSession(ctx context.Context, spec agent.Spec) (agent.Session, error) {
+	cmd := exec.CommandContext(ctx, b.cfg.Binary, "app-server", "--listen", "stdio://")
+	if spec.Workdir != "" {
+		cmd.Dir = spec.Workdir
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
+	for k, v := range spec.Env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -65,124 +79,287 @@ func NewBackend(cfg Config) (*Backend, error) {
 	if err != nil {
 		return nil, fmt.Errorf("codex: stdout pipe: %w", err)
 	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("codex: stderr pipe: %w", err)
+	}
 
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("codex: start mcp-server: %w", err)
+		return nil, fmt.Errorf("codex: start app-server: %w", err)
 	}
 
-	b := &Backend{
-		cfg:     cfg,
-		cmd:     cmd,
-		stdin:   stdin,
-		stdout:  stdout,
-		pending: make(map[int64]chan Response),
-		threads: make(map[string]chan agent.Event),
-		done:    make(chan struct{}),
+	sess := &session{
+		cfg:        b.cfg,
+		cmd:        cmd,
+		stdin:      stdin,
+		stdout:     stdout,
+		stderr:     stderr,
+		events:     make(chan agent.Event, 256),
+		done:       make(chan struct{}),
+		procDone:   make(chan error, 1),
+		pending:    make(map[string]chan Response),
+		spec:       spec,
+		start:      time.Now(),
+		sessionRef: agent.SessionRef{Kind: "codex-thread"},
 	}
-	go b.readLoop()
-	return b, nil
+	go sess.readLoop()
+	go sess.captureStderr()
+
+	initCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := sess.initialize(initCtx); err != nil {
+		_ = sess.Close()
+		return nil, err
+	}
+	if err := sess.startThread(initCtx); err != nil {
+		_ = sess.Close()
+		return nil, err
+	}
+	if err := sess.startTurn(initCtx); err != nil {
+		_ = sess.Close()
+		return nil, err
+	}
+
+	return sess, nil
 }
 
-// readLoop reads newline-delimited JSON from stdout, routing responses
-// by ID and notifications by thread.
-func (b *Backend) readLoop() {
-	defer close(b.done)
-	scanner := bufio.NewScanner(b.stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+func (b *Backend) Shutdown(_ context.Context) error { return nil }
 
-	for scanner.Scan() {
-		line := scanner.Bytes()
+type session struct {
+	cfg Config
 
-		// Try to determine if this is a response (has "id") or notification (has "method", no "id").
-		var probe struct {
-			ID     *int64 `json:"id"`
-			Method string `json:"method"`
-		}
-		if err := json.Unmarshal(line, &probe); err != nil {
-			continue
-		}
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout io.ReadCloser
+	stderr io.ReadCloser
 
-		if probe.ID != nil {
-			// It's a response.
-			var resp Response
-			if err := json.Unmarshal(line, &resp); err != nil {
-				continue
-			}
-			b.mu.Lock()
-			ch, ok := b.pending[resp.ID]
-			if ok {
-				delete(b.pending, resp.ID)
-			}
-			b.mu.Unlock()
-			if ok {
-				ch <- resp
-				close(ch)
-			}
-		} else if probe.Method != "" {
-			// It's a notification.
-			var notif Notification
-			if err := json.Unmarshal(line, &notif); err != nil {
-				continue
-			}
-			evt := mapNotification(notif.Method, notif.Params)
+	writeMu sync.Mutex
+	mu      sync.Mutex
+	nextID  atomic.Int64
+	pending map[string]chan Response
+	closed  bool
 
-			// Try to extract thread_id from params to route to the right session.
-			threadID := extractThreadID(notif.Params)
-			b.mu.Lock()
-			ch, ok := b.threads[threadID]
-			b.mu.Unlock()
-			if ok {
-				select {
-				case ch <- evt:
-				default:
-					// Drop if full; non-blocking.
-				}
-			}
-		}
-	}
+	events chan agent.Event
+	done   chan struct{}
+	start  time.Time
+	spec   agent.Spec
+
+	threadID string
+	turnID   string
+
+	exitCode     int
+	duration     time.Duration
+	waitErr      error
+	finalMsg     string
+	filesChanged map[string]struct{}
+	lastError    string
+	sessionRef   agent.SessionRef
+
+	finishOnce sync.Once
+	stopOnce   sync.Once
+	procDone   chan error
 }
 
-// extractThreadID attempts to read a "thread_id" field from params JSON.
-func extractThreadID(params json.RawMessage) string {
-	var p struct {
-		ThreadID string `json:"thread_id"`
+func (s *session) ID() string {
+	if s.threadID != "" {
+		return s.threadID
 	}
-	if err := json.Unmarshal(params, &p); err != nil {
-		return ""
-	}
-	return p.ThreadID
+	return s.sessionRef.ID
 }
 
-// call sends a JSON-RPC request and waits for the response.
-func (b *Backend) call(ctx context.Context, method string, params interface{}) (json.RawMessage, error) {
-	id := b.nextID.Add(1)
-	req := Request{
-		JSONRPC: "2.0",
-		ID:      id,
-		Method:  method,
-		Params:  params,
+func (s *session) Events() <-chan agent.Event { return s.events }
+
+func (s *session) Wait(ctx context.Context) (agent.Result, error) {
+	select {
+	case <-s.done:
+	case <-ctx.Done():
+		return agent.Result{}, ctx.Err()
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	files := make([]string, 0, len(s.filesChanged))
+	for path := range s.filesChanged {
+		files = append(files, path)
+	}
+	return agent.Result{
+		ExitCode:     s.exitCode,
+		FinalMsg:     s.finalMsg,
+		FilesChanged: files,
+		Duration:     s.duration,
+		SessionRef:   s.sessionRef,
+	}, s.waitErr
+}
+
+func (s *session) Interrupt(ctx context.Context) error {
+	s.mu.Lock()
+	threadID := s.threadID
+	turnID := s.turnID
+	s.mu.Unlock()
+	if threadID == "" || turnID == "" {
+		return nil
+	}
+	_, err := s.call(ctx, "turn/interrupt", map[string]any{
+		"threadId": threadID,
+		"turnId":   turnID,
+	})
+	return err
+}
+
+func (s *session) Close() error {
+	s.finish("interrupted", context.Canceled)
+	s.shutdownProcess()
+
+	select {
+	case <-s.procDone:
+		return nil
+	case <-time.After(2 * time.Second):
+		if s.cmd.Process != nil {
+			_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
+		}
+	}
+
+	select {
+	case <-s.procDone:
+	case <-time.After(2 * time.Second):
+		return errors.New("codex: app-server did not exit after SIGKILL")
+	}
+	return nil
+}
+
+func (s *session) shutdownProcess() {
+	s.stopOnce.Do(func() {
+		_ = s.stdin.Close()
+		if s.cmd.Process != nil {
+			_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGTERM)
+		}
+	})
+}
+
+func (s *session) initialize(ctx context.Context) error {
+	_, err := s.call(ctx, "initialize", map[string]any{
+		"clientInfo": map[string]string{
+			"name":    s.cfg.ClientName,
+			"version": s.cfg.ClientVersion,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("codex: initialize: %w", err)
+	}
+	if err := s.notify("initialized", nil); err != nil {
+		return fmt.Errorf("codex: initialized: %w", err)
+	}
+	return nil
+}
+
+func (s *session) startThread(ctx context.Context) error {
+	params := map[string]any{
+		"cwd": s.spec.Workdir,
+	}
+	if s.spec.Model != "" {
+		params["model"] = s.spec.Model
+	}
+	if s.spec.Sandbox != "" {
+		params["sandbox"] = s.spec.Sandbox
+	}
+	if s.spec.Approval != "" {
+		params["approvalPolicy"] = s.spec.Approval
+	}
+
+	result, err := s.call(ctx, "thread/start", params)
+	if err != nil {
+		return fmt.Errorf("codex: thread/start: %w", err)
+	}
+	var payload struct {
+		Thread struct {
+			ID string `json:"id"`
+		} `json:"thread"`
+	}
+	if err := json.Unmarshal(result, &payload); err != nil {
+		return fmt.Errorf("codex: parse thread/start response: %w", err)
+	}
+	if payload.Thread.ID == "" {
+		return fmt.Errorf("codex: thread/start returned empty thread id")
+	}
+
+	s.mu.Lock()
+	s.threadID = payload.Thread.ID
+	s.sessionRef.ID = payload.Thread.ID
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *session) startTurn(ctx context.Context) error {
+	params := map[string]any{
+		"threadId": s.threadID,
+		"input": []map[string]any{{
+			"type": "text",
+			"text": s.spec.Prompt,
+		}},
+	}
+	if s.spec.Model != "" {
+		params["model"] = s.spec.Model
+	}
+	if s.spec.Approval != "" {
+		params["approvalPolicy"] = s.spec.Approval
+	}
+
+	result, err := s.call(ctx, "turn/start", params)
+	if err != nil {
+		return fmt.Errorf("codex: turn/start: %w", err)
+	}
+	var payload struct {
+		Turn struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"turn"`
+	}
+	if err := json.Unmarshal(result, &payload); err != nil {
+		return fmt.Errorf("codex: parse turn/start response: %w", err)
+	}
+	if payload.Turn.ID != "" {
+		s.mu.Lock()
+		s.turnID = payload.Turn.ID
+		s.mu.Unlock()
+	}
+	return nil
+}
+
+func (s *session) captureStderr() {
+	if s.stderr == nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, s.stderr)
+}
+
+func (s *session) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	id := s.nextID.Add(1)
+	req := Request{JSONRPC: "2.0", ID: id, Method: method, Params: params}
 	data, err := json.Marshal(req)
 	if err != nil {
-		return nil, fmt.Errorf("codex: marshal request: %w", err)
+		return nil, fmt.Errorf("codex: marshal %s request: %w", method, err)
 	}
 	data = append(data, '\n')
 
+	key := requestIDForInt(id)
 	ch := make(chan Response, 1)
-	b.mu.Lock()
-	if b.closed {
-		b.mu.Unlock()
-		return nil, fmt.Errorf("codex: backend is shut down")
-	}
-	b.pending[id] = ch
-	b.mu.Unlock()
 
-	if _, err := b.stdin.Write(data); err != nil {
-		b.mu.Lock()
-		delete(b.pending, id)
-		b.mu.Unlock()
-		return nil, fmt.Errorf("codex: write request: %w", err)
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil, errors.New("codex: session already closed")
+	}
+	s.pending[key] = ch
+	s.mu.Unlock()
+
+	s.writeMu.Lock()
+	_, err = s.stdin.Write(data)
+	s.writeMu.Unlock()
+	if err != nil {
+		s.mu.Lock()
+		delete(s.pending, key)
+		s.mu.Unlock()
+		return nil, fmt.Errorf("codex: write %s request: %w", method, err)
 	}
 
 	select {
@@ -192,155 +369,302 @@ func (b *Backend) call(ctx context.Context, method string, params interface{}) (
 		}
 		return resp.Result, nil
 	case <-ctx.Done():
-		b.mu.Lock()
-		delete(b.pending, id)
-		b.mu.Unlock()
-		return nil, ctx.Err()
-	case <-b.done:
-		return nil, fmt.Errorf("codex: mcp-server exited")
-	}
-}
-
-func (b *Backend) NewSession(ctx context.Context, spec agent.Spec) (agent.Session, error) {
-	id := uuid.New().String()
-
-	// Start a thread.
-	type threadStartParams struct {
-		Workdir string `json:"workdir,omitempty"`
-	}
-	result, err := b.call(ctx, "thread/start", threadStartParams{Workdir: spec.Workdir})
-	if err != nil {
-		return nil, fmt.Errorf("codex: thread/start: %w", err)
-	}
-
-	var threadResult struct {
-		ThreadID string `json:"thread_id"`
-	}
-	if err := json.Unmarshal(result, &threadResult); err != nil {
-		return nil, fmt.Errorf("codex: parse thread/start result: %w", err)
-	}
-	threadID := threadResult.ThreadID
-	if threadID == "" {
-		threadID = id
-	}
-
-	events := make(chan agent.Event, 64)
-
-	b.mu.Lock()
-	b.threads[threadID] = events
-	b.mu.Unlock()
-
-	s := &session{
-		id:       id,
-		threadID: threadID,
-		backend:  b,
-		events:   events,
-		done:     make(chan struct{}),
-		start:    time.Now(),
-	}
-
-	// Start a turn with the prompt.
-	type turnStartParams struct {
-		ThreadID string `json:"thread_id"`
-		Prompt   string `json:"prompt"`
-		Model    string `json:"model,omitempty"`
-	}
-	go func() {
-		defer close(s.done)
-		_, turnErr := b.call(ctx, "turn/start", turnStartParams{
-			ThreadID: threadID,
-			Prompt:   spec.Prompt,
-			Model:    spec.Model,
-		})
 		s.mu.Lock()
-		s.duration = time.Since(s.start)
-		if turnErr != nil {
-			s.waitErr = turnErr
-			s.exitCode = 1
-		}
+		delete(s.pending, key)
 		s.mu.Unlock()
-	}()
-
-	return s, nil
-}
-
-func (b *Backend) Shutdown(ctx context.Context) error {
-	b.mu.Lock()
-	b.closed = true
-	b.mu.Unlock()
-
-	_ = b.stdin.Close()
-
-	grace := 5 * time.Second
-	timer := time.NewTimer(grace)
-	defer timer.Stop()
-
-	select {
-	case <-b.done:
-		return b.cmd.Wait()
-	case <-timer.C:
-		if b.cmd.Process != nil {
-			_ = syscall.Kill(-b.cmd.Process.Pid, syscall.SIGKILL)
-		}
-	case <-ctx.Done():
-		if b.cmd.Process != nil {
-			_ = syscall.Kill(-b.cmd.Process.Pid, syscall.SIGKILL)
-		}
-		return ctx.Err()
-	}
-
-	select {
-	case <-b.done:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	return b.cmd.Wait()
-}
-
-type session struct {
-	id       string
-	threadID string
-	backend  *Backend
-	events   chan agent.Event
-	done     chan struct{}
-	start    time.Time
-
-	mu       sync.Mutex
-	exitCode int
-	finalMsg string
-	duration time.Duration
-	waitErr  error
-}
-
-func (s *session) ID() string                { return s.id }
-func (s *session) Events() <-chan agent.Event { return s.events }
-
-func (s *session) Wait(ctx context.Context) (agent.Result, error) {
-	select {
+		return nil, ctx.Err()
 	case <-s.done:
-	case <-ctx.Done():
-		return agent.Result{}, ctx.Err()
+		return nil, errors.New("codex: session closed")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return agent.Result{
-		ExitCode: s.exitCode,
-		FinalMsg: s.finalMsg,
-		Duration: s.duration,
-	}, s.waitErr
 }
 
-func (s *session) Interrupt(ctx context.Context) error {
-	type interruptParams struct {
-		ThreadID string `json:"thread_id"`
+func (s *session) notify(method string, params any) error {
+	req := Notification{JSONRPC: "2.0", Method: method}
+	if params != nil {
+		raw, err := json.Marshal(params)
+		if err != nil {
+			return err
+		}
+		req.Params = raw
 	}
-	_, err := s.backend.call(ctx, "turn/interrupt", interruptParams{ThreadID: s.threadID})
+	data, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_, err = s.stdin.Write(data)
 	return err
 }
 
-func (s *session) Close() error {
-	s.backend.mu.Lock()
-	delete(s.backend.threads, s.threadID)
-	s.backend.mu.Unlock()
-	return nil
+func (s *session) reply(id json.RawMessage, payload any) error {
+	data, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      json.RawMessage(append([]byte(nil), id...)),
+		"result":  payload,
+	})
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_, err = s.stdin.Write(data)
+	return err
+}
+
+func (s *session) replyError(id json.RawMessage, code int, message string) error {
+	data, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      json.RawMessage(append([]byte(nil), id...)),
+		"error": map[string]any{
+			"code":    code,
+			"message": message,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_, err = s.stdin.Write(data)
+	return err
+}
+
+func (s *session) readLoop() {
+	scanner := bufio.NewScanner(s.stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := append([]byte(nil), scanner.Bytes()...)
+		var envelope struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if err := json.Unmarshal(line, &envelope); err != nil {
+			continue
+		}
+
+		switch {
+		case len(envelope.ID) > 0 && envelope.Method == "":
+			var resp Response
+			if err := json.Unmarshal(line, &resp); err != nil {
+				continue
+			}
+			key := requestIDKey(resp.ID)
+			s.mu.Lock()
+			ch := s.pending[key]
+			delete(s.pending, key)
+			s.mu.Unlock()
+			if ch != nil {
+				ch <- resp
+				close(ch)
+			}
+		case len(envelope.ID) > 0 && envelope.Method != "":
+			var req ServerRequest
+			if err := json.Unmarshal(line, &req); err != nil {
+				continue
+			}
+			s.handleServerRequest(req)
+		case envelope.Method != "":
+			var notif Notification
+			if err := json.Unmarshal(line, &notif); err != nil {
+				continue
+			}
+			s.handleNotification(notif, json.RawMessage(line))
+		}
+	}
+
+	waitErr := s.cmd.Wait()
+	s.procDone <- waitErr
+	close(s.events)
+	if waitErr != nil && !errors.Is(waitErr, context.Canceled) {
+		s.finish("failed", waitErr)
+	} else {
+		s.finish("completed", nil)
+	}
+}
+
+func (s *session) handleServerRequest(req ServerRequest) {
+	switch req.Method {
+	case "item/commandExecution/requestApproval":
+		_ = s.reply(req.ID, map[string]any{"decision": "acceptForSession"})
+	case "item/fileChange/requestApproval":
+		_ = s.reply(req.ID, map[string]any{"decision": "acceptForSession"})
+	case "item/permissions/requestApproval":
+		var params struct {
+			Permissions any `json:"permissions"`
+		}
+		_ = json.Unmarshal(req.Params, &params)
+		_ = s.reply(req.ID, map[string]any{
+			"permissions": params.Permissions,
+			"scope":       "session",
+		})
+	case "execCommandApproval", "applyPatchApproval":
+		_ = s.reply(req.ID, map[string]any{"decision": "approved_for_session"})
+	case "item/tool/requestUserInput":
+		_ = s.reply(req.ID, map[string]any{"answers": map[string]any{}})
+	case "mcpServer/elicitation/request":
+		_ = s.reply(req.ID, map[string]any{"action": "decline"})
+	case "item/tool/call":
+		_ = s.reply(req.ID, map[string]any{
+			"success": false,
+			"contentItems": []map[string]any{{
+				"type": "inputText",
+				"text": "workbuddy does not expose client-side dynamic tools",
+			}},
+		})
+	default:
+		_ = s.replyError(req.ID, -32601, fmt.Sprintf("unsupported server request %q", req.Method))
+	}
+}
+
+func (s *session) handleNotification(notif Notification, raw json.RawMessage) {
+	for _, evt := range mapNotification(notif.Method, notif.Params, raw) {
+		s.emit(evt)
+	}
+	s.observeNotification(notif.Method, notif.Params)
+}
+
+func (s *session) observeNotification(method string, params json.RawMessage) {
+	switch method {
+	case "turn/started":
+		var payload struct {
+			Turn struct {
+				ID string `json:"id"`
+			} `json:"turn"`
+		}
+		if err := json.Unmarshal(params, &payload); err == nil && payload.Turn.ID != "" {
+			s.mu.Lock()
+			s.turnID = payload.Turn.ID
+			s.mu.Unlock()
+		}
+	case "item/completed":
+		var payload struct {
+			Item map[string]json.RawMessage `json:"item"`
+		}
+		if err := json.Unmarshal(params, &payload); err != nil {
+			return
+		}
+		itemType := rawString(payload.Item, "type")
+		switch itemType {
+		case "agentMessage":
+			if text := rawString(payload.Item, "text"); text != "" {
+				phase := rawString(payload.Item, "phase")
+				if phase == "final_answer" || phase == "" {
+					s.mu.Lock()
+					s.finalMsg = text
+					s.mu.Unlock()
+				}
+			}
+		case "fileChange":
+			for _, change := range rawPatchChanges(payload.Item) {
+				s.trackChangedFile(change.Path)
+			}
+		}
+	case "turn/completed":
+		var payload struct {
+			Turn struct {
+				ID         string `json:"id"`
+				Status     string `json:"status"`
+				DurationMS int64  `json:"durationMs"`
+			} `json:"turn"`
+		}
+		if err := json.Unmarshal(params, &payload); err != nil {
+			return
+		}
+		status := payload.Turn.Status
+		if status == "" {
+			status = "completed"
+		}
+		if payload.Turn.ID != "" {
+			s.mu.Lock()
+			s.turnID = payload.Turn.ID
+			s.mu.Unlock()
+		}
+		var waitErr error
+		exitCode := 0
+		switch status {
+		case "completed":
+			exitCode = 0
+		case "interrupted":
+			exitCode = 130
+			waitErr = context.Canceled
+		default:
+			exitCode = 1
+			s.mu.Lock()
+			msg := s.lastError
+			s.mu.Unlock()
+			if msg == "" {
+				msg = "codex turn failed"
+			}
+			waitErr = errors.New(msg)
+		}
+		s.finishWithDuration(status, exitCode, waitErr, payload.Turn.DurationMS)
+		go s.shutdownProcess()
+	case "error":
+		var payload struct {
+			Error struct {
+				Message string          `json:"message"`
+				Code    json.RawMessage `json:"codexErrorInfo"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(params, &payload); err == nil {
+			s.mu.Lock()
+			s.lastError = payload.Error.Message
+			s.mu.Unlock()
+		}
+	}
+}
+
+func (s *session) emit(evt agent.Event) {
+	select {
+	case s.events <- evt:
+	case <-s.done:
+	}
+}
+
+func (s *session) trackChangedFile(path string) {
+	if path == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.filesChanged == nil {
+		s.filesChanged = make(map[string]struct{})
+	}
+	s.filesChanged[path] = struct{}{}
+	s.mu.Unlock()
+}
+
+func (s *session) finish(status string, err error) {
+	durationMS := int64(time.Since(s.start) / time.Millisecond)
+	s.finishWithDuration(status, exitCodeForStatus(status), err, durationMS)
+}
+
+func (s *session) finishWithDuration(_ string, exitCode int, err error, durationMS int64) {
+	s.finishOnce.Do(func() {
+		s.mu.Lock()
+		s.exitCode = exitCode
+		s.waitErr = err
+		if durationMS > 0 {
+			s.duration = time.Duration(durationMS) * time.Millisecond
+		} else {
+			s.duration = time.Since(s.start)
+		}
+		s.closed = true
+		s.mu.Unlock()
+		close(s.done)
+	})
+}
+
+func exitCodeForStatus(status string) int {
+	switch status {
+	case "completed":
+		return 0
+	case "interrupted":
+		return 130
+	default:
+		return 1
+	}
 }
