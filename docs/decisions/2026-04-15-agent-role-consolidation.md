@@ -35,7 +35,7 @@ Collapse the catalog to exactly two agents:
   artifact against each acceptance criterion. All pass → `status:done`.
   Any fail → back to `status:developing` with a feedback comment.
 
-Runtime (`claude-code` / `codex` / `codex-appserver`) becomes a
+Runtime (`claude-code` / `codex`) becomes a
 repo-level config override on these two agents, not its own catalog
 entry.
 

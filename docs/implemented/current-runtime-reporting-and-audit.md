@@ -35,7 +35,8 @@ type Runtime interface {
 
 - `internal/launcher/launcher.go`
 - `internal/launcher/claude.go`
-- `internal/launcher/codex.go`
+- `internal/launcher/agent_bridge.go`
+- `internal/agent/codex/backend.go`
 - `internal/launcher/process.go`
 
 此外，launcher 现在还有一个与 runtime 正交的 runner 选择：
@@ -57,7 +58,7 @@ type Runtime interface {
 
 差异点：
 
-- `codex` runtime 会实时把 `codex exec --json` 映射成 Event v1
+- `codex` runtime 会把 `codex app-server` JSON-RPC 通知映射成 Event v1
 - Claude prompt 路径会把 `claude --output-format stream-json` 映射成 Event v1
 - 保底 shell one-shot 路径仍只产出最小事件集
 - GitHub Actions runner 不在本机执行 agent 子进程；它把远端 logs/artifacts

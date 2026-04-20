@@ -144,7 +144,7 @@ timeout: 30s
 	gh.mu.Unlock()
 
 	task12 := waitForTaskByIssue(t, dbPath, 12)
-	if got, want := task12.Runtime, config.RuntimeCodexExec; got != want {
+	if got, want := task12.Runtime, config.RuntimeCodex; got != want {
 		t.Fatalf("reloaded task runtime = %q, want %q", got, want)
 	}
 

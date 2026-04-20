@@ -22,7 +22,7 @@ func TestSessionManagerLifecycle(t *testing.T) {
 		Repo:      "owner/repo",
 		IssueNum:  39,
 		AgentName: "dev-agent",
-		Runtime:   "codex-exec",
+		Runtime:   "codex",
 		WorkerID:  "worker-1",
 		Attempt:   2,
 	})

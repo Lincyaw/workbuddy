@@ -29,7 +29,6 @@ const (
 	RuntimeClaudeCode  = "claude-code"
 	RuntimeClaudeShot  = "claude-oneshot"
 	RuntimeCodex       = "codex"
-	RuntimeCodexExec   = "codex-exec"
 	RuntimeCodexServer = "codex-appserver"
 )
 
@@ -42,7 +41,6 @@ var validRuntimes = map[string]bool{
 	RuntimeClaudeCode:  true,
 	RuntimeClaudeShot:  true,
 	RuntimeCodex:       true,
-	RuntimeCodexExec:   true,
 	RuntimeCodexServer: true,
 }
 
@@ -257,8 +255,8 @@ func normalizeAgentConfig(agent *AgentConfig) ([]Warning, error) {
 	var warnings []Warning
 
 	switch agent.Runtime {
-	case RuntimeCodex:
-		agent.Runtime = RuntimeCodexExec
+	case RuntimeCodex, RuntimeCodexServer:
+		agent.Runtime = RuntimeCodex
 	}
 
 	if agent.Policy.Timeout > 0 {
@@ -319,18 +317,7 @@ func normalizeAgentConfig(agent *AgentConfig) ([]Warning, error) {
 		if agent.Policy.Approval != "never" {
 			return warnings, fmt.Errorf("unsupported policy.approval %q for runtime %q", agent.Policy.Approval, agent.Runtime)
 		}
-	case RuntimeCodexExec:
-		switch agent.Policy.Sandbox {
-		case "read-only", "workspace-write", "danger-full-access":
-		default:
-			return warnings, fmt.Errorf("unsupported policy.sandbox %q for runtime %q", agent.Policy.Sandbox, agent.Runtime)
-		}
-		switch agent.Policy.Approval {
-		case "never", "on-failure", "on-request":
-		default:
-			return warnings, fmt.Errorf("unsupported policy.approval %q for runtime %q", agent.Policy.Approval, agent.Runtime)
-		}
-	case RuntimeCodexServer:
+	case RuntimeCodex:
 		switch agent.Policy.Sandbox {
 		case "read-only", "workspace-write", "danger-full-access":
 		default:
@@ -368,9 +355,7 @@ func defaultSandboxForRuntime(runtime string) string {
 	switch runtime {
 	case RuntimeClaudeCode, RuntimeClaudeShot:
 		return "read-only"
-	case RuntimeCodexExec:
-		return "read-only"
-	case RuntimeCodexServer:
+	case RuntimeCodex:
 		return "read-only"
 	default:
 		return ""
@@ -379,7 +364,7 @@ func defaultSandboxForRuntime(runtime string) string {
 
 func defaultApprovalForRuntime(runtime string) string {
 	switch runtime {
-	case RuntimeClaudeCode, RuntimeClaudeShot, RuntimeCodexExec, RuntimeCodexServer:
+	case RuntimeClaudeCode, RuntimeClaudeShot, RuntimeCodex:
 		return "never"
 	default:
 		return ""

@@ -63,7 +63,7 @@ func TestClaimAckHeartbeatCompleteFlow(t *testing.T) {
 		IssueNum:  41,
 		AgentName: "dev-agent",
 		Role:      "dev",
-		Runtime:   "codex-exec",
+		Runtime:   "codex",
 		Workflow:  "default",
 		State:     "developing",
 		Status:    store.TaskStatusPending,
@@ -86,7 +86,7 @@ func TestClaimAckHeartbeatCompleteFlow(t *testing.T) {
 		t.Fatalf("claim status = %d, want 200", claimResp.StatusCode)
 	}
 	claimed := decodeTaskResponse(t, claimResp)
-	if claimed.ID != "task-1" || claimed.Role != "dev" || claimed.Runtime != "codex-exec" {
+	if claimed.ID != "task-1" || claimed.Role != "dev" || claimed.Runtime != "codex" {
 		t.Fatalf("unexpected claim payload: %+v", claimed)
 	}
 
@@ -162,7 +162,7 @@ func TestDuplicateClaimRejectedByOwnership(t *testing.T) {
 		IssueNum:  42,
 		AgentName: "review-agent",
 		Role:      "review",
-		Runtime:   "codex-exec",
+		Runtime:   "codex",
 		Workflow:  "default",
 		State:     "reviewing",
 		Status:    store.TaskStatusPending,

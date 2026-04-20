@@ -60,7 +60,7 @@ func seedAuditData(t *testing.T, st *store.Store, sessionsDir string) {
 	}); err != nil {
 		t.Fatalf("UpsertIssueDependencyState: %v", err)
 	}
-	rawPath := filepath.Join(sessionsDir, "session-40", "codex-exec.jsonl")
+	rawPath := filepath.Join(sessionsDir, "session-40", "raw-session.jsonl")
 	if err := os.MkdirAll(filepath.Dir(rawPath), 0o755); err != nil {
 		t.Fatalf("mkdir session dir: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestHandleSession(t *testing.T) {
 	if !strings.HasSuffix(resp.ArtifactPaths.EventsV1, filepath.Join("session-40", "events-v1.jsonl")) {
 		t.Fatalf("events path = %q", resp.ArtifactPaths.EventsV1)
 	}
-	if !strings.HasSuffix(resp.ArtifactPaths.Raw, filepath.Join("session-40", "codex-exec.jsonl")) {
+	if !strings.HasSuffix(resp.ArtifactPaths.Raw, filepath.Join("session-40", "raw-session.jsonl")) {
 		t.Fatalf("raw path = %q", resp.ArtifactPaths.Raw)
 	}
 }
@@ -398,7 +398,7 @@ func seedDashboardData(t *testing.T, st *store.Store, sessionsDir string) {
 		StdoutPath: filepath.Join(sessionsDir, "session-40", "stdout"),
 		StderrPath: filepath.Join(sessionsDir, "session-40", "stderr"),
 		Summary:    "session 40 summary",
-		RawPath:    filepath.Join(sessionsDir, "session-40", "codex-exec.jsonl"),
+		RawPath:    filepath.Join(sessionsDir, "session-40", "raw-session.jsonl"),
 	}, "stdout line 1\nstdout line 2\n", "stderr line 1\n", 2*time.Second, 0)
 
 	insertSession(store.SessionRecord{
@@ -415,7 +415,7 @@ func seedDashboardData(t *testing.T, st *store.Store, sessionsDir string) {
 		StdoutPath: filepath.Join(sessionsDir, "session-41", "stdout"),
 		StderrPath: filepath.Join(sessionsDir, "session-41", "stderr"),
 		Summary:    "session 41 summary",
-		RawPath:    filepath.Join(sessionsDir, "session-41", "codex-exec.jsonl"),
+		RawPath:    filepath.Join(sessionsDir, "session-41", "raw-session.jsonl"),
 	}, "review stdout\n", "review stderr\n", 4*time.Second, 1)
 
 	insertSession(store.SessionRecord{
@@ -432,7 +432,7 @@ func seedDashboardData(t *testing.T, st *store.Store, sessionsDir string) {
 		StdoutPath: filepath.Join(sessionsDir, "session-active", "stdout"),
 		StderrPath: filepath.Join(sessionsDir, "session-active", "stderr"),
 		Summary:    "active summary",
-		RawPath:    filepath.Join(sessionsDir, "session-active", "codex-exec.jsonl"),
+		RawPath:    filepath.Join(sessionsDir, "session-active", "raw-session.jsonl"),
 	}, "active stdout\n", "", 0, 0)
 }
 

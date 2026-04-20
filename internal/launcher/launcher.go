@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Lincyaw/workbuddy/internal/agent"
+	"github.com/Lincyaw/workbuddy/internal/agent/codex"
 	"github.com/Lincyaw/workbuddy/internal/config"
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 )
@@ -19,7 +21,12 @@ type Launcher struct {
 func NewLauncher() *Launcher {
 	l := &Launcher{runtimes: make(map[string]Runtime)}
 	l.Register(&ClaudeRuntime{}, config.RuntimeClaudeCode, config.RuntimeClaudeShot)
-	l.Register(&CodexRuntime{}, config.RuntimeCodex, config.RuntimeCodexExec)
+	l.Register(&agentBridgeRuntime{
+		runtimeName: config.RuntimeCodex,
+		newBackend: func() (agent.Backend, error) {
+			return codex.NewBackend(codex.Config{})
+		},
+	}, config.RuntimeCodex, config.RuntimeCodexServer)
 	return l
 }
 

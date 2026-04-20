@@ -298,14 +298,10 @@ func (c *Client) downloadArtifacts(ctx context.Context, cfg Config, runID int64)
 			resultPath = path
 		case "events-v1.jsonl":
 			canonicalSessionPath = path
-		case "codex-exec.jsonl":
-			if canonicalSessionPath == "" {
-				canonicalSessionPath = path
-			}
 		}
 	}
 	if canonicalSessionPath == "" {
-		return nil, "", "", fmt.Errorf("gha: run %d artifacts missing session capture (want events-v1.jsonl or codex-exec.jsonl)", runID)
+		return nil, "", "", fmt.Errorf("gha: run %d artifacts missing session capture (want events-v1.jsonl)", runID)
 	}
 	return files, resultPath, canonicalSessionPath, nil
 }

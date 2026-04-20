@@ -28,7 +28,6 @@ func TestClientRunWorkflow_UsesDispatchRunIDAndIngestsArtifacts(t *testing.T) {
 	}))
 	writeFixture(t, filepath.Join(fixtures, "artifact.zip"), zipFixture(t, map[string]string{
 		"events-v1.jsonl":       "{\"kind\":\"turn.completed\"}\n",
-		"codex-exec.jsonl":      "{\"type\":\"message\"}\n",
 		"workbuddy-result.json": `{"exit_code":0,"last_message":"remote success","meta":{"pr_url":"https://github.com/owner/repo/pull/47"},"session_path":"events-v1.jsonl"}`,
 		"nested/ignored.txt":    "hello\n",
 	}))

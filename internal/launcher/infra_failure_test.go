@@ -73,12 +73,7 @@ func TestProcessRuntime_GenuineExitNoInfraFailure(t *testing.T) {
 
 // TestClaudeStream_InfraFailureMetaHelpers asserts the shared
 // markInfraFailure helper invariants used by the runClaudeStream "read
-// stdout" / "build command" / "cmd.Start" error paths. We exercise these
-// paths indirectly through the helper rather than by mutating PATH — the
-// launcher test suite already includes tests that manipulate PATH via
-// installFakeCodexScript, and layering a second PATH mutation has been
-// observed to race in ways that are unrelated to the property under
-// test here.
+// stdout" / "build command" / "cmd.Start" error paths.
 func TestClaudeStream_InfraFailureMetaHelpers(t *testing.T) {
 	r := &Result{ExitCode: -1, Meta: map[string]string{}}
 	markInfraFailure(r, "stdout stream read error")
@@ -87,108 +82,6 @@ func TestClaudeStream_InfraFailureMetaHelpers(t *testing.T) {
 	}
 	if r.Meta[MetaInfraFailureReason] != "stdout stream read error" {
 		t.Fatalf("unexpected reason: %q", r.Meta[MetaInfraFailureReason])
-	}
-}
-
-// TestCodexSessionRun_RuntimePanicMarksInfraFailure simulates a codex
-// binary that aborts with a Rust-style panic on stderr before emitting
-// any agent output. This is the plugin-cache scenario called out in
-// AC-1: the process exits non-zero but the failure is infrastructural,
-// not the agent returning a FAIL verdict.
-//
-// We deliberately give the script a brief sleep before exiting so the
-// stderr pipe reader goroutine has a chance to drain the panic
-// message — without this, the script can exit so fast that the test
-// observes an empty stderr on occasional scheduling orderings, which
-// would incorrectly report no infra_failure. The production scenario
-// this test mirrors (a Rust binary panicking) always produces stderr
-// bytes that the runtime eventually drains, so the sleep is only there
-// to stabilize the test against the stdout-pipe-closed-first race.
-func TestCodexSessionRun_RuntimePanicMarksInfraFailure(t *testing.T) {
-	restore := installFakeCodexScript(t,
-		"#!/bin/sh\n"+
-			"printf 'thread main panicked at src/plugin-cache.rs:42:10:\\nmissing cache entry\\n' >&2\n"+
-			// The real-world scenario this test mirrors (a Rust binary
-			// panicking) produces multi-KB stack traces, so the stderr
-			// reader in codex.go has plenty of bytes to drain before
-			// the pipe closes. In the test we emit a single short line
-			// and need a small delay so the pipe drain goroutine is
-			// definitely scheduled before the process exits. Without
-			// the delay, occasional scheduling orderings leave the
-			// test seeing an empty stderr even though the production
-			// path handles panics correctly.
-			"sync\n"+
-			"sleep 0.5\n"+
-			"exit 101\n")
-	defer restore()
-
-	launcher := NewLauncher()
-	task := newTestTask(t)
-	agent := &config.AgentConfig{
-		Name:    "codex-panic",
-		Runtime: config.RuntimeCodexExec,
-		Prompt:  "irrelevant",
-		Policy:  config.PolicyConfig{Sandbox: "read-only", Approval: "never"},
-		Timeout: 5 * time.Second,
-	}
-	session, err := launcher.Start(context.Background(), agent, task)
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	defer func() { _ = session.Close() }()
-
-	_, result, err := collectSessionEvents(t, session)
-	if err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	if result == nil {
-		t.Fatal("expected non-nil result on codex panic")
-	}
-	if !IsInfraFailure(result) {
-		t.Fatalf("expected Meta[infra_failure]=true for codex panic, got Meta=%v stderr=%q stdout=%q exit=%d duration=%s", result.Meta, result.Stderr, result.Stdout, result.ExitCode, result.Duration)
-	}
-}
-
-// TestCodexSessionRun_GenuineExitNoInfraFailure verifies backwards
-// compatibility: when codex exits non-zero with a normal failure
-// message (no runtime-panic signature), Meta[infra_failure] must NOT be
-// set and the reporter should render this as "Failure". See AC-5.
-func TestCodexSessionRun_GenuineExitNoInfraFailure(t *testing.T) {
-	restore := installFakeCodexScript(t,
-		"#!/bin/sh\n"+
-			"printf '{\"type\":\"task_started\",\"task_id\":\"t1\"}\\n'\n"+
-			"printf '{\"type\":\"agent_message\",\"message\":\"I reviewed the PR and found issues\"}\\n'\n"+
-			"printf '{\"type\":\"task_complete\",\"error\":true}\\n'\n"+
-			"exit 2\n")
-	defer restore()
-
-	launcher := NewLauncher()
-	task := newTestTask(t)
-	agent := &config.AgentConfig{
-		Name:    "codex-fail",
-		Runtime: config.RuntimeCodexExec,
-		Prompt:  "irrelevant",
-		Policy:  config.PolicyConfig{Sandbox: "read-only", Approval: "never"},
-		Timeout: 5 * time.Second,
-	}
-	session, err := launcher.Start(context.Background(), agent, task)
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	defer func() { _ = session.Close() }()
-
-	_, result, err := collectSessionEvents(t, session)
-	if err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	if result == nil {
-		t.Fatal("expected result")
-	}
-	if IsInfraFailure(result) {
-		t.Fatalf("genuine agent FAIL verdict must NOT be marked infra_failure: Meta=%v stderr=%q", result.Meta, result.Stderr)
-	}
-	if result.ExitCode != 2 {
-		t.Fatalf("expected exit code 2, got %d", result.ExitCode)
 	}
 }
 

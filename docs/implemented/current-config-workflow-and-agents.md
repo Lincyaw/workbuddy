@@ -104,7 +104,6 @@
 
 - `claude-code`
 - `codex`
-- `codex-appserver`
 
 默认行为：
 

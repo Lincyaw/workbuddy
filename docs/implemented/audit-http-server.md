@@ -120,7 +120,7 @@ Example response:
   "artifact_paths": {
     "session_dir": "/repo/.workbuddy/sessions/session-40",
     "events_v1": "/repo/.workbuddy/sessions/session-40/events-v1.jsonl",
-    "raw": "/repo/.workbuddy/sessions/session-40/codex-exec.jsonl"
+    "raw": "/repo/.workbuddy/sessions/session-40/stdout"
   }
 }
 ```
