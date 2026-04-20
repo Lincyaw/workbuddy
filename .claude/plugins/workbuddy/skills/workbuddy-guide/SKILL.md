@@ -1,6 +1,6 @@
 ---
 name: workbuddy-guide
-description: "Explain how to use workbuddy: what it is, which command to reach for, and where to find deeper references. Use when the user says 'how to use workbuddy', 'workbuddy guide', 'how does workbuddy work', 'teach me workbuddy', '怎么用workbuddy', '使用指南', or asks about deployment, running, or operating workbuddy."
+description: "Explain and operate workbuddy: what it is, which command to reach for, and where to find deeper references. **Trigger whenever the user mentions 'workbuddy' in any context** — including operational requests (register/onboard a repo, add/bind a worker, 注册仓库, 加仓库, 接入新仓库, onboard repo, set up worker), explanatory questions (how to use workbuddy, workbuddy guide, teach me workbuddy, 怎么用workbuddy, 使用指南), and deployment/running/operating/debugging workbuddy. Invoke this skill before running workbuddy CLI commands so the documented onboarding flow (coordinator register + worker repos add) isn't missed."
 user_invocable: true
 ---
 
