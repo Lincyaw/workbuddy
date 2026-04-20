@@ -170,7 +170,7 @@ func TestCodexSessionRun_EmitsPermissionEvent(t *testing.T) {
 	agent := &config.AgentConfig{
 		Name:    "codex-agent",
 		Role:    "review",
-		Runtime: config.RuntimeCodexExec,
+		Runtime: config.RuntimeCodex,
 		Prompt:  "Reply with exactly HELLO",
 		Policy:  config.PolicyConfig{Sandbox: "read-only", Approval: "never"},
 		Timeout: 10 * time.Second,

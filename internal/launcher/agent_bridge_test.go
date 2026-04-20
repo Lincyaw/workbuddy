@@ -2,7 +2,6 @@ package launcher
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
@@ -28,50 +27,30 @@ func TestNewBackendFromConfigClaudeShot(t *testing.T) {
 	}
 }
 
-func TestNewBackendFromConfigCodexExecNoEnv(t *testing.T) {
-	// Without WORKBUDDY_CODEX_BACKEND env var, should return nil (fall through).
-	os.Unsetenv("WORKBUDDY_CODEX_BACKEND")
-	b, err := newBackendFromConfig(config.RuntimeCodexExec)
-	if err != nil {
-		t.Fatalf("newBackendFromConfig(%q) error: %v", config.RuntimeCodexExec, err)
-	}
-	if b != nil {
-		t.Fatalf("newBackendFromConfig(%q) = %v, want nil (fall through)", config.RuntimeCodexExec, b)
-	}
-}
+func TestNewBackendFromConfigCodex(t *testing.T) {
+	restore := installFakeCodex(t)
+	defer restore()
 
-func TestNewBackendFromConfigCodexNoEnv(t *testing.T) {
-	os.Unsetenv("WORKBUDDY_CODEX_BACKEND")
 	b, err := newBackendFromConfig(config.RuntimeCodex)
 	if err != nil {
 		t.Fatalf("newBackendFromConfig(%q) error: %v", config.RuntimeCodex, err)
 	}
-	if b != nil {
-		t.Fatalf("newBackendFromConfig(%q) = %v, want nil (fall through)", config.RuntimeCodex, b)
+	if b == nil {
+		t.Fatalf("newBackendFromConfig(%q) = nil, want codex backend", config.RuntimeCodex)
 	}
+	_ = b.Shutdown(context.Background())
 }
 
 func TestNewBackendFromConfigCodexAppServerRuntime(t *testing.T) {
+	restore := installFakeCodex(t)
+	defer restore()
+
 	b, err := newBackendFromConfig(config.RuntimeCodexServer)
 	if err != nil {
-		t.Logf("newBackendFromConfig(%q): %v (expected when codex is not installed)", config.RuntimeCodexServer, err)
-		return
+		t.Fatalf("newBackendFromConfig(%q): %v", config.RuntimeCodexServer, err)
 	}
 	if b == nil {
 		t.Fatal("newBackendFromConfig(codex-appserver) returned nil backend")
-	}
-}
-
-func TestNewBackendFromConfigCodexAppServerEnv(t *testing.T) {
-	// With WORKBUDDY_CODEX_BACKEND=app-server, should attempt to create codex backend.
-	t.Setenv("WORKBUDDY_CODEX_BACKEND", "app-server")
-	b, err := newBackendFromConfig(config.RuntimeCodex)
-	if err != nil {
-		t.Logf("newBackendFromConfig with app-server env: %v (expected when codex is not installed)", err)
-		return
-	}
-	if b == nil {
-		t.Fatal("newBackendFromConfig with app-server env returned nil backend")
 	}
 	_ = b.Shutdown(context.Background())
 }

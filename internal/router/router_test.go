@@ -191,7 +191,7 @@ func TestRouter_PersistOnlyModeLeavesTaskPending(t *testing.T) {
 		"dev-agent": {
 			Name:    "dev-agent",
 			Role:    "dev",
-			Runtime: "codex-exec",
+			Runtime: "codex",
 			Command: "echo hello",
 		},
 	}
@@ -224,7 +224,7 @@ func TestRouter_PersistOnlyModeLeavesTaskPending(t *testing.T) {
 	if len(tasks) != 1 {
 		t.Fatalf("pending tasks = %d, want 1", len(tasks))
 	}
-	if tasks[0].Role != "dev" || tasks[0].Runtime != "codex-exec" || tasks[0].Workflow != "default" || tasks[0].State != "developing" {
+	if tasks[0].Role != "dev" || tasks[0].Runtime != "codex" || tasks[0].Workflow != "default" || tasks[0].State != "developing" {
 		t.Fatalf("unexpected persisted task: %+v", tasks[0])
 	}
 }
@@ -239,7 +239,7 @@ func TestRouter_PersistOnlyModeDoesNotCreateWorktree(t *testing.T) {
 		"dev-agent": {
 			Name:    "dev-agent",
 			Role:    "dev",
-			Runtime: "codex-exec",
+			Runtime: "codex",
 			Command: "echo hello",
 		},
 	}
@@ -348,7 +348,7 @@ func TestRouter_DispatchUsesWorktreeForRepoRootAndWorkDir(t *testing.T) {
 			"dev-agent": {
 				Name:    "dev-agent",
 				Role:    "dev",
-				Runtime: "codex-exec",
+				Runtime: "codex",
 				Command: "echo hello",
 			},
 		},

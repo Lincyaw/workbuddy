@@ -1076,9 +1076,9 @@ func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) 
 	}
 	if result != nil && eventsPath != "" && waitErr == nil {
 		// Prefer the normalized Event Schema v1 artifact as the session's
-		// canonical path so audit/reporter work off the unified stream.
-		// The runtime-native artifact (e.g. codex-exec.jsonl) stays on disk
-		// but is no longer the handle handed downstream.
+		// canonical path so audit/reporter work off the unified stream. Any
+		// runtime-native artifact becomes RawSessionPath instead of the
+		// downstream default.
 		if result.RawSessionPath == "" {
 			result.RawSessionPath = result.SessionPath
 		}

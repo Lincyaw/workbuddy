@@ -723,8 +723,8 @@ func normalizeWorkerRuntime(raw string) (public string, runtimeAlias string, err
 	switch strings.TrimSpace(strings.ToLower(raw)) {
 	case "", config.RuntimeClaudeCode:
 		return config.RuntimeClaudeCode, config.RuntimeClaudeCode, nil
-	case config.RuntimeCodex, config.RuntimeCodexExec:
-		return config.RuntimeCodex, config.RuntimeCodexExec, nil
+	case config.RuntimeCodex, config.RuntimeCodexServer:
+		return config.RuntimeCodex, config.RuntimeCodex, nil
 	default:
 		return "", "", fmt.Errorf("worker: unsupported runtime %q (want claude-code or codex)", raw)
 	}

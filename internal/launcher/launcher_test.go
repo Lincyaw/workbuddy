@@ -221,7 +221,7 @@ func TestStart_GitHubActionsRunnerUsesRemoteSession(t *testing.T) {
 	agent := &config.AgentConfig{
 		Name:    "remote-agent",
 		Runner:  config.RunnerGitHubActions,
-		Runtime: config.RuntimeCodexExec,
+		Runtime: config.RuntimeCodex,
 		Prompt:  "remote",
 		GitHubActions: config.GitHubActionsRunnerConfig{
 			Workflow:     "workbuddy-remote-runner.yml",

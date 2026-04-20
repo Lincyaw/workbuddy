@@ -22,25 +22,11 @@ func NewLauncher() *Launcher {
 	l := &Launcher{runtimes: make(map[string]Runtime)}
 	l.Register(&ClaudeRuntime{}, config.RuntimeClaudeCode, config.RuntimeClaudeShot)
 	l.Register(&agentBridgeRuntime{
-		runtimeName: config.RuntimeCodexServer,
+		runtimeName: config.RuntimeCodex,
 		newBackend: func() (agent.Backend, error) {
 			return codex.NewBackend(codex.Config{})
 		},
-	}, config.RuntimeCodexServer)
-
-	// When WORKBUDDY_CODEX_BACKEND=app-server/json-rpc, route the legacy
-	// `codex` aliases through the JSON-RPC app-server backend instead of the
-	// subprocess-based `codex exec` launcher.
-	if useCodexAppServerBackend() {
-		l.Register(&agentBridgeRuntime{
-			runtimeName: config.RuntimeCodexExec,
-			newBackend: func() (agent.Backend, error) {
-				return codex.NewBackend(codex.Config{})
-			},
-		}, config.RuntimeCodex, config.RuntimeCodexExec)
-	} else {
-		l.Register(&CodexRuntime{}, config.RuntimeCodex, config.RuntimeCodexExec)
-	}
+	}, config.RuntimeCodex, config.RuntimeCodexServer)
 	return l
 }
 

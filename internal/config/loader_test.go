@@ -279,11 +279,11 @@ func TestRepositorySampleConfig_LoadsMinimalAgentCatalog(t *testing.T) {
 		t.Fatalf("repository sample config agent count = %d, want %d; catalog is now minimal (dev + review only)", got, len(expectedAgents))
 	}
 
-	if got := cfg.Agents["dev-agent"].Runtime; got != RuntimeCodexExec {
-		t.Fatalf("dev-agent runtime = %q, want %q", got, RuntimeCodexExec)
+	if got := cfg.Agents["dev-agent"].Runtime; got != RuntimeCodex {
+		t.Fatalf("dev-agent runtime = %q, want %q", got, RuntimeCodex)
 	}
-	if got := cfg.Agents["review-agent"].Runtime; got != RuntimeCodexExec {
-		t.Fatalf("review-agent runtime = %q, want %q", got, RuntimeCodexExec)
+	if got := cfg.Agents["review-agent"].Runtime; got != RuntimeCodex {
+		t.Fatalf("review-agent runtime = %q, want %q", got, RuntimeCodex)
 	}
 
 	// Both agents' trigger labels (status:developing, status:reviewing) should be
@@ -359,8 +359,8 @@ func TestLoadConfig_NormalParse(t *testing.T) {
 	if !ok {
 		t.Fatal("agent 'review-agent' not found")
 	}
-	if codexAgent.Runtime != RuntimeCodexExec {
-		t.Errorf("codex runtime = %q, want %q", codexAgent.Runtime, RuntimeCodexExec)
+	if codexAgent.Runtime != RuntimeCodex {
+		t.Errorf("codex runtime = %q, want %q", codexAgent.Runtime, RuntimeCodex)
 	}
 	if codexAgent.Policy.Model != "gpt-5.4" {
 		t.Errorf("codex model = %q", codexAgent.Policy.Model)
@@ -418,7 +418,7 @@ func TestLoadConfig_AgentWithoutPermissions_UsesDefaults(t *testing.T) {
 	}
 }
 
-func TestNormalizeAgentConfig_RejectsUnsupportedCodexExecApproval(t *testing.T) {
+func TestNormalizeAgentConfig_AcceptsCodexViaApprover(t *testing.T) {
 	agent := &AgentConfig{
 		Name:    "codex-agent",
 		Runtime: RuntimeCodex,
@@ -429,12 +429,8 @@ func TestNormalizeAgentConfig_RejectsUnsupportedCodexExecApproval(t *testing.T) 
 		},
 	}
 
-	_, err := NormalizeAgentConfig(agent)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), `unsupported policy.approval "via-approver"`) {
-		t.Fatalf("unexpected error: %v", err)
+	if _, err := NormalizeAgentConfig(agent); err != nil {
+		t.Fatalf("NormalizeAgentConfig: %v", err)
 	}
 }
 
@@ -1133,7 +1129,7 @@ command: |
 		t.Fatalf("unexpected warnings: %v", warnings)
 	}
 	got := cfg.Agents["codex-agent"]
-	if got.Runtime != RuntimeCodexExec {
+	if got.Runtime != RuntimeCodex {
 		t.Fatalf("runtime = %q", got.Runtime)
 	}
 	if got.Policy.Model != "gpt-5.4" || got.Policy.Approval != "on-request" || got.Policy.Sandbox != "danger-full-access" {
@@ -1195,7 +1191,7 @@ prompt: |
 	if len(warnings) != 0 {
 		t.Fatalf("unexpected warnings: %v", warnings)
 	}
-	if cfg.Agents["future-agent"].Runtime != RuntimeCodexServer {
+	if cfg.Agents["future-agent"].Runtime != RuntimeCodex {
 		t.Fatalf("runtime = %q", cfg.Agents["future-agent"].Runtime)
 	}
 }

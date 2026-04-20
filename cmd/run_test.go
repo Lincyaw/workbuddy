@@ -17,7 +17,7 @@ import (
 
 func TestParseRunFlags(t *testing.T) {
 	cmd := &cobra.Command{Use: "run"}
-	cmd.Flags().String("runtime", config.RuntimeCodexExec, "")
+	cmd.Flags().String("runtime", config.RuntimeCodex, "")
 	cmd.Flags().StringP("prompt", "p", "", "")
 	cmd.Flags().String("prompt-file", "", "")
 	cmd.Flags().String("workdir", ".", "")
@@ -72,16 +72,16 @@ func TestRunRuntimeWithOpts_UsesLauncher(t *testing.T) {
 }
 
 func TestRunRuntimeWithOpts_FailsOnNonZeroExit(t *testing.T) {
-	mockRT := &mockRuntime{name: config.RuntimeCodexExec, resultFn: func(ctx context.Context, agent *config.AgentConfig, task *launcher.TaskContext) (*launcher.Result, error) {
+	mockRT := &mockRuntime{name: config.RuntimeCodex, resultFn: func(ctx context.Context, agent *config.AgentConfig, task *launcher.TaskContext) (*launcher.Result, error) {
 		return &launcher.Result{ExitCode: 23, LastMessage: "review failed", SessionPath: filepath.Join(task.WorkDir, "artifact.jsonl")}, nil
 	}}
 	lnch := launcher.NewLauncher()
-	lnch.Register(mockRT, config.RuntimeCodex, config.RuntimeCodexExec)
+	lnch.Register(mockRT, config.RuntimeCodex, config.RuntimeCodex)
 
 	var out bytes.Buffer
 	var errOut bytes.Buffer
 	err := runRuntimeWithOpts(context.Background(), &runOpts{
-		runtime:  config.RuntimeCodexExec,
+		runtime:  config.RuntimeCodex,
 		prompt:   "review this",
 		workdir:  t.TempDir(),
 		sandbox:  "danger-full-access",
@@ -132,7 +132,7 @@ func TestRunRuntime_CodexPromptE2E(t *testing.T) {
 	var out bytes.Buffer
 	var errOut bytes.Buffer
 	err := runRuntimeWithOpts(context.Background(), &runOpts{
-		runtime:  config.RuntimeCodexExec,
+		runtime:  config.RuntimeCodex,
 		prompt:   "Review the current repository changes in this working directory. Start your reply with REVIEW_OK and then provide a concise review.",
 		workdir:  repo,
 		sandbox:  "danger-full-access",

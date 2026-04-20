@@ -361,7 +361,7 @@ func TestTaskClaimLifecycle(t *testing.T) {
 		IssueNum:  7,
 		AgentName: "dev-agent",
 		Role:      "dev",
-		Runtime:   "codex-exec",
+		Runtime:   "codex",
 		Workflow:  "default",
 		State:     "developing",
 		Status:    TaskStatusPending,
@@ -420,7 +420,7 @@ func TestTaskOwnershipConflicts(t *testing.T) {
 		IssueNum:  8,
 		AgentName: "review-agent",
 		Role:      "review",
-		Runtime:   "codex-exec",
+		Runtime:   "codex",
 		Status:    TaskStatusPending,
 	}); err != nil {
 		t.Fatalf("InsertTask: %v", err)

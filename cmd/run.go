@@ -34,7 +34,7 @@ var runCmd = &cobra.Command{
 }
 
 func init() {
-	runCmd.Flags().String("runtime", config.RuntimeCodexExec, "Runtime to start (e.g. codex, codex-exec, claude-code)")
+	runCmd.Flags().String("runtime", config.RuntimeCodex, "Runtime to start (e.g. codex, claude-code)")
 	runCmd.Flags().StringP("prompt", "p", "", "Prompt to send to the runtime")
 	runCmd.Flags().String("prompt-file", "", "Read prompt from file")
 	runCmd.Flags().String("workdir", ".", "Working directory for the runtime session")

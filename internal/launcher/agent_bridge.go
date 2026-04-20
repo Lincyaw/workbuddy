@@ -3,7 +3,6 @@ package launcher
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 
@@ -14,25 +13,11 @@ import (
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 )
 
-func useCodexAppServerBackend() bool {
-	switch strings.TrimSpace(os.Getenv("WORKBUDDY_CODEX_BACKEND")) {
-	case "app-server", "json-rpc", "mcp-server":
-		return true
-	default:
-		return false
-	}
-}
-
 // newBackendFromConfig returns an agent.Backend for the given runtime name,
-// or nil if the caller should fall through to the existing launcher runtime.
+// or an error when the runtime is unsupported.
 func newBackendFromConfig(runtimeName string) (agent.Backend, error) {
 	switch runtimeName {
-	case config.RuntimeCodex, config.RuntimeCodexExec:
-		if useCodexAppServerBackend() {
-			return codex.NewBackend(codex.Config{})
-		}
-		return nil, nil // fall through to existing launcher
-	case config.RuntimeCodexServer:
+	case config.RuntimeCodex, config.RuntimeCodexServer:
 		return codex.NewBackend(codex.Config{})
 	case config.RuntimeClaudeCode, config.RuntimeClaudeShot:
 		return claude.NewBackend(), nil
@@ -105,6 +90,8 @@ func (r *agentBridgeRuntime) Start(ctx context.Context, agentCfg *config.AgentCo
 			Sess:      sess,
 			Handle:    handle,
 		},
+		agentCfg: agentCfg,
+		task:     task,
 	}, nil
 }
 
@@ -130,11 +117,41 @@ func (r *agentBridgeRuntime) Launch(ctx context.Context, agentCfg *config.AgentC
 
 // agentBridgeSession wraps agent.BridgeSession to implement launcher.Session.
 type agentBridgeSession struct {
-	bridge *agent.BridgeSession
+	bridge   *agent.BridgeSession
+	agentCfg *config.AgentConfig
+	task     *TaskContext
 }
 
 func (s *agentBridgeSession) Run(ctx context.Context, events chan<- launcherevents.Event) (*Result, error) {
-	br, err := s.bridge.Run(ctx, events)
+	var bridgeEvents chan launcherevents.Event
+	if events != nil {
+		bridgeEvents = make(chan launcherevents.Event, 32)
+		seq := uint64(0)
+		sessionID := ""
+		if s.task != nil {
+			sessionID = s.task.Session.ID
+		}
+		emitPermissionEvent(events, &seq, sessionID, sessionID, s.agentCfg)
+
+		forwardDone := make(chan struct{})
+		go func() {
+			defer close(forwardDone)
+			for evt := range bridgeEvents {
+				evt.Seq++
+				select {
+				case events <- evt:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+		defer func() {
+			close(bridgeEvents)
+			<-forwardDone
+		}()
+	}
+
+	br, err := s.bridge.Run(ctx, bridgeEvents)
 	if br == nil {
 		return nil, err
 	}

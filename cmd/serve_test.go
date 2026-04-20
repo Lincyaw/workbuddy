@@ -1585,7 +1585,7 @@ func TestExecuteTask_PersistsPartialResultOnRunError(t *testing.T) {
 	}
 
 	gh := &mockCommentWriter{}
-	mockRT := &mockRuntime{name: config.RuntimeCodexExec, resultFn: func(ctx context.Context, agent *config.AgentConfig, task *launcher.TaskContext) (*launcher.Result, error) {
+	mockRT := &mockRuntime{name: config.RuntimeCodex, resultFn: func(ctx context.Context, agent *config.AgentConfig, task *launcher.TaskContext) (*launcher.Result, error) {
 		return &launcher.Result{
 			ExitCode:    -1,
 			LastMessage: "partial failure report",
@@ -1595,7 +1595,7 @@ func TestExecuteTask_PersistsPartialResultOnRunError(t *testing.T) {
 		}, fmt.Errorf("runtime failed")
 	}}
 	lnch := launcher.NewLauncher()
-	lnch.Register(mockRT, config.RuntimeCodex, config.RuntimeCodexExec)
+	lnch.Register(mockRT, config.RuntimeCodex, config.RuntimeCodex)
 
 	sm := statemachine.NewStateMachine(nil, st, nil, eventlog.NewEventLogger(st), nil)
 	deps := &workerDeps{
@@ -1613,7 +1613,7 @@ func TestExecuteTask_PersistsPartialResultOnRunError(t *testing.T) {
 		Repo:      "owner/repo",
 		IssueNum:  8,
 		AgentName: "dev-agent",
-		Agent:     &config.AgentConfig{Name: "dev-agent", Runtime: config.RuntimeCodexExec, Prompt: "test prompt"},
+		Agent:     &config.AgentConfig{Name: "dev-agent", Runtime: config.RuntimeCodex, Prompt: "test prompt"},
 		Workflow:  "dev-workflow",
 		State:     "developing",
 		Context:   &launcher.TaskContext{Repo: "owner/repo", RepoRoot: repoRoot, WorkDir: workdir, Session: launcher.SessionContext{ID: sessionID}},
