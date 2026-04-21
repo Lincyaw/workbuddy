@@ -152,4 +152,3 @@ func TestMarkInfraFailure(t *testing.T) {
 		t.Fatal("expected infra_failure=true")
 	}
 }
-

@@ -174,10 +174,14 @@ func mapErrorNotification(params, raw json.RawMessage) agent.Event {
 }
 
 func newEvent(kind, turnID string, payload any, raw json.RawMessage) agent.Event {
+	body, err := launcherevents.EncodePayload(payload)
+	if err != nil {
+		body = json.RawMessage(`{"message":"event payload encode failed"}`)
+	}
 	return agent.Event{
 		Kind:   kind,
 		TurnID: turnID,
-		Body:   launcherevents.MustPayload(payload),
+		Body:   body,
 		Raw:    cloneRaw(raw),
 	}
 }

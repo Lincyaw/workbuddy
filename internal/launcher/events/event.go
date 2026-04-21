@@ -17,8 +17,16 @@ type Event struct {
 	Raw       json.RawMessage `json:"raw,omitempty"`
 }
 
-func MustPayload(v any) json.RawMessage {
+func EncodePayload(v any) (json.RawMessage, error) {
 	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func MustPayload(v any) json.RawMessage {
+	data, err := EncodePayload(v)
 	if err != nil {
 		panic(err)
 	}

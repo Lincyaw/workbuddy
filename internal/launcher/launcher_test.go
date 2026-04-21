@@ -11,6 +11,7 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/config"
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
+	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 )
 
 func newTestTask(t *testing.T) *TaskContext {
@@ -236,11 +237,11 @@ func TestStart_GitHubActionsRunnerUsesRemoteSession(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	defer func() { _ = session.Close() }()
-	remote, ok := session.(*ghaSession)
+	remote, ok := session.(*runtimepkg.GHASession)
 	if !ok {
-		t.Fatalf("session type = %T, want *ghaSession", session)
+		t.Fatalf("session type = %T, want *runtime.GHASession", session)
 	}
-	if remote.client == nil {
+	if remote.Client == nil {
 		t.Fatal("expected GitHub Actions client")
 	}
 }

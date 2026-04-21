@@ -109,9 +109,7 @@ func TestExecuteTask_InfraFailureFromLauncherStartError(t *testing.T) {
 	// Make Start fail by installing a dedicated mock; the existing
 	// mockRuntime.Start always succeeds, so we wrap it.
 	failStartRT := &startFailRuntime{name: config.RuntimeClaudeCode, wrapped: rt}
-	deps, st, comments := newWorkerTestDepsWithComments(t, rt)
-	// Re-register so the launcher uses the failStartRT for claude-code.
-	deps.launcher.Register(failStartRT, config.RuntimeClaudeCode, config.RuntimeClaudeShot)
+	deps, st, comments := newWorkerTestDepsWithComments(t, failStartRT)
 
 	task := newWorkerTestTask(t, st, "owner/repo", 132, "task-start-fail")
 	executeTask(context.Background(), task, deps)
