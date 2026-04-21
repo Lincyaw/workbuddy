@@ -296,10 +296,6 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	}
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
-	var (
-		taskErrMu  sync.Mutex
-		taskErrVal error
-	)
 
 	for {
 		if ctx.Err() != nil {
@@ -362,11 +358,11 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 				WorkspaceManager:  wsMgr,
 			})
 			if err := distributed.ExecuteTask(ctx, t); err != nil {
-				taskErrMu.Lock()
-				if taskErrVal == nil {
-					taskErrVal = err
-				}
-				taskErrMu.Unlock()
+				// Per-task failures (including non-retryable coordinator
+				// SubmitResult failures) are logged and surfaced via the
+				// reporter/release paths, but must not fail the whole
+				// worker process — the poll loop continues with the next
+				// task.
 				log.Printf("[worker] task %s error: %v", t.TaskID, err)
 			}
 		}(task)
@@ -374,10 +370,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 
 	// Wait for all in-flight tasks to finish before exiting.
 	wg.Wait()
-
-	taskErrMu.Lock()
-	defer taskErrMu.Unlock()
-	return taskErrVal
+	return nil
 }
 
 func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *workerclient.Client, cfg *config.FullConfig, executor *workerexec.Executor, recorder *workersession.Recorder, rep *reporter.Reporter, reader workerIssueReader, workDir, workerID, runtimeAlias string, heartbeatInterval, shutdownTimeout time.Duration, wsMgr workspaceManager) error {

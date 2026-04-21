@@ -24,7 +24,29 @@ import (
 const (
 	defaultRemoteTaskAPITimeout = 5 * time.Second
 	postSessionDrainTimeout     = 5 * time.Second
+
+	// submitResultMaxAttempts bounds how many times a worker retries
+	// SubmitResult against the coordinator before giving up and falling
+	// back to an explicit ReleaseTask + GitHub breadcrumb. 3 attempts
+	// with exponential backoff (250ms, 500ms, 1000ms) caps the total
+	// wait below the usual lease/heartbeat window.
+	submitResultMaxAttempts  = 3
+	submitResultInitialDelay = 250 * time.Millisecond
+	submitResultMaxDelay     = 2 * time.Second
 )
+
+// submitResultSleep is overridable from tests to avoid real backoff waits.
+var submitResultSleep = func(ctx context.Context, d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-ctx.Done():
+	}
+}
 
 type DistributedIssueReader interface {
 	IssueLabelReader
@@ -230,24 +252,86 @@ func (w *DistributedWorker) ExecuteTask(ctx context.Context, task *workerclient.
 		status = store.TaskStatusFailed
 	}
 
-	submitCtx, cancel := context.WithTimeout(context.Background(), boundedRemoteTaskAPITimeout(w.deps.ShutdownTimeout))
-	defer cancel()
-	if err := w.deps.Client.SubmitResult(submitCtx, task.TaskID, workerclient.ResultRequest{
+	resultReq := workerclient.ResultRequest{
 		WorkerID:      w.deps.WorkerID,
 		Status:        status,
 		CurrentLabels: currentLabels,
 		InfraFailure:  execution.InfraFailure(),
 		InfraReason:   execution.InfraReason(),
-	}); err != nil {
-		log.Printf("[worker] submit result failed for task %s: %v", task.TaskID, err)
-		return nil
 	}
+	submitErr := w.submitResultWithRetry(ctx, task.TaskID, resultReq)
+	if submitErr != nil {
+		// Result delivery failed even after bounded retry. Treat as a
+		// first-class failure: (1) still post a GitHub breadcrumb so
+		// operators see an "agent completed but coordinator sync
+		// failed" trail, (2) explicitly release the lease with a
+		// useful reason so the coordinator knows it's free instead of
+		// waiting for lease expiry, (3) propagate a non-nil error so
+		// shutdown/cancel paths upstream can react.
+		log.Printf("[worker] submit result permanently failed for task %s after %d attempts: %v", task.TaskID, submitResultMaxAttempts, submitErr)
+
+		reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedRemoteTaskAPITimeout(w.deps.ShutdownTimeout))
+		if err := w.deps.Reporter.ReportVerified(reportCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, w.deps.WorkerID, 0, workflowMaxRetries(w.deps.Config, task.Workflow), fmt.Sprintf("coordinator sync failed: %v", submitErr), reportWorkDir, verifyRes); err != nil {
+			log.Printf("[worker] report after submit-failure failed: %v", err)
+		}
+		reportCancel()
+
+		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), boundedRemoteTaskAPITimeout(w.deps.ShutdownTimeout))
+		reason := fmt.Sprintf("submit result failed: %v", submitErr)
+		if err := w.deps.Client.ReleaseTask(releaseCtx, task.TaskID, workerclient.ReleaseRequest{WorkerID: w.deps.WorkerID, Reason: reason}); err != nil {
+			log.Printf("[worker] release after submit-failure failed for task %s: %v", task.TaskID, err)
+		} else {
+			released.Store(true)
+		}
+		releaseCancel()
+
+		return fmt.Errorf("submit result for task %s: %w", task.TaskID, submitErr)
+	}
+
 	reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedRemoteTaskAPITimeout(w.deps.ShutdownTimeout))
 	defer reportCancel()
 	if err := w.deps.Reporter.ReportVerified(reportCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, w.deps.WorkerID, 0, workflowMaxRetries(w.deps.Config, task.Workflow), "", reportWorkDir, verifyRes); err != nil {
 		log.Printf("[worker] report failed: %v", err)
 	}
 	return nil
+}
+
+// submitResultWithRetry attempts SubmitResult up to submitResultMaxAttempts
+// times with exponential backoff, stopping early on unrecoverable errors
+// (unauthorized, ownership-lost, context cancellation). Returns the final
+// error or nil on success.
+func (w *DistributedWorker) submitResultWithRetry(ctx context.Context, taskID string, req workerclient.ResultRequest) error {
+	delay := submitResultInitialDelay
+	var lastErr error
+	for attempt := 1; attempt <= submitResultMaxAttempts; attempt++ {
+		submitCtx, cancel := context.WithTimeout(context.Background(), boundedRemoteTaskAPITimeout(w.deps.ShutdownTimeout))
+		err := w.deps.Client.SubmitResult(submitCtx, taskID, req)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		// Non-retryable conditions: parent context already dead, auth
+		// rejected (creds wrong, not a transient blip), or coordinator
+		// says we no longer own the task.
+		if ctx.Err() != nil || errorsIsUnauthorized(err) || IsTaskOwnershipLost(err) {
+			log.Printf("[worker] submit result for task %s non-retryable on attempt %d/%d: %v", taskID, attempt, submitResultMaxAttempts, err)
+			return err
+		}
+		if attempt == submitResultMaxAttempts {
+			break
+		}
+		log.Printf("[worker] submit result for task %s failed on attempt %d/%d: %v (retrying in %s)", taskID, attempt, submitResultMaxAttempts, err, delay)
+		submitResultSleep(ctx, delay)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		delay *= 2
+		if delay > submitResultMaxDelay {
+			delay = submitResultMaxDelay
+		}
+	}
+	return lastErr
 }
 
 func BuildRemoteTaskContext(task *workerclient.Task, reader DistributedIssueReader, workDir string) *runtimepkg.TaskContext {
