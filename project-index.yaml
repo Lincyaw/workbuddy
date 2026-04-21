@@ -602,8 +602,10 @@ requirements:
       - "AC-026-7: 单元测试：mock HTTP server 验证各操作"
     code:
       - internal/workerclient/client.go
+      - internal/worker/distributed.go
     tests:
       - internal/workerclient/client_test.go
+      - internal/worker/distributed_test.go
     deps: [REQ-025]
 
   # ============================================================
