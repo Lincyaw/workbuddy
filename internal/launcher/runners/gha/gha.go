@@ -20,6 +20,67 @@ type CommandRunner interface {
 	Run(ctx context.Context, stdin []byte, args ...string) ([]byte, error)
 }
 
+// FailureStage classifies where a GitHub Actions run failed. Callers use it to
+// distinguish runtime/infrastructure problems (dispatch, poll, artifact IO/parse)
+// from the agent itself reporting a non-zero exit inside a workflow that ran
+// to completion.
+type FailureStage string
+
+const (
+	// StageDispatch covers errors dispatching the workflow (HTTP, auth, missing
+	// workflow, or a dispatch response that cannot be parsed).
+	StageDispatch FailureStage = "dispatch"
+	// StagePoll covers errors polling the workflow run status (context cancel,
+	// HTTP, parse, or unexpected empty metadata).
+	StagePoll FailureStage = "poll"
+	// StageLogs covers errors downloading or unpacking the run logs artifact.
+	StageLogs FailureStage = "logs"
+	// StageArtifacts covers errors listing/downloading/unzipping artifacts or
+	// missing required artifacts (e.g. events-v1.jsonl).
+	StageArtifacts FailureStage = "artifacts"
+)
+
+// StageError annotates a gha error with the failure stage so callers can map it
+// to the runtime infra-failure taxonomy without string matching.
+type StageError struct {
+	Stage FailureStage
+	Err   error
+}
+
+func (e *StageError) Error() string {
+	if e == nil || e.Err == nil {
+		return ""
+	}
+	return e.Err.Error()
+}
+
+func (e *StageError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func stageErr(stage FailureStage, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &StageError{Stage: stage, Err: err}
+}
+
+// StageOf returns the failure stage attached to err, or the empty string if
+// none is present.
+func StageOf(err error) FailureStage {
+	if err == nil {
+		return ""
+	}
+	var se *StageError
+	if errors.As(err, &se) {
+		return se.Stage
+	}
+	return ""
+}
+
 type GHCLI struct{}
 
 func (GHCLI) Run(ctx context.Context, stdin []byte, args ...string) ([]byte, error) {
@@ -120,20 +181,20 @@ func (c *Client) RunWorkflow(ctx context.Context, cfg Config) (*Outcome, error) 
 	dispatchedAt := c.now().UTC().Add(-2 * time.Second)
 	dispatchRun, err := c.dispatch(ctx, cfg)
 	if err != nil {
-		return nil, err
+		return nil, stageErr(StageDispatch, err)
 	}
 	run, err := c.waitForRun(ctx, cfg, dispatchedAt, dispatchRun)
 	if err != nil {
-		return nil, err
+		return nil, stageErr(StagePoll, err)
 	}
 
 	logPath, logs, err := c.downloadLogs(ctx, cfg, run.ID)
 	if err != nil {
-		return nil, err
+		return nil, stageErr(StageLogs, err)
 	}
 	files, resultPath, sessionPath, err := c.downloadArtifacts(ctx, cfg, run.ID)
 	if err != nil {
-		return nil, err
+		return nil, stageErr(StageArtifacts, err)
 	}
 
 	return &Outcome{

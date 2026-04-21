@@ -1882,6 +1882,8 @@ requirements:
       - internal/launcher/process.go
       - internal/launcher/claude_stream.go
       - internal/launcher/agent_bridge.go
+      - internal/runtime/gha_runner.go
+      - internal/launcher/runners/gha/gha.go
       - internal/reporter/format.go
       - internal/reporter/reporter.go
       - internal/eventlog/eventlog.go
@@ -1893,6 +1895,7 @@ requirements:
       - cmd/worker.go
     tests:
       - internal/launcher/infra_failure_test.go
+      - internal/runtime/gha_runner_test.go
       - internal/reporter/reporter_test.go
       - cmd/serve_infra_failure_test.go
       - cmd/coordinator_infra_failure_test.go

@@ -80,6 +80,11 @@ func (s *GHASession) Run(ctx context.Context, events chan<- launcherevents.Event
 		if code == "timeout" {
 			result.Meta["timeout"] = "true"
 		}
+		// Classify every pre-completion failure (dispatch / poll / logs / artifact
+		// download) as an infrastructure failure: the agent never produced a
+		// verdict, so downstream retry/escalation must not treat this as an
+		// agent-reported failure.
+		MarkInfraFailure(result, ghaInfraReason(runErr, code))
 		EmitEvent(events, &seq, s.Task.Session.ID, s.Task.Session.ID, launcherevents.KindError, launcherevents.ErrorPayload{Code: code, Message: runErr.Error(), Recoverable: false}, nil)
 		EmitEvent(events, &seq, s.Task.Session.ID, s.Task.Session.ID, launcherevents.KindTurnCompleted, launcherevents.TurnCompletedPayload{TurnID: s.Task.Session.ID, Status: "error"}, nil)
 		return result, runErr
@@ -87,9 +92,28 @@ func (s *GHASession) Run(ctx context.Context, events chan<- launcherevents.Event
 
 	result, err := s.resultFromOutcome(outcome, duration)
 	if err != nil {
+		// Artifact parse failures mean the runner succeeded but we cannot read
+		// its verdict; treat as infra failure so retries do not count it as a
+		// legitimate agent failure.
+		parseResult := &Result{
+			ExitCode: -1,
+			Duration: duration,
+			Stderr:   err.Error(),
+			Meta: map[string]string{
+				"runner": config.RunnerGitHubActions,
+			},
+		}
+		if outcome != nil {
+			parseResult.Stdout = outcome.Logs
+			parseResult.SessionPath = outcome.CanonicalSessionPath
+			if parseResult.SessionPath == "" {
+				parseResult.SessionPath = outcome.LogPath
+			}
+		}
+		MarkInfraFailure(parseResult, "gha: artifact parse")
 		EmitEvent(events, &seq, s.Task.Session.ID, s.Task.Session.ID, launcherevents.KindError, launcherevents.ErrorPayload{Code: "artifact_parse", Message: err.Error(), Recoverable: false}, nil)
 		EmitEvent(events, &seq, s.Task.Session.ID, s.Task.Session.ID, launcherevents.KindTurnCompleted, launcherevents.TurnCompletedPayload{TurnID: s.Task.Session.ID, Status: "error"}, nil)
-		return nil, err
+		return parseResult, err
 	}
 	if err := ValidateOutputContract(s.Agent, result); err != nil {
 		EmitOutputContractFailure(events, &seq, s.Task.Session.ID, s.Task.Session.ID, err, EmitEvent)
@@ -228,6 +252,30 @@ func (s *GHASession) resolveRef(ctx context.Context) (string, error) {
 func (s *GHASession) SetApprover(Approver) error { return ErrNotSupported }
 
 func (s *GHASession) Close() error { return nil }
+
+// ghaInfraReason maps a RunWorkflow error to the infra-failure reason string.
+// It uses the typed FailureStage attached by the gha client; timeout/cancelled
+// contexts fall back to a generic reason so the caller's `code` still reflects
+// the context state.
+func ghaInfraReason(err error, code string) string {
+	switch code {
+	case "timeout":
+		return "gha: workflow timed out"
+	case "cancelled":
+		return "gha: run cancelled"
+	}
+	switch gha.StageOf(err) {
+	case gha.StageDispatch:
+		return "gha: workflow dispatch failed"
+	case gha.StagePoll:
+		return "gha: workflow poll failed"
+	case gha.StageLogs:
+		return "gha: logs download failed"
+	case gha.StageArtifacts:
+		return "gha: artifact download failed"
+	}
+	return "gha: runtime failure"
+}
 
 func SessionArtifactDir(task *TaskContext) string {
 	baseDir := task.RepoRoot
