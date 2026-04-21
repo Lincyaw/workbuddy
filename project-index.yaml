@@ -108,7 +108,8 @@ documentation:
       related_code:
         - cmd/run.go
         - cmd/serve.go
-        - internal/runtime/runtime.go
+        - internal/runtime/types.go
+        - internal/runtime/session_manager.go
         - internal/launcher/agent_bridge.go
         - internal/launcher/types.go
         - internal/worker/executor.go
@@ -131,7 +132,10 @@ documentation:
         - cmd/serve.go
         - cmd/worker.go
         - internal/ghadapter/ghcli.go
-        - internal/runtime/runtime.go
+        - internal/runtime/types.go
+        - internal/runtime/registry.go
+        - internal/runtime/session_manager.go
+        - internal/runtime/infra_failure.go
         - internal/worker/distributed.go
         - internal/worker/embedded.go
         - internal/worker/executor.go
@@ -151,7 +155,10 @@ documentation:
       status: maintained
       related_code:
         - cmd/serve.go
-        - internal/runtime/runtime.go
+        - internal/runtime/types.go
+        - internal/runtime/registry.go
+        - internal/runtime/session_manager.go
+        - internal/runtime/infra_failure.go
         - internal/launcher/types.go
         - internal/launcher/launcher.go
         - internal/launcher/events/
@@ -453,7 +460,10 @@ requirements:
       - internal/agent/codex/backend.go
       - internal/agent/codex/events.go
       - internal/agent/codex/jsonrpc.go
-      - internal/runtime/runtime.go
+      - internal/runtime/types.go
+      - internal/runtime/registry.go
+      - internal/runtime/session_manager.go
+      - internal/runtime/infra_failure.go
       - internal/launcher/launcher.go
       - internal/launcher/agent_bridge.go
       - internal/launcher/template.go

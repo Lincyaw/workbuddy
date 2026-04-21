@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
+	"github.com/Lincyaw/workbuddy/internal/launcher"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
 	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
@@ -223,7 +224,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	}
 
 	if lnch == nil {
-		lnch = runtimepkg.NewRegistry()
+		lnch = launcher.NewLauncher()
 	}
 	if reader == nil {
 		reader = &GHCLIReader{}

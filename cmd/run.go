@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
+	"github.com/Lincyaw/workbuddy/internal/launcher"
 	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -50,7 +51,7 @@ func runRuntimeCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runRuntimeWithOpts(cmd.Context(), opts, runtimepkg.NewRegistry(), os.Stdout, os.Stderr)
+	return runRuntimeWithOpts(cmd.Context(), opts, launcher.NewLauncher(), os.Stdout, os.Stderr)
 }
 
 func parseRunFlags(cmd *cobra.Command) (*runOpts, error) {

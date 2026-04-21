@@ -23,6 +23,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/dependency"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/ghadapter"
+	"github.com/Lincyaw/workbuddy/internal/launcher"
 	"github.com/Lincyaw/workbuddy/internal/metrics"
 	"github.com/Lincyaw/workbuddy/internal/notifier"
 	"github.com/Lincyaw/workbuddy/internal/operator"
@@ -339,7 +340,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	// Launcher
 	lnch := launcherOverride
 	if lnch == nil {
-		lnch = runtimepkg.NewRegistry()
+		lnch = launcher.NewLauncher()
 	}
 	lnch.SetSessionManager(runtimepkg.NewSessionManager(sessionsDir, st))
 
