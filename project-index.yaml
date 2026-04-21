@@ -173,7 +173,6 @@ documentation:
         - cmd/diagnose.go
         - internal/coordinator/http/handler.go
         - internal/workerclient/client.go
-        - internal/coordinator/server.go
       notes: Distributed coordinator/worker topology fully implemented with HTTP long-polling, shared-secret auth, and complete CLI surface (REQ-017~022, REQ-025~029, REQ-032~037).
 
     - path: docs/implemented/runtime-migration-plan.md
@@ -564,10 +563,9 @@ requirements:
       - "AC-026-6: 实现与 v0.1.0 channel-based client 相同的接口"
       - "AC-026-7: 单元测试：mock HTTP server 验证各操作"
     code:
-      - internal/worker/client/client.go
-      - internal/worker/client/run.go
+      - internal/workerclient/client.go
     tests:
-      - internal/worker/client/client_test.go
+      - internal/workerclient/client_test.go
     deps: [REQ-025]
 
   # ============================================================
@@ -1044,14 +1042,14 @@ requirements:
     code:
       - cmd/coordinator.go
       - cmd/worker.go
-      - internal/coordinator/server.go
+      - internal/coordinator/http/handler.go
       - internal/store/store.go
       - internal/store/worker_tokens.go
       - internal/workerclient/client.go
     tests:
       - cmd/coordinator_test.go
       - cmd/worker_test.go
-      - internal/coordinator/server_test.go
+      - internal/coordinator/http/handler_test.go
       - internal/store/store_test.go
       - internal/workerclient/client_test.go
     deps: [REQ-025]
@@ -1373,13 +1371,13 @@ requirements:
       - internal/metrics/handler.go
       - cmd/serve.go
       - cmd/coordinator.go
-      - internal/coordinator/server.go
+      - internal/coordinator/http/handler.go
       - internal/eventlog/eventlog.go
       - internal/store/store.go
     tests:
       - internal/metrics/handler_test.go
       - cmd/serve_test.go
-      - internal/coordinator/server_test.go
+      - internal/coordinator/http/handler_test.go
     related_docs:
       - docs/implemented/pipeline-observability-and-diagnosis.md
     deps: [REQ-009, REQ-025, REQ-024]
