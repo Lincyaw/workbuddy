@@ -57,11 +57,11 @@ func TestClaudeStreamEventMapperMapsStructuredEvents(t *testing.T) {
 			t.Fatalf("event[%d] kind = %s, want %s", i, got[i].Kind, want)
 		}
 	}
-	if mapper.sessionRef.ID != "claude-session-1" {
-		t.Fatalf("session ref = %+v", mapper.sessionRef)
+	if mapper.SessionRefValue.ID != "claude-session-1" {
+		t.Fatalf("session ref = %+v", mapper.SessionRefValue)
 	}
-	if mapper.lastMessage != "Running checksDone" {
-		t.Fatalf("last message = %q", mapper.lastMessage)
+	if mapper.LastMessageValue != "Running checksDone" {
+		t.Fatalf("last message = %q", mapper.LastMessageValue)
 	}
 
 	var execPayload launcherevents.CommandExecPayload

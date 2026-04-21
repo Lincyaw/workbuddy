@@ -11,12 +11,12 @@
 - 已落地：`internal/worker/session/stream.go` + `internal/worker/session/recorder.go` 已成为 worker 路径里的统一 session event stream / audit-event write boundary。
 - 已落地：worktree setup / cleanup 已收口到 `internal/worker/executor.go`；`internal/router/router.go` 不再在 dispatch 时 eager-create worktree，embedded / distributed 都通过 shared executor 进入同一条工作区隔离主链。
 - 已落地：session / event storage 退化会显式写入 session `health.json`，并同步暴露到 `runtime.Result.Meta`，不再只停留在 stderr / log。
-- 已落地：`internal/runtime/` 现在真实拥有 canonical `Runtime` / `Session` / `Result` / `TaskContext`、generic registry、session manager 与 infra-failure helper；`internal/launcher` 已缩到 builtins + compatibility shim。
+- 已落地：`internal/runtime/` 现在真实拥有 canonical `Runtime` / `Session` / `Result` / `TaskContext`、generic registry、session manager、infra-failure helper，以及 Claude/Codex/GHA 的 concrete runtime/session 实现；`internal/launcher` 已缩到 builtins + compatibility shim。
 - 已落地：`cmd/serve.go` 不再内联 `runEmbeddedWorker(...)` / `executeTask(...)` / `streamSessionEvents(...)`。
 - 已落地：`internal/agent/bridge.go` 已删除，agent-session → launcher event/result translation 直接收口到 `internal/launcher/agent_bridge.go`。
 - 已落地：`internal/worker/executor.go` 现在有显式 `Start()` / `Stop()` lifecycle，且 worker package 已补 direct executor 单元测试。
 - 已落地：runtime event hot path 已移除生产调用里的 `MustPayload(...)` panic 依赖，改为显式编码分支。
-- 仍未完成：Claude/Codex/GHA 的具体 runtime 实现、event/permission helper 仍主要停留在 `internal/launcher/`；当前是“canonical runtime ownership 已迁移，具体实现层还未完全挪走”的状态。
+- 当前剩余项仅是可选的 shim 删除 / callsite rename cleanup；`#146` 主体要求的 shared worker core、runtime unification、GitHub adapter 收口与 session recorder 收口都已落地。
 
 ## 背景
 

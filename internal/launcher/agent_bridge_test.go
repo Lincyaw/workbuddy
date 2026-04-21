@@ -63,7 +63,7 @@ func TestNewBackendFromConfigUnknown(t *testing.T) {
 }
 
 func TestAgentBridgeRuntimeName(t *testing.T) {
-	r := &agentBridgeRuntime{runtimeName: "test-runtime"}
+	r := newAgentBridgeRuntime("test-runtime", nil)
 	if r.Name() != "test-runtime" {
 		t.Fatalf("Name() = %q, want %q", r.Name(), "test-runtime")
 	}

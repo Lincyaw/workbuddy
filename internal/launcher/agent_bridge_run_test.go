@@ -43,10 +43,10 @@ func TestAgentBridgeSessionRunTranslatesEventsAndWritesRaw(t *testing.T) {
 	}
 	handle := &fakeBridgeHandle{}
 	bridge := &agentBridgeSession{
-		session:  sess,
-		handle:   handle,
-		agentCfg: &config.AgentConfig{Name: "dev-agent"},
-		task:     &TaskContext{Session: SessionContext{ID: "wb-session-1"}},
+		Session:  sess,
+		Handle:   handle,
+		AgentCfg: &config.AgentConfig{Name: "dev-agent"},
+		Task:     &TaskContext{Session: SessionContext{ID: "wb-session-1"}},
 	}
 
 	sess.events <- agent.Event{Kind: "agent.message", TurnID: "turn-1", Body: json.RawMessage(`{"text":"hi"}`), Raw: json.RawMessage(`{"raw":"hi"}`)}

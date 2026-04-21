@@ -7,13 +7,14 @@ import (
 	"testing"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
+	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 )
 
 func TestProcessSessionBuildCommand_UsesPromptForClaude(t *testing.T) {
 	task := newTestTask(t)
-	sess := &processSession{
-		runtimeName: config.RuntimeClaudeCode,
-		agent: &config.AgentConfig{
+	sess := &runtimepkg.ProcessSession{
+		RuntimeName: config.RuntimeClaudeCode,
+		Agent: &config.AgentConfig{
 			Runtime: config.RuntimeClaudeCode,
 			Prompt:  "review issue {{.Issue.Number}}",
 			Policy: config.PolicyConfig{
@@ -21,10 +22,10 @@ func TestProcessSessionBuildCommand_UsesPromptForClaude(t *testing.T) {
 				Approval: "never",
 			},
 		},
-		task: task,
+		Task: task,
 	}
 
-	cmd, err := sess.buildCommand(context.Background())
+	cmd, err := sess.BuildCommand(context.Background())
 	if err != nil {
 		t.Fatalf("buildCommand: %v", err)
 	}
