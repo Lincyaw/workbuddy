@@ -178,13 +178,26 @@ func (p *Poller) Run(ctx context.Context) error {
 	}
 }
 
-// poll performs a single poll cycle: list issues + PRs, diff against cache, emit events.
-// Always emits EventPollCycleDone before returning so consumers can use it as a
-// per-cycle boundary signal (e.g. to reset dedup state).
+// poll performs a single poll cycle as a two-phase snapshot:
+//
+//  1. Collect phase — list issues + PRs and diff them against the cache
+//     purely in memory, producing a list of pending events and a list of
+//     pending cache mutations. No cache writes happen here.
+//  2. Commit phase — once every GitHub read has succeeded, apply all cache
+//     mutations and emit all pending events. Only at the end do we emit
+//     EventPollCycleDone.
+//
+// If any GitHub read fails partway through phase 1 (e.g. `gh pr list`
+// returns an error after `gh issue list` succeeded), we abort without
+// touching the cache and without emitting EventPollCycleDone, so the next
+// cycle will re-diff the same issues and no changes are silently lost. See
+// issue #145 finding #3.
 func (p *Poller) poll(ctx context.Context) {
-	defer p.emit(ctx, ChangeEvent{Type: EventPollCycleDone, Repo: p.repo})
+	// --- Phase 1: collect everything in memory ---
 	var pending []ChangeEvent
-	// --- Issues ---
+	var cacheOps []func() error
+
+	// Issues.
 	issues, err := p.gh.ListIssues(p.repo)
 	if err != nil {
 		if ghutil.IsRateLimit(err) {
@@ -200,10 +213,19 @@ func (p *Poller) poll(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		pending = append(pending, p.diffIssue(iss)...)
+		evts, op, ok := p.planDiffIssue(iss)
+		if !ok {
+			// Cache query failed; treat as a phase-1 failure and abort
+			// before touching anything so the next cycle can retry.
+			return
+		}
+		pending = append(pending, evts...)
+		if op != nil {
+			cacheOps = append(cacheOps, op)
+		}
 	}
 
-	// --- PRs ---
+	// PRs.
 	prs, err := p.gh.ListPRs(p.repo)
 	if err != nil {
 		if ghutil.IsRateLimit(err) {
@@ -212,22 +234,30 @@ func (p *Poller) poll(ctx context.Context) {
 		} else {
 			log.Printf("[poller] error listing PRs for %s: %v", p.repo, err)
 		}
+		// Phase 1 failed: do NOT commit cache, do NOT emit events, do NOT
+		// emit EventPollCycleDone. The next cycle will re-observe the same
+		// issue changes and re-emit them.
 		return
 	}
-	p.ResetBackoff()
 
 	for _, pr := range prs {
 		if ctx.Err() != nil {
 			return
 		}
-		pending = append(pending, p.diffPR(pr)...)
+		evts, op, ok := p.planDiffPR(pr)
+		if !ok {
+			return
+		}
+		pending = append(pending, evts...)
+		if op != nil {
+			cacheOps = append(cacheOps, op)
+		}
 	}
 
-	// --- Detect closed/deleted issues ---
-	// Compare cached issue numbers against what we saw this poll.
-	// Issues in cache but not in current results have been closed/deleted.
-	// Skip this check if the result set may be truncated (gh --limit 100),
-	// since issues beyond the first page would be falsely classified as closed.
+	// Closed/deleted issue detection.
+	// Compare cached issue numbers against what we saw this poll. Issues in
+	// cache but not in current results have been closed or deleted. Skip
+	// when the result set may be truncated (gh --limit 100).
 	if len(issues) >= ghListLimit {
 		log.Printf("[poller] issue list may be truncated (%d results), skipping close detection", len(issues))
 	} else {
@@ -235,7 +265,6 @@ func (p *Poller) poll(ctx context.Context) {
 		for _, iss := range issues {
 			openIssueNums[iss.Number] = true
 		}
-		// Also include PR numbers so we don't treat them as closed issues.
 		openPRNums := make(map[int]bool, len(prs))
 		for _, pr := range prs {
 			openPRNums[pr.Number] = true
@@ -254,16 +283,32 @@ func (p *Poller) poll(ctx context.Context) {
 			if openIssueNums[num] || openPRNums[num] {
 				continue
 			}
+			closedNum := num
 			pending = append(pending, ChangeEvent{
 				Type:     EventIssueClosed,
 				Repo:     p.repo,
-				IssueNum: num,
+				IssueNum: closedNum,
 				Detail:   "issue no longer in open issues list",
 			})
-			if err := p.store.DeleteIssueCache(p.repo, num); err != nil {
-				log.Printf("[poller] error deleting cache for closed issue %s#%d: %v", p.repo, num, err)
-			}
+			cacheOps = append(cacheOps, func() error {
+				if err := p.store.DeleteIssueCache(p.repo, closedNum); err != nil {
+					log.Printf("[poller] error deleting cache for closed issue %s#%d: %v", p.repo, closedNum, err)
+					return err
+				}
+				return nil
+			})
 		}
+	}
+
+	// All GH reads succeeded. Safe to reset backoff now.
+	p.ResetBackoff()
+
+	// --- Phase 2: commit cache updates, then emit events + cycle-done. ---
+	for _, op := range cacheOps {
+		if ctx.Err() != nil {
+			return
+		}
+		_ = op()
 	}
 	for _, ev := range pending {
 		if ctx.Err() != nil {
@@ -271,17 +316,20 @@ func (p *Poller) poll(ctx context.Context) {
 		}
 		p.emit(ctx, ev)
 	}
+	p.emit(ctx, ChangeEvent{Type: EventPollCycleDone, Repo: p.repo})
 }
 
-// diffIssue compares a live issue against the cache and emits change events.
-func (p *Poller) diffIssue(iss Issue) []ChangeEvent {
+// planDiffIssue computes pending change events and a deferred cache-write op
+// for a live issue without mutating the cache. The ok return is false only
+// when querying the cache itself fails — which we treat as a phase-1 failure
+// so the whole cycle can be retried.
+func (p *Poller) planDiffIssue(iss Issue) (events []ChangeEvent, cacheOp func() error, ok bool) {
 	labelsJSON := labelsToJSON(iss.Labels)
-	var events []ChangeEvent
 
 	cached, err := p.store.QueryIssueCache(p.repo, iss.Number)
 	if err != nil {
 		log.Printf("[poller] error querying cache for %s#%d: %v", p.repo, iss.Number, err)
-		return nil
+		return nil, nil, false
 	}
 
 	if cached == nil {
@@ -294,7 +342,6 @@ func (p *Poller) diffIssue(iss Issue) []ChangeEvent {
 			Author:   iss.Author,
 		})
 	} else {
-		// Compare labels.
 		oldLabels := labelsFromJSON(cached.Labels)
 		added, removed := diffLabels(oldLabels, iss.Labels)
 		for _, l := range added {
@@ -319,32 +366,35 @@ func (p *Poller) diffIssue(iss Issue) []ChangeEvent {
 		}
 	}
 
-	// Update cache.
-	if err := p.store.UpsertIssueCache(store.IssueCache{
-		Repo:     p.repo,
-		IssueNum: iss.Number,
-		Labels:   labelsJSON,
-		Body:     iss.Body,
-		State:    strings.ToLower(iss.State),
-	}); err != nil {
-		log.Printf("[poller] error upserting cache for %s#%d: %v", p.repo, iss.Number, err)
+	issCopy := iss
+	cacheOp = func() error {
+		if err := p.store.UpsertIssueCache(store.IssueCache{
+			Repo:     p.repo,
+			IssueNum: issCopy.Number,
+			Labels:   labelsJSON,
+			Body:     issCopy.Body,
+			State:    strings.ToLower(issCopy.State),
+		}); err != nil {
+			log.Printf("[poller] error upserting cache for %s#%d: %v", p.repo, issCopy.Number, err)
+			return err
+		}
+		return nil
 	}
-	return events
+	return events, cacheOp, true
 }
 
-// diffPR compares a live PR against the cache and emits change events.
-func (p *Poller) diffPR(pr PR) []ChangeEvent {
-	// PRs are cached with negative number to avoid collision with issues.
-	// Actually, PR numbers are distinct from issue numbers on GitHub, but
-	// to be safe we use a "pr:" prefix in the state field.
+// planDiffPR computes pending change events and a deferred cache-write op
+// for a live PR without mutating the cache.
+func (p *Poller) planDiffPR(pr PR) (events []ChangeEvent, cacheOp func() error, ok bool) {
+	// PR numbers are distinct from issue numbers on GitHub, but to be safe
+	// we prefix the cached state with "pr:".
 	stateVal := "pr:" + strings.ToLower(pr.State)
 
 	cached, err := p.store.QueryIssueCache(p.repo, pr.Number)
 	if err != nil {
 		log.Printf("[poller] error querying cache for PR %s#%d: %v", p.repo, pr.Number, err)
-		return nil
+		return nil, nil, false
 	}
-	var events []ChangeEvent
 
 	if cached == nil {
 		events = append(events, ChangeEvent{
@@ -362,17 +412,21 @@ func (p *Poller) diffPR(pr PR) []ChangeEvent {
 		})
 	}
 
-	// Update cache.
-	if err := p.store.UpsertIssueCache(store.IssueCache{
-		Repo:     p.repo,
-		IssueNum: pr.Number,
-		Labels:   "",
-		Body:     "",
-		State:    stateVal,
-	}); err != nil {
-		log.Printf("[poller] error upserting cache for PR %s#%d: %v", p.repo, pr.Number, err)
+	prCopy := pr
+	cacheOp = func() error {
+		if err := p.store.UpsertIssueCache(store.IssueCache{
+			Repo:     p.repo,
+			IssueNum: prCopy.Number,
+			Labels:   "",
+			Body:     "",
+			State:    stateVal,
+		}); err != nil {
+			log.Printf("[poller] error upserting cache for PR %s#%d: %v", p.repo, prCopy.Number, err)
+			return err
+		}
+		return nil
 	}
-	return events
+	return events, cacheOp, true
 }
 
 // emit sends a ChangeEvent on the events channel, respecting context cancellation.

@@ -641,6 +641,122 @@ func TestPollTruncatedIssueListStillEmitsBufferedEvents(t *testing.T) {
 	}
 }
 
+// TestPollPRListFailureDoesNotDropIssueChanges is a regression test for
+// issue #145 finding #3: before the two-phase snapshot fix, the poller
+// would (a) update the issue cache inline while diffing issues, (b) abort
+// on a subsequent `gh pr list` failure, and (c) still emit
+// EventPollCycleDone via defer. The net result was that buffered
+// issue-change events were thrown away while the cache had already been
+// advanced, so the next cycle saw "no change" and the label transition
+// was silently lost.
+//
+// With the fix, a PR-list failure mid-cycle must leave the cache
+// untouched and must not emit EventPollCycleDone, so the next successful
+// cycle re-diffs and re-emits the missed events.
+func TestPollPRListFailureDoesNotDropIssueChanges(t *testing.T) {
+	st := testStore(t)
+
+	// Seed an existing cached issue with label "bug".
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     "owner/repo",
+		IssueNum: 1,
+		Labels:   `["bug"]`,
+		State:    "open",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Cycle 1: issue label has changed ("bug" -> "enhancement"), but the
+	// PR list fails. Nothing should be committed or flushed.
+	gh := &mockGHReader{
+		issues: []Issue{
+			{Number: 1, Title: "x", State: "open", Labels: []string{"enhancement"}, Author: "alice"},
+		},
+		prsErr: fmt.Errorf("gh pr list: network unreachable"),
+	}
+	p := NewPoller(gh, st, "owner/repo", time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	p.poll(ctx)
+
+	// Drain whatever was emitted (expected: nothing at all, including no
+	// EventPollCycleDone, because phase 1 failed).
+	events := collectAll(p.Events(), 200*time.Millisecond)
+	for _, ev := range events {
+		if ev.Type == EventPollCycleDone {
+			t.Fatalf("failed cycle should not emit EventPollCycleDone, got %+v", events)
+		}
+	}
+	if len(events) != 0 {
+		t.Fatalf("failed cycle should emit no change events, got %+v", events)
+	}
+
+	// Cache must NOT have been advanced: the cached labels should still
+	// be the seeded ["bug"], otherwise the next cycle would miss the
+	// transition.
+	cached, err := st.QueryIssueCache("owner/repo", 1)
+	if err != nil {
+		t.Fatalf("QueryIssueCache: %v", err)
+	}
+	if cached == nil {
+		t.Fatal("cache entry disappeared")
+	}
+	if cached.Labels != `["bug"]` {
+		t.Fatalf("cache was mutated during failed cycle: labels=%q (want [\"bug\"])", cached.Labels)
+	}
+
+	// Cycle 2: PR list now succeeds. The label transition we missed in
+	// cycle 1 must re-emerge as label_added/label_removed events.
+	gh.prsErr = nil
+	gh.prs = nil
+	p.poll(ctx)
+
+	events = collectAll(p.Events(), 200*time.Millisecond)
+	var sawAdded, sawRemoved, sawCycleDone bool
+	for _, ev := range events {
+		switch ev.Type {
+		case EventLabelAdded:
+			if ev.IssueNum == 1 && ev.Detail == "enhancement" {
+				sawAdded = true
+			}
+		case EventLabelRemoved:
+			if ev.IssueNum == 1 && ev.Detail == "bug" {
+				sawRemoved = true
+			}
+		case EventPollCycleDone:
+			sawCycleDone = true
+		}
+	}
+	if !sawAdded || !sawRemoved {
+		t.Fatalf("recovered cycle must re-emit missed label transition, got %+v", events)
+	}
+	if !sawCycleDone {
+		t.Fatalf("recovered cycle must emit EventPollCycleDone, got %+v", events)
+	}
+}
+
+// collectAll reads every event currently available on ch until the channel
+// is idle for the given quiescence window. Unlike drain, it does not skip
+// EventPollCycleDone — callers asserting on (or against) its presence need
+// to see it.
+func collectAll(ch <-chan ChangeEvent, quiet time.Duration) []ChangeEvent {
+	var out []ChangeEvent
+	for {
+		timer := time.NewTimer(quiet)
+		select {
+		case ev, ok := <-ch:
+			timer.Stop()
+			if !ok {
+				return out
+			}
+			out = append(out, ev)
+		case <-timer.C:
+			return out
+		}
+	}
+}
+
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
