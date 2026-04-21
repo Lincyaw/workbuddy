@@ -2,7 +2,6 @@ package reporter
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -10,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Lincyaw/workbuddy/internal/ghadapter"
 )
 
 // ClaimType identifies the category of a side-effect claim.
@@ -56,6 +57,7 @@ type ClaimVerifier interface {
 // GHClaimVerifier implements ClaimVerifier using the gh CLI and git.
 type GHClaimVerifier struct {
 	runCommand func(ctx context.Context, name string, args ...string) ([]byte, error)
+	gh         *ghadapter.CLI
 	loginOnce  sync.Once
 	login      string
 	loginErr   error
@@ -65,24 +67,41 @@ const commentTimestampSkew = 2 * time.Minute
 
 // NewGHClaimVerifier creates a GHClaimVerifier that shells out to gh/git.
 func NewGHClaimVerifier() *GHClaimVerifier {
-	return &GHClaimVerifier{
-		runCommand: func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			cmd := exec.CommandContext(ctx, name, args...)
-			return cmd.CombinedOutput()
-		},
-	}
+	v := &GHClaimVerifier{}
+	v.runCommand = v.defaultRunCommand
+	v.gh = ghadapter.NewCLIWithRunner(func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		return v.runCommand(ctx, name, args...)
+	})
+	return v
 }
 
 func (v *GHClaimVerifier) authenticatedLogin(ctx context.Context) (string, error) {
 	v.loginOnce.Do(func() {
-		out, err := v.runCommand(ctx, "gh", "api", "user", "--jq", ".login")
+		out, err := v.ghClient().AuthenticatedLogin(ctx)
 		if err != nil {
-			v.loginErr = fmt.Errorf("gh api user: %w", err)
+			v.loginErr = err
 			return
 		}
-		v.login = strings.TrimSpace(string(out))
+		v.login = strings.TrimSpace(out)
 	})
 	return v.login, v.loginErr
+}
+
+func (v *GHClaimVerifier) defaultRunCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cmd := exec.CommandContext(ctx, name, args...)
+	return cmd.CombinedOutput()
+}
+
+func (v *GHClaimVerifier) ghClient() *ghadapter.CLI {
+	if v != nil && v.gh != nil {
+		return v.gh
+	}
+	return ghadapter.NewCLIWithRunner(func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		return v.runCommand(ctx, name, args...)
+	})
 }
 
 var (
@@ -157,41 +176,27 @@ func (v *GHClaimVerifier) Verify(ctx context.Context, repo string, issueNum int,
 	return &VerificationResult{Partial: partial, Checks: checks}, nil
 }
 
-type ghComment struct {
-	Author struct {
-		Login string `json:"login"`
-	} `json:"author"`
-	CreatedAt time.Time `json:"createdAt"`
-	Body      string    `json:"body"`
-}
-
 func (v *GHClaimVerifier) verifyCommentOnPR(ctx context.Context, repo string, prNum int, input VerificationInput) ClaimCheck {
 	claim := fmt.Sprintf("posted comment on PR #%d", prNum)
 	login, err := v.authenticatedLogin(ctx)
 	if err != nil {
 		return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: err.Error(), OK: false}
 	}
-	out, err := v.runCommand(ctx, "gh", "pr", "view", strconv.Itoa(prNum), "--repo", repo, "--json", "comments")
+	comments, err := v.ghClient().ReadPullRequestComments(ctx, repo, prNum)
 	if err != nil {
-		return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: fmt.Sprintf("gh error: %s", string(out)), OK: false}
+		return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: err.Error(), OK: false}
 	}
-	var payload struct {
-		Comments []ghComment `json:"comments"`
-	}
-	if err := json.Unmarshal(out, &payload); err != nil {
-		return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: fmt.Sprintf("parse error: %v", err), OK: false}
-	}
-	if len(payload.Comments) == 0 {
+	if len(comments) == 0 {
 		return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: "no comments on PR", OK: false}
 	}
-	last := payload.Comments[len(payload.Comments)-1]
-	if login != "" && last.Author.Login != login {
-		return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: fmt.Sprintf("most recent comment author is %s, expected %s", last.Author.Login, login), OK: false}
+	last := comments[len(comments)-1]
+	if login != "" && last.Author != login {
+		return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: fmt.Sprintf("most recent comment author is %s, expected %s", last.Author, login), OK: false}
 	}
 	if !commentWithinRunWindow(last.CreatedAt, input) {
-		return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: fmt.Sprintf("most recent comment by %s is outside this run window (%s)", last.Author.Login, last.CreatedAt.Format(time.RFC3339)), OK: false}
+		return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: fmt.Sprintf("most recent comment by %s is outside this run window (%s)", last.Author, last.CreatedAt.Format(time.RFC3339)), OK: false}
 	}
-	return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: fmt.Sprintf("recent comment by %s at %s", last.Author.Login, last.CreatedAt.Format(time.RFC3339)), OK: true}
+	return ClaimCheck{Type: ClaimCommentPR, Claim: claim, Actual: fmt.Sprintf("recent comment by %s at %s", last.Author, last.CreatedAt.Format(time.RFC3339)), OK: true}
 }
 
 func (v *GHClaimVerifier) verifyCommentOnIssue(ctx context.Context, repo string, issueNum int, input VerificationInput) ClaimCheck {
@@ -200,71 +205,45 @@ func (v *GHClaimVerifier) verifyCommentOnIssue(ctx context.Context, repo string,
 	if err != nil {
 		return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: err.Error(), OK: false}
 	}
-	out, err := v.runCommand(ctx, "gh", "issue", "view", strconv.Itoa(issueNum), "--repo", repo, "--json", "comments")
+	comments, err := v.ghClient().ReadDetailedIssueComments(ctx, repo, issueNum)
 	if err != nil {
-		return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: fmt.Sprintf("gh error: %s", string(out)), OK: false}
+		return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: err.Error(), OK: false}
 	}
-	var payload struct {
-		Comments []ghComment `json:"comments"`
-	}
-	if err := json.Unmarshal(out, &payload); err != nil {
-		return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: fmt.Sprintf("parse error: %v", err), OK: false}
-	}
-	if len(payload.Comments) == 0 {
+	if len(comments) == 0 {
 		return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: "no comments on issue", OK: false}
 	}
-	last := payload.Comments[len(payload.Comments)-1]
-	if login != "" && last.Author.Login != login {
-		return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: fmt.Sprintf("most recent comment author is %s, expected %s", last.Author.Login, login), OK: false}
+	last := comments[len(comments)-1]
+	if login != "" && last.Author != login {
+		return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: fmt.Sprintf("most recent comment author is %s, expected %s", last.Author, login), OK: false}
 	}
 	if !commentWithinRunWindow(last.CreatedAt, input) {
-		return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: fmt.Sprintf("most recent comment by %s is outside this run window (%s)", last.Author.Login, last.CreatedAt.Format(time.RFC3339)), OK: false}
+		return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: fmt.Sprintf("most recent comment by %s is outside this run window (%s)", last.Author, last.CreatedAt.Format(time.RFC3339)), OK: false}
 	}
-	return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: fmt.Sprintf("recent comment by %s at %s", last.Author.Login, last.CreatedAt.Format(time.RFC3339)), OK: true}
+	return ClaimCheck{Type: ClaimCommentIssue, Claim: claim, Actual: fmt.Sprintf("recent comment by %s at %s", last.Author, last.CreatedAt.Format(time.RFC3339)), OK: true}
 }
 
 func (v *GHClaimVerifier) verifyLabelPresent(ctx context.Context, repo string, issueNum int, label string) ClaimCheck {
 	claim := fmt.Sprintf("added %s", label)
-	out, err := v.runCommand(ctx, "gh", "issue", "view", strconv.Itoa(issueNum), "--repo", repo, "--json", "labels")
+	labels, err := v.ghClient().ReadIssueLabels(repo, issueNum)
 	if err != nil {
-		return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("gh error: %s", string(out)), OK: false}
+		return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: err.Error(), OK: false}
 	}
-	var payload struct {
-		Labels []struct {
-			Name string `json:"name"`
-		} `json:"labels"`
-	}
-	if err := json.Unmarshal(out, &payload); err != nil {
-		return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("parse error: %v", err), OK: false}
-	}
-	for _, l := range payload.Labels {
-		if l.Name == label {
+	for _, current := range labels {
+		if current == label {
 			return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("label present: %s", label), OK: true}
 		}
 	}
-	var names []string
-	for _, l := range payload.Labels {
-		names = append(names, l.Name)
-	}
-	return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("label not found in current labels: %s", strings.Join(names, ", ")), OK: false}
+	return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("label not found in current labels: %s", strings.Join(labels, ", ")), OK: false}
 }
 
 func (v *GHClaimVerifier) verifyLabelAbsent(ctx context.Context, repo string, issueNum int, label string) ClaimCheck {
 	claim := fmt.Sprintf("removed %s", label)
-	out, err := v.runCommand(ctx, "gh", "issue", "view", strconv.Itoa(issueNum), "--repo", repo, "--json", "labels")
+	labels, err := v.ghClient().ReadIssueLabels(repo, issueNum)
 	if err != nil {
-		return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("gh error: %s", string(out)), OK: false}
+		return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: err.Error(), OK: false}
 	}
-	var payload struct {
-		Labels []struct {
-			Name string `json:"name"`
-		} `json:"labels"`
-	}
-	if err := json.Unmarshal(out, &payload); err != nil {
-		return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("parse error: %v", err), OK: false}
-	}
-	for _, l := range payload.Labels {
-		if l.Name == label {
+	for _, current := range labels {
+		if current == label {
 			return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("label still present: %s", label), OK: false}
 		}
 	}
@@ -273,24 +252,12 @@ func (v *GHClaimVerifier) verifyLabelAbsent(ctx context.Context, repo string, is
 
 func (v *GHClaimVerifier) verifyLabelsGeneric(ctx context.Context, repo string, issueNum int) ClaimCheck {
 	claim := "updated labels"
-	out, err := v.runCommand(ctx, "gh", "issue", "view", strconv.Itoa(issueNum), "--repo", repo, "--json", "labels")
+	labels, err := v.ghClient().ReadIssueLabels(repo, issueNum)
 	if err != nil {
-		return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("gh error: %s", string(out)), OK: false}
+		return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: err.Error(), OK: false}
 	}
-	var payload struct {
-		Labels []struct {
-			Name string `json:"name"`
-		} `json:"labels"`
-	}
-	if err := json.Unmarshal(out, &payload); err != nil {
-		return ClaimCheck{Type: ClaimLabels, Claim: claim, Actual: fmt.Sprintf("parse error: %v", err), OK: false}
-	}
-	var names []string
-	for _, l := range payload.Labels {
-		names = append(names, l.Name)
-	}
-	actual := fmt.Sprintf("current labels: %s", strings.Join(names, ", "))
-	if len(names) == 0 {
+	actual := fmt.Sprintf("current labels: %s", strings.Join(labels, ", "))
+	if len(labels) == 0 {
 		actual = "current labels: none"
 	}
 	return ClaimCheck{
@@ -303,16 +270,9 @@ func (v *GHClaimVerifier) verifyLabelsGeneric(ctx context.Context, repo string, 
 
 func (v *GHClaimVerifier) verifyPRCreated(ctx context.Context, repo string, prNum int) ClaimCheck {
 	claim := fmt.Sprintf("created PR #%d", prNum)
-	out, err := v.runCommand(ctx, "gh", "pr", "view", strconv.Itoa(prNum), "--repo", repo, "--json", "state,headRefName")
+	pr, err := v.ghClient().ReadPullRequest(ctx, repo, prNum)
 	if err != nil {
-		return ClaimCheck{Type: ClaimPRCreated, Claim: claim, Actual: fmt.Sprintf("gh error: %s", string(out)), OK: false}
-	}
-	var pr struct {
-		State       string `json:"state"`
-		HeadRefName string `json:"headRefName"`
-	}
-	if err := json.Unmarshal(out, &pr); err != nil {
-		return ClaimCheck{Type: ClaimPRCreated, Claim: claim, Actual: fmt.Sprintf("parse error: %v", err), OK: false}
+		return ClaimCheck{Type: ClaimPRCreated, Claim: claim, Actual: err.Error(), OK: false}
 	}
 	if pr.State != "OPEN" && pr.State != "open" {
 		return ClaimCheck{Type: ClaimPRCreated, Claim: claim, Actual: fmt.Sprintf("PR state is %s", pr.State), OK: false}

@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
-	"github.com/Lincyaw/workbuddy/internal/launcher"
+	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
@@ -50,7 +50,7 @@ func runRuntimeCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runRuntimeWithOpts(cmd.Context(), opts, launcher.NewLauncher(), os.Stdout, os.Stderr)
+	return runRuntimeWithOpts(cmd.Context(), opts, runtimepkg.NewRegistry(), os.Stdout, os.Stderr)
 }
 
 func parseRunFlags(cmd *cobra.Command) (*runOpts, error) {
@@ -75,7 +75,7 @@ func parseRunFlags(cmd *cobra.Command) (*runOpts, error) {
 	return &runOpts{runtime: runtimeName, prompt: prompt, promptFile: promptFile, workdir: workdir, sandbox: sandbox, approval: approval, model: model, timeout: timeout}, nil
 }
 
-func runRuntimeWithOpts(ctx context.Context, opts *runOpts, lnch *launcher.Launcher, stdout, stderr io.Writer) error {
+func runRuntimeWithOpts(ctx context.Context, opts *runOpts, lnch *runtimepkg.Registry, stdout, stderr io.Writer) error {
 	workdir, err := filepath.Abs(opts.workdir)
 	if err != nil {
 		return fmt.Errorf("run: resolve workdir: %w", err)
@@ -101,11 +101,11 @@ func runRuntimeWithOpts(ctx context.Context, opts *runOpts, lnch *launcher.Launc
 		return err
 	}
 
-	task := &launcher.TaskContext{
+	task := &runtimepkg.TaskContext{
 		Repo:     filepath.Base(workdir),
 		RepoRoot: workdir,
 		WorkDir:  workdir,
-		Session:  launcher.SessionContext{ID: "session-" + uuid.NewString()},
+		Session:  runtimepkg.SessionContext{ID: "session-" + uuid.NewString()},
 	}
 	result, err := lnch.Launch(ctx, agent, task)
 	if err != nil {

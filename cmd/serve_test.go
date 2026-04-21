@@ -25,6 +25,8 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/router"
 	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
+	workerexec "github.com/Lincyaw/workbuddy/internal/worker"
+	workersession "github.com/Lincyaw/workbuddy/internal/worker/session"
 )
 
 // ---------------------------------------------------------------------------
@@ -393,7 +395,7 @@ func TestServeTrustedAuthorsAllowsAuthorizedIssueCaseInsensitive(t *testing.T) {
 	}
 }
 
-func newWorkerTestDeps(t *testing.T, rt *mockRuntime, readers ...issueLabelReader) (*workerDeps, *store.Store) {
+func newWorkerTestDeps(t *testing.T, rt launcher.Runtime, readers ...issueLabelReader) (*workerDeps, *store.Store) {
 	t.Helper()
 	setupFakeGHCLI(t)
 
@@ -414,8 +416,8 @@ func newWorkerTestDeps(t *testing.T, rt *mockRuntime, readers ...issueLabelReade
 	}
 
 	return &workerDeps{
-		launcher:     lnch,
-		auditor:      audit.NewAuditor(st, filepath.Join(t.TempDir(), "archive")),
+		executor:     workerexec.NewExecutor(lnch, issueReader),
+		recorder:     workersession.NewRecorder(st, filepath.Join(t.TempDir(), "archive")),
 		reporter:     reporter.NewReporter(&mockCommentWriter{}),
 		store:        st,
 		sm:           statemachine.NewStateMachine(nil, st, nil, eventlog.NewEventLogger(st), nil),
@@ -428,7 +430,7 @@ func newWorkerTestDeps(t *testing.T, rt *mockRuntime, readers ...issueLabelReade
 	}, st
 }
 
-func newWorkerTestDepsWithComments(t *testing.T, rt *mockRuntime, readers ...issueLabelReader) (*workerDeps, *store.Store, *mockCommentWriter) {
+func newWorkerTestDepsWithComments(t *testing.T, rt launcher.Runtime, readers ...issueLabelReader) (*workerDeps, *store.Store, *mockCommentWriter) {
 	t.Helper()
 	setupFakeGHCLI(t)
 
@@ -450,8 +452,8 @@ func newWorkerTestDepsWithComments(t *testing.T, rt *mockRuntime, readers ...iss
 	comments := &mockCommentWriter{}
 
 	return &workerDeps{
-		launcher:     lnch,
-		auditor:      audit.NewAuditor(st, filepath.Join(t.TempDir(), "archive")),
+		executor:     workerexec.NewExecutor(lnch, issueReader),
+		recorder:     workersession.NewRecorder(st, filepath.Join(t.TempDir(), "archive")),
 		reporter:     reporter.NewReporter(comments),
 		store:        st,
 		sm:           statemachine.NewStateMachine(nil, st, nil, eventlog.NewEventLogger(st), nil),
@@ -462,6 +464,18 @@ func newWorkerTestDepsWithComments(t *testing.T, rt *mockRuntime, readers ...iss
 		sessionsDir:  sessionsDir,
 		issueReader:  issueReader,
 	}, st, comments
+}
+
+func runEmbeddedWorker(ctx context.Context, taskCh <-chan router.WorkerTask, deps *workerDeps, maxParallelTasks int) {
+	workerexec.NewEmbeddedWorker(deps.embeddedDeps(), maxParallelTasks).Run(ctx, taskCh)
+}
+
+func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) {
+	workerexec.NewEmbeddedWorker(deps.embeddedDeps(), 0).ExecuteTask(ctx, task)
+}
+
+func streamSessionEvents(taskCtx *launcher.TaskContext, eventsCh <-chan launcherevents.Event) (string, func() error) {
+	return workerexec.StreamSessionEvents(taskCtx, eventsCh)
 }
 
 func TestServeDependencyGateBlocksUntilDependencyDone(t *testing.T) {
@@ -1599,8 +1613,8 @@ func TestExecuteTask_PersistsPartialResultOnRunError(t *testing.T) {
 
 	sm := statemachine.NewStateMachine(nil, st, nil, eventlog.NewEventLogger(st), nil)
 	deps := &workerDeps{
-		launcher: lnch,
-		auditor:  audit.NewAuditor(st, filepath.Join(t.TempDir(), "archive")),
+		executor: workerexec.NewExecutor(lnch, nil),
+		recorder: workersession.NewRecorder(st, filepath.Join(t.TempDir(), "archive")),
 		reporter: reporter.NewReporter(gh),
 		store:    st,
 		sm:       sm,
@@ -1629,7 +1643,7 @@ func TestExecuteTask_PersistsPartialResultOnRunError(t *testing.T) {
 		t.Fatalf("task status = %+v", tasks)
 	}
 
-	sessions, err := deps.auditor.Query(audit.Filter{SessionID: sessionID})
+	sessions, err := st.ListAgentSessions(store.SessionFilter{Repo: "owner/repo"})
 	if err != nil {
 		t.Fatal(err)
 	}

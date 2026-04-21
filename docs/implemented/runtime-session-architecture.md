@@ -43,7 +43,8 @@ type Session interface {
 Router -> Runtime.Start -> Session.Run -> Event stream -> Reporter / Audit / Web UI
 ```
 
-在 `cmd/serve.go` 的 worker 路径里，`executeTask(...)` 会：
+在当前共享 worker 路径里（embedded 由 `internal/worker/embedded.go` 驱动，
+distributed 由 `cmd/worker.go` 调用同一个 `internal/worker.Executor`），执行链会：
 
 1. `launcher.Start(...)` 拿到 `Session`
 2. 启动 Event Schema v1 事件采集
@@ -55,7 +56,8 @@ Router -> Runtime.Start -> Session.Run -> Event stream -> Reporter / Audit / Web
 
 相关代码：
 
-- `cmd/serve.go`
+- `internal/worker/embedded.go`
+- `internal/worker/executor.go`
 - `internal/labelcheck/labelcheck.go`
 - `internal/reporter/reporter.go`
 - `internal/audit/audit.go`
@@ -104,7 +106,7 @@ Router -> Runtime.Start -> Session.Run -> Event stream -> Reporter / Audit / Web
 
 相关代码：
 
-- `cmd/serve.go`
+- `internal/worker/embedded.go`
 - `internal/labelcheck/labelcheck.go`
 - `internal/audit/audit.go`
 - `internal/reporter/format.go`

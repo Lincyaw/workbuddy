@@ -2,7 +2,6 @@ package reporter
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,8 +13,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/ghadapter"
 	"github.com/Lincyaw/workbuddy/internal/ghutil"
-	"github.com/Lincyaw/workbuddy/internal/launcher"
+	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 )
 
 // ReactionConfused is the GitHub reaction content used to signal that an
@@ -38,23 +38,21 @@ type GHCommentWriter interface {
 	WriteComment(repo string, issueNum int, body string) error
 }
 
-// GHCLIWriter implements GHCommentWriter using the gh CLI.
-type GHCLIWriter struct{}
+// GHCLIWriter implements GHCommentWriter using the shared gh CLI adapter.
+type GHCLIWriter struct {
+	Client *ghadapter.CLI
+}
+
+func (g *GHCLIWriter) client() *ghadapter.CLI {
+	if g != nil && g.Client != nil {
+		return g.Client
+	}
+	return ghadapter.NewCLI()
+}
 
 // WriteComment posts a comment to the given issue via gh issue comment.
-// The body is passed via stdin using --body-file - to avoid "argument list too long".
 func (g *GHCLIWriter) WriteComment(repo string, issueNum int, body string) error {
-	cmd := exec.Command("gh", "issue", "comment",
-		fmt.Sprintf("%d", issueNum),
-		"--repo", repo,
-		"--body-file", "-",
-	)
-	cmd.Stdin = strings.NewReader(body)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("reporter: gh issue comment: %s: %w", string(output), err)
-	}
-	return nil
+	return g.client().WriteIssueComment(context.Background(), repo, issueNum, body)
 }
 
 // ReactionManager abstracts adding/removing emoji reactions on issues so the
@@ -64,48 +62,38 @@ type ReactionManager interface {
 	SetBlockedReaction(ctx context.Context, repo string, issueNum int, blocked bool) error
 }
 
-// GHCLIReactionManager implements ReactionManager via the gh CLI.
+// GHCLIReactionManager implements ReactionManager via the shared gh CLI adapter.
 type GHCLIReactionManager struct {
-	// botLoginOnce / botLogin caches `gh api user --jq .login` so we only
-	// shell out once per process to identify the bot's own reactions.
+	Client *ghadapter.CLI
+	// botLoginOnce / botLogin caches the authenticated login so we only resolve it once.
 	botLoginOnce sync.Once
 	botLogin     string
 	botLoginErr  error
 }
 
+func (g *GHCLIReactionManager) client() *ghadapter.CLI {
+	if g != nil && g.Client != nil {
+		return g.Client
+	}
+	return ghadapter.NewCLI()
+}
+
 func (g *GHCLIReactionManager) authenticatedLogin(ctx context.Context) (string, error) {
 	g.botLoginOnce.Do(func() {
-		cmd := exec.CommandContext(ctx, "gh", "api", "user", "--jq", ".login")
-		out, err := cmd.Output()
+		login, err := g.client().AuthenticatedLogin(ctx)
 		if err != nil {
-			g.botLoginErr = fmt.Errorf("reporter: gh api user: %w", err)
+			g.botLoginErr = err
 			return
 		}
-		g.botLogin = strings.TrimSpace(string(out))
+		g.botLogin = strings.TrimSpace(login)
 	})
 	return g.botLogin, g.botLoginErr
 }
 
 // SetBlockedReaction adds or removes the bot's own reaction on the issue.
-//
-// blocked=true → POST a confused reaction (idempotent on GitHub side: if the
-// authenticated user already reacted with `confused`, GitHub returns 200
-// without creating a duplicate).
-//
-// blocked=false → fetch all reactions on the issue, filter for `content ==
-// confused` authored by the bot's own login, and DELETE each one.
 func (g *GHCLIReactionManager) SetBlockedReaction(ctx context.Context, repo string, issueNum int, blocked bool) error {
-	endpoint := fmt.Sprintf("repos/%s/issues/%d/reactions", repo, issueNum)
 	if blocked {
-		cmd := exec.CommandContext(ctx, "gh", "api", "-X", "POST", endpoint,
-			"-f", "content="+ReactionConfused,
-			"-H", "Accept: application/vnd.github+json",
-		)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("reporter: gh api POST reactions: %s: %w", string(out), err)
-		}
-		return nil
+		return g.client().AddIssueReaction(ctx, repo, issueNum, ReactionConfused)
 	}
 
 	login, err := g.authenticatedLogin(ctx)
@@ -113,34 +101,19 @@ func (g *GHCLIReactionManager) SetBlockedReaction(ctx context.Context, repo stri
 		return err
 	}
 
-	listCmd := exec.CommandContext(ctx, "gh", "api", endpoint,
-		"-H", "Accept: application/vnd.github+json",
-	)
-	out, err := listCmd.Output()
+	reactions, err := g.client().ListIssueReactions(ctx, repo, issueNum)
 	if err != nil {
-		return fmt.Errorf("reporter: gh api GET reactions: %w", err)
+		return err
 	}
-	var reactions []struct {
-		ID      int64  `json:"id"`
-		Content string `json:"content"`
-		User    struct {
-			Login string `json:"login"`
-		} `json:"user"`
-	}
-	if err := json.Unmarshal(out, &reactions); err != nil {
-		return fmt.Errorf("reporter: parse reactions: %w", err)
-	}
-	for _, r := range reactions {
-		if r.Content != ReactionConfused {
+	for _, reaction := range reactions {
+		if reaction.Content != ReactionConfused {
 			continue
 		}
-		if login != "" && r.User.Login != login {
+		if login != "" && reaction.User != login {
 			continue
 		}
-		delEndpoint := fmt.Sprintf("repos/%s/issues/%d/reactions/%d", repo, issueNum, r.ID)
-		delCmd := exec.CommandContext(ctx, "gh", "api", "-X", "DELETE", delEndpoint)
-		if delOut, err := delCmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("reporter: gh api DELETE reactions/%d: %s: %w", r.ID, string(delOut), err)
+		if err := g.client().DeleteIssueReaction(ctx, repo, issueNum, reaction.ID); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -210,7 +183,7 @@ func (r *Reporter) SetVerifier(v ClaimVerifier) {
 
 // Verify runs claim verification against the agent result.
 // It returns nil when the verifier is not configured or the run did not succeed.
-func (r *Reporter) Verify(ctx context.Context, repo string, issueNum int, result *launcher.Result) (*VerificationResult, error) {
+func (r *Reporter) Verify(ctx context.Context, repo string, issueNum int, result *runtimepkg.Result) (*VerificationResult, error) {
 	if r.verifier == nil || result == nil || result.ExitCode != 0 {
 		return nil, nil
 	}
@@ -251,7 +224,7 @@ func (r *Reporter) Report(
 	repo string,
 	issueNum int,
 	agentName string,
-	result *launcher.Result,
+	result *runtimepkg.Result,
 	sessionID, workerID string,
 	retryCount, maxRetries int,
 	labelLine string,
@@ -270,7 +243,7 @@ func (r *Reporter) ReportVerified(
 	repo string,
 	issueNum int,
 	agentName string,
-	result *launcher.Result,
+	result *runtimepkg.Result,
 	sessionID, workerID string,
 	retryCount, maxRetries int,
 	labelLine string,
@@ -290,7 +263,7 @@ func (r *Reporter) ReportWithVerification(
 	repo string,
 	issueNum int,
 	agentName string,
-	result *launcher.Result,
+	result *runtimepkg.Result,
 	sessionID, workerID string,
 	retryCount, maxRetries int,
 	labelLine string,
@@ -304,7 +277,7 @@ func (r *Reporter) report(
 	repo string,
 	issueNum int,
 	agentName string,
-	result *launcher.Result,
+	result *runtimepkg.Result,
 	sessionID, workerID string,
 	retryCount, maxRetries int,
 	labelLine string,
@@ -335,10 +308,10 @@ func (r *Reporter) report(
 	// we render this with a distinct header and explicitly disclaim the
 	// agent-verdict interpretation. See issue #131.
 	var infraReason string
-	if launcher.IsInfraFailure(result) {
+	if runtimepkg.IsInfraFailure(result) {
 		status = "infra-error"
 		if result.Meta != nil {
-			infraReason = result.Meta[launcher.MetaInfraFailureReason]
+			infraReason = result.Meta[runtimepkg.MetaInfraFailureReason]
 		}
 		if result.Stderr != "" {
 			errorDetail = result.Stderr
@@ -421,7 +394,7 @@ func (r *Reporter) report(
 	})
 }
 
-func reportOutput(result *launcher.Result) string {
+func reportOutput(result *runtimepkg.Result) string {
 	if result == nil {
 		return ""
 	}

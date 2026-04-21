@@ -16,12 +16,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Lincyaw/workbuddy/internal/audit"
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/launcher"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
 	"github.com/Lincyaw/workbuddy/internal/store"
+	workerexec "github.com/Lincyaw/workbuddy/internal/worker"
+	workersession "github.com/Lincyaw/workbuddy/internal/worker/session"
 	"github.com/Lincyaw/workbuddy/internal/workerclient"
 	"github.com/spf13/cobra"
 )
@@ -907,7 +908,7 @@ func TestExecuteRemoteTaskStopsHeartbeatAfterKilledProcess(t *testing.T) {
 	lnch.Register(mockRT, config.RuntimeClaudeCode)
 
 	rep := reporter.NewReporter(&mockCommentWriter{})
-	auditor := audit.NewAuditor(localStore, filepath.Join(t.TempDir(), "sessions"))
+	recorder := workersession.NewRecorder(localStore, filepath.Join(t.TempDir(), "sessions"))
 	client := workerclient.New(server.URL, "", server.Client())
 
 	if err := executeRemoteTask(
@@ -915,12 +916,11 @@ func TestExecuteRemoteTaskStopsHeartbeatAfterKilledProcess(t *testing.T) {
 		task,
 		client,
 		cfg,
-		lnch,
-		auditor,
+		workerexec.NewExecutor(lnch, reader),
+		recorder,
 		rep,
 		reader,
 		t.TempDir(),
-		filepath.Join(t.TempDir(), "sessions"),
 		"worker-1",
 		"",
 		20*time.Millisecond,
@@ -987,7 +987,7 @@ func TestExecuteRemoteTaskRequeuesWorktreeSetupFailure(t *testing.T) {
 	}
 	comments := &mockCommentWriter{}
 	rep := reporter.NewReporter(comments)
-	auditor := audit.NewAuditor(nil, filepath.Join(t.TempDir(), "sessions"))
+	recorder := workersession.NewRecorder(nil, filepath.Join(t.TempDir(), "sessions"))
 	client := workerclient.New(server.URL, "", server.Client())
 	wsErr := errors.New("missing but already registered worktree")
 
@@ -996,12 +996,11 @@ func TestExecuteRemoteTaskRequeuesWorktreeSetupFailure(t *testing.T) {
 		task,
 		client,
 		cfg,
-		launcher.NewLauncher(),
-		auditor,
+		workerexec.NewExecutor(launcher.NewLauncher(), reader),
+		recorder,
 		rep,
 		reader,
 		t.TempDir(),
-		filepath.Join(t.TempDir(), "sessions"),
 		"worker-1",
 		"",
 		20*time.Millisecond,

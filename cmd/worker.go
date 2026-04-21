@@ -11,19 +11,16 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
-	"github.com/Lincyaw/workbuddy/internal/audit"
 	"github.com/Lincyaw/workbuddy/internal/config"
-	"github.com/Lincyaw/workbuddy/internal/eventlog"
-	"github.com/Lincyaw/workbuddy/internal/launcher"
-	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
-	"github.com/Lincyaw/workbuddy/internal/staleinference"
+	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 	"github.com/Lincyaw/workbuddy/internal/store"
+	workerexec "github.com/Lincyaw/workbuddy/internal/worker"
+	workersession "github.com/Lincyaw/workbuddy/internal/worker/session"
 	"github.com/Lincyaw/workbuddy/internal/workerclient"
 	"github.com/Lincyaw/workbuddy/internal/workspace"
 	"github.com/spf13/cobra"
@@ -172,7 +169,7 @@ func resolveWorkerToken(token string) string {
 	return strings.TrimSpace(os.Getenv("WORKBUDDY_AUTH_TOKEN"))
 }
 
-func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerIssueReader, parentCtx ...context.Context) error {
+func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader workerIssueReader, parentCtx ...context.Context) error {
 	if opts == nil {
 		return fmt.Errorf("worker: options are required")
 	}
@@ -226,7 +223,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 	}
 
 	if lnch == nil {
-		lnch = launcher.NewLauncher()
+		lnch = runtimepkg.NewRegistry()
 	}
 	if reader == nil {
 		reader = &GHCLIReader{}
@@ -240,11 +237,12 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 
 	client := workerclient.New(opts.coordinatorURL, opts.token, nil)
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
-	rep.SetEventRecorder(eventlog.NewEventLogger(localStore))
+	recorder := workersession.NewRecorder(localStore, opts.sessionsDir)
+	rep.SetEventRecorder(recorder)
 	rep.SetVerifier(reporter.NewGHClaimVerifier())
-	auditor := audit.NewAuditor(localStore, opts.sessionsDir)
 	bindings := newWorkerRepoBindingStore(repoBindings)
 	workspaces := newWorkerWorkspaceSet()
+	executor := workerexec.NewExecutor(lnch, reader)
 
 	var ctx context.Context
 	var cancel context.CancelFunc
@@ -348,7 +346,21 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 			wsMgr := workspaces.forRepoPath(repoPath, func(path string) workspaceManager {
 				return workspace.NewManager(path)
 			})
-			if err := executeRemoteTask(ctx, t, client, cfg, lnch, auditor, rep, reader, repoPath, opts.sessionsDir, workerID, runtimeAlias, opts.heartbeatInterval, opts.shutdownTimeout, wsMgr); err != nil {
+			distributed := workerexec.NewDistributedWorker(workerexec.DistributedDeps{
+				Config:            cfg,
+				Executor:          executor,
+				Recorder:          recorder,
+				Reporter:          rep,
+				Reader:            reader,
+				Client:            client,
+				WorkDir:           repoPath,
+				WorkerID:          workerID,
+				RuntimeAlias:      runtimeAlias,
+				HeartbeatInterval: opts.heartbeatInterval,
+				ShutdownTimeout:   opts.shutdownTimeout,
+				WorkspaceManager:  wsMgr,
+			})
+			if err := distributed.ExecuteTask(ctx, t); err != nil {
 				taskErrMu.Lock()
 				if taskErrVal == nil {
 					taskErrVal = err
@@ -367,305 +379,22 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 	return taskErrVal
 }
 
-func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *workerclient.Client, cfg *config.FullConfig, lnch *launcher.Launcher, auditor *audit.Auditor, rep *reporter.Reporter, reader workerIssueReader, workDir, sessionsDir, workerID, runtimeAlias string, heartbeatInterval, shutdownTimeout time.Duration, wsMgr workspaceManager) error {
-	agentCfg, ok := cfg.Agents[task.AgentName]
-	if !ok {
-		return fmt.Errorf("worker: agent %q not found in local config", task.AgentName)
-	}
-	agentCopy := *agentCfg
-	if runtimeAlias != "" {
-		agentCopy.Runtime = runtimeAlias
-	}
-
-	launchCtx := buildRemoteTaskContext(task, reader, workDir)
-	sessionID := launchCtx.Session.ID
-
-	// Start heartbeat BEFORE worktree setup. `git worktree add` on a large
-	// repo with many concurrent claims can block well past the 30s task lease;
-	// a silent lease expiry there lets the same worker re-claim the same task
-	// from its own poll loop, producing two parallel goroutines for one task
-	// (see issue #143 and the chain to #141).
-	taskCtx, taskCancel := context.WithCancel(ctx)
-	defer taskCancel()
-
-	var released atomic.Bool
-	releaseDone := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			releaseCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-			defer cancel()
-			if err := client.ReleaseTask(releaseCtx, task.TaskID, workerclient.ReleaseRequest{WorkerID: workerID, Reason: "worker shutdown"}); err == nil {
-				released.Store(true)
-			}
-			taskCancel()
-		case <-releaseDone:
-		}
-	}()
-	defer close(releaseDone)
-
-	heartbeatStop := make(chan struct{})
-	heartbeatDone := make(chan struct{})
-	var heartbeatStopOnce sync.Once
-	stopHeartbeat := func() {
-		heartbeatStopOnce.Do(func() {
-			close(heartbeatStop)
-		})
-		<-heartbeatDone
-	}
-	go func() {
-		defer close(heartbeatDone)
-		ticker := time.NewTicker(heartbeatInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				hbCtx, cancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(heartbeatInterval))
-				err := client.Heartbeat(hbCtx, task.TaskID, workerclient.HeartbeatRequest{WorkerID: workerID})
-				cancel()
-				if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, workerclient.ErrUnauthorized) {
-					// Coordinator returns HTTP 400 "worker_id does not match claimed task"
-					// when another claimer (often this same worker's poll loop after a
-					// lease expiry) has taken over. Stop executing: a second goroutine
-					// already owns this task and will run it; continuing here just
-					// races against it on the same worktree. See #143.
-					if isTaskOwnershipLost(err) {
-						log.Printf("[worker] heartbeat reports ownership lost for task %s: %v — cancelling local execution", task.TaskID, err)
-						taskCancel()
-						return
-					}
-					log.Printf("[worker] heartbeat failed for task %s: %v", task.TaskID, err)
-				}
-			case <-heartbeatStop:
-				return
-			case <-taskCtx.Done():
-				return
-			}
-		}
-	}()
-	defer stopHeartbeat()
-
-	// Create an isolated worktree for this task so multiple agents
-	// don't interfere with each other's git state.
-	var worktreePath string
-	if wsMgr != nil {
-		wt, err := wsMgr.Create(task.IssueNum, task.TaskID)
-		if err != nil {
-			log.Printf("[worker] failed to create worktree for issue #%d: %v", task.IssueNum, err)
-			// Report the worktree failure as a user-visible comment.
-			result := &launcher.Result{
-				ExitCode: 1,
-				Stderr:   err.Error(),
-			}
-			reportCtx, cancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(shutdownTimeout))
-			if rerr := rep.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, workerID, 0, workflowMaxRetries(cfg, task.Workflow), "", ""); rerr != nil {
-				log.Printf("[worker] failed to report worktree failure: %v", rerr)
-			}
-			cancel()
-			// Requeue the claimed task so it can be retried after the worktree issue is fixed.
-			releaseCtx, cancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(shutdownTimeout))
-			if rerr := client.ReleaseTask(releaseCtx, task.TaskID, workerclient.ReleaseRequest{
-				WorkerID: workerID,
-				Reason:   fmt.Sprintf("worktree setup failed: %v", err),
-			}); rerr != nil {
-				log.Printf("[worker] failed to release task after worktree setup failure: %v", rerr)
-			}
-			cancel()
-			return fmt.Errorf("worker: worktree setup failed for issue #%d: %w", task.IssueNum, err)
-		}
-		workDir = wt
-		worktreePath = wt
-		launchCtx.RepoRoot = wt
-		launchCtx.WorkDir = wt
-		log.Printf("[worker] using worktree %s for issue #%d", wt, task.IssueNum)
-	}
-	defer func() {
-		if worktreePath != "" && wsMgr != nil {
-			if err := wsMgr.Remove(worktreePath); err != nil {
-				log.Printf("[worker] worktree cleanup failed for issue #%d: %v", task.IssueNum, err)
-			}
-		}
-	}()
-
-	sessionID = launchCtx.Session.ID
-	if err := rep.ReportStarted(taskCtx, task.Repo, task.IssueNum, task.AgentName, sessionID, workerID); err != nil {
-		log.Printf("[worker] report started failed: %v", err)
-	}
-
-	session, err := lnch.Start(taskCtx, &agentCopy, launchCtx)
-	if err != nil {
-		return fmt.Errorf("worker: start agent %s: %w", task.AgentName, err)
-	}
-	defer func() { _ = session.Close() }()
-
-	eventsCh := make(chan launcherevents.Event, 64)
-	eventsPath, waitEvents := streamSessionEvents(launchCtx, eventsCh)
-
-	// Set up stale inference watchdog channel wrapping.
-	// When enabled, events flow through a proxy channel that records
-	// activity timestamps; otherwise session writes directly to eventsCh.
-	siCfg := cfg.Worker.StaleInference
-	sessionCh := eventsCh // channel passed to session.Run
-	var proxyDone chan struct{}
-	if siCfg.StaleInferenceEnabled() {
-		tracker := staleinference.NewEventTracker()
-		watchdogCtx, watchdogCancel := context.WithCancel(taskCtx)
-		defer watchdogCancel()
-		go staleinference.Watch(watchdogCtx, staleinference.Config{
-			IdleThreshold:        siCfg.IdleThreshold,
-			CheckInterval:        siCfg.CheckInterval,
-			CompletedGracePeriod: siCfg.CompletedGracePeriod,
-		}, tracker, taskCancel)
-
-		proxyCh := make(chan launcherevents.Event, 64)
-		proxyDone = make(chan struct{})
-		go func() {
-			defer close(proxyDone)
-			for evt := range proxyCh {
-				if evt.Kind == launcherevents.KindTaskComplete {
-					tracker.RecordCompletion()
-				} else {
-					tracker.RecordActivity()
-				}
-				select {
-				case eventsCh <- evt:
-				case <-taskCtx.Done():
-					// Drain remaining events without blocking if context is cancelled.
-					for range proxyCh {
-					}
-					return
-				}
-			}
-		}()
-		sessionCh = proxyCh
-	}
-
-	result, runErr := session.Run(taskCtx, sessionCh)
-	// Drain the stale-inference proxy. A closed sessionCh (= proxyCh) only
-	// makes the proxy's `for evt := range proxyCh` loop exit when the body
-	// isn't currently blocked on `eventsCh <- evt`. Under concurrent load
-	// eventsCh can back up (streamSessionEvents writes to disk, proxy has
-	// cap=64 input/output); when it does, the proxy parks inside the
-	// select{} and close(sessionCh) is not enough to release it. Bound the
-	// wait and fall back to taskCancel — the proxy has a
-	// `case <-taskCtx.Done()` escape that drains without sending. Without
-	// this, proxy wedges, <-proxyDone hangs, executeRemoteTask never returns,
-	// and the worker slot is held forever with heartbeat still firing.
-	// See #143 follow-up: post-session zombie.
-	if proxyDone != nil {
-		close(sessionCh)
-		select {
-		case <-proxyDone:
-		case <-time.After(postSessionDrainTimeout):
-			log.Printf("[worker] proxy drain timed out for task %s after %s; cancelling task ctx to unblock", task.TaskID, postSessionDrainTimeout)
-			taskCancel()
-			<-proxyDone
-		}
-	}
-	close(eventsCh)
-	// Same story for the events writer: bound the wait so a slow consumer
-	// cannot trap executeRemoteTask in the cleanup phase.
-	waitDone := make(chan error, 1)
-	go func() { waitDone <- waitEvents() }()
-	select {
-	case werr := <-waitDone:
-		if werr != nil {
-			log.Printf("[worker] event capture failed: %v", werr)
-		}
-	case <-time.After(postSessionDrainTimeout):
-		log.Printf("[worker] event stream drain timed out for task %s after %s; dropping tail of events log", task.TaskID, postSessionDrainTimeout)
-	}
-	stopHeartbeat()
-	if result == nil {
-		// session.Run returned nil — we have no verdict to attribute. Classify
-		// as infra failure so the coordinator does not mark the agent as
-		// having FAILED. See issue #131 / AC-3.
-		result = &launcher.Result{
-			ExitCode: -1,
-			Stderr:   runErrString(runErr),
-			Meta: map[string]string{
-				launcher.MetaInfraFailure:       "true",
-				launcher.MetaInfraFailureReason: "session.Run returned nil result",
-			},
-		}
-	}
-	if result.Meta == nil {
-		result.Meta = map[string]string{}
-	}
-	if eventsPath != "" {
-		if result.RawSessionPath == "" {
-			result.RawSessionPath = result.SessionPath
-		}
-		result.SessionPath = eventsPath
-	}
-	if runErr != nil && result.Stderr == "" {
-		result.Stderr = runErr.Error()
-	}
-	if err := auditor.Capture(sessionID, task.TaskID, task.Repo, task.IssueNum, task.AgentName, result); err != nil {
-		log.Printf("[worker] audit capture failed: %v", err)
-	}
-	if ctx.Err() != nil && !released.Load() {
-		releaseCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		err := client.ReleaseTask(releaseCtx, task.TaskID, workerclient.ReleaseRequest{WorkerID: workerID, Reason: "worker shutdown"})
-		cancel()
-		if err == nil {
-			released.Store(true)
-		}
-	}
-	if released.Load() {
-		return nil
-	}
-
-	currentLabels, err := snapshotIssueLabels(task.Repo, task.IssueNum, reader)
-	if err != nil {
-		currentLabels = append([]string(nil), launchCtx.Issue.Labels...)
-	}
-
-	status := store.TaskStatusCompleted
-	if runErr != nil || result.ExitCode != 0 {
-		status = store.TaskStatusFailed
-	}
-	if result.Meta["timeout"] == "true" {
-		status = store.TaskStatusTimeout
-	}
-
-	// Verify agent claims before submitting result to coordinator.
-	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(shutdownTimeout))
-	verifyRes, verifyErr := rep.Verify(verifyCtx, task.Repo, task.IssueNum, result)
-	verifyCancel()
-	if verifyErr != nil {
-		log.Printf("[worker] claim verification error for task %s: %v", task.TaskID, verifyErr)
-	}
-	if verifyRes != nil && verifyRes.Partial {
-		log.Printf("[worker] agent %s for %s#%d claimed side-effects not verified — treating as failure", task.AgentName, task.Repo, task.IssueNum)
-		status = store.TaskStatusFailed
-	}
-
-	// Detect launcher-layer infra failure so the coordinator does not treat
-	// this as an agent FAIL verdict. See issue #131 / AC-3.
-	infraFailure := launcher.IsInfraFailure(result)
-	infraReason := ""
-	if infraFailure && result.Meta != nil {
-		infraReason = result.Meta[launcher.MetaInfraFailureReason]
-	}
-	submitCtx, cancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(shutdownTimeout))
-	defer cancel()
-	if err := client.SubmitResult(submitCtx, task.TaskID, workerclient.ResultRequest{
-		WorkerID:      workerID,
-		Status:        status,
-		CurrentLabels: currentLabels,
-		InfraFailure:  infraFailure,
-		InfraReason:   infraReason,
-	}); err != nil {
-		log.Printf("[worker] submit result failed for task %s: %v", task.TaskID, err)
-		return nil
-	}
-	reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(shutdownTimeout))
-	defer reportCancel()
-	if err := rep.ReportVerified(reportCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, workerID, 0, workflowMaxRetries(cfg, task.Workflow), "", workDir, verifyRes); err != nil {
-		log.Printf("[worker] report failed: %v", err)
-	}
-	return nil
+func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *workerclient.Client, cfg *config.FullConfig, executor *workerexec.Executor, recorder *workersession.Recorder, rep *reporter.Reporter, reader workerIssueReader, workDir, workerID, runtimeAlias string, heartbeatInterval, shutdownTimeout time.Duration, wsMgr workspaceManager) error {
+	distributed := workerexec.NewDistributedWorker(workerexec.DistributedDeps{
+		Config:            cfg,
+		Executor:          executor,
+		Recorder:          recorder,
+		Reporter:          rep,
+		Reader:            reader,
+		Client:            client,
+		WorkDir:           workDir,
+		WorkerID:          workerID,
+		RuntimeAlias:      runtimeAlias,
+		HeartbeatInterval: heartbeatInterval,
+		ShutdownTimeout:   shutdownTimeout,
+		WorkspaceManager:  wsMgr,
+	})
+	return distributed.ExecuteTask(ctx, task)
 }
 
 func boundedWorkerTaskAPITimeout(timeout time.Duration) time.Duration {
@@ -675,38 +404,12 @@ func boundedWorkerTaskAPITimeout(timeout time.Duration) time.Duration {
 	return timeout
 }
 
-// isTaskOwnershipLost returns true when err from a coordinator task endpoint
-// indicates this worker no longer owns the task — typically because the lease
-// expired and another claimer (or this worker's own poll loop) took over.
-// Heartbeat/submit callers should stop executing when this is true.
 func isTaskOwnershipLost(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "worker_id does not match claimed task") ||
-		strings.Contains(msg, "task already completed") ||
-		strings.Contains(msg, "not claimable by this worker") ||
-		strings.Contains(msg, "task is no longer owned by worker")
+	return workerexec.IsTaskOwnershipLost(err)
 }
 
-func buildRemoteTaskContext(task *workerclient.Task, reader workerIssueReader, workDir string) *launcher.TaskContext {
-	issue := launcher.IssueContext{Number: task.IssueNum}
-	if reader != nil {
-		if details, err := reader.ReadIssue(task.Repo, task.IssueNum); err == nil {
-			issue.Body = details.Body
-			issue.Labels = append([]string(nil), details.Labels...)
-		}
-	}
-	return &launcher.TaskContext{
-		Issue:    issue,
-		Repo:     task.Repo,
-		RepoRoot: workDir,
-		WorkDir:  workDir,
-		Session: launcher.SessionContext{
-			ID: fmt.Sprintf("session-%s", task.TaskID),
-		},
-	}
+func buildRemoteTaskContext(task *workerclient.Task, reader workerIssueReader, workDir string) *runtimepkg.TaskContext {
+	return workerexec.BuildRemoteTaskContext(task, reader, workDir)
 }
 
 func parseWorkerRoles(raw string, agents map[string]*config.AgentConfig) []string {
@@ -760,11 +463,4 @@ func workflowMaxRetries(cfg *config.FullConfig, workflow string) int {
 		return wf.MaxRetries
 	}
 	return 3
-}
-
-func runErrString(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
 }

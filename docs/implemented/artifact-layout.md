@@ -6,7 +6,8 @@
 
 当前 session artifact 已统一写到仓库根 `.workbuddy/sessions/session-<sid>/`。
 launcher 产出的 `stdout` / `stderr` / `tool-calls.jsonl` 与
-`cmd/serve.go:streamSessionEvents` 生成的 `events-v1.jsonl` 都不再依赖 `task.WorkDir`，
+`internal/worker/executor.go` 里的共享事件流写入逻辑生成的 `events-v1.jsonl`
+都不再依赖 `task.WorkDir`，
 因此 worktree 清理不会删除它们。
 
 ## 当前行为
@@ -35,13 +36,13 @@ worktree 只装 agent 改的代码，不再装事件流。
    `cmd/run.go` 的直接运行路径也把 `RepoRoot` 设为当前工作目录。
 3. `cmd/serve.go`：以 `<RepoRoot>/.workbuddy/sessions/` 初始化 `SessionManager`，
    由 launcher/runtime 统一向该目录写入 stdout / stderr / tool-calls / metadata。
-4. `cmd/serve.go:streamSessionEvents`：统一通过 `SessionHandle.EventsPath()` 把
+4. `internal/worker/executor.go`：统一通过 `SessionHandle.EventsPath()` 把
    `events-v1.jsonl` 写到 `<RepoRoot>/.workbuddy/sessions/session-<sid>/`。
 
 ### 2. 错误路径下 artifact 不丢
 
 由于 artifact 已经不在 worktree 里，worktree 清理不会再把它删掉。
-`cmd/serve.go:executeTask` 的行为是：
+`internal/worker/embedded.go` 的 embedded worker 路径行为是：
 
 - 无论 runtime 是否返错，只要 `session.Run(...)` 返回了非 nil `Result`（含
   `SessionPath`、`LastMessage`、`TokenUsage`），都在 return 前先调 `audit.Capture(...)`。

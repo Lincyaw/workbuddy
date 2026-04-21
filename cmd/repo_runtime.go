@@ -235,6 +235,9 @@ func (pm *pollerManager) StartOrUpdate(rec store.RepoRegistrationRecord) error {
 	sm.SetIssueClaim(buildIssueClaimerID("coordinator-"+hostnameOrUnknown(), os.Getpid()), statemachine.DefaultIssueClaimLease)
 	depResolver := dependency.NewResolver(pm.store, pm.ghReader, pm.eventlog, pm.alertBus)
 	rt := router.NewRouter(cfg.Agents, pm.registry, pm.store, rec.Repo, pm.repoRoot, nil, nil, false)
+	if issueDataReader, ok := pm.ghReader.(router.IssueDataReader); ok {
+		rt.SetIssueDataReader(issueDataReader)
+	}
 	runCtx, cancel := context.WithCancel(pm.rootCtx)
 	runtime := &repoRuntime{
 		registration: rec,

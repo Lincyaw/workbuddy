@@ -7,11 +7,8 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,9 +22,7 @@ import (
 	coordinatorhttp "github.com/Lincyaw/workbuddy/internal/coordinator/http"
 	"github.com/Lincyaw/workbuddy/internal/dependency"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
-	"github.com/Lincyaw/workbuddy/internal/labelcheck"
-	"github.com/Lincyaw/workbuddy/internal/launcher"
-	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
+	"github.com/Lincyaw/workbuddy/internal/ghadapter"
 	"github.com/Lincyaw/workbuddy/internal/metrics"
 	"github.com/Lincyaw/workbuddy/internal/notifier"
 	"github.com/Lincyaw/workbuddy/internal/operator"
@@ -35,11 +30,14 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
 	"github.com/Lincyaw/workbuddy/internal/router"
+	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 	"github.com/Lincyaw/workbuddy/internal/security"
 	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/tasknotify"
 	"github.com/Lincyaw/workbuddy/internal/webui"
+	workerexec "github.com/Lincyaw/workbuddy/internal/worker"
+	workersession "github.com/Lincyaw/workbuddy/internal/worker/session"
 	"github.com/Lincyaw/workbuddy/internal/workspace"
 	"github.com/spf13/cobra"
 )
@@ -110,53 +108,6 @@ type serveOpts struct {
 	trustedAuthorsSet bool
 }
 
-// issueTaskLocks serializes tasks for the same repo+issue. Entries are
-// ref-counted and evicted once no goroutine holds or waits on them so the
-// map cannot grow without bound over a long-running serve process.
-type issueTaskLocks struct {
-	mu    sync.Mutex
-	locks map[string]*issueTaskLock
-}
-
-type issueTaskLock struct {
-	mu     sync.Mutex
-	parent *issueTaskLocks
-	key    string
-	refs   int
-}
-
-func (l *issueTaskLocks) Acquire(repo string, issue int) *issueTaskLock {
-	key := runningTaskKey(repo, issue)
-
-	l.mu.Lock()
-	if l.locks == nil {
-		l.locks = make(map[string]*issueTaskLock)
-	}
-	lk, ok := l.locks[key]
-	if !ok {
-		lk = &issueTaskLock{parent: l, key: key}
-		l.locks[key] = lk
-	}
-	lk.refs++
-	l.mu.Unlock()
-
-	lk.mu.Lock()
-	return lk
-}
-
-func (l *issueTaskLock) Release() {
-	l.mu.Unlock()
-
-	l.parent.mu.Lock()
-	l.refs--
-	if l.refs == 0 {
-		if current, ok := l.parent.locks[l.key]; ok && current == l {
-			delete(l.parent.locks, l.key)
-		}
-	}
-	l.parent.mu.Unlock()
-}
-
 // closedIssues tracks issues that were closed while same-issue work was still
 // queued so deferred tasks can be dropped before they start.
 type closedIssues struct {
@@ -176,197 +127,36 @@ func (c *closedIssues) IsClosed(repo string, issue int) bool {
 	return ok
 }
 
-// GHCLIReader implements poller.GHReader using the gh CLI.
-type GHCLIReader struct{}
-
-type issueLabelReader interface {
-	ReadIssueLabels(repo string, issueNum int) ([]string, error)
+// GHCLIReader implements poller.GHReader using the shared gh CLI adapter.
+type GHCLIReader struct {
+	client *ghadapter.CLI
 }
 
-// ghIssueJSON matches the JSON output of gh issue list --json.
-type ghIssueJSON struct {
-	Number int    `json:"number"`
-	Title  string `json:"title"`
-	State  string `json:"state"`
-	Body   string `json:"body"`
-	Author struct {
-		Login string `json:"login"`
-	} `json:"author"`
-	Labels []struct {
-		Name string `json:"name"`
-	} `json:"labels"`
+func (g *GHCLIReader) cli() *ghadapter.CLI {
+	if g != nil && g.client != nil {
+		return g.client
+	}
+	return ghadapter.NewCLI()
 }
 
-type ghIssueLabelsJSON struct {
-	Labels []struct {
-		Name string `json:"name"`
-	} `json:"labels"`
-}
-
-type ghIssueDetailJSON struct {
-	Number      int    `json:"number"`
-	State       string `json:"state"`
-	StateReason string `json:"stateReason"`
-	Body        string `json:"body"`
-	Labels      struct {
-		Nodes []struct {
-			Name string `json:"name"`
-		} `json:"nodes"`
-	} `json:"labels"`
-	ClosedByPullRequestsReferences struct {
-		Nodes []struct {
-			Number int    `json:"number"`
-			State  string `json:"state"`
-			URL    string `json:"url"`
-		} `json:"nodes"`
-	} `json:"closedByPullRequestsReferences"`
-}
-
-// ghPRJSON matches the JSON output of gh pr list --json.
-type ghPRJSON struct {
-	Number      int    `json:"number"`
-	URL         string `json:"url"`
-	HeadRefName string `json:"headRefName"`
-	State       string `json:"state"`
-}
-
-// ListIssues returns issues for the given repo via gh CLI.
 func (g *GHCLIReader) ListIssues(repo string) ([]poller.Issue, error) {
-	cmd := exec.Command("gh", "issue", "list",
-		"--repo", repo,
-		"--state", "open",
-		"--limit", "100",
-		"--json", "number,title,state,body,author,labels",
-	)
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("gh issue list: %w", err)
-	}
-
-	var raw []ghIssueJSON
-	if err := json.Unmarshal(out, &raw); err != nil {
-		return nil, fmt.Errorf("gh issue list: parse JSON: %w", err)
-	}
-
-	issues := make([]poller.Issue, len(raw))
-	for i, r := range raw {
-		labels := make([]string, len(r.Labels))
-		for j, l := range r.Labels {
-			labels[j] = l.Name
-		}
-		issues[i] = poller.Issue{
-			Number: r.Number,
-			Title:  r.Title,
-			State:  r.State,
-			Labels: labels,
-			Body:   r.Body,
-			Author: r.Author.Login,
-		}
-	}
-	return issues, nil
+	return g.cli().ListIssues(repo)
 }
 
-// ListPRs returns pull requests for the given repo via gh CLI.
 func (g *GHCLIReader) ListPRs(repo string) ([]poller.PR, error) {
-	cmd := exec.Command("gh", "pr", "list",
-		"--repo", repo,
-		"--state", "open",
-		"--limit", "100",
-		"--json", "number,url,headRefName,state",
-	)
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("gh pr list: %w", err)
-	}
-
-	var raw []ghPRJSON
-	if err := json.Unmarshal(out, &raw); err != nil {
-		return nil, fmt.Errorf("gh pr list: parse JSON: %w", err)
-	}
-
-	prs := make([]poller.PR, len(raw))
-	for i, r := range raw {
-		prs[i] = poller.PR{
-			Number: r.Number,
-			URL:    r.URL,
-			Branch: r.HeadRefName,
-			State:  r.State,
-		}
-	}
-	return prs, nil
+	return g.cli().ListPRs(repo)
 }
 
-// CheckRepoAccess verifies gh CLI access to the given repo.
 func (g *GHCLIReader) CheckRepoAccess(repo string) error {
-	cmd := exec.Command("gh", "repo", "view", repo, "--json", "name")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("gh repo view %s: %s: %w", repo, string(out), err)
-	}
-	return nil
+	return g.cli().CheckRepoAccess(repo)
 }
 
 func (g *GHCLIReader) ReadIssueLabels(repo string, issueNum int) ([]string, error) {
-	cmd := exec.Command("gh", "issue", "view",
-		fmt.Sprintf("%d", issueNum),
-		"--repo", repo,
-		"--json", "labels",
-	)
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("gh issue view labels: %w", err)
-	}
-
-	var raw ghIssueLabelsJSON
-	if err := json.Unmarshal(out, &raw); err != nil {
-		return nil, fmt.Errorf("gh issue view labels: parse JSON: %w", err)
-	}
-
-	labels := make([]string, len(raw.Labels))
-	for i, label := range raw.Labels {
-		labels[i] = label.Name
-	}
-	return labels, nil
+	return g.cli().ReadIssueLabels(repo, issueNum)
 }
 
 func (g *GHCLIReader) ReadIssue(repo string, issueNum int) (poller.IssueDetails, error) {
-	parts := strings.SplitN(repo, "/", 2)
-	if len(parts) != 2 {
-		return poller.IssueDetails{}, fmt.Errorf("invalid repo %q", repo)
-	}
-	query := `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){number state stateReason body labels(first:100){nodes{name}} closedByPullRequestsReferences(first:10){nodes{number state url}}}}}`
-	cmd := exec.Command("gh", "api", "graphql",
-		"-f", "query="+query,
-		"-F", "owner="+parts[0],
-		"-F", "name="+parts[1],
-		"-F", fmt.Sprintf("number=%d", issueNum),
-	)
-	out, err := cmd.Output()
-	if err != nil {
-		return poller.IssueDetails{}, fmt.Errorf("gh api graphql issue detail: %w", err)
-	}
-	var response struct {
-		Data struct {
-			Repository struct {
-				Issue ghIssueDetailJSON `json:"issue"`
-			} `json:"repository"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(out, &response); err != nil {
-		return poller.IssueDetails{}, fmt.Errorf("gh api graphql issue detail parse: %w", err)
-	}
-	issue := response.Data.Repository.Issue
-	labels := make([]string, len(issue.Labels.Nodes))
-	for i, label := range issue.Labels.Nodes {
-		labels[i] = label.Name
-	}
-	return poller.IssueDetails{
-		Number:           issue.Number,
-		State:            strings.ToLower(issue.State),
-		StateReason:      strings.ToLower(issue.StateReason),
-		Body:             issue.Body,
-		Labels:           labels,
-		ClosedByLinkedPR: len(issue.ClosedByPullRequestsReferences.Nodes) > 0,
-	}, nil
+	return g.cli().ReadIssue(repo, issueNum)
 }
 
 var serveCmd = &cobra.Command{
@@ -431,11 +221,7 @@ func parseServeFlags(cmd *cobra.Command) (*serveOpts, error) {
 // runServeWithOpts is the testable core of the serve command.
 // ghReader and launcherOverride allow tests to inject mocks.
 // If parentCtx is non-nil, it is used instead of signal handling (for tests).
-func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverride *launcher.Launcher, parentCtx ...context.Context) error {
-	if opts.maxParallelTasks <= 0 {
-		opts.maxParallelTasks = defaultEmbeddedWorkerParallelism()
-	}
-
+func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverride *runtimepkg.Registry, parentCtx ...context.Context) error {
 	// 1. Load config
 	cfg, warnings, err := config.LoadConfig(opts.configDir)
 	if err != nil {
@@ -497,7 +283,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	}
 	logSecurityPosture(secRuntime.Current())
 	sessionsDir := filepath.Join(repoDir, ".workbuddy", "sessions")
-	auditor := audit.NewAuditor(st, sessionsDir)
+	recorder := workersession.NewRecorder(st, sessionsDir)
 
 	var workerID string
 	if !opts.coordinatorAPI {
@@ -546,18 +332,21 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 
 	// Router
 	rt := router.NewRouter(cfg.Agents, reg, st, cfg.Global.Repo, repoDir, taskCh, wsMgr, !opts.coordinatorAPI)
+	if issueDataReader, ok := ghReader.(router.IssueDataReader); ok {
+		rt.SetIssueDataReader(issueDataReader)
+	}
 
 	// Launcher
 	lnch := launcherOverride
 	if lnch == nil {
-		lnch = launcher.NewLauncher()
+		lnch = runtimepkg.NewRegistry()
 	}
-	lnch.SetSessionManager(launcher.NewSessionManager(sessionsDir, st))
+	lnch.SetSessionManager(runtimepkg.NewSessionManager(sessionsDir, st))
 
 	// Reporter
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
 	rep.SetBaseURL(fmt.Sprintf("http://localhost:%d", cfg.Global.Port))
-	rep.SetEventRecorder(evlog)
+	rep.SetEventRecorder(recorder)
 	rep.SetVerifier(reporter.NewGHClaimVerifier())
 	rt.SetReporter(rep)
 
@@ -782,8 +571,8 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	workerDone := make(chan struct{})
 	if !opts.coordinatorAPI {
 		deps := &workerDeps{
-			launcher:     lnch,
-			auditor:      auditor,
+			executor:     workerexec.NewExecutor(lnch, labelReader),
+			recorder:     recorder,
 			reporter:     rep,
 			store:        st,
 			sm:           sm,
@@ -797,10 +586,11 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 			issueReader:  labelReader,
 		}
 		wg.Add(1)
+		embeddedWorker := workerexec.NewEmbeddedWorker(deps.embeddedDeps(), opts.maxParallelTasks)
 		go func() {
 			defer wg.Done()
 			defer close(workerDone)
-			runEmbeddedWorker(ctx, taskCh, deps, opts.maxParallelTasks)
+			embeddedWorker.Run(ctx, taskCh)
 		}()
 	} else {
 		close(workerDone)
@@ -882,8 +672,8 @@ func logSecurityPosture(snapshot security.Snapshot) {
 
 // workerDeps bundles the dependencies for the embedded worker, avoiding parameter sprawl.
 type workerDeps struct {
-	launcher     *launcher.Launcher
-	auditor      *audit.Auditor
+	executor     *workerexec.Executor
+	recorder     *workersession.Recorder
 	reporter     *reporter.Reporter
 	store        *store.Store
 	sm           *statemachine.StateMachine
@@ -897,427 +687,33 @@ type workerDeps struct {
 	issueReader  issueLabelReader
 }
 
-func defaultEmbeddedWorkerParallelism() int {
-	if runtime.NumCPU() < defaultMaxParallelTasks {
-		return runtime.NumCPU()
+func (d *workerDeps) embeddedDeps() workerexec.EmbeddedDeps {
+	var runningTasks workerexec.RunningTaskRegistry
+	if d.runningTasks != nil {
+		runningTasks = d.runningTasks
 	}
-	return defaultMaxParallelTasks
-}
-
-// runEmbeddedWorker runs the embedded worker loop with bounded cross-issue
-// parallelism while serializing tasks for the same repo+issue.
-func runEmbeddedWorker(ctx context.Context, taskCh <-chan router.WorkerTask, deps *workerDeps, maxParallelTasks int) {
-	if maxParallelTasks <= 0 {
-		maxParallelTasks = defaultEmbeddedWorkerParallelism()
+	var closedIssues workerexec.ClosedIssueTracker
+	if d.closedIssues != nil {
+		closedIssues = d.closedIssues
 	}
-
-	issueLocks := &issueTaskLocks{}
-	var wg sync.WaitGroup
-
-	// Fixed-size worker pool. Each worker pulls from taskCh and serializes
-	// same-repo+issue work via per-issue locks. This caps in-flight goroutines
-	// at maxParallelTasks without holding a global slot while waiting on a
-	// per-issue lock (which would cause head-of-line blocking across issues).
-	for i := 0; i < maxParallelTasks; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case task, ok := <-taskCh:
-					if !ok {
-						return
-					}
-					runWorkerTask(ctx, task, deps, issueLocks)
-				}
-			}
-		}()
+	var issueReader workerexec.IssueLabelReader
+	if d.issueReader != nil {
+		issueReader = d.issueReader
 	}
-	wg.Wait()
-}
-
-func runWorkerTask(ctx context.Context, task router.WorkerTask, deps *workerDeps, issueLocks *issueTaskLocks) {
-	issueLock := issueLocks.Acquire(task.Repo, task.IssueNum)
-	defer issueLock.Release()
-
-	if deps.closedIssues != nil && deps.closedIssues.IsClosed(task.Repo, task.IssueNum) {
-		skipTaskForClosedIssue(task, deps)
-		return
+	return workerexec.EmbeddedDeps{
+		Executor:         d.executor,
+		Recorder:         d.recorder,
+		Reporter:         d.reporter,
+		Store:            d.store,
+		StateMachine:     d.sm,
+		WorkerID:         d.workerID,
+		Config:           d.cfg,
+		WorkspaceManager: d.wsMgr,
+		RunningTasks:     runningTasks,
+		ClosedIssues:     closedIssues,
+		TaskHub:          d.taskHub,
+		IssueReader:      issueReader,
 	}
-
-	executeTask(ctx, task, deps)
-}
-
-func skipTaskForClosedIssue(task router.WorkerTask, deps *workerDeps) {
-	log.Printf("[worker] skipping queued task %s for closed issue %s#%d",
-		task.TaskID, task.Repo, task.IssueNum)
-
-	if deps.store != nil {
-		if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
-			log.Printf("[worker] failed to update skipped task status: %v", err)
-		}
-	}
-	if deps.sm != nil {
-		var labels []string
-		if deps.store != nil {
-			labels = fetchCachedLabels(deps.store, task.Repo, task.IssueNum)
-		}
-		deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, task.TaskID, task.AgentName, 1, labels)
-	}
-}
-
-// executeTask runs a single agent task and handles reporting/auditing.
-func executeTask(ctx context.Context, task router.WorkerTask, deps *workerDeps) {
-	// Create a per-task context that can be cancelled independently (e.g., on issue close).
-	taskCtx, taskCancel := context.WithCancel(ctx)
-	defer taskCancel()
-
-	// Register for cancellation on issue close.
-	if deps.runningTasks != nil {
-		deps.runningTasks.Register(task.Repo, task.IssueNum, taskCancel)
-		defer deps.runningTasks.Remove(task.Repo, task.IssueNum)
-	}
-
-	// Clean up worktree after task completes.
-	if task.WorktreePath != "" && deps.wsMgr != nil {
-		defer func() {
-			if err := deps.wsMgr.Remove(task.WorktreePath); err != nil {
-				log.Printf("[worker] worktree cleanup failed: %v", err)
-			}
-		}()
-	}
-	log.Printf("[worker] executing task %s: agent=%s issue=%s#%d",
-		task.TaskID, task.AgentName, task.Repo, task.IssueNum)
-	startedAt := time.Now().UTC()
-
-	// Mark task as running now that the worker has actually started it.
-	if deps.store != nil {
-		if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusRunning); err != nil {
-			log.Printf("[worker] failed to update task status to running: %v", err)
-		}
-	}
-
-	// Add claim reaction (eyes) to signal this issue is being worked on.
-	addClaimReaction(taskCtx, task.Repo, task.IssueNum, task.AgentName)
-
-	// Post "Agent Started" comment with session link.
-	sessionID := task.Context.Session.ID
-	task.Context.Session.TaskID = task.TaskID
-	task.Context.Session.WorkerID = deps.workerID
-	task.Context.Session.Attempt = currentAttempt(task, deps.store)
-	if err := deps.reporter.ReportStarted(taskCtx, task.Repo, task.IssueNum, task.AgentName, sessionID, deps.workerID); err != nil {
-		log.Printf("[worker] report started failed: %v", err)
-	}
-
-	session, err := deps.launcher.Start(taskCtx, task.Agent, task.Context)
-	if err != nil {
-		// A Start error is strictly pre-exec (template render / prompt derivation
-		// failure or runtime registration miss). Classify as infra failure: post
-		// a report, update task status for the dispatch failure cap, but do NOT
-		// call StateMachine.MarkAgentCompleted — a launcher-layer error is not
-		// an agent verdict. See issue #131 / AC-3.
-		log.Printf("[worker] failed to start agent %s: %v (treating as infra failure)", task.AgentName, err)
-		if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
-			log.Printf("[worker] failed to update task status: %v", err)
-		}
-		infraResult := &launcher.Result{
-			ExitCode: -1,
-			Stderr:   err.Error(),
-			Meta: map[string]string{
-				launcher.MetaInfraFailure:       "true",
-				launcher.MetaInfraFailureReason: "launcher Start() failed: " + err.Error(),
-			},
-		}
-		publishTaskCompletion(deps.taskHub, task, store.TaskStatusFailed, infraResult.ExitCode, startedAt, time.Now().UTC())
-		logInfraFailureEvent(deps.store, task, infraResult, "launcher_start_error")
-		reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(agentShutdownWait))
-		if reportErr := deps.reporter.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, infraResult,
-			task.Context.Session.ID, deps.workerID, 0, 3, "", ""); reportErr != nil {
-			log.Printf("[worker] infra-failure report failed: %v", reportErr)
-		}
-		reportCancel()
-		return
-	}
-	var result *launcher.Result
-	var runErr error
-	defer func() { _ = session.Close() }()
-	defer func() {
-		if handle := task.Context.SessionHandle(); handle != nil {
-			status := store.TaskStatusCompleted
-			if runErr != nil || resultExitCode(result) != 0 {
-				status = store.TaskStatusFailed
-			}
-			if result != nil && result.Meta != nil && result.Meta["timeout"] == "true" {
-				status = store.TaskStatusTimeout
-			}
-			_ = handle.Close(status)
-		}
-	}()
-
-	preLabels, preSnapshotErr := snapshotIssueLabels(task.Repo, task.IssueNum, deps.issueReader)
-	if preSnapshotErr != nil {
-		log.Printf("[worker] label pre-snapshot failed: %v", preSnapshotErr)
-	} else if task.Context != nil {
-		task.Context.Session.PreLabels = cloneLabels(preLabels)
-	}
-
-	eventsCh := make(chan launcherevents.Event, 64)
-	eventsPath, waitEvents := streamSessionEvents(task.Context, eventsCh)
-	result, runErr = session.Run(taskCtx, eventsCh)
-	close(eventsCh)
-	waitErr := waitEvents()
-	if waitErr != nil {
-		log.Printf("[worker] event capture failed: %v", waitErr)
-	}
-	if result != nil && result.TokenUsage != nil && deps.store != nil {
-		eventlog.NewEventLogger(deps.store).Log(eventlog.TypeTokenUsage, task.Repo, task.IssueNum, result.TokenUsage)
-	}
-	if result != nil && eventsPath != "" && waitErr == nil {
-		// Prefer the normalized Event Schema v1 artifact as the session's
-		// canonical path so audit/reporter work off the unified stream. Any
-		// runtime-native artifact becomes RawSessionPath instead of the
-		// downstream default.
-		if result.RawSessionPath == "" {
-			result.RawSessionPath = result.SessionPath
-		}
-		result.SessionPath = eventsPath
-	}
-
-	postLabels, postSnapshotErr := snapshotIssueLabels(task.Repo, task.IssueNum, deps.issueReader)
-	if postSnapshotErr != nil {
-		log.Printf("[worker] label post-snapshot failed: %v", postSnapshotErr)
-	} else if task.Context != nil {
-		task.Context.Session.PostLabels = cloneLabels(postLabels)
-	}
-
-	completionLabels := postLabels
-	if postSnapshotErr != nil {
-		completionLabels = fetchCachedLabels(deps.store, task.Repo, task.IssueNum)
-	}
-
-	labelSummary := ""
-	if preSnapshotErr == nil && postSnapshotErr == nil {
-		if validation, ok, validationErr := validateLabelTransition(task, deps, preLabels, postLabels, result); validationErr != nil {
-			log.Printf("[worker] label validation skipped: %v", validationErr)
-		} else if ok {
-			labelSummary = validation.Summary()
-			payload := audit.LabelValidationPayload{
-				Pre:            cloneLabels(preLabels),
-				Post:           cloneLabels(postLabels),
-				ExitCode:       exitCodeForValidation(result),
-				Classification: string(validation.Classification),
-			}
-			if err := deps.auditor.RecordLabelValidation(task.Repo, task.IssueNum, payload); err != nil {
-				log.Printf("[worker] label validation audit failed: %v", err)
-			}
-			if validation.NeedsHumanRecommendation() {
-				if err := deps.reporter.ReportNeedsHuman(taskCtx, task.Repo, task.IssueNum, labelSummary); err != nil {
-					log.Printf("[worker] needs-human recommendation failed: %v", err)
-				}
-			}
-		}
-	} else if preSnapshotErr == nil || postSnapshotErr == nil {
-		log.Printf("[worker] label validation skipped: incomplete label snapshots for %s#%d", task.Repo, task.IssueNum)
-	} else {
-		log.Printf("[worker] label validation skipped: label snapshots unavailable for %s#%d", task.Repo, task.IssueNum)
-	}
-	if runErr != nil {
-		log.Printf("[worker] agent %s failed: %v", task.AgentName, runErr)
-		if result == nil {
-			// No result at all — the launcher could not produce a verdict we
-			// can reason about. Classify as infra failure (issue #131, AC-3):
-			// post a report comment, update task status (so the dispatch
-			// failure cap still bounds retries), emit an infra_failure event,
-			// but DO NOT call MarkAgentCompleted — this is not an agent verdict.
-			if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
-				log.Printf("[worker] failed to update task status: %v", err)
-			}
-			infraResult := &launcher.Result{
-				ExitCode: -1,
-				Stderr:   runErr.Error(),
-				Meta: map[string]string{
-					launcher.MetaInfraFailure:       "true",
-					launcher.MetaInfraFailureReason: "session.Run returned nil result: " + runErr.Error(),
-				},
-			}
-			publishTaskCompletion(deps.taskHub, task, store.TaskStatusFailed, infraResult.ExitCode, startedAt, time.Now().UTC())
-			logInfraFailureEvent(deps.store, task, infraResult, "session_run_nil_result")
-			reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(agentShutdownWait))
-			if reportErr := deps.reporter.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, infraResult,
-				sessionID, deps.workerID, 0, 3, "", ""); reportErr != nil {
-				log.Printf("[worker] infra-failure report failed: %v", reportErr)
-			}
-			reportCancel()
-			return
-		}
-	}
-
-	// Infra failure detected by the launcher itself: the runtime set
-	// Meta[infra_failure] to signal a pre-LLM failure (exec error, scanner
-	// overflow, plugin-cache panic, etc.). Short-circuit before we mark the
-	// state-machine as though the agent returned a FAIL verdict.
-	if launcher.IsInfraFailure(result) {
-		if err := deps.store.UpdateTaskStatus(task.TaskID, store.TaskStatusFailed); err != nil {
-			log.Printf("[worker] failed to update task status: %v", err)
-		}
-		if err := deps.auditor.Capture(sessionID, task.TaskID, task.Repo, task.IssueNum, task.AgentName, result); err != nil {
-			log.Printf("[worker] audit capture failed: %v", err)
-		}
-		publishTaskCompletion(deps.taskHub, task, store.TaskStatusFailed, result.ExitCode, startedAt, time.Now().UTC())
-		logInfraFailureEvent(deps.store, task, result, "launcher_infra_failure")
-		reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(agentShutdownWait))
-		var reportWorkDir string
-		if task.Context != nil {
-			reportWorkDir = task.Context.WorkDir
-		}
-		if reportErr := deps.reporter.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, result,
-			sessionID, deps.workerID, 0, 3, labelSummary, reportWorkDir); reportErr != nil {
-			log.Printf("[worker] infra-failure report failed: %v", reportErr)
-		}
-		reportCancel()
-		return
-	}
-
-	// Determine task status
-	status := store.TaskStatusCompleted
-	if runErr != nil || result.ExitCode != 0 {
-		status = store.TaskStatusFailed
-	}
-	if result.Meta != nil && result.Meta["timeout"] == "true" {
-		status = store.TaskStatusTimeout
-	}
-
-	// Update task status
-	if err := deps.store.UpdateTaskStatus(task.TaskID, status); err != nil {
-		log.Printf("[worker] failed to update task status: %v", err)
-	}
-
-	// Audit session
-	if err := deps.auditor.Capture(sessionID, task.TaskID, task.Repo, task.IssueNum, task.AgentName, result); err != nil {
-		log.Printf("[worker] audit capture failed: %v", err)
-	}
-	// Get retry count for reporting
-	retryCount := 0
-	maxRetries := 3
-	if wf, ok := deps.cfg.Workflows[task.Workflow]; ok {
-		maxRetries = wf.MaxRetries
-	}
-	counts, err := deps.store.QueryTransitionCounts(task.Repo, task.IssueNum)
-	if err == nil {
-		for _, tc := range counts {
-			if tc.ToState == task.State {
-				retryCount = tc.Count
-				break
-			}
-		}
-	}
-
-	// Report to issue
-	reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedWorkerTaskAPITimeout(agentShutdownWait))
-	defer reportCancel()
-	var reportWorkDir string
-	if task.Context != nil {
-		reportWorkDir = task.Context.WorkDir
-	}
-	verifyResult, err := deps.reporter.ReportWithVerification(reportCtx, task.Repo, task.IssueNum, task.AgentName, result,
-		sessionID, deps.workerID, retryCount, maxRetries, labelSummary, reportWorkDir)
-	if err != nil {
-		log.Printf("[worker] report failed: %v", err)
-	}
-
-	// If claims failed verification, treat as failure for state machine
-	exitCode := result.ExitCode
-	if verifyResult != nil && verifyResult.Partial {
-		exitCode = 1
-		status = store.TaskStatusFailed
-		if err := deps.store.UpdateTaskStatus(task.TaskID, status); err != nil {
-			log.Printf("[worker] failed to update task status after partial: %v", err)
-		}
-	}
-
-	// Mark agent completed in state machine
-	deps.sm.MarkAgentCompleted(task.Repo, task.IssueNum, task.TaskID, task.AgentName, exitCode, completionLabels)
-	publishTaskCompletion(deps.taskHub, task, status, exitCode, startedAt, time.Now().UTC())
-
-	// Fallback: if the agent completed successfully but did not change labels,
-	// the state machine won't advance. Invalidate the poller cache and
-	// redispatch so the agent gets another chance to take action.
-	if status == store.TaskStatusCompleted && preSnapshotErr == nil && postSnapshotErr == nil && labelsUnchanged(preLabels, postLabels) {
-		log.Printf("[worker] agent %s completed for %s#%d but labels unchanged — redispatching", task.AgentName, task.Repo, task.IssueNum)
-		if err := deps.store.DeleteIssueCache(task.Repo, task.IssueNum); err != nil {
-			log.Printf("[worker] fallback cache-invalidate failed: %v", err)
-		}
-	}
-}
-
-func currentAttempt(task router.WorkerTask, st *store.Store) int {
-	if st == nil {
-		return 0
-	}
-	counts, err := st.QueryTransitionCounts(task.Repo, task.IssueNum)
-	if err != nil {
-		return 0
-	}
-	for _, tc := range counts {
-		if tc.ToState == task.State {
-			return tc.Count
-		}
-	}
-	return 0
-}
-
-func publishTaskCompletion(hub *tasknotify.Hub, task router.WorkerTask, status string, exitCode int, startedAt, completedAt time.Time) {
-	if hub == nil {
-		return
-	}
-	hub.Publish(tasknotify.TaskEvent{
-		TaskID:      task.TaskID,
-		Repo:        task.Repo,
-		IssueNum:    task.IssueNum,
-		AgentName:   task.AgentName,
-		Status:      status,
-		ExitCode:    exitCode,
-		DurationMS:  completedAt.Sub(startedAt).Milliseconds(),
-		StartedAt:   startedAt,
-		CompletedAt: completedAt,
-	})
-}
-
-// logInfraFailureEvent records an eventlog.TypeInfraFailure entry for an
-// agent run that failed at the launcher layer (pre-LLM) rather than
-// returning an agent verdict. The event carries the task identifiers plus
-// the launcher-provided reason, so operators can distinguish these from
-// genuine agent FAIL verdicts in the event stream. See issue #131 / AC-4.
-func logInfraFailureEvent(st *store.Store, task router.WorkerTask, result *launcher.Result, source string) {
-	if st == nil {
-		return
-	}
-	payload := map[string]any{
-		"agent_name": task.AgentName,
-		"task_id":    task.TaskID,
-		"workflow":   task.Workflow,
-		"state":      task.State,
-		"source":     source,
-	}
-	if result != nil {
-		payload["exit_code"] = result.ExitCode
-		if result.Meta != nil {
-			if reason := result.Meta[launcher.MetaInfraFailureReason]; reason != "" {
-				payload["reason"] = reason
-			}
-		}
-		if result.Stderr != "" {
-			// Keep the stderr excerpt short; operators only need a hint.
-			stderr := result.Stderr
-			if len(stderr) > 1024 {
-				stderr = stderr[:1024]
-			}
-			payload["stderr_excerpt"] = stderr
-		}
-	}
-	eventlog.NewEventLogger(st).Log(eventlog.TypeInfraFailure, task.Repo, task.IssueNum, payload)
 }
 
 func newTaskWatchHandler(hub *tasknotify.Hub) http.HandlerFunc {
@@ -1380,200 +776,6 @@ func newTaskWatchHandler(hub *tasknotify.Hub) http.HandlerFunc {
 			}
 		}
 	}
-}
-
-func resultExitCode(result *launcher.Result) int {
-	if result == nil {
-		return -1
-	}
-	return result.ExitCode
-}
-
-func streamSessionEvents(taskCtx *launcher.TaskContext, eventsCh <-chan launcherevents.Event) (string, func() error) {
-	handle := taskCtx.SessionHandle()
-	if handle == nil {
-		return "", func() error { return nil }
-	}
-	path := handle.EventsPath()
-	errCh := make(chan error, 1)
-	go func() {
-		var encodeErr error
-		for evt := range eventsCh {
-			if encodeErr != nil {
-				continue
-			}
-			data, err := json.Marshal(evt)
-			if err != nil {
-				encodeErr = err
-				continue
-			}
-			if err := handle.WriteEvent(append(data, '\n')); err != nil {
-				encodeErr = err
-			}
-		}
-		if encodeErr != nil {
-			errCh <- encodeErr
-			return
-		}
-		errCh <- nil
-	}()
-	return path, func() error { return <-errCh }
-}
-
-// addClaimReaction adds an eyes reaction to the issue to signal an agent claimed it.
-func addClaimReaction(ctx context.Context, repo string, issueNum int, agentName string) {
-	cmd := exec.CommandContext(ctx, "gh", "api",
-		fmt.Sprintf("repos/%s/issues/%d/reactions", repo, issueNum),
-		"-f", "content=eyes", "--silent")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		if ctx.Err() != nil {
-			return // cancelled, don't log
-		}
-		log.Printf("[worker] failed to add claim reaction for %s on %s#%d: %v (output: %s)",
-			agentName, repo, issueNum, err, string(out))
-	}
-}
-
-// fetchCachedLabels retrieves the current labels for an issue from the store's
-// issue cache. Returns nil if the cache entry is missing or unparseable.
-func fetchCachedLabels(st *store.Store, repo string, issueNum int) []string {
-	cached, err := st.QueryIssueCache(repo, issueNum)
-	if err != nil || cached == nil {
-		return nil
-	}
-	var labels []string
-	if err := json.Unmarshal([]byte(cached.Labels), &labels); err != nil {
-		log.Printf("[worker] failed to parse cached labels for %s#%d: %v", repo, issueNum, err)
-		return nil
-	}
-	return labels
-}
-
-func snapshotIssueLabels(repo string, issueNum int, reader issueLabelReader) ([]string, error) {
-	if reader == nil {
-		return nil, fmt.Errorf("no issue label reader configured")
-	}
-	labels, err := reader.ReadIssueLabels(repo, issueNum)
-	if err != nil {
-		return nil, err
-	}
-	return cloneLabels(labels), nil
-}
-
-func validateLabelTransition(task router.WorkerTask, deps *workerDeps, preLabels, postLabels []string, result *launcher.Result) (labelcheck.Result, bool, error) {
-	if deps == nil || deps.cfg == nil {
-		return labelcheck.Result{}, false, fmt.Errorf("missing worker config")
-	}
-	if deps.issueReader == nil {
-		return labelcheck.Result{}, false, fmt.Errorf("no issue label reader configured")
-	}
-
-	wf, ok := deps.cfg.Workflows[task.Workflow]
-	if !ok || wf == nil {
-		return labelcheck.Result{}, false, fmt.Errorf("workflow %q not found", task.Workflow)
-	}
-	queuedState, ok := wf.States[task.State]
-	if !ok || queuedState == nil {
-		return labelcheck.Result{}, false, fmt.Errorf("state %q not found in workflow %q", task.State, task.Workflow)
-	}
-
-	input := labelcheck.Input{
-		Pre:      cloneLabels(preLabels),
-		Post:     cloneLabels(postLabels),
-		ExitCode: exitCodeForValidation(result),
-		Current:  labelcheck.State{Name: task.State, Label: queuedState.EnterLabel},
-	}
-
-	stateNames := make([]string, 0, len(wf.States))
-	for name := range wf.States {
-		stateNames = append(stateNames, name)
-	}
-	sort.Strings(stateNames)
-
-	knownSeen := make(map[string]bool)
-	for _, name := range stateNames {
-		state := wf.States[name]
-		if state == nil || state.EnterLabel == "" || knownSeen[state.EnterLabel] {
-			continue
-		}
-		knownSeen[state.EnterLabel] = true
-		input.KnownStates = append(input.KnownStates, labelcheck.State{Name: name, Label: state.EnterLabel})
-	}
-
-	input.Current = labelcheck.ResolveCurrent(input.Pre, input.Current, input.KnownStates)
-
-	currentState, err := resolveWorkflowLabelState(wf, input.Current)
-	if err != nil {
-		return labelcheck.Result{}, false, err
-	}
-
-	allowedSeen := make(map[string]bool)
-	for _, transition := range currentState.Transitions {
-		target, ok := wf.States[transition.To]
-		if !ok || target == nil || target.EnterLabel == "" || allowedSeen[target.EnterLabel] {
-			continue
-		}
-		allowedSeen[target.EnterLabel] = true
-		input.AllowedTransitions = append(input.AllowedTransitions, labelcheck.State{Name: transition.To, Label: target.EnterLabel})
-	}
-
-	return labelcheck.Classify(input), true, nil
-}
-
-func resolveWorkflowLabelState(wf *config.WorkflowConfig, current labelcheck.State) (*config.State, error) {
-	if wf == nil {
-		return nil, fmt.Errorf("missing workflow")
-	}
-	if current.Name != "" {
-		if state, ok := wf.States[current.Name]; ok && state != nil {
-			return state, nil
-		}
-	}
-	if current.Label != "" {
-		stateNames := make([]string, 0, len(wf.States))
-		for name := range wf.States {
-			stateNames = append(stateNames, name)
-		}
-		sort.Strings(stateNames)
-		for _, name := range stateNames {
-			state := wf.States[name]
-			if state != nil && state.EnterLabel == current.Label {
-				return state, nil
-			}
-		}
-	}
-	return nil, fmt.Errorf("resolved state %q (%q) not found in workflow %q", current.Name, current.Label, wf.Name)
-}
-
-func exitCodeForValidation(result *launcher.Result) int {
-	if result == nil {
-		return -1
-	}
-	return result.ExitCode
-}
-
-func cloneLabels(labels []string) []string {
-	if len(labels) == 0 {
-		return nil
-	}
-	return append([]string(nil), labels...)
-}
-
-// labelsUnchanged returns true if two label slices contain the same elements.
-func labelsUnchanged(pre, post []string) bool {
-	if len(pre) != len(post) {
-		return false
-	}
-	a := append([]string(nil), pre...)
-	b := append([]string(nil), post...)
-	sort.Strings(a)
-	sort.Strings(b)
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // recoverTasks marks running tasks as failed and re-routes pending tasks on restart.

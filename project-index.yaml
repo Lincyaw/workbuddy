@@ -108,8 +108,11 @@ documentation:
       related_code:
         - cmd/run.go
         - cmd/serve.go
+        - internal/runtime/runtime.go
         - internal/launcher/agent_bridge.go
         - internal/launcher/types.go
+        - internal/worker/executor.go
+        - internal/worker/session/stream.go
         - internal/router/router.go
         - internal/audit/audit.go
         - internal/workspace/workspace.go
@@ -121,15 +124,41 @@ documentation:
       related_code: []
       notes: Future-state design map. All prior planned docs have been implemented and migrated to docs/implemented/.
 
+    - path: docs/planned/worker-execution-boundary.md
+      bucket: planned
+      status: maintained
+      related_code:
+        - cmd/serve.go
+        - cmd/worker.go
+        - internal/ghadapter/ghcli.go
+        - internal/runtime/runtime.go
+        - internal/worker/distributed.go
+        - internal/worker/embedded.go
+        - internal/worker/executor.go
+        - internal/worker/session/recorder.go
+        - internal/worker/session/stream.go
+        - internal/launcher/types.go
+        - internal/launcher/agent_bridge.go
+        - internal/launcher/infra_failure.go
+        - internal/reporter/reporter.go
+        - internal/router/router.go
+        - internal/workspace/workspace.go
+        - internal/workerclient/client.go
+      notes: Planned design for issue #146: extract a canonical worker execution core, converge runtime/session abstractions, and centralize GitHub/session-recording boundaries.
+
     - path: docs/implemented/runtime-session-architecture.md
       bucket: implemented
       status: maintained
       related_code:
         - cmd/serve.go
+        - internal/runtime/runtime.go
         - internal/launcher/types.go
         - internal/launcher/launcher.go
         - internal/launcher/events/
         - internal/launcher/agent_bridge.go
+        - internal/worker/distributed.go
+        - internal/worker/embedded.go
+        - internal/worker/executor.go
         - internal/labelcheck/labelcheck.go
         - internal/audit/audit.go
         - internal/reporter/reporter.go
@@ -420,27 +449,26 @@ requirements:
       - "AC-006-14: 单元测试：正常执行、超时终止、模板渲染、取消、Meta 解析成功、Meta 缺失、claude-code runtime、codex runtime、未知 runtime 9 种场景"
     code:
       - internal/agent/agent.go
-      - internal/agent/bridge.go
       - internal/agent/claude/backend.go
       - internal/agent/codex/backend.go
       - internal/agent/codex/events.go
       - internal/agent/codex/jsonrpc.go
+      - internal/runtime/runtime.go
       - internal/launcher/launcher.go
       - internal/launcher/agent_bridge.go
       - internal/launcher/template.go
       - internal/launcher/claude.go
-      - internal/launcher/agent_bridge.go
       - internal/launcher/meta.go
       - internal/launcher/types.go
     tests:
       - cmd/serve_agent_backend_test.go
       - internal/agent/agent_test.go
-      - internal/agent/bridge_test.go
       - internal/agent/claude/backend_test.go
       - internal/agent/codex/backend_test.go
       - internal/agent/codex/events_test.go
       - internal/agent/codex/jsonrpc_test.go
       - internal/launcher/agent_bridge_test.go
+      - internal/launcher/agent_bridge_run_test.go
       - internal/launcher/launcher_test.go
     deps: []
 
@@ -1229,7 +1257,7 @@ requirements:
       - "AC-036-3: 退出码约定：completed=0, failed=1, timeout=2, watch 自身超时=3"
       - "AC-036-4: --issue 限定只等特定 issue 的 task，不指定则等任意 task"
       - "AC-036-5: --timeout 限定最大等待时间，默认 30m；超时后输出 No task completed within timeout 并以 exit code 3 退出"
-      - "AC-036-6: serve 进程内新增 internal/tasknotify/hub.go，实现 Publish/Subscribe/Unsubscribe；在 executeTask 末尾 Publish TaskEvent"
+      - "AC-036-6: serve 路径新增 internal/tasknotify/hub.go，实现 Publish/Subscribe/Unsubscribe；worker 完成路径在 shared embedded/coordinator worker 代码里 Publish TaskEvent"
       - "AC-036-7: 新增 SSE endpoint GET /tasks/watch?repo=X&issue=N，注册 subscriber，按 repo/issue 过滤，首条匹配事件写 SSE data 后关闭"
       - "AC-036-8: CLI 端通过标准 HTTP 连接 SSE endpoint，解析 text/event-stream 格式"
       - "AC-036-9: serve 进程未运行时（连接失败），输出明确错误 Cannot connect to workbuddy server 并 exit 1"
@@ -1240,6 +1268,7 @@ requirements:
       - main.go
       - cmd/status.go
       - cmd/serve.go
+      - internal/worker/embedded.go
       - cmd/exit_error.go
       - internal/tasknotify/hub.go
     tests:
@@ -1835,7 +1864,7 @@ requirements:
     acceptance_criteria:
       - "AC-056-1: Runtime detection sets Result.Meta[infra_failure]=true when the process cannot be started (exec.Error pre-LLM), a Rust plugin panic fires before any agent output, or the Go scanner hits a buffer-too-long condition; applies to both Claude and Codex runtimes"
       - "AC-056-2: Reporter renders a distinct 'Infra Error' header (not 'Failure') for infra-failure results; body surfaces the launcher reason and explicitly states this was not an agent verdict"
-      - "AC-056-3: In cmd/serve.go and cmd/worker.go an infra-failure still posts a report comment but does NOT call StateMachine.MarkAgentCompleted with a failure signal; the #130 failure-cap bounds retries"
+      - "AC-056-3: In the embedded and distributed worker paths (`internal/worker/embedded.go`, `cmd/worker.go`) an infra-failure still posts a report comment but does NOT call StateMachine.MarkAgentCompleted with a failure signal; the #130 failure-cap bounds retries"
       - "AC-056-4: A dedicated eventlog entry (eventlog.TypeInfraFailure) is emitted for every infra-failure run"
       - "AC-056-5: Unit tests cover pre-exec launcher error producing Meta[infra_failure] and an 'Infra Error' rendered comment; genuine agent exit!=0 NOT producing Meta[infra_failure] and still rendering as 'Failure'; worker path infra-failure does not call MarkAgentCompleted's fail path"
     code:
@@ -1846,6 +1875,8 @@ requirements:
       - internal/reporter/format.go
       - internal/reporter/reporter.go
       - internal/eventlog/eventlog.go
+      - internal/worker/embedded.go
+      - internal/worker/executor.go
       - internal/workerclient/client.go
       - cmd/coordinator.go
       - cmd/serve.go
@@ -1914,6 +1945,8 @@ requirements:
       - "AC-058-7: Unit tests cover stale metadata + prune rescue, existing-clean reuse, existing-dirty refuse, and stale-add failure"
     code:
       - internal/workspace/workspace.go
+      - internal/worker/embedded.go
+      - internal/worker/executor.go
       - cmd/worker.go
       - internal/router/router.go
       - cmd/serve.go

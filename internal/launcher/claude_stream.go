@@ -169,13 +169,17 @@ func (m *claudeStreamEventMapper) Map(line []byte, seq *uint64) []launcherevents
 
 func (m *claudeStreamEventMapper) makeEvent(seq *uint64, kind launcherevents.EventKind, payload any, raw []byte) launcherevents.Event {
 	*seq = *seq + 1
+	payloadJSON, err := launcherevents.EncodePayload(payload)
+	if err != nil {
+		payloadJSON = []byte(`{"message":"event payload encode failed"}`)
+	}
 	return launcherevents.Event{
 		Kind:      kind,
 		Timestamp: time.Now().UTC(),
 		SessionID: m.sessionID,
 		TurnID:    m.effectiveTurnID(),
 		Seq:       *seq,
-		Payload:   launcherevents.MustPayload(payload),
+		Payload:   payloadJSON,
 		Raw:       cloneRaw(raw),
 	}
 }

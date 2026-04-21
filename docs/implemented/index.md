@@ -25,10 +25,10 @@
 | `agent-catalog.md` | 2-agent catalog（dev-agent, review-agent）与各自 schema/output contract | `.github/workbuddy/agents/`, `internal/config/loader.go` |
 | `current-runtime-reporting-and-audit.md` | launcher、reporter、audit、sessions UI 行为 | `internal/launcher/`, `internal/agent/codex/`, `internal/reporter/`, `internal/audit/`, `internal/webui/` |
 | `remote-runner-github-actions.md` | GitHub Actions remote runner 的 agent config、dispatch/poll 行为 | `internal/config/`, `internal/launcher/`, `.github/workflows/` |
-| `runtime-session-architecture.md` | Runtime.Start → Session.Run 主链路，post-Run label validation | `cmd/serve.go`, `internal/launcher/`, `internal/labelcheck/`, `internal/reporter/`, `internal/audit/` |
+| `runtime-session-architecture.md` | Runtime.Start → Session.Run 主链路，post-Run label validation | `internal/worker/embedded.go`, `internal/worker/executor.go`, `internal/launcher/`, `internal/labelcheck/`, `internal/reporter/`, `internal/audit/` |
 | `event-schema-v1.md` | Event Schema v1 合同、runtime 映射、artifact 消费路径 | `internal/launcher/events/`, `internal/launcher/agent_bridge.go`, `internal/agent/codex/events.go`, `internal/launcher/claude_stream.go` |
 | `current-persistence-and-workspace.md` | 存储、事件日志、worker registry、worktree 隔离 | `internal/store/`, `internal/eventlog/`, `internal/registry/`, `internal/workspace/` |
-| `artifact-layout.md` | session artifact 位于仓库根 `.workbuddy/sessions/` | `cmd/serve.go`, `cmd/run.go`, `internal/launcher/`, `internal/audit/` |
+| `artifact-layout.md` | session artifact 位于仓库根 `.workbuddy/sessions/` | `cmd/serve.go`, `cmd/run.go`, `internal/worker/executor.go`, `internal/launcher/`, `internal/audit/` |
 | `issue-dependencies.md` | issue dependency 声明、verdict、dispatch gate、😕 反应信号 | `cmd/serve.go`, `internal/dependency/`, `internal/store/`, `internal/statemachine/` |
 | `audit-http-server.md` | REQ-011 审计 HTTP 端点：/events、/issues/.../state、/sessions/:id | `cmd/serve.go`, `internal/auditapi/`, `internal/webui/` |
 | `distributed-topology-and-cli.md` | Coordinator/Worker 分布式拓扑、全部 CLI 命令列表、HTTP API | `cmd/coordinator.go`, `cmd/worker.go`, `internal/coordinator/http/` |
