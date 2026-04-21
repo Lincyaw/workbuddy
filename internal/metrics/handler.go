@@ -1,7 +1,6 @@
 package metrics
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -15,18 +14,32 @@ import (
 
 const stuckThreshold = time.Hour
 
+// Source is the narrow, read-only view of persistence required by the metrics
+// handler. It is satisfied by *store.Store and exists so this package never
+// touches a raw *sql.DB. Keeping the surface small (only aggregates, not
+// arbitrary SQL) is the point of issue #145 finding #9.
+type Source interface {
+	CountEventsByRepoType() ([]store.EventCountByRepoType, error)
+	TokenUsageEvents(eventType string) ([]store.TokenUsagePayload, error)
+	CountTasksByRepoStatus() ([]store.TaskCountByRepoStatus, error)
+	CountWorkersByRepo() ([]store.WorkerCountByRepo, error)
+	MaxTransitionCounts() ([]store.TransitionMaxCount, error)
+	ListOpenIssueActivity(pendingStatus, runningStatus string) ([]store.IssueActivityRow, error)
+}
+
 // Handler serves Prometheus metrics from SQLite state.
 type Handler struct {
-	store *store.Store
+	src   Source
 	evlog *eventlog.EventLogger
 	now   func() time.Time
 }
 
-// NewHandler returns a handler bound to the provided store.
-func NewHandler(st *store.Store) *Handler {
+// NewHandler returns a handler bound to the provided metrics source. Any type
+// satisfying Source can be passed; in production this is *store.Store.
+func NewHandler(src Source) *Handler {
 	return &Handler{
-		store: st,
-		now:   time.Now,
+		src: src,
+		now: time.Now,
 	}
 }
 
@@ -60,21 +73,20 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) writeMetrics(b *strings.Builder, now time.Time) error {
-	db := h.store.DB()
-	if err := h.writeEventCounters(b, db); err != nil {
+	if err := h.writeEventCounters(b); err != nil {
 		return err
 	}
-	if err := h.writeTaskCounters(b, db); err != nil {
+	if err := h.writeTaskCounters(b); err != nil {
 		return err
 	}
-	if err := h.writeWorkerCounters(b, db); err != nil {
+	if err := h.writeWorkerCounters(b); err != nil {
 		return err
 	}
-	if err := h.writeTransitionMaxCounters(b, db); err != nil {
+	if err := h.writeTransitionMaxCounters(b); err != nil {
 		return err
 	}
 	h.writeEventlogHealth(b)
-	return h.writeIssueCounters(b, db, now)
+	return h.writeIssueCounters(b, now)
 }
 
 func (h *Handler) writeEventlogHealth(b *strings.Builder) {
@@ -94,90 +106,66 @@ func (h *Handler) writeEventlogHealth(b *strings.Builder) {
 	_, _ = b.WriteString(fmt.Sprintf("workbuddy_eventlog_degraded %d\n", degraded))
 }
 
-func (h *Handler) writeEventCounters(b *strings.Builder, db *sql.DB) error {
-	rows, err := db.Query(`SELECT COALESCE(repo, ''), COALESCE(type, ''), COUNT(1) FROM events GROUP BY repo, type`)
+func (h *Handler) writeEventCounters(b *strings.Builder) error {
+	agg, err := h.src.CountEventsByRepoType()
 	if err != nil {
 		return fmt.Errorf("events query: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
-
-	type eventMetric struct {
-		repo string
-		typ  string
-		cnt  int64
-	}
-	metrics := make([]eventMetric, 0)
+	metrics := append([]store.EventCountByRepoType(nil), agg...)
 	eventCounts := make(map[string]map[string]int64)
-	for rows.Next() {
-		var m eventMetric
-		if err := rows.Scan(&m.repo, &m.typ, &m.cnt); err != nil {
-			return fmt.Errorf("scan events: %w", err)
-		}
-		metrics = append(metrics, m)
-		byType, ok := eventCounts[m.typ]
+	for _, m := range metrics {
+		byType, ok := eventCounts[m.Type]
 		if !ok {
 			byType = make(map[string]int64)
-			eventCounts[m.typ] = byType
+			eventCounts[m.Type] = byType
 		}
-		byType[m.repo] = m.cnt
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("scan events rows: %w", err)
+		byType[m.Repo] = m.Count
 	}
 
 	sort.Slice(metrics, func(i, j int) bool {
-		if metrics[i].repo == metrics[j].repo {
-			return metrics[i].typ < metrics[j].typ
+		if metrics[i].Repo == metrics[j].Repo {
+			return metrics[i].Type < metrics[j].Type
 		}
-		return metrics[i].repo < metrics[j].repo
+		return metrics[i].Repo < metrics[j].Repo
 	})
 
 	_, _ = b.WriteString("# HELP workbuddy_events_total Total count of lifecycle events by type and repository.\n")
 	_, _ = b.WriteString("# TYPE workbuddy_events_total counter\n")
 	for _, m := range metrics {
 		_, _ = b.WriteString(fmt.Sprintf(`workbuddy_events_total{repo=%s,type=%s} %d`+"\n",
-			promLabel(m.repo, "repo"), promLabel(m.typ, "type"), m.cnt))
+			promLabel(m.Repo, "repo"), promLabel(m.Type, "type"), m.Count))
 	}
 	h.writeDerivedEventCounter(b, "workbuddy_tasks_dispatched_total", "Total workflow dispatch events.", eventCounts[eventlog.TypeDispatch])
 	h.writeDerivedEventCounter(b, "workbuddy_retry_limit_reached_total", "Total retry limit reached events.", eventCounts[eventlog.TypeRetryLimit])
 	h.writeDerivedEventCounter(b, "workbuddy_cycle_limit_reached_total", "Total cycle limit reached events.", eventCounts[eventlog.TypeCycleLimitReached])
 	h.writeDerivedEventCounter(b, "workbuddy_dependency_blocked_total", "Total events for dispatches blocked by dependency verdict.", eventCounts[eventlog.TypeDispatchBlockedByDependency])
 
-	tokenTotals := map[string]map[string]int64{}
-	var tokenParseErrors int64
-	tokenRows, err := db.Query(`SELECT COALESCE(repo, ''), COALESCE(payload, '') FROM events WHERE type = ?`, eventlog.TypeTokenUsage)
+	tokenEvents, err := h.src.TokenUsageEvents(eventlog.TypeTokenUsage)
 	if err != nil {
 		return fmt.Errorf("token usage query: %w", err)
 	}
-	defer func() { _ = tokenRows.Close() }()
-	for tokenRows.Next() {
-		var repo, rawPayload string
-		if err := tokenRows.Scan(&repo, &rawPayload); err != nil {
-			return fmt.Errorf("scan token usage: %w", err)
-		}
+	tokenTotals := map[string]map[string]int64{}
+	var tokenParseErrors int64
+	for _, ev := range tokenEvents {
 		var usage struct {
 			Input  int64 `json:"input"`
 			Output int64 `json:"output"`
 			Cached int64 `json:"cached"`
 			Total  int64 `json:"total"`
 		}
-		if err := json.Unmarshal([]byte(rawPayload), &usage); err != nil {
+		if err := json.Unmarshal([]byte(ev.Payload), &usage); err != nil {
 			tokenParseErrors++
 			continue
 		}
-
-		agg, ok := tokenTotals[repo]
+		agg, ok := tokenTotals[ev.Repo]
 		if !ok {
 			agg = map[string]int64{}
-			tokenTotals[repo] = agg
+			tokenTotals[ev.Repo] = agg
 		}
 		agg["input"] += usage.Input
 		agg["output"] += usage.Output
 		agg["cached"] += usage.Cached
 		agg["total"] += usage.Total
-	}
-	if err := tokenRows.Err(); err != nil {
-		return fmt.Errorf("scan token usage rows: %w", err)
 	}
 
 	_, _ = b.WriteString("# HELP workbuddy_token_parse_errors_total Number of malformed token usage payloads.\n")
@@ -218,190 +206,98 @@ func (h *Handler) writeDerivedEventCounter(b *strings.Builder, metricName, helpT
 	}
 }
 
-func (h *Handler) writeTaskCounters(b *strings.Builder, db *sql.DB) error {
-	rows, err := db.Query(`SELECT COALESCE(repo, ''), COALESCE(status, ''), COUNT(1) FROM task_queue GROUP BY repo, status`)
+func (h *Handler) writeTaskCounters(b *strings.Builder) error {
+	metrics, err := h.src.CountTasksByRepoStatus()
 	if err != nil {
 		return fmt.Errorf("tasks query: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
-
-	type metric struct {
-		repo   string
-		status string
-		count  int64
-	}
-	metrics := make([]metric, 0)
-	for rows.Next() {
-		var m metric
-		if err := rows.Scan(&m.repo, &m.status, &m.count); err != nil {
-			return fmt.Errorf("scan tasks: %w", err)
-		}
-		metrics = append(metrics, m)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("scan task rows: %w", err)
-	}
-
 	sort.Slice(metrics, func(i, j int) bool {
-		if metrics[i].repo == metrics[j].repo {
-			return metrics[i].status < metrics[j].status
+		if metrics[i].Repo == metrics[j].Repo {
+			return metrics[i].Status < metrics[j].Status
 		}
-		return metrics[i].repo < metrics[j].repo
+		return metrics[i].Repo < metrics[j].Repo
 	})
 
 	_, _ = b.WriteString("# HELP workbuddy_tasks_active Active task count by repo and status.\n")
 	_, _ = b.WriteString("# TYPE workbuddy_tasks_active gauge\n")
 	for _, m := range metrics {
 		_, _ = b.WriteString(fmt.Sprintf(`workbuddy_tasks_active{repo=%s,status=%s} %d`+"\n",
-			promLabel(m.repo, "repo"), promLabel(m.status, "status"), m.count))
+			promLabel(m.Repo, "repo"), promLabel(m.Status, "status"), m.Count))
 	}
 	return nil
 }
 
-func (h *Handler) writeWorkerCounters(b *strings.Builder, db *sql.DB) error {
-	rows, err := db.Query(`
-		SELECT COALESCE(repo, ''), COUNT(1),
-		       SUM(CASE WHEN status = 'online' THEN 1 ELSE 0 END)
-		FROM workers
-		GROUP BY repo`)
+func (h *Handler) writeWorkerCounters(b *strings.Builder) error {
+	metrics, err := h.src.CountWorkersByRepo()
 	if err != nil {
 		return fmt.Errorf("workers query: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
-
-	type metric struct {
-		repo   string
-		total  int64
-		online int64
-	}
-	metrics := make([]metric, 0)
-	for rows.Next() {
-		var m metric
-		if err := rows.Scan(&m.repo, &m.total, &m.online); err != nil {
-			return fmt.Errorf("scan workers: %w", err)
-		}
-		metrics = append(metrics, m)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("scan worker rows: %w", err)
-	}
-
-	sort.Slice(metrics, func(i, j int) bool { return metrics[i].repo < metrics[j].repo })
+	sort.Slice(metrics, func(i, j int) bool { return metrics[i].Repo < metrics[j].Repo })
 	_, _ = b.WriteString("# HELP workbuddy_workers_total Total registered workers by repo.\n")
 	_, _ = b.WriteString("# TYPE workbuddy_workers_total gauge\n")
 	_, _ = b.WriteString("# HELP workbuddy_workers_online Online workers by repo.\n")
 	_, _ = b.WriteString("# TYPE workbuddy_workers_online gauge\n")
 	for _, m := range metrics {
-		repoLabel := promLabel(m.repo, "repo")
-		_, _ = b.WriteString(fmt.Sprintf("workbuddy_workers_total{repo=%s} %d\n", repoLabel, m.total))
-		_, _ = b.WriteString(fmt.Sprintf("workbuddy_workers_online{repo=%s} %d\n", repoLabel, m.online))
+		repoLabel := promLabel(m.Repo, "repo")
+		_, _ = b.WriteString(fmt.Sprintf("workbuddy_workers_total{repo=%s} %d\n", repoLabel, m.Total))
+		_, _ = b.WriteString(fmt.Sprintf("workbuddy_workers_online{repo=%s} %d\n", repoLabel, m.Online))
 	}
 	return nil
 }
 
-func (h *Handler) writeTransitionMaxCounters(b *strings.Builder, db *sql.DB) error {
-	rows, err := db.Query(`SELECT COALESCE(repo, ''), COALESCE(from_state, ''), COALESCE(to_state, ''), MAX(count) FROM transition_counts GROUP BY repo, from_state, to_state`)
+func (h *Handler) writeTransitionMaxCounters(b *strings.Builder) error {
+	metrics, err := h.src.MaxTransitionCounts()
 	if err != nil {
 		return fmt.Errorf("transition max query: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
-
-	type metric struct {
-		repo      string
-		fromState string
-		toState   string
-		maxCount  int64
-	}
-	metrics := make([]metric, 0)
-	for rows.Next() {
-		var m metric
-		if err := rows.Scan(&m.repo, &m.fromState, &m.toState, &m.maxCount); err != nil {
-			return fmt.Errorf("scan transition max: %w", err)
-		}
-		metrics = append(metrics, m)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("scan transition max rows: %w", err)
-	}
-
 	sort.Slice(metrics, func(i, j int) bool {
 		a, b := metrics[i], metrics[j]
-		if a.repo == b.repo {
-			if a.fromState == b.fromState {
-				return a.toState < b.toState
+		if a.Repo == b.Repo {
+			if a.FromState == b.FromState {
+				return a.ToState < b.ToState
 			}
-			return a.fromState < b.fromState
+			return a.FromState < b.FromState
 		}
-		return a.repo < b.repo
+		return a.Repo < b.Repo
 	})
 
 	_, _ = b.WriteString("# HELP workbuddy_transition_max_count Maximum retry count observed for each workflow transition.\n")
 	_, _ = b.WriteString("# TYPE workbuddy_transition_max_count gauge\n")
 	for _, m := range metrics {
 		_, _ = b.WriteString(fmt.Sprintf(`workbuddy_transition_max_count{repo=%s,from=%s,to=%s} %d`+"\n",
-			promLabel(m.repo, "repo"), promLabel(m.fromState, "from"), promLabel(m.toState, "to"), m.maxCount))
+			promLabel(m.Repo, "repo"), promLabel(m.FromState, "from"), promLabel(m.ToState, "to"), m.MaxCount))
 	}
 	return nil
 }
 
-func (h *Handler) writeIssueCounters(b *strings.Builder, db *sql.DB, now time.Time) error {
-	rows, err := db.Query(`
-		SELECT
-			ic.repo,
-			ic.issue_num,
-			ic.labels,
-			COALESCE(ic.state, ''),
-			(
-				SELECT MAX(e.ts) FROM events e
-				WHERE e.repo = ic.repo AND e.issue_num = ic.issue_num
-			),
-			(
-				SELECT COUNT(1) FROM task_queue tq
-				WHERE tq.repo = ic.repo AND tq.issue_num = ic.issue_num
-					AND tq.status IN (?, ?)
-			)
-		FROM issue_cache ic
-		WHERE (ic.state = 'open' OR ic.state IS NULL)
-			AND (ic.state IS NULL OR ic.state NOT LIKE 'pr:%')`,
-		store.TaskStatusPending, store.TaskStatusRunning)
+func (h *Handler) writeIssueCounters(b *strings.Builder, now time.Time) error {
+	rows, err := h.src.ListOpenIssueActivity(store.TaskStatusPending, store.TaskStatusRunning)
 	if err != nil {
 		return fmt.Errorf("open issue query: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
 
 	openIssues := map[string]int64{}
 	stuckIssues := map[string]int64{}
-	for rows.Next() {
-		var repo, labelsJSON, issueState string
-		var issueNum int
-		var rawLastEvent sql.NullString
-		var activeTaskCount int
-		if err := rows.Scan(&repo, &issueNum, &labelsJSON, &issueState, &rawLastEvent, &activeTaskCount); err != nil {
-			return fmt.Errorf("scan issue row: %w", err)
-		}
-		openIssues[repo]++
+	for _, row := range rows {
+		openIssues[row.Repo]++
 
-		_ = issueNum
-		state := inferCurrentState(labelsJSON, issueState)
+		state := inferCurrentState(row.LabelsJSON, row.State)
 		if !isIntermediateState(state) {
 			continue
 		}
-		if activeTaskCount > 0 {
+		if row.ActiveTaskCount > 0 {
 			continue
 		}
-		if !rawLastEvent.Valid {
+		if !row.LastEventAt.Valid {
 			continue
 		}
-		lastEventAt, ok := parseEventTimestamp(rawLastEvent.String)
+		lastEventAt, ok := parseEventTimestamp(row.LastEventAt.String)
 		if !ok {
 			continue
 		}
 		if now.Sub(lastEventAt) > stuckThreshold {
-			stuckIssues[repo]++
+			stuckIssues[row.Repo]++
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("scan issue rows: %w", err)
 	}
 
 	repos := make([]string, 0, len(openIssues))

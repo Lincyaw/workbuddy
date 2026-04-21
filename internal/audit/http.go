@@ -178,23 +178,7 @@ func (h *HTTPHandler) queryIssueState(repo string, issueNum int) (IssueStateResp
 }
 
 func (h *HTTPHandler) latestIssueEvent(repo string, issueNum int) (*time.Time, error) {
-	var raw string
-	err := h.store.DB().QueryRow(
-		`SELECT ts FROM events WHERE repo = ? AND issue_num = ? ORDER BY ts DESC, id DESC LIMIT 1`,
-		repo, issueNum,
-	).Scan(&raw)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("latest issue event: %w", err)
-	}
-	ts, ok := parseAuditTimestamp(raw)
-	if !ok {
-		return nil, nil
-	}
-	ts = ts.UTC()
-	return &ts, nil
+	return h.store.LatestEventAt(repo, issueNum)
 }
 
 func parseEventFilter(values url.Values) (eventlog.EventFilter, error) {

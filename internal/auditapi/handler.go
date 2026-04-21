@@ -560,62 +560,38 @@ func (h *Handler) queryAlerts(r *http.Request) ([]operator.Alert, error) {
 
 func (h *Handler) queryStatus() (statusResponse, error) {
 	var resp statusResponse
-	if err := h.store.DB().QueryRow(
-		`SELECT COUNT(*)
-		 FROM sessions s
-		 LEFT JOIN task_queue t ON t.id = s.task_id
-		 WHERE COALESCE(t.status, s.status) IN (?, ?)`,
-		store.TaskStatusPending, store.TaskStatusRunning,
-	).Scan(&resp.ActiveSessions); err != nil {
+	active, err := h.store.CountActiveSessions()
+	if err != nil {
 		return resp, fmt.Errorf("count active sessions: %w", err)
 	}
-	if err := h.store.DB().QueryRow(`SELECT COUNT(*) FROM workers`).Scan(&resp.Workers); err != nil {
+	resp.ActiveSessions = active
+	workers, err := h.store.CountWorkers()
+	if err != nil {
 		return resp, fmt.Errorf("count workers: %w", err)
 	}
-	var raw sql.NullString
-	if err := h.store.DB().QueryRow(
-		`SELECT ts FROM events WHERE type = ? ORDER BY id DESC LIMIT 1`,
-		poller.EventPollCycleDone,
-	).Scan(&raw); err != nil && err != sql.ErrNoRows {
+	resp.Workers = workers
+	lastPoll, err := h.store.LastEventTimestampByType(poller.EventPollCycleDone)
+	if err != nil {
 		return resp, fmt.Errorf("query last poll: %w", err)
 	}
-	if raw.Valid {
-		if ts, ok := parseSQLiteTimestamp(raw.String); ok {
-			ts = ts.UTC()
-			resp.LastPoll = &ts
-		}
-	}
+	resp.LastPoll = lastPoll
 	return resp, nil
 }
 
 func (h *Handler) listSessions(repo string, limit, offset int) ([]sessionListResponse, error) {
-	query := `SELECT s.id, s.session_id, s.task_id, s.repo, s.issue_num, s.agent_name, s.runtime, s.worker_id, s.attempt,
-	                 COALESCE(t.status, s.status),
-	                 s.dir, s.stdout_path, s.stderr_path, s.tool_calls_path, s.metadata_path, s.summary, s.raw_path, s.created_at, s.closed_at
-	          FROM sessions s
-	          LEFT JOIN task_queue t ON t.id = s.task_id
-	          WHERE 1=1`
-	args := make([]any, 0, 3)
-	if strings.TrimSpace(repo) != "" {
-		query += ` AND s.repo = ?`
-		args = append(args, strings.TrimSpace(repo))
-	}
-	query += ` ORDER BY s.id DESC LIMIT ? OFFSET ?`
-	args = append(args, limit, offset)
-
-	rows, err := h.store.DB().Query(query, args...)
+	records, err := h.store.ListSessionsForAPI(store.SessionListFilter{
+		Repo:   repo,
+		Limit:  limit,
+		Offset: offset,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("list sessions: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
 
-	var out []sessionListResponse
-	for rows.Next() {
-		record, err := scanSessionRecord(rows.Scan)
-		if err != nil {
-			return nil, fmt.Errorf("scan session: %w", err)
-		}
-		exitCode, _, finishedAt, err := h.sessionTaskStats(*record)
+	out := make([]sessionListResponse, 0, len(records))
+	for i := range records {
+		record := records[i]
+		exitCode, _, finishedAt, err := h.sessionTaskStats(record)
 		if err != nil {
 			return nil, err
 		}
@@ -636,7 +612,7 @@ func (h *Handler) listSessions(repo string, limit, offset int) ([]sessionListRes
 			Summary:    record.Summary,
 		})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (h *Handler) buildSessionDetail(record store.SessionRecord) (sessionDetailResponse, error) {
@@ -707,47 +683,26 @@ func (h *Handler) sessionTaskStats(record store.SessionRecord) (int, string, *ti
 
 func (h *Handler) queryMetrics() (metricsResponse, error) {
 	resp := metricsResponse{AgentExecutions: map[string]int{}}
-	var total, successful, retried int
-	var avg sql.NullFloat64
-	if err := h.store.DB().QueryRow(
-		`SELECT
-			 COUNT(*),
-			 SUM(CASE WHEN COALESCE(t.status, s.status) = ? THEN 1 ELSE 0 END),
-			 AVG(CASE
-				 WHEN s.closed_at IS NOT NULL THEN (julianday(s.closed_at) - julianday(s.created_at)) * 86400.0
-				 ELSE NULL
-			 END),
-			 SUM(CASE WHEN s.attempt > 1 THEN 1 ELSE 0 END)
-		 FROM sessions s
-		 LEFT JOIN task_queue t ON t.id = s.task_id
-		 WHERE COALESCE(t.status, s.status) IN (?, ?, ?)`,
-		store.TaskStatusCompleted,
-		store.TaskStatusCompleted, store.TaskStatusFailed, store.TaskStatusTimeout,
-	).Scan(&total, &successful, &avg, &retried); err != nil {
+	agg, err := h.store.AggregateSessionMetrics()
+	if err != nil {
 		return resp, fmt.Errorf("aggregate metrics: %w", err)
 	}
-	if total > 0 {
-		resp.SuccessRate = float64(successful) / float64(total)
-		resp.RetryRate = float64(retried) / float64(total)
+	if agg.Total > 0 {
+		resp.SuccessRate = float64(agg.Successful) / float64(agg.Total)
+		resp.RetryRate = float64(agg.Retried) / float64(agg.Total)
 	}
-	if avg.Valid {
-		resp.AvgDuration = avg.Float64
+	if agg.AvgDuration.Valid {
+		resp.AvgDuration = agg.AvgDuration.Float64
 	}
 
-	rows, err := h.store.DB().Query(`SELECT agent_name, COUNT(*) FROM sessions GROUP BY agent_name ORDER BY agent_name`)
+	perAgent, err := h.store.CountSessionsByAgent()
 	if err != nil {
 		return resp, fmt.Errorf("aggregate per-agent counts: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var agentName string
-		var count int
-		if err := rows.Scan(&agentName, &count); err != nil {
-			return resp, fmt.Errorf("scan per-agent counts: %w", err)
-		}
-		resp.AgentExecutions[agentName] = count
+	for _, row := range perAgent {
+		resp.AgentExecutions[row.AgentName] = row.Count
 	}
-	return resp, rows.Err()
+	return resp, nil
 }
 
 func scanSessionRecord(scan func(dest ...any) error) (*store.SessionRecord, error) {

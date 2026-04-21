@@ -2,7 +2,6 @@
 package workflow
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -33,14 +32,27 @@ type WorkflowInstance struct {
 // ErrWorkflowInstanceNotFound is returned when requested instance rows do not exist.
 var ErrWorkflowInstanceNotFound = errors.New("workflow instance not found")
 
-// Manager provides CRUD operations for workflow instances and transitions.
-type Manager struct {
-	db *sql.DB
+// Repository is the narrow persistence surface required by Manager. It is
+// satisfied by *store.Store and is defined here so workflow.Manager does not
+// have to reach through to a raw *sql.DB.
+type Repository interface {
+	CreateWorkflowInstanceIfMissing(id, workflowName, repo string, issueNum int, currentState string) error
+	AdvanceWorkflowInstance(id, fromState, toState, triggerAgent string, at time.Time) error
+	QueryWorkflowInstancesByRepoIssue(repo string, issueNum int) ([]store.WorkflowInstanceRow, error)
+	GetWorkflowInstanceByID(id string) (*store.WorkflowInstanceRow, error)
+	QueryWorkflowTransitions(instanceID string) ([]store.WorkflowTransitionRow, error)
 }
 
-// NewManager creates a workflow manager using an existing SQLite connection.
-func NewManager(db *sql.DB) *Manager {
-	return &Manager{db: db}
+// Manager provides CRUD operations for workflow instances and transitions.
+type Manager struct {
+	repo Repository
+}
+
+// NewManager creates a workflow manager bound to the given store-backed
+// repository. Passing nil is permitted but every subsequent call will return
+// "workflow manager not initialized".
+func NewManager(repo Repository) *Manager {
+	return &Manager{repo: repo}
 }
 
 // CreateIfMissing creates a WorkflowInstance if one does not exist.
@@ -48,17 +60,11 @@ func NewManager(db *sql.DB) *Manager {
 func (m *Manager) CreateIfMissing(
 	repo string, issueNum int, workflowName, currentState string,
 ) error {
-	if m == nil || m.db == nil {
+	if m == nil || m.repo == nil {
 		return errors.New("workflow manager not initialized")
 	}
 	id := makeInstanceID(repo, issueNum, workflowName)
-
-	_, err := m.db.Exec(
-		`INSERT INTO workflow_instances (id, workflow_name, repo, issue_num, current_state)
-		 VALUES (?, ?, ?, ?, ?) ON CONFLICT (repo, issue_num, workflow_name) DO NOTHING`,
-		id, workflowName, repo, issueNum, currentState,
-	)
-	if err != nil {
+	if err := m.repo.CreateWorkflowInstanceIfMissing(id, workflowName, repo, issueNum, currentState); err != nil {
 		return fmt.Errorf("create workflow instance: %w", err)
 	}
 	return nil
@@ -66,158 +72,90 @@ func (m *Manager) CreateIfMissing(
 
 // Advance writes a new transition and updates CurrentState atomically.
 func (m *Manager) Advance(repo string, issueNum int, workflowName, fromState, toState, triggerAgent string) error {
-	if m == nil || m.db == nil {
+	if m == nil || m.repo == nil {
 		return errors.New("workflow manager not initialized")
 	}
 	id := makeInstanceID(repo, issueNum, workflowName)
-
-	tx, err := m.db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin advance tx: %w", err)
-	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	now := time.Now().UTC()
-	if _, err := tx.Exec(
-		`INSERT INTO workflow_transitions (workflow_instance_id, from_state, to_state, trigger_agent, created_at)
-		 VALUES (?, ?, ?, ?, ?)`,
-		id, fromState, toState, triggerAgent, now.Format(time.RFC3339),
-	); err != nil {
-		return fmt.Errorf("insert transition: %w", err)
-	}
-
-	result, err := tx.Exec(
-		`UPDATE workflow_instances
-			SET current_state = ?, updated_at = ?
-			WHERE id = ?`,
-		toState, now.Format(time.RFC3339), id,
-	)
-	if err != nil {
-		return fmt.Errorf("update workflow instance state: %w", err)
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("rows affected: %w", err)
-	}
-	if rows == 0 {
+	err := m.repo.AdvanceWorkflowInstance(id, fromState, toState, triggerAgent, time.Now().UTC())
+	if errors.Is(err, store.ErrWorkflowInstanceNotFound) {
 		return ErrWorkflowInstanceNotFound
 	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit advance tx: %w", err)
+	if err != nil {
+		return fmt.Errorf("advance workflow instance: %w", err)
 	}
 	return nil
 }
 
 // QueryByRepoIssue returns all workflow instances for one issue with history.
 func (m *Manager) QueryByRepoIssue(repo string, issueNum int) ([]WorkflowInstance, error) {
-	if m == nil || m.db == nil {
+	if m == nil || m.repo == nil {
 		return nil, errors.New("workflow manager not initialized")
 	}
-	rows, err := m.db.Query(
-		`SELECT id, workflow_name, repo, issue_num, current_state, created_at, updated_at
-		 FROM workflow_instances
-		 WHERE repo = ? AND issue_num = ?
-		 ORDER BY created_at, id`,
-		repo, issueNum,
-	)
+	rows, err := m.repo.QueryWorkflowInstancesByRepoIssue(repo, issueNum)
 	if err != nil {
 		return nil, fmt.Errorf("query workflow instances: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
-
-	var out []WorkflowInstance
-	for rows.Next() {
-		inst := WorkflowInstance{}
-		var createdAtStr, updatedAtStr string
-		if err := rows.Scan(
-			&inst.ID, &inst.WorkflowName, &inst.Repo, &inst.IssueNum, &inst.CurrentState,
-			&createdAtStr, &updatedAtStr,
-		); err != nil {
-			return nil, fmt.Errorf("scan workflow instance: %w", err)
-		}
-		inst.CreatedAt, _ = store.ParseTimestamp(createdAtStr, "workflow.created_at")
-		inst.UpdatedAt, _ = store.ParseTimestamp(updatedAtStr, "workflow.updated_at")
-		inst.History, err = m.queryHistory(inst.ID)
+	out := make([]WorkflowInstance, 0, len(rows))
+	for _, r := range rows {
+		inst := instanceFromRow(r)
+		inst.History, err = m.loadHistory(inst.ID)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, inst)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate workflow instances: %w", err)
 	}
 	return out, nil
 }
 
 // GetByID loads one WorkflowInstance and its transitions by ID.
 func (m *Manager) GetByID(id string) (*WorkflowInstance, error) {
-	if m == nil || m.db == nil {
+	if m == nil || m.repo == nil {
 		return nil, errors.New("workflow manager not initialized")
 	}
-	row := m.db.QueryRow(
-		`SELECT id, workflow_name, repo, issue_num, current_state, created_at, updated_at
-		 FROM workflow_instances
-		 WHERE id = ?`,
-		id,
-	)
-	record, err := scanInstance(row.Scan)
-	if err == sql.ErrNoRows {
+	row, err := m.repo.GetWorkflowInstanceByID(id)
+	if errors.Is(err, store.ErrWorkflowInstanceNotFound) {
 		return nil, ErrWorkflowInstanceNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("query workflow instance by id: %w", err)
 	}
-	record.History, err = m.queryHistory(record.ID)
+	inst := instanceFromRow(*row)
+	inst.History, err = m.loadHistory(inst.ID)
 	if err != nil {
 		return nil, err
 	}
-	return record, nil
+	return &inst, nil
 }
 
-func (m *Manager) queryHistory(instanceID string) ([]StateTransition, error) {
-	rows, err := m.db.Query(
-		`SELECT from_state, to_state, trigger_agent, created_at
-		 FROM workflow_transitions
-		 WHERE workflow_instance_id = ?
-		 ORDER BY created_at ASC, id ASC`,
-		instanceID,
-	)
+func (m *Manager) loadHistory(instanceID string) ([]StateTransition, error) {
+	rows, err := m.repo.QueryWorkflowTransitions(instanceID)
 	if err != nil {
 		return nil, fmt.Errorf("query workflow transitions: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
-
-	history := make([]StateTransition, 0)
-	for rows.Next() {
-		var tr StateTransition
-		var ts string
-		if err := rows.Scan(&tr.From, &tr.To, &tr.TriggerAgent, &ts); err != nil {
-			return nil, fmt.Errorf("scan workflow transition: %w", err)
-		}
-		tr.Timestamp, _ = store.ParseTimestamp(ts, "workflow_transition.created_at")
-		history = append(history, tr)
+	out := make([]StateTransition, 0, len(rows))
+	for _, r := range rows {
+		ts, _ := store.ParseTimestamp(r.CreatedAt, "workflow_transition.created_at")
+		out = append(out, StateTransition{
+			From:         r.FromState,
+			To:           r.ToState,
+			Timestamp:    ts,
+			TriggerAgent: r.TriggerAgent,
+		})
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate workflow transitions: %w", err)
-	}
-	return history, nil
+	return out, nil
 }
 
-func scanInstance(scan func(dest ...any) error) (*WorkflowInstance, error) {
-	record := &WorkflowInstance{}
-	var createdAtStr, updatedAtStr string
-	if err := scan(
-		&record.ID, &record.WorkflowName, &record.Repo, &record.IssueNum,
-		&record.CurrentState, &createdAtStr, &updatedAtStr,
-	); err != nil {
-		return nil, err
+func instanceFromRow(r store.WorkflowInstanceRow) WorkflowInstance {
+	inst := WorkflowInstance{
+		ID:           r.ID,
+		WorkflowName: r.WorkflowName,
+		Repo:         r.Repo,
+		IssueNum:     r.IssueNum,
+		CurrentState: r.CurrentState,
 	}
-	record.CreatedAt, _ = store.ParseTimestamp(createdAtStr, "workflow.created_at")
-	record.UpdatedAt, _ = store.ParseTimestamp(updatedAtStr, "workflow.updated_at")
-	return record, nil
+	inst.CreatedAt, _ = store.ParseTimestamp(r.CreatedAt, "workflow.created_at")
+	inst.UpdatedAt, _ = store.ParseTimestamp(r.UpdatedAt, "workflow.updated_at")
+	return inst
 }
 
 func makeInstanceID(repo string, issueNum int, workflowName string) string {

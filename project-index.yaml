@@ -632,8 +632,10 @@ requirements:
     code:
       - internal/eventlog/eventlog.go
       - internal/metrics/handler.go
+      - internal/store/queries.go
     tests:
       - internal/eventlog/eventlog_test.go
+      - internal/store/queries_test.go
     deps: [REQ-024]
 
   - id: REQ-010
