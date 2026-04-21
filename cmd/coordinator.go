@@ -2,22 +2,20 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"text/tabwriter"
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/alertbus"
+	"github.com/Lincyaw/workbuddy/internal/app"
 	"github.com/Lincyaw/workbuddy/internal/audit"
 	"github.com/Lincyaw/workbuddy/internal/auditapi"
 	"github.com/Lincyaw/workbuddy/internal/config"
@@ -27,11 +25,28 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
-	"github.com/Lincyaw/workbuddy/internal/router"
 	"github.com/Lincyaw/workbuddy/internal/security"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/tasknotify"
 	"github.com/spf13/cobra"
+)
+
+// Aliases so cmd-internal call sites (and some infrastructure tests in
+// cmd/*_test.go) keep working after the HTTP handlers moved to internal/app.
+type (
+	fullCoordinatorServer = app.FullCoordinatorServer
+	taskResultRequest     = app.TaskResultRequest
+	taskHeartbeatRequest  = app.TaskHeartbeatRequest
+	taskReleaseRequest    = app.TaskReleaseRequest
+	workerRegisterRequest = app.WorkerRegisterRequest
+	taskPollResponse      = app.TaskPollResponse
+	repoRegisterRequest   = app.RepoRegisterRequest
+	repoStatusResponse    = app.RepoStatusResponse
+)
+
+const (
+	defaultLongPollTimeout = app.DefaultLongPollTimeout
+	longPollCheckInterval  = app.LongPollCheckInterval
 )
 
 type coordinatorOpts struct {
@@ -276,109 +291,19 @@ func runCoordinatorTokenRevokeCmd(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-// --- Full coordinator mode (used by worker tests and future standalone coordinator) ---
+// --- Full coordinator mode (used by worker tests and the standalone coordinator binary) ---
 
-const (
-	defaultLongPollTimeout = 30 * time.Second
-	longPollCheckInterval  = 100 * time.Millisecond
-)
-
-type fullCoordinatorServer struct {
-	rootCtx     context.Context
-	store       *store.Store
-	registry    *registry.Registry
-	eventlog    *eventlog.EventLogger
-	taskHub     *tasknotify.Hub
-	pollers     *pollerManager
-	config      *coordinatorConfigRuntime
-	authEnabled bool
-	authToken   string
-}
-
-type workerRegisterRequest struct {
-	WorkerID string   `json:"worker_id"`
-	Repo     string   `json:"repo"`
-	Roles    []string `json:"roles"`
-	Runtime  string   `json:"runtime,omitempty"`
-	Repos    []string `json:"repos,omitempty"`
-	Hostname string   `json:"hostname"`
-}
-
-type taskPollResponse struct {
-	TaskID    string   `json:"task_id"`
-	Repo      string   `json:"repo"`
-	IssueNum  int      `json:"issue_num"`
-	AgentName string   `json:"agent_name"`
-	Workflow  string   `json:"workflow,omitempty"`
-	State     string   `json:"state,omitempty"`
-	Roles     []string `json:"roles,omitempty"`
-}
-
-type repoRegisterRequest struct {
-	Repo        string                   `json:"repo"`
-	Environment string                   `json:"environment,omitempty"`
-	Agents      []*config.AgentConfig    `json:"agents"`
-	Workflows   []*config.WorkflowConfig `json:"workflows"`
-}
-
-type repoStatusResponse struct {
-	Repo         string    `json:"repo"`
-	Environment  string    `json:"environment"`
-	Status       string    `json:"status"`
-	PollerStatus string    `json:"poller_status"`
-	RegisteredAt time.Time `json:"registered_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
-}
-
-type taskResultRequest struct {
-	WorkerID      string   `json:"worker_id"`
-	Status        string   `json:"status"`
-	CurrentLabels []string `json:"current_labels"`
-	// InfraFailure flags launcher-layer failures that must NOT be translated
-	// into a state-machine failure signal. See issue #131 / AC-3.
-	InfraFailure bool   `json:"infra_failure,omitempty"`
-	InfraReason  string `json:"infra_reason,omitempty"`
-}
-
-type taskHeartbeatRequest struct {
-	WorkerID string `json:"worker_id"`
-}
-
-type taskReleaseRequest struct {
-	WorkerID string `json:"worker_id"`
-	Reason   string `json:"reason,omitempty"`
-}
-
-// runCoordinatorWithOpts starts a full coordinator (poller + state machine + router + HTTP API).
-// It is the backbone for integration tests that pair a worker with a coordinator.
+// runCoordinatorWithOpts composes the distributed coordinator topology:
+// store → recovery → security → eventlog → notifier → operator → poller
+// manager → coordinator HTTP server. The HTTP surface and the per-repo
+// runtime live in internal/app; this function owns flag/config → runtime
+// translation and lifecycle orchestration.
 func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, parentCtx ...context.Context) error {
-	var bootstrapCfg *config.FullConfig
-	if strings.TrimSpace(opts.configDir) != "" {
-		cfg, warnings, err := config.LoadConfig(opts.configDir)
-		if err != nil {
-			return fmt.Errorf("coordinator: load config: %w", err)
-		}
-		for _, w := range warnings {
-			log.Printf("[coordinator] warning: %s", w)
-		}
-		bootstrapCfg = cfg
+	bootstrapCfg, err := loadCoordinatorBootstrapConfig(opts)
+	if err != nil {
+		return err
 	}
-
-	port := opts.port
-	if bootstrapCfg != nil && bootstrapCfg.Global.Port > 0 {
-		port = bootstrapCfg.Global.Port
-	}
-	if port <= 0 {
-		port = defaultPort
-	}
-
-	pollInterval := opts.pollInterval
-	if bootstrapCfg != nil && bootstrapCfg.Global.PollInterval > 0 {
-		pollInterval = bootstrapCfg.Global.PollInterval
-	}
-	if pollInterval <= 0 {
-		pollInterval = defaultPollInterval
-	}
+	port, pollInterval := resolveCoordinatorTiming(opts, bootstrapCfg)
 
 	authToken := strings.TrimSpace(os.Getenv("WORKBUDDY_AUTH_TOKEN"))
 	if opts.auth && authToken == "" {
@@ -395,146 +320,76 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	defer func() { _ = st.Close() }()
 
 	alertBus := alertbus.NewBus(64)
-	if err := recoverTasks(st, alertBus); err != nil {
+	if err := app.RecoverTasks(st, alertBus); err != nil {
 		log.Printf("[coordinator] warning: recovery failed: %v", err)
 	}
 	taskHub := tasknotify.NewHub()
 
 	if ghReader == nil {
-		ghReader = &GHCLIReader{}
+		ghReader = &app.GHCLIReader{}
 	}
-	securityPath := filepath.Join(mustRepoRoot(), ".workbuddy", "security.yaml")
 	secRuntime, watchSecurityFile, err := security.NewRuntime(security.Options{
 		FlagValue: opts.trustedAuthors,
 		FlagSet:   opts.trustedAuthorsSet,
 		EnvValue:  os.Getenv("WORKBUDDY_TRUSTED_AUTHORS"),
-		FilePath:  securityPath,
+		FilePath:  filepath.Join(mustRepoRoot(), ".workbuddy", "security.yaml"),
 	})
 	if err != nil {
 		return fmt.Errorf("coordinator: load security config: %w", err)
 	}
-	logSecurityPosture(secRuntime.Current())
+	app.LogSecurityPosture(secRuntime.Current())
 
 	evlog := eventlog.NewEventLogger(st)
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
 	rep.SetEventRecorder(evlog)
 	reg := registry.NewRegistry(st, pollInterval)
 
-	var ctx context.Context
-	var cancel context.CancelFunc
-	var sigCh chan os.Signal
-	if len(parentCtx) > 0 && parentCtx[0] != nil {
-		ctx, cancel = context.WithCancel(parentCtx[0])
-	} else {
-		ctx, cancel = context.WithCancel(context.Background())
-		sigCh = make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	}
+	ctx, cancel, sigCh := buildRunContext(parentCtx)
 	defer cancel()
 
 	var notifCfg config.NotificationsConfig
 	if bootstrapCfg != nil {
 		notifCfg = bootstrapCfg.Notifications
 	}
-	notifierRuntime, err := newNotifierRuntime(ctx, notifCfg, alertBus, taskHub, evlog)
+	notifierRuntime, err := app.NewNotifierRuntime(ctx, notifCfg, alertBus, taskHub, evlog)
 	if err != nil {
 		return fmt.Errorf("coordinator: init notifier: %w", err)
 	}
 
-	operatorCfg := config.OperatorConfig{Enabled: true}
-	defaultRepo := ""
-	if bootstrapCfg != nil {
-		operatorCfg = bootstrapCfg.Operator
-		defaultRepo = bootstrapCfg.Global.Repo
-	}
-	if operatorCfg.Enabled {
-		detector := operator.NewDetector(operator.DetectorOptions{
-			Store:                   st,
-			Config:                  operatorCfg,
-			AlertBus:                alertBus,
-			DefaultRepo:             defaultRepo,
-			DefaultPollInterval:     pollInterval,
-			WorkerHeartbeatInterval: defaultWorkerHeartbeat,
-		})
-		go func() {
-			if err := detector.Run(ctx); err != nil {
-				log.Printf("[coordinator] operator detector error: %v", err)
-			}
-		}()
-	}
+	startCoordinatorOperatorDetector(ctx, st, alertBus, bootstrapCfg, pollInterval)
 
-	// Optional startup rate-limit budget check; best-effort and non-fatal.
 	if bootstrapCfg != nil && strings.TrimSpace(bootstrapCfg.Global.Repo) != "" {
-		go runRateLimitBudgetCheck(ctx, "coordinator", bootstrapCfg.Global.Repo)
+		go app.RunRateLimitBudgetCheck(ctx, "coordinator", bootstrapCfg.Global.Repo)
 	}
 
-	api := &fullCoordinatorServer{
-		rootCtx:     ctx,
-		store:       st,
-		registry:    reg,
-		eventlog:    evlog,
-		taskHub:     taskHub,
-		pollers:     newPollerManager(ctx, st, reg, evlog, alertBus, ghReader, rep, mustRepoRoot(), pollInterval, secRuntime),
-		authEnabled: opts.auth,
-		authToken:   authToken,
+	api := &app.FullCoordinatorServer{
+		RootCtx:     ctx,
+		Store:       st,
+		Registry:    reg,
+		Eventlog:    evlog,
+		TaskHub:     taskHub,
+		Pollers:     app.NewPollerManager(ctx, st, reg, evlog, alertBus, ghReader, rep, mustRepoRoot(), pollInterval, secRuntime),
+		AuthEnabled: opts.auth,
+		AuthToken:   authToken,
 	}
 	if watchSecurityFile {
 		if err := secRuntime.StartFileWatcher(ctx); err != nil {
 			return fmt.Errorf("coordinator: start security watcher: %w", err)
 		}
 	}
-	if err := api.pollers.loadExisting(); err != nil {
+	if err := api.Pollers.LoadExisting(); err != nil {
 		return fmt.Errorf("coordinator: load existing registrations: %w", err)
 	}
-	if bootstrapCfg != nil && strings.TrimSpace(bootstrapCfg.Global.Repo) != "" {
-		rec, err := buildRepoRegistrationRecord(buildRepoRegistrationPayload(bootstrapCfg))
-		if err != nil {
-			return fmt.Errorf("coordinator: build bootstrap repo registration: %w", err)
-		}
-		if err := st.UpsertRepoRegistration(rec); err != nil {
-			return fmt.Errorf("coordinator: bootstrap repo registration: %w", err)
-		}
-		if err := api.pollers.StartOrUpdate(rec); err != nil {
-			return fmt.Errorf("coordinator: start bootstrap repo runtime: %w", err)
-		}
-		api.config = newCoordinatorConfigRuntime(opts.configDir, bootstrapCfg, st, evlog, api.pollers, reg, notifierRuntime, alertBus, taskHub)
-		if err := startCoordinatorConfigWatcher(ctx, opts.configDir, api.config); err != nil {
-			return fmt.Errorf("coordinator: start config watcher: %w", err)
-		}
+	if err := bootstrapCoordinatorRegistration(ctx, api, bootstrapCfg, st, evlog, reg, notifierRuntime, alertBus, taskHub, opts.configDir); err != nil {
+		return err
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", api.handleHealth)
-	metrics.NewHandler(st).WithEventLogger(evlog).Register(mux)
-	readOnlyAudit := audit.NewHTTPHandler(st)
-	readOnlyAuditMux := http.NewServeMux()
-	readOnlyAudit.Register(readOnlyAuditMux)
-	mux.Handle("/events", api.wrapAuth(readOnlyAuditMux))
-	mux.Handle("/tasks", api.wrapAuth(readOnlyAuditMux))
-	mux.Handle("/issues/", api.wrapAuth(readOnlyAuditMux))
-	dashboardAPI := auditapi.NewHandler(st)
-	dashboardAPI.SetSessionsDir(filepath.Join(filepath.Dir(opts.dbPath), "sessions"))
-	dashboardAPI.RegisterDashboard(mux)
-	mux.Handle("/api/v1/repos/register", api.wrapAuth(http.HandlerFunc(api.handleRegisterRepo)))
-	mux.Handle("/api/v1/repos/", api.wrapAuth(http.HandlerFunc(api.handleRepoByPath)))
-	mux.Handle("/api/v1/repos", api.wrapAuth(http.HandlerFunc(api.handleListRepos)))
-	mux.Handle("/api/v1/workers/register", api.wrapAuth(http.HandlerFunc(api.handleRegisterWorker)))
-	mux.Handle("/api/v1/workers/", api.wrapAuth(http.HandlerFunc(api.handleWorkerByPath)))
-	mux.Handle("/api/v1/config/reload", api.wrapAuth(http.HandlerFunc(api.handleConfigReload)))
-	mux.Handle("/api/v1/tasks/poll", api.wrapAuth(http.HandlerFunc(api.handlePollTask)))
-	mux.Handle("/api/v1/tasks/", api.wrapAuth(http.HandlerFunc(api.handleTaskAction)))
-
-	listenAddr := opts.listenAddr
-	if strings.TrimSpace(listenAddr) == "" {
-		listenAddr = fmt.Sprintf(":%d", port)
-	}
 	srv := &http.Server{
-		Addr:    listenAddr,
-		Handler: mux,
+		Addr:    resolveListenAddr(opts.listenAddr, port),
+		Handler: buildCoordinatorMux(api, st, evlog, opts.dbPath),
 	}
 
 	var wg sync.WaitGroup
-
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -554,7 +409,6 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	}
 
 	cancel()
-
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
@@ -566,21 +420,124 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	return nil
 }
 
-func (s *fullCoordinatorServer) handleConfigReload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		coordWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return
+func loadCoordinatorBootstrapConfig(opts *coordinatorOpts) (*config.FullConfig, error) {
+	if strings.TrimSpace(opts.configDir) == "" {
+		return nil, nil
 	}
-	if s.config == nil {
-		coordWriteJSON(w, http.StatusNotFound, map[string]string{"error": "config reload is unavailable without --config-dir bootstrap mode"})
-		return
-	}
-	summary, err := s.config.Reload("manual_api")
+	cfg, warnings, err := config.LoadConfig(opts.configDir)
 	if err != nil {
-		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return nil, fmt.Errorf("coordinator: load config: %w", err)
+	}
+	for _, w := range warnings {
+		log.Printf("[coordinator] warning: %s", w)
+	}
+	return cfg, nil
+}
+
+func resolveCoordinatorTiming(opts *coordinatorOpts, bootstrapCfg *config.FullConfig) (port int, pollInterval time.Duration) {
+	port = opts.port
+	if bootstrapCfg != nil && bootstrapCfg.Global.Port > 0 {
+		port = bootstrapCfg.Global.Port
+	}
+	if port <= 0 {
+		port = defaultPort
+	}
+	pollInterval = opts.pollInterval
+	if bootstrapCfg != nil && bootstrapCfg.Global.PollInterval > 0 {
+		pollInterval = bootstrapCfg.Global.PollInterval
+	}
+	if pollInterval <= 0 {
+		pollInterval = defaultPollInterval
+	}
+	return port, pollInterval
+}
+
+func startCoordinatorOperatorDetector(ctx context.Context, st *store.Store, alertBus *alertbus.Bus, bootstrapCfg *config.FullConfig, pollInterval time.Duration) {
+	operatorCfg := config.OperatorConfig{Enabled: true}
+	defaultRepo := ""
+	if bootstrapCfg != nil {
+		operatorCfg = bootstrapCfg.Operator
+		defaultRepo = bootstrapCfg.Global.Repo
+	}
+	if !operatorCfg.Enabled {
 		return
 	}
-	coordWriteJSON(w, http.StatusOK, summary)
+	detector := operator.NewDetector(operator.DetectorOptions{
+		Store:                   st,
+		Config:                  operatorCfg,
+		AlertBus:                alertBus,
+		DefaultRepo:             defaultRepo,
+		DefaultPollInterval:     pollInterval,
+		WorkerHeartbeatInterval: defaultWorkerHeartbeat,
+	})
+	go func() {
+		if err := detector.Run(ctx); err != nil {
+			log.Printf("[coordinator] operator detector error: %v", err)
+		}
+	}()
+}
+
+func bootstrapCoordinatorRegistration(
+	ctx context.Context,
+	api *app.FullCoordinatorServer,
+	bootstrapCfg *config.FullConfig,
+	st *store.Store,
+	evlog *eventlog.EventLogger,
+	reg *registry.Registry,
+	notifierRuntime *app.NotifierRuntime,
+	alertBus *alertbus.Bus,
+	taskHub *tasknotify.Hub,
+	configDir string,
+) error {
+	if bootstrapCfg == nil || strings.TrimSpace(bootstrapCfg.Global.Repo) == "" {
+		return nil
+	}
+	rec, err := app.BuildRepoRegistrationRecord(app.BuildRepoRegistrationPayload(bootstrapCfg))
+	if err != nil {
+		return fmt.Errorf("coordinator: build bootstrap repo registration: %w", err)
+	}
+	if err := st.UpsertRepoRegistration(rec); err != nil {
+		return fmt.Errorf("coordinator: bootstrap repo registration: %w", err)
+	}
+	if err := api.Pollers.StartOrUpdate(rec); err != nil {
+		return fmt.Errorf("coordinator: start bootstrap repo runtime: %w", err)
+	}
+	api.Config = app.NewCoordinatorConfigRuntime(configDir, bootstrapCfg, st, evlog, api.Pollers, reg, notifierRuntime, alertBus, taskHub)
+	if err := app.StartCoordinatorConfigWatcher(ctx, configDir, api.Config); err != nil {
+		return fmt.Errorf("coordinator: start config watcher: %w", err)
+	}
+	return nil
+}
+
+func resolveListenAddr(listenAddr string, port int) string {
+	if strings.TrimSpace(listenAddr) == "" {
+		return fmt.Sprintf(":%d", port)
+	}
+	return listenAddr
+}
+
+func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog *eventlog.EventLogger, dbPath string) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", api.HandleHealth)
+	metrics.NewHandler(st).WithEventLogger(evlog).Register(mux)
+	readOnlyAudit := audit.NewHTTPHandler(st)
+	readOnlyAuditMux := http.NewServeMux()
+	readOnlyAudit.Register(readOnlyAuditMux)
+	mux.Handle("/events", api.WrapAuth(readOnlyAuditMux))
+	mux.Handle("/tasks", api.WrapAuth(readOnlyAuditMux))
+	mux.Handle("/issues/", api.WrapAuth(readOnlyAuditMux))
+	dashboardAPI := auditapi.NewHandler(st)
+	dashboardAPI.SetSessionsDir(filepath.Join(filepath.Dir(dbPath), "sessions"))
+	dashboardAPI.RegisterDashboard(mux)
+	mux.Handle("/api/v1/repos/register", api.WrapAuth(http.HandlerFunc(api.HandleRegisterRepo)))
+	mux.Handle("/api/v1/repos/", api.WrapAuth(http.HandlerFunc(api.HandleRepoByPath)))
+	mux.Handle("/api/v1/repos", api.WrapAuth(http.HandlerFunc(api.HandleListRepos)))
+	mux.Handle("/api/v1/workers/register", api.WrapAuth(http.HandlerFunc(api.HandleRegisterWorker)))
+	mux.Handle("/api/v1/workers/", api.WrapAuth(http.HandlerFunc(api.HandleWorkerByPath)))
+	mux.Handle("/api/v1/config/reload", api.WrapAuth(http.HandlerFunc(api.HandleConfigReload)))
+	mux.Handle("/api/v1/tasks/poll", api.WrapAuth(http.HandlerFunc(api.HandlePollTask)))
+	mux.Handle("/api/v1/tasks/", api.WrapAuth(http.HandlerFunc(api.HandleTaskAction)))
+	return mux
 }
 
 func mustRepoRoot() string {
@@ -595,498 +552,3 @@ func mustRepoRoot() string {
 	return abs
 }
 
-func (s *fullCoordinatorServer) wrapAuth(next http.Handler) http.Handler {
-	if !s.authEnabled {
-		return next
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		const prefix = "Bearer "
-		authz := r.Header.Get("Authorization")
-		if !strings.HasPrefix(authz, prefix) || strings.TrimSpace(strings.TrimPrefix(authz, prefix)) != s.authToken {
-			coordWriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-func (s *fullCoordinatorServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	statuses, err := s.pollers.ListStatuses()
-	if err != nil {
-		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	coordWriteJSON(w, http.StatusOK, map[string]any{
-		"status": "ok",
-		"repos":  len(statuses),
-	})
-}
-
-func (s *fullCoordinatorServer) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		coordWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return
-	}
-	var req repoRegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
-		return
-	}
-	req.Repo = strings.TrimSpace(req.Repo)
-	if req.Repo == "" {
-		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "repo is required"})
-		return
-	}
-
-	payload := repoRegistrationPayload{
-		Repo:        req.Repo,
-		Environment: strings.TrimSpace(req.Environment),
-		Agents:      req.Agents,
-		Workflows:   req.Workflows,
-	}
-	rec, err := buildRepoRegistrationRecord(&payload)
-	if err != nil {
-		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	prev, err := s.store.GetRepoRegistration(req.Repo)
-	if err != nil {
-		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	if err := s.store.UpsertRepoRegistration(rec); err != nil {
-		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	if err := s.pollers.StartOrUpdate(rec); err != nil {
-		if prev != nil {
-			if restoreErr := s.store.UpsertRepoRegistration(*prev); restoreErr != nil {
-				coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("%v (rollback failed: %v)", err, restoreErr)})
-				return
-			}
-		} else {
-			if deleteErr := s.store.DeleteRepoRegistration(req.Repo); deleteErr != nil {
-				coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("%v (rollback failed: %v)", err, deleteErr)})
-				return
-			}
-		}
-		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	coordWriteJSON(w, http.StatusOK, map[string]string{"status": "registered"})
-}
-
-func (s *fullCoordinatorServer) handleListRepos(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		coordWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return
-	}
-	statuses, err := s.pollers.ListStatuses()
-	if err != nil {
-		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	resp := make([]repoStatusResponse, 0, len(statuses))
-	for _, status := range statuses {
-		resp = append(resp, repoStatusResponse{
-			Repo:         status.Registration.Repo,
-			Environment:  status.Registration.Environment,
-			Status:       status.Registration.Status,
-			PollerStatus: status.PollerStatus,
-			RegisteredAt: status.Registration.RegisteredAt,
-			UpdatedAt:    status.Registration.UpdatedAt,
-		})
-	}
-	coordWriteJSON(w, http.StatusOK, resp)
-}
-
-func (s *fullCoordinatorServer) handleRepoByPath(w http.ResponseWriter, r *http.Request) {
-	repo := strings.TrimPrefix(r.URL.Path, "/api/v1/repos/")
-	repo = strings.TrimSpace(repo)
-	if repo == "" {
-		http.NotFound(w, r)
-		return
-	}
-	switch r.Method {
-	case http.MethodDelete:
-		if err := s.pollers.Deregister(repo); err != nil {
-			coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		coordWriteJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
-	default:
-		coordWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-	}
-}
-
-func (s *fullCoordinatorServer) handleWorkerByPath(w http.ResponseWriter, r *http.Request) {
-	workerID := strings.TrimPrefix(r.URL.Path, "/api/v1/workers/")
-	workerID = strings.TrimSpace(workerID)
-	if workerID == "" {
-		http.NotFound(w, r)
-		return
-	}
-	switch r.Method {
-	case http.MethodDelete:
-		if err := s.registry.Unregister(workerID); err != nil {
-			switch {
-			case errors.Is(err, registry.ErrWorkerNotFound):
-				coordWriteJSON(w, http.StatusNotFound, map[string]string{"error": "worker not found"})
-			case errors.Is(err, registry.ErrWorkerHasRunningTask):
-				coordWriteJSON(w, http.StatusConflict, map[string]string{"error": "worker has a running task"})
-			default:
-				coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			}
-			return
-		}
-		coordWriteJSON(w, http.StatusOK, map[string]string{"status": "unregistered"})
-	default:
-		coordWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-	}
-}
-
-func (s *fullCoordinatorServer) handleRegisterWorker(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		coordWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return
-	}
-	var req workerRegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
-		return
-	}
-	req.WorkerID = strings.TrimSpace(req.WorkerID)
-	req.Repo = strings.TrimSpace(req.Repo)
-	req.Runtime = strings.TrimSpace(req.Runtime)
-	if len(req.Repos) == 0 && req.Repo != "" {
-		req.Repos = []string{req.Repo}
-	}
-	if req.Repo == "" && len(req.Repos) > 0 {
-		req.Repo = strings.TrimSpace(req.Repos[0])
-	}
-	if req.WorkerID == "" || req.Repo == "" || len(req.Roles) == 0 {
-		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "worker_id, repo, and roles are required"})
-		return
-	}
-	for _, repo := range req.Repos {
-		registered, err := s.pollers.IsRegistered(repo)
-		if err != nil {
-			coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		if !registered {
-			coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("repo %q is not registered", repo)})
-			return
-		}
-	}
-	if err := s.registry.RegisterWithRepos(req.WorkerID, req.Repo, req.Repos, req.Roles, req.Hostname); err != nil {
-		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	s.eventlog.Log(eventlog.TypeWorkerRegistered, req.Repo, 0, map[string]any{
-		"worker_id": req.WorkerID,
-		"roles":     req.Roles,
-		"runtime":   req.Runtime,
-		"repos":     req.Repos,
-		"hostname":  req.Hostname,
-	})
-	coordWriteJSON(w, http.StatusCreated, map[string]string{"status": "registered"})
-}
-
-func (s *fullCoordinatorServer) handlePollTask(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		coordWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return
-	}
-	workerID := strings.TrimSpace(r.URL.Query().Get("worker_id"))
-	if workerID == "" {
-		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "worker_id is required"})
-		return
-	}
-	timeout := parseLongPollTimeout(r.URL.Query().Get("timeout"))
-	worker, err := s.lookupWorker(workerID)
-	if err != nil {
-		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	if worker == nil {
-		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown worker"})
-		return
-	}
-
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	ticker := time.NewTicker(longPollCheckInterval)
-	defer ticker.Stop()
-
-	for {
-		task, err := s.claimNextTask(worker)
-		switch {
-		case err == nil:
-		case errors.Is(err, store.ErrTaskClaimConflict):
-		default:
-			coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		if task != nil {
-			_ = s.registry.Heartbeat(worker.ID)
-			coordWriteJSON(w, http.StatusOK, task)
-			return
-		}
-
-		select {
-		case <-s.rootCtx.Done():
-			w.WriteHeader(http.StatusNoContent)
-			return
-		case <-r.Context().Done():
-			w.WriteHeader(http.StatusNoContent)
-			return
-		case <-deadline.C:
-			w.WriteHeader(http.StatusNoContent)
-			return
-		case <-ticker.C:
-		}
-	}
-}
-
-func (s *fullCoordinatorServer) handleTaskAction(w http.ResponseWriter, r *http.Request) {
-	taskID, action, ok := parseFullTaskActionPath(r.URL.Path)
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-	switch {
-	case r.Method == http.MethodPost && action == "result":
-		s.handleTaskResult(w, r, taskID)
-	case r.Method == http.MethodPost && action == "heartbeat":
-		s.handleTaskHeartbeat(w, r, taskID)
-	case r.Method == http.MethodPost && action == "release":
-		s.handleTaskRelease(w, r, taskID)
-	default:
-		coordWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-	}
-}
-
-func (s *fullCoordinatorServer) handleTaskResult(w http.ResponseWriter, r *http.Request, taskID string) {
-	var req taskResultRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
-		return
-	}
-	req.WorkerID = strings.TrimSpace(req.WorkerID)
-	task, err := s.store.GetTask(taskID)
-	if err != nil {
-		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	if task == nil {
-		coordWriteJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
-		return
-	}
-	if req.WorkerID == "" || task.WorkerID != req.WorkerID {
-		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "worker_id does not match claimed task"})
-		return
-	}
-	status := normalizeTaskResultStatus(req.Status)
-	if status == "" {
-		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "status must be completed, failed, or timeout"})
-		return
-	}
-	if err := s.store.TransitionTaskStatusIfRunning(taskID, status); err != nil {
-		if errors.Is(err, store.ErrTaskStatusTerminal) {
-			// Late submit from a zombie goroutine after the task was already
-			// settled (by another goroutine of the same worker, by operator
-			// cleanup, etc.). Reject without rewriting the terminal status.
-			// See #143 / #141 for the dup-claim race that produces these.
-			log.Printf("[coordinator] rejecting late submit for task %s: %v", taskID, err)
-			coordWriteJSON(w, http.StatusConflict, map[string]string{"error": "task already in terminal status"})
-			return
-		}
-		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	if err := s.registry.Heartbeat(req.WorkerID); err != nil {
-		log.Printf("[coordinator] worker heartbeat during result failed: %v", err)
-	}
-	exitCode := 0
-	if status != store.TaskStatusCompleted {
-		exitCode = 1
-	}
-	publishTaskCompletion(s.taskHub, router.WorkerTask{
-		TaskID:    task.ID,
-		Repo:      task.Repo,
-		IssueNum:  task.IssueNum,
-		AgentName: task.AgentName,
-	}, status, exitCode, time.Now(), time.Now())
-	if req.InfraFailure {
-		// Launcher-layer failure: the agent never got to decide. Record the
-		// infra event for operator visibility, emit the standard completed
-		// event for bookkeeping, but DO NOT call MarkAgentCompleted — that
-		// would tell the state-machine the agent FAILED, which is the very
-		// mis-classification issue #131 is fixing.
-		s.eventlog.Log(eventlog.TypeInfraFailure, task.Repo, task.IssueNum, map[string]any{
-			"task_id":    task.ID,
-			"worker_id":  req.WorkerID,
-			"agent_name": task.AgentName,
-			"status":     status,
-			"reason":     req.InfraReason,
-			"source":     "worker_submit",
-		})
-	} else {
-		s.pollers.MarkAgentCompleted(task.Repo, task.IssueNum, task.ID, task.AgentName, exitCode, req.CurrentLabels)
-	}
-	s.eventlog.Log(eventlog.TypeCompleted, task.Repo, task.IssueNum, map[string]any{
-		"task_id":    task.ID,
-		"worker_id":  req.WorkerID,
-		"agent_name": task.AgentName,
-		"status":     status,
-	})
-	coordWriteJSON(w, http.StatusOK, map[string]string{"status": status})
-}
-
-func (s *fullCoordinatorServer) handleTaskHeartbeat(w http.ResponseWriter, r *http.Request, taskID string) {
-	var req taskHeartbeatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
-		return
-	}
-	req.WorkerID = strings.TrimSpace(req.WorkerID)
-	if req.WorkerID == "" {
-		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "worker_id is required"})
-		return
-	}
-	task, err := s.store.GetTask(taskID)
-	if err != nil {
-		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	if task == nil {
-		coordWriteJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
-		return
-	}
-	if task.WorkerID != req.WorkerID {
-		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "worker_id does not match claimed task"})
-		return
-	}
-	if err := s.store.HeartbeatTask(taskID, req.WorkerID, defaultLongPollTimeout); err != nil {
-		log.Printf("[coordinator] task heartbeat DB update failed for %s: %v", taskID, err)
-	}
-	if err := s.registry.Heartbeat(req.WorkerID); err != nil {
-		if errors.Is(err, registry.ErrWorkerNotFound) {
-			coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown worker"})
-			return
-		}
-		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *fullCoordinatorServer) handleTaskRelease(w http.ResponseWriter, r *http.Request, taskID string) {
-	var req taskReleaseRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
-		return
-	}
-	req.WorkerID = strings.TrimSpace(req.WorkerID)
-	if req.WorkerID == "" {
-		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "worker_id is required"})
-		return
-	}
-	released, err := s.store.ReleaseTask(taskID, req.WorkerID)
-	if err != nil {
-		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	if !released {
-		coordWriteJSON(w, http.StatusConflict, map[string]string{"error": "task is not claimable by this worker"})
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *fullCoordinatorServer) lookupWorker(workerID string) (*store.WorkerRecord, error) {
-	workers, err := s.store.QueryWorkers("")
-	if err != nil {
-		return nil, err
-	}
-	for _, worker := range workers {
-		if worker.ID == workerID {
-			return &worker, nil
-		}
-	}
-	return nil, nil
-}
-
-func (s *fullCoordinatorServer) claimNextTask(worker *store.WorkerRecord) (*taskPollResponse, error) {
-	var roles []string
-	if err := json.Unmarshal([]byte(worker.Roles), &roles); err != nil {
-		return nil, fmt.Errorf("unmarshal worker roles: %w", err)
-	}
-	var repos []string
-	if err := json.Unmarshal([]byte(worker.ReposJSON), &repos); err != nil || len(repos) == 0 {
-		repos = []string{worker.Repo}
-	}
-	task, err := s.store.ClaimNextTask(worker.ID, roles, repos, "", defaultLongPollTimeout)
-	if err != nil || task == nil {
-		return nil, err
-	}
-	s.eventlog.Log(eventlog.TypeDispatch, task.Repo, task.IssueNum, map[string]any{
-		"task_id":    task.ID,
-		"worker_id":  worker.ID,
-		"agent_name": task.AgentName,
-	})
-	return &taskPollResponse{
-		TaskID:    task.ID,
-		Repo:      task.Repo,
-		IssueNum:  task.IssueNum,
-		AgentName: task.AgentName,
-		Workflow:  task.Workflow,
-		State:     task.State,
-		Roles:     append([]string(nil), roles...),
-	}, nil
-}
-
-func parseLongPollTimeout(raw string) time.Duration {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return defaultLongPollTimeout
-	}
-	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
-		return d
-	}
-	return defaultLongPollTimeout
-}
-
-func parseFullTaskActionPath(path string) (taskID string, action string, ok bool) {
-	trimmed := strings.TrimPrefix(path, "/api/v1/tasks/")
-	parts := strings.Split(strings.Trim(trimmed, "/"), "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", false
-	}
-	return parts[0], parts[1], true
-}
-
-func normalizeTaskResultStatus(raw string) string {
-	switch strings.TrimSpace(strings.ToLower(raw)) {
-	case store.TaskStatusCompleted:
-		return store.TaskStatusCompleted
-	case store.TaskStatusFailed:
-		return store.TaskStatusFailed
-	case store.TaskStatusTimeout:
-		return store.TaskStatusTimeout
-	default:
-		return ""
-	}
-}
-
-func coordWriteJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if payload == nil {
-		return
-	}
-	if err := json.NewEncoder(w).Encode(payload); err != nil {
-		log.Printf("[coordinator] encode response failed: %v", err)
-	}
-}

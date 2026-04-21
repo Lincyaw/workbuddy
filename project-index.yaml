@@ -1362,6 +1362,8 @@ requirements:
       - cmd/coordinator.go
       - cmd/repo.go
       - cmd/repo_runtime.go
+      - internal/app/coordinator.go
+      - internal/app/repo_runtime.go
       - internal/config/loader.go
       - internal/coordinator/http/handler.go
       - internal/registry/registry.go
@@ -1615,6 +1617,9 @@ requirements:
       - cmd/coordinator.go
       - cmd/config_reload.go
       - cmd/repo_runtime.go
+      - internal/app/config_reload.go
+      - internal/app/coordinator.go
+      - internal/app/repo_runtime.go
       - internal/eventlog/eventlog.go
       - internal/registry/registry.go
       - go.mod
@@ -1726,6 +1731,8 @@ requirements:
       - cmd/serve.go
       - cmd/coordinator.go
       - cmd/repo_runtime.go
+      - internal/app/repo_runtime.go
+      - internal/app/security_event.go
       - internal/poller/poller.go
       - internal/security/security.go
       - internal/statemachine/statemachine.go
@@ -1943,6 +1950,8 @@ requirements:
       - internal/eventlog/eventlog.go
       - cmd/serve.go
       - cmd/repo_runtime.go
+      - internal/app/repo_runtime.go
+      - internal/app/claim_id.go
     tests:
       - internal/store/store_test.go
       - internal/statemachine/statemachine_test.go
@@ -2005,8 +2014,9 @@ requirements:
       - cmd/claim_id.go
       - cmd/serve.go
       - cmd/repo_runtime.go
+      - internal/app/claim_id.go
+      - internal/app/repo_runtime.go
     tests:
       - internal/store/store_test.go
       - internal/statemachine/statemachine_test.go
-      - cmd/claim_id_test.go
     deps: [REQ-057]
