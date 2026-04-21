@@ -150,7 +150,7 @@ func NewStateMachine(
 ) *StateMachine {
 	var workflowManager *workflow.Manager
 	if st != nil {
-		workflowManager = workflow.NewManager(st.DB())
+		workflowManager = workflow.NewManager(st)
 	}
 	return &StateMachine{
 		workflows:       workflows,

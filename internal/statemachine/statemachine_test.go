@@ -202,7 +202,7 @@ func TestNormalTransition(t *testing.T) {
 		t.Error("expected dispatch request, got none")
 	}
 
-	instances, err := workflow.NewManager(sm.store.DB()).QueryByRepoIssue("test/repo", 1)
+	instances, err := workflow.NewManager(sm.store).QueryByRepoIssue("test/repo", 1)
 	if err != nil {
 		t.Fatalf("workflow query: %v", err)
 	}

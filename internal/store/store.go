@@ -104,6 +104,11 @@ func (s *Store) Close() error {
 }
 
 // DB returns the underlying *sql.DB for advanced use cases.
+//
+// Deprecated: Prefer the typed methods on Store (or define a new narrow
+// repository method here) instead of issuing raw SQL through this handle.
+// Direct access couples callers to storage internals and was the cause of
+// issue #145 finding #9. Remaining callers are tracked by TODO(#145-9).
 func (s *Store) DB() *sql.DB {
 	return s.db
 }

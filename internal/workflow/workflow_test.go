@@ -15,7 +15,7 @@ func newTestManager(t *testing.T) *Manager {
 		t.Fatalf("NewStore: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	return NewManager(st.DB())
+	return NewManager(st)
 }
 
 func TestCreateWorkflowInstance(t *testing.T) {

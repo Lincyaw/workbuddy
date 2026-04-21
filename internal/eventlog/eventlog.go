@@ -187,49 +187,11 @@ func (l *EventLogger) Health() Health {
 // Query returns events matching the filter criteria.
 // All filter fields are optional; zero-value fields are ignored.
 func (l *EventLogger) Query(filter EventFilter) ([]store.Event, error) {
-	db := l.store.DB()
-
-	query := `SELECT id, ts, type, repo, issue_num, payload FROM events WHERE 1=1`
-	var args []interface{}
-
-	if filter.Repo != "" {
-		query += ` AND repo = ?`
-		args = append(args, filter.Repo)
-	}
-	if filter.Type != "" {
-		query += ` AND type = ?`
-		args = append(args, filter.Type)
-	}
-	if filter.IssueNum != 0 {
-		query += ` AND issue_num = ?`
-		args = append(args, filter.IssueNum)
-	}
-	if filter.Since != nil {
-		query += ` AND ts >= ?`
-		args = append(args, filter.Since.UTC().Format("2006-01-02 15:04:05"))
-	}
-	if filter.Until != nil {
-		query += ` AND ts <= ?`
-		args = append(args, filter.Until.UTC().Format("2006-01-02 15:04:05"))
-	}
-
-	query += ` ORDER BY id`
-
-	rows, err := db.Query(query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("eventlog: query: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var out []store.Event
-	for rows.Next() {
-		var ev store.Event
-		var ts string
-		if err := rows.Scan(&ev.ID, &ts, &ev.Type, &ev.Repo, &ev.IssueNum, &ev.Payload); err != nil {
-			return nil, fmt.Errorf("eventlog: scan: %w", err)
-		}
-		ev.TS, _ = time.Parse("2006-01-02 15:04:05", ts)
-		out = append(out, ev)
-	}
-	return out, rows.Err()
+	return l.store.QueryEventsFiltered(store.EventQueryFilter{
+		Since:    filter.Since,
+		Until:    filter.Until,
+		Type:     filter.Type,
+		Repo:     filter.Repo,
+		IssueNum: filter.IssueNum,
+	})
 }
