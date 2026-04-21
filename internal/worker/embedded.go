@@ -482,9 +482,6 @@ func validateLabelTransition(task router.WorkerTask, deps EmbeddedDeps, preLabel
 	if deps.Config == nil {
 		return labelcheck.Result{}, false, fmt.Errorf("missing worker config")
 	}
-	if deps.IssueReader == nil {
-		return labelcheck.Result{}, false, fmt.Errorf("no issue label reader configured")
-	}
 
 	wf, ok := deps.Config.Workflows[task.Workflow]
 	if !ok || wf == nil {

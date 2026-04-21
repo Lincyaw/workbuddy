@@ -177,7 +177,7 @@ func (w *DistributedWorker) ExecuteTask(ctx context.Context, task *workerclient.
 		}
 	}
 	if ctx.Err() != nil && !released.Load() {
-		releaseCtx, cancel := context.WithTimeout(context.Background(), w.deps.ShutdownTimeout)
+		releaseCtx, cancel := context.WithTimeout(context.Background(), boundedRemoteTaskAPITimeout(w.deps.ShutdownTimeout))
 		err := w.deps.Client.ReleaseTask(releaseCtx, task.TaskID, workerclient.ReleaseRequest{WorkerID: w.deps.WorkerID, Reason: "worker shutdown"})
 		cancel()
 		if err == nil {

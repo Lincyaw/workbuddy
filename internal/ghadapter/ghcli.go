@@ -16,7 +16,8 @@ import (
 type RunCommand func(ctx context.Context, name string, args ...string) ([]byte, error)
 
 type CLI struct {
-	run RunCommand
+	run         RunCommand
+	runCombined RunCommand
 }
 
 type Comment struct {
@@ -37,14 +38,14 @@ type PullRequest struct {
 }
 
 func NewCLI() *CLI {
-	return &CLI{run: defaultRunCommand}
+	return &CLI{run: defaultRunCommand, runCombined: defaultRunCombined}
 }
 
 func NewCLIWithRunner(run RunCommand) *CLI {
 	if run == nil {
-		run = defaultRunCommand
+		return &CLI{run: defaultRunCommand, runCombined: defaultRunCombined}
 	}
-	return &CLI{run: run}
+	return &CLI{run: run, runCombined: run}
 }
 
 func defaultRunCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -68,6 +69,13 @@ func (c *CLI) runCommand(ctx context.Context, name string, args ...string) ([]by
 		return defaultRunCommand(ctx, name, args...)
 	}
 	return c.run(ctx, name, args...)
+}
+
+func (c *CLI) runCommandCombined(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if c == nil || c.runCombined == nil {
+		return defaultRunCombined(ctx, name, args...)
+	}
+	return c.runCombined(ctx, name, args...)
 }
 
 func (c *CLI) ListIssues(repo string) ([]poller.Issue, error) {
@@ -137,8 +145,15 @@ func (c *CLI) ListPRs(repo string) ([]poller.PR, error) {
 }
 
 func (c *CLI) CheckRepoAccess(repo string) error {
-	_, err := c.runCommand(nil, "gh", "repo", "view", repo, "--json", "name")
-	return err
+	out, err := c.runCommandCombined(nil, "gh", "repo", "view", repo, "--json", "name")
+	if err != nil {
+		output := strings.TrimSpace(string(out))
+		if output != "" {
+			return fmt.Errorf("ghadapter: gh repo view %s: %s: %w", repo, output, err)
+		}
+		return fmt.Errorf("ghadapter: gh repo view %s: %w", repo, err)
+	}
+	return nil
 }
 
 func (c *CLI) ReadIssueLabels(repo string, issueNum int) ([]string, error) {
@@ -166,7 +181,7 @@ func (c *CLI) ReadIssueLabels(repo string, issueNum int) ([]string, error) {
 }
 
 func (c *CLI) ReadIssue(repo string, issueNum int) (poller.IssueDetails, error) {
-	query := fmt.Sprintf(`query{repository(owner:%q,name:%q){issue(number:%d){number state stateReason body labels(first:50){nodes{name}} closedByPullRequestsReferences(first:10){nodes{number state url}}}}}`,
+	query := fmt.Sprintf(`query{repository(owner:%q,name:%q){issue(number:%d){number state stateReason body labels(first:100){nodes{name}} closedByPullRequestsReferences(first:10){nodes{number state url}}}}}`,
 		repoOwner(repo), repoName(repo), issueNum)
 	out, err := c.runCommand(nil, "gh", "api", "graphql", "-f", "query="+query)
 	if err != nil {
@@ -341,7 +356,7 @@ func (c *CLI) WriteIssueComment(ctx context.Context, repo string, issueNum int, 
 	cmd.Stdin = strings.NewReader(body)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("reporter: gh issue comment: %s: %w", string(output), err)
+		return fmt.Errorf("ghadapter: gh issue comment: %s: %w", string(output), err)
 	}
 	return nil
 }
@@ -349,19 +364,19 @@ func (c *CLI) WriteIssueComment(ctx context.Context, repo string, issueNum int, 
 func (c *CLI) AuthenticatedLogin(ctx context.Context) (string, error) {
 	out, err := c.runCommand(ctx, "gh", "api", "user", "--jq", ".login")
 	if err != nil {
-		return "", fmt.Errorf("reporter: gh api user: %w", err)
+		return "", fmt.Errorf("ghadapter: gh api user: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
 
 func (c *CLI) AddIssueReaction(ctx context.Context, repo string, issueNum int, content string) error {
-	out, err := defaultRunCombined(ctx, "gh", "api", "-X", "POST",
+	out, err := c.runCommandCombined(ctx, "gh", "api", "-X", "POST",
 		fmt.Sprintf("repos/%s/issues/%d/reactions", repo, issueNum),
 		"-f", "content="+content,
 		"-H", "Accept: application/vnd.github+json",
 	)
 	if err != nil {
-		return fmt.Errorf("reporter: gh api POST reactions: %s: %w", string(out), err)
+		return fmt.Errorf("ghadapter: gh api POST reactions: %s: %w", string(out), err)
 	}
 	return nil
 }
@@ -372,7 +387,7 @@ func (c *CLI) ListIssueReactions(ctx context.Context, repo string, issueNum int)
 		"-H", "Accept: application/vnd.github+json",
 	)
 	if err != nil {
-		return nil, fmt.Errorf("reporter: gh api GET reactions: %w", err)
+		return nil, fmt.Errorf("ghadapter: gh api GET reactions: %w", err)
 	}
 	var raw []struct {
 		ID      int64  `json:"id"`
@@ -382,7 +397,7 @@ func (c *CLI) ListIssueReactions(ctx context.Context, repo string, issueNum int)
 		} `json:"user"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
-		return nil, fmt.Errorf("reporter: parse reactions: %w", err)
+		return nil, fmt.Errorf("ghadapter: parse reactions: %w", err)
 	}
 	reactions := make([]Reaction, 0, len(raw))
 	for _, reaction := range raw {
@@ -392,11 +407,11 @@ func (c *CLI) ListIssueReactions(ctx context.Context, repo string, issueNum int)
 }
 
 func (c *CLI) DeleteIssueReaction(ctx context.Context, repo string, issueNum int, reactionID int64) error {
-	out, err := defaultRunCombined(ctx, "gh", "api", "-X", "DELETE",
+	out, err := c.runCommandCombined(ctx, "gh", "api", "-X", "DELETE",
 		fmt.Sprintf("repos/%s/issues/%d/reactions/%d", repo, issueNum, reactionID),
 	)
 	if err != nil {
-		return fmt.Errorf("reporter: gh api DELETE reactions/%d: %s: %w", reactionID, string(out), err)
+		return fmt.Errorf("ghadapter: gh api DELETE reactions/%d: %s: %w", reactionID, string(out), err)
 	}
 	return nil
 }
