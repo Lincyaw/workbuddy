@@ -139,32 +139,36 @@ func (w *EmbeddedWorker) ExecuteTask(ctx context.Context, task router.WorkerTask
 	taskCtx.Session.TaskID = task.TaskID
 	taskCtx.Session.WorkerID = w.deps.WorkerID
 	taskCtx.Session.Attempt = currentAttempt(task, w.deps.Store)
-	if w.deps.Reporter != nil {
-		if err := w.deps.Reporter.ReportStarted(taskRunCtx, task.Repo, task.IssueNum, task.AgentName, sessionID, w.deps.WorkerID); err != nil {
-			log.Printf("[worker] report started failed: %v", err)
-		}
-	}
 
-	var cleanup func() error
-	if task.WorktreePath != "" && w.deps.WorkspaceManager != nil {
-		cleanup = func() error { return w.deps.WorkspaceManager.Remove(task.WorktreePath) }
+	var wsMgr WorkspaceManager
+	if w.deps.WorkspaceManager != nil {
+		wsMgr = w.deps.WorkspaceManager
 	}
 	execution := w.deps.Executor.Execute(taskRunCtx, Task{
-		TaskID:    task.TaskID,
-		Repo:      task.Repo,
-		IssueNum:  task.IssueNum,
-		AgentName: task.AgentName,
-		Agent:     task.Agent,
-		Context:   task.Context,
-		Workflow:  task.Workflow,
-		State:     task.State,
-		WorkerID:  w.deps.WorkerID,
-		Attempt:   taskCtx.Session.Attempt,
-		Cleanup:   cleanup,
+		TaskID:           task.TaskID,
+		Repo:             task.Repo,
+		IssueNum:         task.IssueNum,
+		AgentName:        task.AgentName,
+		Agent:            task.Agent,
+		Context:          task.Context,
+		Workflow:         task.Workflow,
+		State:            task.State,
+		WorkerID:         w.deps.WorkerID,
+		Attempt:          taskCtx.Session.Attempt,
+		WorkspaceManager: wsMgr,
+		OnPrepared: func(ctx context.Context, _ Task) {
+			if w.deps.Reporter != nil {
+				if err := w.deps.Reporter.ReportStarted(ctx, task.Repo, task.IssueNum, task.AgentName, sessionID, w.deps.WorkerID); err != nil {
+					log.Printf("[worker] report started failed: %v", err)
+				}
+			}
+		},
 	})
 
 	if execution.Result != nil && execution.Result.TokenUsage != nil && w.deps.Recorder != nil {
-		w.deps.Recorder.Log(eventlog.TypeTokenUsage, task.Repo, task.IssueNum, execution.Result.TokenUsage)
+		if err := w.deps.Recorder.LogSession(sessionID, eventlog.TypeTokenUsage, task.Repo, task.IssueNum, execution.Result.TokenUsage); err != nil {
+			log.Printf("[worker] token usage record failed: %v", err)
+		}
 	}
 	if execution.RunErr != nil {
 		log.Printf("[worker] agent %s failed: %v", task.AgentName, execution.RunErr)
@@ -190,7 +194,7 @@ func (w *EmbeddedWorker) ExecuteTask(ctx context.Context, task router.WorkerTask
 				Classification: string(validation.Classification),
 			}
 			if w.deps.Recorder != nil {
-				if err := w.deps.Recorder.RecordLabelValidation(task.Repo, task.IssueNum, payload); err != nil {
+				if err := w.deps.Recorder.RecordLabelValidationSession(sessionID, task.Repo, task.IssueNum, payload); err != nil {
 					log.Printf("[worker] label validation audit failed: %v", err)
 				}
 			}
@@ -231,7 +235,7 @@ func (w *EmbeddedWorker) ExecuteTask(ctx context.Context, task router.WorkerTask
 			source = "launcher_infra_failure"
 		}
 		publishTaskCompletion(w.deps.TaskHub, task, store.TaskStatusFailed, execution.ExitCode(), startedAt, execution.CompletedAt)
-		logInfraFailureEvent(w.deps.Store, task, execution.Result, source)
+		logInfraFailureEvent(w.deps.Recorder, w.deps.Store, sessionID, task, execution.Result, source)
 		if w.deps.Reporter != nil {
 			reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedTaskAPITimeout(embeddedShutdownWait))
 			var reportWorkDir string
@@ -357,7 +361,11 @@ func (w *EmbeddedWorker) handleTaskPanic(task router.WorkerTask, recovered any) 
 		}
 	}
 	panicResult := infraFailureResult(fmt.Sprintf("embedded worker panic: %v", recovered), fmt.Errorf("%v", recovered))
-	logInfraFailureEvent(w.deps.Store, task, panicResult, "embedded_worker_panic")
+	sessionID := task.TaskID
+	if task.Context != nil && task.Context.Session.ID != "" {
+		sessionID = task.Context.Session.ID
+	}
+	logInfraFailureEvent(w.deps.Recorder, w.deps.Store, sessionID, task, panicResult, "embedded_worker_panic")
 	now := time.Now().UTC()
 	publishTaskCompletion(w.deps.TaskHub, task, store.TaskStatusFailed, panicResult.ExitCode, now, now)
 }
@@ -408,8 +416,8 @@ func publishTaskCompletion(hub *tasknotify.Hub, task router.WorkerTask, status s
 	})
 }
 
-func logInfraFailureEvent(st *store.Store, task router.WorkerTask, result *runtimepkg.Result, source string) {
-	if st == nil {
+func logInfraFailureEvent(recorder *workersession.Recorder, st *store.Store, sessionID string, task router.WorkerTask, result *runtimepkg.Result, source string) {
+	if recorder == nil && st == nil {
 		return
 	}
 	payload := map[string]any{
@@ -434,7 +442,13 @@ func logInfraFailureEvent(st *store.Store, task router.WorkerTask, result *runti
 			payload["stderr_excerpt"] = stderr
 		}
 	}
-	if err := workersession.RecordEvent(st, eventlog.TypeInfraFailure, task.Repo, task.IssueNum, payload); err != nil {
+	var err error
+	if recorder != nil {
+		err = recorder.RecordEventSession(sessionID, eventlog.TypeInfraFailure, task.Repo, task.IssueNum, payload)
+	} else {
+		err = workersession.RecordEvent(st, eventlog.TypeInfraFailure, task.Repo, task.IssueNum, payload)
+	}
+	if err != nil {
 		log.Printf("[worker] failed to record infra failure event for %s#%d: %v", task.Repo, task.IssueNum, err)
 	}
 }

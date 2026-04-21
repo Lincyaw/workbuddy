@@ -11,6 +11,12 @@ import (
 
 type SessionRunner func(ctx context.Context, session runtimepkg.Session, eventsCh chan<- launcherevents.Event) (*runtimepkg.Result, error)
 
+// WorkspaceManager owns per-task worktree setup and teardown.
+type WorkspaceManager interface {
+	Create(issueNum int, taskID string) (string, error)
+	Remove(worktreePath string) error
+}
+
 // Task is the canonical execution input shared by worker implementations.
 type Task struct {
 	TaskID            string
@@ -24,6 +30,8 @@ type Task struct {
 	WorkerID          string
 	Attempt           int
 	Cleanup           func() error
+	WorkspaceManager  WorkspaceManager
+	OnPrepared        func(ctx context.Context, task Task)
 	RunSession        SessionRunner
 	EventDrainTimeout time.Duration
 }

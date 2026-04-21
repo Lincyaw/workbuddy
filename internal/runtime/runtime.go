@@ -41,6 +41,8 @@ const (
 
 	MetaInfraFailure       = launcherpkg.MetaInfraFailure
 	MetaInfraFailureReason = launcherpkg.MetaInfraFailureReason
+	MetaStorageDegraded    = "storage_degraded"
+	MetaStorageIssues      = "storage_issues"
 )
 
 func NewRegistry() *Registry {

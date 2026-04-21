@@ -91,6 +91,28 @@ func (e *Executor) Execute(ctx context.Context, task Task) Execution {
 			}
 		}()
 	}
+	if task.WorkspaceManager != nil {
+		worktreePath, err := task.WorkspaceManager.Create(task.IssueNum, task.TaskID)
+		if err != nil {
+			exec.CompletedAt = time.Now().UTC()
+			exec.RunErr = fmt.Errorf("worktree setup failed: %w", err)
+			exec.Result = infraFailureResult("worktree setup failed: "+err.Error(), err)
+			exec.FailureSource = "worktree_setup_error"
+			sessionStatus = executionStatus(exec.Result, exec.RunErr)
+			return exec
+		}
+		defer func() {
+			if err := task.WorkspaceManager.Remove(worktreePath); err != nil {
+				log.Printf("[worker] worktree cleanup failed for %s#%d: %v", task.Repo, task.IssueNum, err)
+			}
+		}()
+		taskCtx.RepoRoot = worktreePath
+		taskCtx.WorkDir = worktreePath
+	}
+	exec.Task = task
+	if task.OnPrepared != nil {
+		task.OnPrepared(ctx, task)
+	}
 
 	exec.StartedAt = time.Now().UTC()
 	session, err := e.launcher.Start(ctx, task.Agent, taskCtx)

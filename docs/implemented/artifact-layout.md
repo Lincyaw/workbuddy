@@ -48,6 +48,8 @@ worktree 只装 agent 改的代码，不再装事件流。
   `SessionPath`、`LastMessage`、`TokenUsage`），都在 return 前先调 `audit.Capture(...)`。
 - 当 `events-v1.jsonl` 成功落盘时，它会覆盖 `Result.SessionPath` 成为 canonical artifact；
   runtime 原始路径保存在 `Result.RawSessionPath`。
+- 当 session / event storage 发生退化时，会额外写入 `health.json`，并把同一份
+  degraded 信息同步到 `Result.Meta`，供 worker/reporter/audit 显式消费。
 
 ### 3. 目录布局约定
 
@@ -63,6 +65,7 @@ worktree 只装 agent 改的代码，不再装事件流。
 │   │       ├── stderr
 │   │       ├── tool-calls.jsonl
 │   │       ├── metadata.json
+│   │       ├── health.json      # session/event storage degraded health（如有）
 │   │       └── ...               # auditor 归档/复制出的文件
 │   └── worktrees/
 │       └── issue-<N>-<taskShort>/  # 仅代码和临时分支

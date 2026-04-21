@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/ghadapter"
@@ -173,37 +172,16 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 		}
 	}
 
-	// Determine WorkDir: use an isolated worktree if workspace manager is set.
-	// If worktree setup fails, the task is failed and reported — never fall back to CWD.
 	var repoRoot string
 	var workDir string
-	var worktreePath string
-	if r.wsMgr != nil {
-		wt, err := r.wsMgr.Create(req.IssueNum, taskID)
-		if err != nil {
-			log.Printf("[router] failed to create worktree for issue #%d: %v", req.IssueNum, err)
-			if uerr := r.store.UpdateTaskStatus(taskID, store.TaskStatusFailed); uerr != nil {
-				log.Printf("[router] failed to update task status to failed: %v", uerr)
-			}
-			if r.reporter != nil {
-				result := &runtimepkg.Result{
-					ExitCode: 1,
-					Stderr:   err.Error(),
-				}
-				reportCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				if rerr := r.reporter.Report(reportCtx, req.Repo, req.IssueNum, req.AgentName, result, taskID, "coordinator", 0, 0, "", ""); rerr != nil {
-					log.Printf("[router] failed to report worktree failure: %v", rerr)
-				}
-			}
-			return
-		}
-		repoRoot = wt
-		workDir = wt
-		worktreePath = wt
-	} else {
+	if r.wsMgr == nil {
 		repoRoot = r.repoRoot
 		workDir, _ = os.Getwd()
+	} else {
+		// The worker executor owns worktree setup/cleanup so transport dispatch
+		// only carries the base repo path.
+		repoRoot = r.repoRoot
+		workDir = r.repoRoot
 	}
 
 	taskCtx := &runtimepkg.TaskContext{
@@ -227,7 +205,6 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 		Context:      taskCtx,
 		Workflow:     req.Workflow,
 		State:        req.State,
-		WorktreePath: worktreePath,
 	}
 
 	select {
@@ -236,12 +213,6 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 		// starts executing, so pending tasks queued in the channel buffer
 		// don't appear as running.
 	case <-ctx.Done():
-		// Clean up worktree that was created but never dispatched.
-		if worktreePath != "" && r.wsMgr != nil {
-			if err := r.wsMgr.Remove(worktreePath); err != nil {
-				log.Printf("[router] failed to clean up worktree on cancellation: %v", err)
-			}
-		}
 		return
 	}
 }

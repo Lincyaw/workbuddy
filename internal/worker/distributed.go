@@ -37,11 +37,6 @@ type RemoteTaskClient interface {
 	SubmitResult(ctx context.Context, taskID string, req workerclient.ResultRequest) error
 }
 
-type RemoteWorkspaceManager interface {
-	Create(issueNum int, taskID string) (string, error)
-	Remove(worktreePath string) error
-}
-
 type DistributedDeps struct {
 	Config            *config.FullConfig
 	Executor          *Executor
@@ -54,7 +49,7 @@ type DistributedDeps struct {
 	RuntimeAlias      string
 	HeartbeatInterval time.Duration
 	ShutdownTimeout   time.Duration
-	WorkspaceManager  RemoteWorkspaceManager
+	WorkspaceManager  WorkspaceManager
 }
 
 type DistributedWorker struct {
@@ -95,7 +90,6 @@ func (w *DistributedWorker) ExecuteTask(ctx context.Context, task *workerclient.
 
 	launchCtx := BuildRemoteTaskContext(task, w.deps.Reader, w.deps.WorkDir)
 	sessionID := launchCtx.Session.ID
-	reportWorkDir := w.deps.WorkDir
 
 	taskCtx, taskCancel := context.WithCancel(ctx)
 	defer taskCancel()
@@ -151,39 +145,6 @@ func (w *DistributedWorker) ExecuteTask(ctx context.Context, task *workerclient.
 		}
 	}()
 	defer stopHeartbeat()
-
-	var worktreePath string
-	if w.deps.WorkspaceManager != nil {
-		wt, err := w.deps.WorkspaceManager.Create(task.IssueNum, task.TaskID)
-		if err != nil {
-			log.Printf("[worker] failed to create worktree for issue #%d: %v", task.IssueNum, err)
-			result := &runtimepkg.Result{ExitCode: 1, Stderr: err.Error()}
-			reportCtx, cancel := context.WithTimeout(context.Background(), boundedRemoteTaskAPITimeout(w.deps.ShutdownTimeout))
-			if rerr := w.deps.Reporter.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, w.deps.WorkerID, 0, workflowMaxRetries(w.deps.Config, task.Workflow), "", ""); rerr != nil {
-				log.Printf("[worker] failed to report worktree failure: %v", rerr)
-			}
-			cancel()
-			releaseCtx, cancel := context.WithTimeout(context.Background(), boundedRemoteTaskAPITimeout(w.deps.ShutdownTimeout))
-			if rerr := w.deps.Client.ReleaseTask(releaseCtx, task.TaskID, workerclient.ReleaseRequest{WorkerID: w.deps.WorkerID, Reason: fmt.Sprintf("worktree setup failed: %v", err)}); rerr != nil {
-				log.Printf("[worker] failed to release task after worktree setup failure: %v", rerr)
-			}
-			cancel()
-			return fmt.Errorf("worker: worktree setup failed for issue #%d: %w", task.IssueNum, err)
-		}
-		reportWorkDir = wt
-		worktreePath = wt
-		launchCtx.RepoRoot = wt
-		launchCtx.WorkDir = wt
-		log.Printf("[worker] using worktree %s for issue #%d", wt, task.IssueNum)
-	}
-	if err := w.deps.Reporter.ReportStarted(taskCtx, task.Repo, task.IssueNum, task.AgentName, sessionID, w.deps.WorkerID); err != nil {
-		log.Printf("[worker] report started failed: %v", err)
-	}
-
-	var cleanup func() error
-	if worktreePath != "" && w.deps.WorkspaceManager != nil {
-		cleanup = func() error { return w.deps.WorkspaceManager.Remove(worktreePath) }
-	}
 	execution := w.deps.Executor.Execute(taskCtx, Task{
 		TaskID:            task.TaskID,
 		Repo:              task.Repo,
@@ -193,7 +154,12 @@ func (w *DistributedWorker) ExecuteTask(ctx context.Context, task *workerclient.
 		Context:           launchCtx,
 		Workflow:          task.Workflow,
 		WorkerID:          w.deps.WorkerID,
-		Cleanup:           cleanup,
+		WorkspaceManager:  w.deps.WorkspaceManager,
+		OnPrepared: func(ctx context.Context, _ Task) {
+			if err := w.deps.Reporter.ReportStarted(ctx, task.Repo, task.IssueNum, task.AgentName, sessionID, w.deps.WorkerID); err != nil {
+				log.Printf("[worker] report started failed: %v", err)
+			}
+		},
 		EventDrainTimeout: postSessionDrainTimeout,
 		RunSession: func(runCtx context.Context, session runtimepkg.Session, eventsCh chan<- launcherevents.Event) (*runtimepkg.Result, error) {
 			return runRemoteSessionWithWatchdog(runCtx, session, eventsCh, w.deps.Config.Worker.StaleInference, task.TaskID, taskCancel)
@@ -201,6 +167,10 @@ func (w *DistributedWorker) ExecuteTask(ctx context.Context, task *workerclient.
 	})
 	stopHeartbeat()
 	result := execution.Result
+	reportWorkDir := w.deps.WorkDir
+	if execution.Task.Context != nil && execution.Task.Context.WorkDir != "" {
+		reportWorkDir = execution.Task.Context.WorkDir
+	}
 	if w.deps.Recorder != nil {
 		if err := w.deps.Recorder.Capture(sessionID, task.TaskID, task.Repo, task.IssueNum, task.AgentName, result); err != nil {
 			log.Printf("[worker] audit capture failed: %v", err)
@@ -216,6 +186,24 @@ func (w *DistributedWorker) ExecuteTask(ctx context.Context, task *workerclient.
 	}
 	if released.Load() {
 		return nil
+	}
+	if execution.FailureSource == "worktree_setup_error" {
+		reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedRemoteTaskAPITimeout(w.deps.ShutdownTimeout))
+		if err := w.deps.Reporter.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, w.deps.WorkerID, 0, workflowMaxRetries(w.deps.Config, task.Workflow), "", ""); err != nil {
+			log.Printf("[worker] failed to report worktree failure: %v", err)
+		}
+		reportCancel()
+
+		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), boundedRemoteTaskAPITimeout(w.deps.ShutdownTimeout))
+		reason := fmt.Sprintf("worktree setup failed: %v", execution.RunErr)
+		if result != nil && result.Meta != nil && result.Meta[runtimepkg.MetaInfraFailureReason] != "" {
+			reason = result.Meta[runtimepkg.MetaInfraFailureReason]
+		}
+		if err := w.deps.Client.ReleaseTask(releaseCtx, task.TaskID, workerclient.ReleaseRequest{WorkerID: w.deps.WorkerID, Reason: reason}); err != nil {
+			log.Printf("[worker] failed to release task after worktree setup failure: %v", err)
+		}
+		releaseCancel()
+		return execution.RunErr
 	}
 
 	currentLabels := execution.CompletionLabels

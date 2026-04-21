@@ -7,7 +7,7 @@
 | 主题 | 目标 | 基线代码 | 依赖前置 |
 | --- | --- | --- | --- |
 | Long-lived runtime / pooling | 为长驻 runtime 增加 per-repo 生命周期、连接复用与 idle 回收 | `internal/launcher/`, `cmd/serve.go` | 现有 one-shot Session 抽象已完成 |
-| Worker execution boundary | 把 embedded / distributed worker 统一到共享执行核心，并抽出 `internal/worker/` / `internal/runtime/` 边界 | `cmd/serve.go`, `cmd/worker.go`, `internal/worker/`, `internal/runtime/`, `internal/ghadapter/`, `internal/launcher/` | shared executor + embedded/distributed extraction + GitHub/session boundary收口已落地；executor lifecycle、direct worker tests、`internal/agent/bridge.go` 删除、MustPayload 热路径移除已完成；launcher compatibility shim 彻底收尾仍待后续 slice |
+| Worker execution boundary | 把 embedded / distributed worker 统一到共享执行核心，并抽出 `internal/worker/` / `internal/runtime/` 边界 | `cmd/serve.go`, `cmd/worker.go`, `internal/worker/`, `internal/runtime/`, `internal/ghadapter/`, `internal/launcher/` | shared executor + embedded/distributed extraction + GitHub/session boundary收口已落地；executor 已接管 worktree setup/cleanup，session storage degraded health 已显式落盘并写入 result metadata；`internal/agent/bridge.go` 删除、MustPayload 热路径移除已完成；launcher compatibility shim 彻底收尾仍待后续 slice |
 
 ## 文档列表
 

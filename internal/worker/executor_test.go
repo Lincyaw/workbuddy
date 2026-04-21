@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -184,6 +185,80 @@ func TestExecutorExecuteClosesManagedSessionOnStartFailure(t *testing.T) {
 	}
 }
 
+func TestExecutorExecuteCreatesAndRemovesWorktree(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	worktreePath := filepath.Join(repoRoot, ".workbuddy", "worktrees", "issue-99")
+	ws := &fakeWorkspaceManager{path: worktreePath}
+
+	lnch := runtimepkg.NewRegistry()
+	lnch.Register(&fakeRuntime{
+		name: "fake-runtime",
+		start: func(_ context.Context, _ *config.AgentConfig, task *runtimepkg.TaskContext) (runtimepkg.Session, error) {
+			if task.WorkDir != worktreePath {
+				t.Fatalf("WorkDir = %q, want %q", task.WorkDir, worktreePath)
+			}
+			if task.RepoRoot != worktreePath {
+				t.Fatalf("RepoRoot = %q, want %q", task.RepoRoot, worktreePath)
+			}
+			return &fakeSession{
+				run: func(_ context.Context, _ chan<- launcherevents.Event) (*runtimepkg.Result, error) {
+					return &runtimepkg.Result{ExitCode: 0, Meta: map[string]string{}}, nil
+				},
+			}, nil
+		},
+	}, "fake-runtime")
+
+	exec := NewExecutor(lnch, nil).Execute(context.Background(), Task{
+		TaskID:           "task-worktree-ok",
+		Repo:             "owner/repo",
+		IssueNum:         99,
+		AgentName:        "dev-agent",
+		Agent:            &config.AgentConfig{Name: "dev-agent", Runtime: "fake-runtime"},
+		Context:          &runtimepkg.TaskContext{RepoRoot: repoRoot, WorkDir: repoRoot},
+		WorkspaceManager: ws,
+	})
+	if exec.RunErr != nil {
+		t.Fatalf("RunErr = %v, want nil", exec.RunErr)
+	}
+	if !ws.created {
+		t.Fatal("workspace Create was not called")
+	}
+	if ws.removed != worktreePath {
+		t.Fatalf("removed path = %q, want %q", ws.removed, worktreePath)
+	}
+}
+
+func TestExecutorExecuteWorktreeSetupFailureMarksInfraFailure(t *testing.T) {
+	t.Parallel()
+
+	lnch := runtimepkg.NewRegistry()
+	ws := &fakeWorkspaceManager{err: errors.New("stale registration")}
+
+	exec := NewExecutor(lnch, nil).Execute(context.Background(), Task{
+		TaskID:           "task-worktree-fail",
+		Repo:             "owner/repo",
+		IssueNum:         88,
+		AgentName:        "dev-agent",
+		Agent:            &config.AgentConfig{Name: "dev-agent", Runtime: "fake-runtime"},
+		Context:          &runtimepkg.TaskContext{},
+		WorkspaceManager: ws,
+	})
+	if exec.Result == nil || !exec.InfraFailure() {
+		t.Fatalf("InfraFailure = false, want true (result=%v)", exec.Result)
+	}
+	if got, want := exec.FailureSource, "worktree_setup_error"; got != want {
+		t.Fatalf("FailureSource = %q, want %q", got, want)
+	}
+	if exec.RunErr == nil || !strings.Contains(exec.RunErr.Error(), "worktree setup failed") {
+		t.Fatalf("RunErr = %v, want worktree setup failure", exec.RunErr)
+	}
+	if ws.created {
+		t.Fatal("workspace Create should fail before runtime start")
+	}
+}
+
 func TestExecutorStopCancelsInFlightRun(t *testing.T) {
 	t.Parallel()
 
@@ -291,6 +366,26 @@ func (r *sequenceLabelReader) ReadIssueLabels(string, int) ([]string, error) {
 	labels := append([]string(nil), r.snapshots[r.idx]...)
 	r.idx++
 	return labels, nil
+}
+
+type fakeWorkspaceManager struct {
+	path    string
+	err     error
+	created bool
+	removed string
+}
+
+func (f *fakeWorkspaceManager) Create(issueNum int, taskID string) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	f.created = true
+	return f.path, nil
+}
+
+func (f *fakeWorkspaceManager) Remove(worktreePath string) error {
+	f.removed = worktreePath
+	return nil
 }
 
 func readSessionMetadata(t *testing.T, path string) map[string]any {

@@ -9,6 +9,8 @@
 - 已落地：`internal/worker/distributed.go` 已接管 remote worker 的 heartbeat / release / submit / watchdog 执行边界，`cmd/worker.go` 只保留 CLI、注册、repo 绑定与并发调度。
 - 已落地：`internal/ghadapter/ghcli.go` 已成为 worker/reporter/router 共享的 gh CLI 读写边界；新的 worker execution path 不再直接在路由/报告逻辑里散落 `os/exec gh ...`。
 - 已落地：`internal/worker/session/stream.go` + `internal/worker/session/recorder.go` 已成为 worker 路径里的统一 session event stream / audit-event write boundary。
+- 已落地：worktree setup / cleanup 已收口到 `internal/worker/executor.go`；`internal/router/router.go` 不再在 dispatch 时 eager-create worktree，embedded / distributed 都通过 shared executor 进入同一条工作区隔离主链。
+- 已落地：session / event storage 退化会显式写入 session `health.json`，并同步暴露到 `runtime.Result.Meta`，不再只停留在 stderr / log。
 - 已落地：`internal/runtime/runtime.go` 已提供新的 canonical runtime/session package name，worker execution core、serve/worker/run 主路径、router/reporter/ghadapter 的 shared runtime/result 上下文现在都优先面向 `internal/runtime`，`internal/launcher` 仍作为兼容 shim 存在。
 - 已落地：`cmd/serve.go` 不再内联 `runEmbeddedWorker(...)` / `executeTask(...)` / `streamSessionEvents(...)`。
 - 已落地：`internal/agent/bridge.go` 已删除，agent-session → launcher event/result translation 直接收口到 `internal/launcher/agent_bridge.go`。
@@ -72,7 +74,7 @@
 而共享 `Executor` 已持有：
 
 - executor-level per-issue execution lock
-- worktree cleanup
+- worktree setup / cleanup
 - `launcher.Start(...)` + `session.Run(...)`
 - label snapshot / validation
 - canonical session event stream

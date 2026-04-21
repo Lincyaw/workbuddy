@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -270,7 +269,7 @@ func TestRouter_PersistOnlyModeDoesNotCreateWorktree(t *testing.T) {
 	}
 }
 
-func TestRouter_WorktreeFailureFailsTaskAndComments(t *testing.T) {
+func TestRouter_DoesNotEagerlyCreateWorktreeAtDispatch(t *testing.T) {
 	setupFakeGHCLI(t)
 
 	st := newTestStore(t)
@@ -315,27 +314,33 @@ func TestRouter_WorktreeFailureFailsTaskAndComments(t *testing.T) {
 
 	select {
 	case task := <-taskCh:
-		t.Fatalf("unexpected dispatched task: %+v", task)
+		if task.Context == nil {
+			t.Fatal("expected dispatched task context")
+		}
+		if task.Context.RepoRoot != repoRoot {
+			t.Fatalf("RepoRoot = %q, want %q", task.Context.RepoRoot, repoRoot)
+		}
+		if task.Context.WorkDir != repoRoot {
+			t.Fatalf("WorkDir = %q, want %q", task.Context.WorkDir, repoRoot)
+		}
 	default:
+		t.Fatal("expected dispatched task")
 	}
 
 	tasks, err := st.QueryTasks(store.TaskStatusFailed)
 	if err != nil {
 		t.Fatalf("QueryTasks: %v", err)
 	}
-	if len(tasks) != 1 {
-		t.Fatalf("failed tasks = %d, want 1", len(tasks))
+	if len(tasks) != 0 {
+		t.Fatalf("failed tasks = %d, want 0", len(tasks))
 	}
 
-	if len(comments.comments) != 1 {
-		t.Fatalf("comment count = %d, want 1", len(comments.comments))
-	}
-	if !strings.Contains(comments.comments[0], "not a registered git worktree") {
-		t.Fatalf("comment missing worktree error: %s", comments.comments[0])
+	if len(comments.comments) != 0 {
+		t.Fatalf("comment count = %d, want 0", len(comments.comments))
 	}
 }
 
-func TestRouter_DispatchUsesWorktreeForRepoRootAndWorkDir(t *testing.T) {
+func TestRouter_DispatchUsesBaseRepoRootAndWorkDir(t *testing.T) {
 	setupFakeGHCLI(t)
 
 	st := newTestStore(t)
@@ -371,17 +376,17 @@ func TestRouter_DispatchUsesWorktreeForRepoRootAndWorkDir(t *testing.T) {
 
 	select {
 	case task := <-taskCh:
-		if task.WorktreePath == "" {
-			t.Fatal("expected dispatched task to include worktree path")
+		if task.WorktreePath != "" {
+			t.Fatalf("WorktreePath = %q, want empty transport payload", task.WorktreePath)
 		}
 		if task.Context == nil {
 			t.Fatal("expected dispatched task context")
 		}
-		if task.Context.RepoRoot != task.WorktreePath {
-			t.Fatalf("RepoRoot = %q, want %q", task.Context.RepoRoot, task.WorktreePath)
+		if task.Context.RepoRoot != repoRoot {
+			t.Fatalf("RepoRoot = %q, want %q", task.Context.RepoRoot, repoRoot)
 		}
-		if task.Context.WorkDir != task.WorktreePath {
-			t.Fatalf("WorkDir = %q, want %q", task.Context.WorkDir, task.WorktreePath)
+		if task.Context.WorkDir != repoRoot {
+			t.Fatalf("WorkDir = %q, want %q", task.Context.WorkDir, repoRoot)
 		}
 	default:
 		t.Fatal("expected dispatched task")
