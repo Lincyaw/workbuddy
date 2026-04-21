@@ -349,7 +349,9 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	rep.SetBaseURL(fmt.Sprintf("http://localhost:%d", cfg.Global.Port))
 	rep.SetEventRecorder(recorder)
 	rep.SetVerifier(reporter.NewGHClaimVerifier())
-	rt.SetReporter(rep)
+	// Note: router no longer holds a Reporter — worktree-failure reporting
+	// now lives on the worker side (see internal/worker/executor.go). The
+	// reporter wired above is used by the poller/worker paths.
 
 	// Poller
 	p := poller.NewPoller(ghReader, st, cfg.Global.Repo, cfg.Global.PollInterval)

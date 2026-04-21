@@ -1,60 +1,78 @@
-// Package router dispatches agent tasks to available workers.
+// Package router makes the scheduling decision for an agent dispatch: given
+// a workflow state and the set of configured agents, which agent should run,
+// and should the task proceed at all (dependency gate)?
+//
+// It intentionally does NOT load GitHub context, persist the task row, or
+// provision worktrees — those responsibilities live in:
+//
+//   - internal/taskprep   — context loading, task persistence, embedded dispatch
+//   - internal/worker     — workspace/worktree provisioning at execute time
+//   - internal/dependency — dependency verdict computation + gating helper
+//
+// See issue #145 finding #8 for the motivation for this split.
 package router
 
 import (
 	"context"
-	"fmt"
 	"log"
-	"os"
-	"strings"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
-	"github.com/Lincyaw/workbuddy/internal/ghadapter"
+	"github.com/Lincyaw/workbuddy/internal/dependency"
 	"github.com/Lincyaw/workbuddy/internal/registry"
-	"github.com/Lincyaw/workbuddy/internal/reporter"
-	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
-	"github.com/Lincyaw/workbuddy/internal/workspace"
-	"github.com/google/uuid"
+	"github.com/Lincyaw/workbuddy/internal/taskprep"
 )
 
-// WorkerTask is the unit of work sent to an embedded Worker via channel.
-type WorkerTask struct {
-	TaskID       string
-	Repo         string
-	IssueNum     int
-	AgentName    string
-	Agent        *config.AgentConfig
-	Context      *runtimepkg.TaskContext
-	Workflow     string
-	State        string
-	WorktreePath string // path to isolated worktree, empty if isolation disabled
+// WorkerTask is re-exported from internal/taskprep so existing consumers
+// (cmd/serve.go, cmd/coordinator.go, internal/worker/embedded.go, tests)
+// continue to compile against router.WorkerTask. The canonical definition
+// lives on the preparer side because materialising a WorkerTask is the
+// preparer's responsibility.
+type WorkerTask = taskprep.WorkerTask
+
+// IssueDataReader is re-exported from internal/taskprep for the same reason.
+type IssueDataReader = taskprep.IssueDataReader
+
+// Decision is the output of the scheduling layer: "dispatch AgentName for
+// this issue in this workflow state". It is consumed by a Preparer that
+// materialises the task row + GH context.
+type Decision = taskprep.Decision
+
+// Preparer is the contract the Router delegates task materialisation to.
+// The concrete implementation lives in internal/taskprep.
+type Preparer interface {
+	Prepare(ctx context.Context, d Decision) error
 }
 
-type IssueDataReader interface {
-	ReadIssueSummary(repo string, issueNum int) (title, body string, labels []string, err error)
-	ReadIssueComments(repo string, issueNum int) ([]runtimepkg.IssueComment, error)
-	ListRelatedPRs(repo string, issueNum int) ([]runtimepkg.PRSummary, error)
+// readerAwarePreparer is an optional extension implemented by preparers that
+// accept a late IssueDataReader override (taskprep.Preparer does).
+type readerAwarePreparer interface {
+	Preparer
+	SetIssueDataReader(IssueDataReader)
 }
 
-// Router receives DispatchRequests from the StateMachine and routes them
-// to Workers. In v0.1.0 it sends tasks over a Go channel to the embedded Worker.
+// Router consumes DispatchRequests from the StateMachine, applies
+// scheduling policy (agent lookup, dependency gating) and hands the
+// resulting Decision to a Preparer.
+//
+// The registry is kept on the struct for call-site compatibility and for a
+// potential future when scheduling actually selects among multiple workers;
+// today the preparer either dispatches to the single embedded worker or
+// persists the task for a remote worker to claim.
 type Router struct {
-	agents             map[string]*config.AgentConfig
-	registry           *registry.Registry
-	store              *store.Store
-	repo               string
-	repoRoot           string
-	taskChan           chan<- WorkerTask
-	wsMgr              *workspace.Manager // nil = no workspace isolation
-	dispatchToEmbedded bool
-	reporter           *reporter.Reporter
-	gh                 IssueDataReader
+	agents    map[string]*config.AgentConfig
+	registry  *registry.Registry
+	gateStore dependency.GateStore
+	preparer  Preparer
 }
 
-// NewRouter creates a Router for v0.1.0 channel-based dispatch.
-// Pass nil for wsMgr to disable workspace isolation (agents use CWD).
+// NewRouter creates a Router wired for v0.1.0 channel-based dispatch. The
+// call signature matches the pre-split router.NewRouter so existing
+// consumers (cmd/serve.go, cmd/repo_runtime.go) don't have to be rewired.
+//
+// The wsMgr argument is retained for signature compatibility but is unused
+// by the router — workspace provisioning lives on the worker side.
 func NewRouter(
 	agents map[string]*config.AgentConfig,
 	reg *registry.Registry,
@@ -62,37 +80,38 @@ func NewRouter(
 	repo string,
 	repoRoot string,
 	taskChan chan<- WorkerTask,
-	wsMgr *workspace.Manager,
+	wsMgr any,
 	dispatchToEmbedded bool,
 ) *Router {
+	_ = repo // reserved for future multi-repo routing; Decision already carries repo per-dispatch
+	_ = wsMgr
 	return &Router{
-		agents:             agents,
-		registry:           reg,
-		store:              st,
-		repo:               repo,
-		repoRoot:           repoRoot,
-		taskChan:           taskChan,
-		wsMgr:              wsMgr,
-		dispatchToEmbedded: dispatchToEmbedded,
-		gh:                 ghadapter.NewCLI(),
+		agents:    agents,
+		registry:  reg,
+		gateStore: st,
+		preparer:  taskprep.NewPreparer(st, repoRoot, taskChan, dispatchToEmbedded),
 	}
 }
 
-// SetReporter sets the optional reporter used to post worktree failure comments.
-func (r *Router) SetReporter(rep *reporter.Reporter) {
-	r.reporter = rep
-}
-
-// SetIssueDataReader replaces the default GitHub issue-context reader.
+// SetIssueDataReader forwards the reader override to the underlying
+// preparer when it supports that hook. Kept for call-site compatibility
+// with the pre-split API.
 func (r *Router) SetIssueDataReader(reader IssueDataReader) {
-	if reader == nil {
-		r.gh = ghadapter.NewCLI()
-		return
+	if rs, ok := r.preparer.(readerAwarePreparer); ok {
+		rs.SetIssueDataReader(reader)
 	}
-	r.gh = reader
 }
 
-// Run reads from the dispatch channel and routes tasks. Blocks until ctx is cancelled.
+// SetPreparer swaps in an alternative Preparer. Intended for tests and for
+// cmd/* wiring that wants to construct a taskprep.Preparer with custom
+// options.
+func (r *Router) SetPreparer(p Preparer) {
+	if p != nil {
+		r.preparer = p
+	}
+}
+
+// Run consumes dispatch requests until ctx is cancelled.
 func (r *Router) Run(ctx context.Context, dispatchCh <-chan statemachine.DispatchRequest) error {
 	for {
 		select {
@@ -107,145 +126,42 @@ func (r *Router) Run(ctx context.Context, dispatchCh <-chan statemachine.Dispatc
 	}
 }
 
-// handleDispatch processes a single DispatchRequest.
+// handleDispatch applies scheduling policy and hands the decision to the
+// preparer.
 func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRequest) {
+	decision, ok := r.decide(req)
+	if !ok {
+		return
+	}
+	if err := r.preparer.Prepare(ctx, decision); err != nil {
+		log.Printf("[router] prepare failed for %s#%d: %v", req.Repo, req.IssueNum, err)
+	}
+}
+
+// decide is the pure scheduling core: no side effects other than logging.
+// Returns (decision, true) if the dispatch should proceed.
+func (r *Router) decide(req statemachine.DispatchRequest) (Decision, bool) {
 	agent, ok := r.agents[req.AgentName]
 	if !ok {
 		log.Printf("[router] agent %q not found, skipping dispatch for %s#%d", req.AgentName, req.Repo, req.IssueNum)
-		return
+		return Decision{}, false
 	}
-	depState, err := r.store.QueryIssueDependencyState(req.Repo, req.IssueNum)
+	blocked, err := dependency.IsBlocked(r.gateStore, req.Repo, req.IssueNum)
 	if err != nil {
 		log.Printf("[router] failed to query dependency state for %s#%d: %v", req.Repo, req.IssueNum, err)
-		return
+		return Decision{}, false
 	}
-	if depState != nil && (depState.Verdict == store.DependencyVerdictBlocked || depState.Verdict == store.DependencyVerdictNeedsHuman) {
-		log.Printf("[router] blocked dispatch for %s#%d due to dependency verdict %q", req.Repo, req.IssueNum, depState.Verdict)
-		return
+	if blocked {
+		log.Printf("[router] blocked dispatch for %s#%d due to dependency verdict", req.Repo, req.IssueNum)
+		return Decision{}, false
 	}
-
-	taskID := uuid.New().String()
-
-	// Record task in store
-	if err := r.store.InsertTask(store.TaskRecord{
-		ID:        taskID,
+	return Decision{
 		Repo:      req.Repo,
 		IssueNum:  req.IssueNum,
 		AgentName: req.AgentName,
-		Role:      agent.Role,
-		Runtime:   agent.Runtime,
+		Agent:     agent,
 		Workflow:  req.Workflow,
 		State:     req.State,
-		Status:    store.TaskStatusPending,
-	}); err != nil {
-		log.Printf("[router] failed to insert task: %v", err)
-		return
-	}
-
-	if !r.dispatchToEmbedded || r.taskChan == nil {
-		return
-	}
-
-	// Fetch issue details via the shared GitHub adapter for template rendering.
-	issueCtx := runtimepkg.IssueContext{Number: req.IssueNum}
-	if r.gh != nil {
-		if title, body, labels, err := r.gh.ReadIssueSummary(req.Repo, req.IssueNum); err != nil {
-			log.Printf("[router] warning: could not fetch issue details: %v", err)
-		} else {
-			issueCtx.Title = title
-			issueCtx.Body = body
-			issueCtx.Labels = labels
-		}
-		if comments, err := r.gh.ReadIssueComments(req.Repo, req.IssueNum); err != nil {
-			log.Printf("[router] warning: could not fetch issue comments: %v", err)
-		} else {
-			issueCtx.Comments = comments
-			issueCtx.CommentsText = formatComments(comments)
-		}
-	}
-	var relatedPRs []runtimepkg.PRSummary
-	if r.gh != nil {
-		var err error
-		relatedPRs, err = r.gh.ListRelatedPRs(req.Repo, req.IssueNum)
-		if err != nil {
-			log.Printf("[router] warning: could not fetch related PRs: %v", err)
-		}
-	}
-
-	var repoRoot string
-	var workDir string
-	if r.wsMgr == nil {
-		repoRoot = r.repoRoot
-		workDir, _ = os.Getwd()
-	} else {
-		// The worker executor owns worktree setup/cleanup so transport dispatch
-		// only carries the base repo path.
-		repoRoot = r.repoRoot
-		workDir = r.repoRoot
-	}
-
-	taskCtx := &runtimepkg.TaskContext{
-		Issue:          issueCtx,
-		Repo:           req.Repo,
-		RepoRoot:       repoRoot,
-		WorkDir:        workDir,
-		RelatedPRs:     relatedPRs,
-		RelatedPRsText: formatRelatedPRs(relatedPRs),
-		Session: runtimepkg.SessionContext{
-			ID: fmt.Sprintf("session-%s", taskID),
-		},
-	}
-
-	task := WorkerTask{
-		TaskID:       taskID,
-		Repo:         req.Repo,
-		IssueNum:     req.IssueNum,
-		AgentName:    req.AgentName,
-		Agent:        agent,
-		Context:      taskCtx,
-		Workflow:     req.Workflow,
-		State:        req.State,
-	}
-
-	select {
-	case r.taskChan <- task:
-		// Task status is updated to running by the worker when it actually
-		// starts executing, so pending tasks queued in the channel buffer
-		// don't appear as running.
-	case <-ctx.Done():
-		return
-	}
+	}, true
 }
 
-func formatComments(comments []runtimepkg.IssueComment) string {
-	if len(comments) == 0 {
-		return "(no comments)"
-	}
-	var b strings.Builder
-	for i, c := range comments {
-		if i > 0 {
-			b.WriteString("\n---\n")
-		}
-		fmt.Fprintf(&b, "[%s by %s]\n%s", c.CreatedAt, c.Author, c.Body)
-	}
-	return b.String()
-}
-
-func formatRelatedPRs(prs []runtimepkg.PRSummary) string {
-	if len(prs) == 0 {
-		return "(no related PRs)"
-	}
-	var b strings.Builder
-	for i, p := range prs {
-		if i > 0 {
-			b.WriteByte('\n')
-		}
-		draft := ""
-		if p.IsDraft {
-			draft = " [draft]"
-		}
-		fmt.Fprintf(&b, "#%d [%s]%s %s (head: %s, base: %s) - %s",
-			p.Number, p.State, draft, p.Title, p.HeadRefName, p.BaseRefName, p.URL)
-	}
-	return b.String()
-}
