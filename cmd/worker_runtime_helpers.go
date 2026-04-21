@@ -1,37 +1,14 @@
 package cmd
 
 import (
-	"runtime"
-	"time"
-
-	"github.com/Lincyaw/workbuddy/internal/router"
-	"github.com/Lincyaw/workbuddy/internal/tasknotify"
+	"github.com/Lincyaw/workbuddy/internal/app"
 )
 
-type issueLabelReader interface {
-	ReadIssueLabels(repo string, issueNum int) ([]string, error)
-}
+// issueLabelReader is the cmd-side alias for app.IssueLabelReader so existing
+// call sites (worker_test, worker, serve) keep compiling after the app split.
+type issueLabelReader = app.IssueLabelReader
 
-func defaultEmbeddedWorkerParallelism() int {
-	if runtime.NumCPU() < defaultMaxParallelTasks {
-		return runtime.NumCPU()
-	}
-	return defaultMaxParallelTasks
-}
-
-func publishTaskCompletion(hub *tasknotify.Hub, task router.WorkerTask, status string, exitCode int, startedAt, completedAt time.Time) {
-	if hub == nil {
-		return
-	}
-	hub.Publish(tasknotify.TaskEvent{
-		TaskID:      task.TaskID,
-		Repo:        task.Repo,
-		IssueNum:    task.IssueNum,
-		AgentName:   task.AgentName,
-		Status:      status,
-		ExitCode:    exitCode,
-		DurationMS:  completedAt.Sub(startedAt).Milliseconds(),
-		StartedAt:   startedAt,
-		CompletedAt: completedAt,
-	})
-}
+var (
+	defaultEmbeddedWorkerParallelism = app.DefaultEmbeddedWorkerParallelism
+	publishTaskCompletion            = app.PublishTaskCompletion
+)

@@ -42,14 +42,14 @@ func TestCoordinator_InfraFailureEmitsInfraEvent(t *testing.T) {
 	reg := registry.NewRegistry(st, 30)
 
 	s := &fullCoordinatorServer{
-		store:    st,
-		registry: reg,
-		eventlog: evlog,
-		taskHub:  tasknotify.NewHub(),
+		Store:    st,
+		Registry: reg,
+		Eventlog: evlog,
+		TaskHub:  tasknotify.NewHub(),
 		// Zero-value pollerManager; MarkAgentCompleted will short-circuit
 		// because no runtime is registered for this repo. That is
 		// exactly the "was not invoked" signal we need for AC-3.
-		pollers: &pollerManager{},
+		Pollers: &pollerManager{},
 	}
 
 	if err := reg.Register("worker-1", "owner/repo", []string{"dev"}, "host1"); err != nil {
@@ -77,7 +77,7 @@ func TestCoordinator_InfraFailureEmitsInfraEvent(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/task-infra/result", bytes.NewReader(body))
 	req = req.WithContext(context.Background())
 	rec := httptest.NewRecorder()
-	s.handleTaskResult(rec, req, "task-infra")
+	s.HandleTaskResult(rec, req, "task-infra")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("result status = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -133,11 +133,11 @@ func TestCoordinator_GenuineFailureDoesNotEmitInfraEvent(t *testing.T) {
 	evlog := eventlog.NewEventLogger(st)
 	reg := registry.NewRegistry(st, 30)
 	s := &fullCoordinatorServer{
-		store:    st,
-		registry: reg,
-		eventlog: evlog,
-		taskHub:  tasknotify.NewHub(),
-		pollers:  &pollerManager{},
+		Store:    st,
+		Registry: reg,
+		Eventlog: evlog,
+		TaskHub:  tasknotify.NewHub(),
+		Pollers:  &pollerManager{},
 	}
 	if err := reg.Register("worker-1", "owner/repo", []string{"dev"}, "host1"); err != nil {
 		t.Fatalf("register worker: %v", err)
@@ -161,7 +161,7 @@ func TestCoordinator_GenuineFailureDoesNotEmitInfraEvent(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/task-fail/result", bytes.NewReader(body))
 	req = req.WithContext(context.Background())
 	rec := httptest.NewRecorder()
-	s.handleTaskResult(rec, req, "task-fail")
+	s.HandleTaskResult(rec, req, "task-fail")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("result status = %d, body=%s", rec.Code, rec.Body.String())
 	}
