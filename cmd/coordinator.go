@@ -505,7 +505,7 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", api.handleHealth)
-	metrics.NewHandler(st).Register(mux)
+	metrics.NewHandler(st).WithEventLogger(evlog).Register(mux)
 	readOnlyAudit := audit.NewHTTPHandler(st)
 	readOnlyAuditMux := http.NewServeMux()
 	readOnlyAudit.Register(readOnlyAuditMux)
