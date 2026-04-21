@@ -628,8 +628,10 @@ requirements:
       - "AC-009-5: 并发安全（SQLite WAL 模式）"
       - "AC-009-6: 支持按时间范围 + 事件类型 + repo + issue 查询"
       - "AC-009-7: 单元测试：写入/查询/并发写入 3 种场景"
+      - "AC-009-8: EventLogger.Health() 暴露降级计数与最近错误，通过 /metrics 导出 workbuddy_eventlog_degraded / workbuddy_eventlog_write_failures_total (issue #145)"
     code:
       - internal/eventlog/eventlog.go
+      - internal/metrics/handler.go
     tests:
       - internal/eventlog/eventlog_test.go
     deps: [REQ-024]

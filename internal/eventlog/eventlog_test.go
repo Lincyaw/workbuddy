@@ -183,6 +183,127 @@ func TestWriteRateLimitEvent(t *testing.T) {
 	}
 }
 
+// TestHealthHappyPath verifies successful writes never mark the logger
+// degraded.
+func TestHealthHappyPath(t *testing.T) {
+	logger := newTestLogger(t)
+
+	logger.Log(TypePoll, "owner/repo", 1, nil)
+	logger.Log(TypeDispatch, "owner/repo", 1, map[string]string{"agent": "dev"})
+
+	h := logger.Health()
+	if h.Degraded {
+		t.Fatalf("expected Degraded=false after successful writes, got %+v", h)
+	}
+	if h.WriteFailures != 0 {
+		t.Fatalf("expected WriteFailures=0, got %d", h.WriteFailures)
+	}
+	if h.LastError != "" {
+		t.Fatalf("expected empty LastError, got %q", h.LastError)
+	}
+	if !h.LastFailureAt.IsZero() {
+		t.Fatalf("expected zero LastFailureAt, got %v", h.LastFailureAt)
+	}
+}
+
+// TestHealthDegradedOnWriteFailure verifies that a failed write marks the
+// logger degraded, increments the counter, and captures the last error — but
+// Log() itself still returns cleanly (best-effort contract preserved).
+func TestHealthDegradedOnWriteFailure(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	s, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("store.NewStore: %v", err)
+	}
+	logger := NewEventLogger(s)
+
+	// Healthy baseline.
+	logger.Log(TypePoll, "owner/repo", 1, nil)
+	if h := logger.Health(); h.Degraded {
+		t.Fatalf("expected healthy baseline, got %+v", h)
+	}
+
+	// Close the store so subsequent InsertEvent calls fail.
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	before := time.Now().UTC()
+	// These must not panic or block despite the closed store.
+	logger.Log(TypePoll, "owner/repo", 2, nil)
+	logger.Log(TypeDispatch, "owner/repo", 3, nil)
+
+	h := logger.Health()
+	if !h.Degraded {
+		t.Fatalf("expected Degraded=true after failed writes, got %+v", h)
+	}
+	if h.WriteFailures != 2 {
+		t.Fatalf("expected WriteFailures=2, got %d", h.WriteFailures)
+	}
+	if h.LastError == "" {
+		t.Fatalf("expected non-empty LastError")
+	}
+	if h.LastFailureAt.Before(before) {
+		t.Fatalf("expected LastFailureAt >= %v, got %v", before, h.LastFailureAt)
+	}
+}
+
+// TestHealthConcurrentSafe verifies Health() is safe to call while Log()
+// runs from multiple goroutines. Run under `go test -race`.
+func TestHealthConcurrentSafe(t *testing.T) {
+	logger := newTestLogger(t)
+
+	const writers = 4
+	const readers = 4
+	const iterations = 20
+
+	stop := make(chan struct{})
+
+	var readerWG sync.WaitGroup
+	readerWG.Add(readers)
+	for i := 0; i < readers; i++ {
+		go func() {
+			defer readerWG.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = logger.Health()
+				}
+			}
+		}()
+	}
+
+	var writerWG sync.WaitGroup
+	writerWG.Add(writers)
+	for i := 0; i < writers; i++ {
+		go func(g int) {
+			defer writerWG.Done()
+			for j := 0; j < iterations; j++ {
+				logger.Log(TypePoll, "owner/repo", g, map[string]int{"iter": j})
+			}
+		}(i)
+	}
+
+	writerWG.Wait()
+	close(stop)
+	readerWG.Wait()
+
+	// The primary invariant is that Health() and Log() race cleanly under
+	// `-race`. The SQLite backend can occasionally return SQLITE_BUSY under
+	// heavy concurrent writes; if that happens the logger correctly marks
+	// itself degraded. Either outcome is acceptable for this test — we only
+	// assert the numbers are self-consistent.
+	h := logger.Health()
+	if h.Degraded && h.WriteFailures == 0 {
+		t.Fatalf("Degraded=true but WriteFailures=0: %+v", h)
+	}
+	if !h.Degraded && h.WriteFailures != 0 {
+		t.Fatalf("Degraded=false but WriteFailures=%d: %+v", h.WriteFailures, h)
+	}
+}
+
 func TestWriteReportOverflowEvent(t *testing.T) {
 	logger := newTestLogger(t)
 	logger.Log(TypeReportOverflow, "owner/repo", 17, map[string]any{

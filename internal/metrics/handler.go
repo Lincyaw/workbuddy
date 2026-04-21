@@ -18,6 +18,7 @@ const stuckThreshold = time.Hour
 // Handler serves Prometheus metrics from SQLite state.
 type Handler struct {
 	store *store.Store
+	evlog *eventlog.EventLogger
 	now   func() time.Time
 }
 
@@ -27,6 +28,14 @@ func NewHandler(st *store.Store) *Handler {
 		store: st,
 		now:   time.Now,
 	}
+}
+
+// WithEventLogger attaches an EventLogger whose health is exposed as the
+// `workbuddy_eventlog_write_failures_total` and `workbuddy_eventlog_degraded`
+// metrics. Passing nil is a no-op. Returns the receiver for chaining.
+func (h *Handler) WithEventLogger(ev *eventlog.EventLogger) *Handler {
+	h.evlog = ev
+	return h
 }
 
 // Register registers GET /metrics.
@@ -64,7 +73,25 @@ func (h *Handler) writeMetrics(b *strings.Builder, now time.Time) error {
 	if err := h.writeTransitionMaxCounters(b, db); err != nil {
 		return err
 	}
+	h.writeEventlogHealth(b)
 	return h.writeIssueCounters(b, db, now)
+}
+
+func (h *Handler) writeEventlogHealth(b *strings.Builder) {
+	if h.evlog == nil {
+		return
+	}
+	hs := h.evlog.Health()
+	_, _ = b.WriteString("# HELP workbuddy_eventlog_write_failures_total Number of event-log writes that failed since process start.\n")
+	_, _ = b.WriteString("# TYPE workbuddy_eventlog_write_failures_total counter\n")
+	_, _ = b.WriteString(fmt.Sprintf("workbuddy_eventlog_write_failures_total %d\n", hs.WriteFailures))
+	_, _ = b.WriteString("# HELP workbuddy_eventlog_degraded 1 if any event-log write has failed since process start, else 0.\n")
+	_, _ = b.WriteString("# TYPE workbuddy_eventlog_degraded gauge\n")
+	degraded := 0
+	if hs.Degraded {
+		degraded = 1
+	}
+	_, _ = b.WriteString(fmt.Sprintf("workbuddy_eventlog_degraded %d\n", degraded))
 }
 
 func (h *Handler) writeEventCounters(b *strings.Builder, db *sql.DB) error {

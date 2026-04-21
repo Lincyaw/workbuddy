@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/store"
@@ -91,10 +93,36 @@ type EventFilter struct {
 	IssueNum int
 }
 
+// Health reports the observability state of an EventLogger.
+//
+// Event-log writes are best-effort telemetry: a single failed INSERT must not
+// block the orchestration pipeline. But silently swallowing failures hides
+// degraded audit trails from operators. Health exposes the degraded condition
+// so it can be surfaced via /metrics, `workbuddy status`, or log scraping
+// without changing the best-effort Log() contract.
+type Health struct {
+	// Degraded is true once any write has failed since process start.
+	Degraded bool `json:"degraded"`
+	// WriteFailures counts the number of failed InsertEvent calls.
+	WriteFailures int64 `json:"write_failures"`
+	// LastError is the string form of the most recent write error, if any.
+	LastError string `json:"last_error,omitempty"`
+	// LastFailureAt is the UTC timestamp of the most recent write error.
+	LastFailureAt time.Time `json:"last_failure_at,omitempty"`
+}
+
 // EventLogger provides a higher-level API over store.Store for event logging.
-// It marshals payloads to JSON and swallows write errors (printing to stderr).
+// It marshals payloads to JSON and swallows write errors (printing to stderr),
+// while tracking failures on a per-instance health counter so operators can
+// detect degraded observability via Health().
 type EventLogger struct {
 	store *store.Store
+
+	writeFailures atomic.Int64
+
+	healthMu      sync.RWMutex
+	lastErr       string
+	lastFailureAt time.Time
 }
 
 // NewEventLogger creates an EventLogger backed by the given Store.
@@ -103,7 +131,8 @@ func NewEventLogger(s *store.Store) *EventLogger {
 }
 
 // Log records an event. The payload is marshalled to JSON automatically.
-// On failure the error is printed to stderr; the caller is never blocked.
+// On failure the error is printed to stderr and the logger's health is
+// marked degraded; the caller is never blocked.
 func (l *EventLogger) Log(eventType, repo string, issueNum int, payload interface{}) {
 	var payloadStr string
 	if payload != nil {
@@ -124,6 +153,34 @@ func (l *EventLogger) Log(eventType, repo string, issueNum int, payload interfac
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "eventlog: write failed: %v\n", err)
+		l.recordFailure(err)
+	}
+}
+
+func (l *EventLogger) recordFailure(err error) {
+	l.writeFailures.Add(1)
+	l.healthMu.Lock()
+	l.lastErr = err.Error()
+	l.lastFailureAt = time.Now().UTC()
+	l.healthMu.Unlock()
+}
+
+// Health returns a snapshot of the logger's observability state. It is safe
+// to call from any goroutine. Callers that treat event-log writes as
+// best-effort can ignore this; operator surfaces (metrics, status, healthz)
+// should surface Degraded as a first-class condition so a lost audit trail
+// is visible instead of silent.
+func (l *EventLogger) Health() Health {
+	failures := l.writeFailures.Load()
+	l.healthMu.RLock()
+	lastErr := l.lastErr
+	lastAt := l.lastFailureAt
+	l.healthMu.RUnlock()
+	return Health{
+		Degraded:      failures > 0,
+		WriteFailures: failures,
+		LastError:     lastErr,
+		LastFailureAt: lastAt,
 	}
 }
 

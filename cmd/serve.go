@@ -413,7 +413,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	})
 
 	audit.NewHTTPHandler(st).Register(mux)
-	metrics.NewHandler(st).Register(mux)
+	metrics.NewHandler(st).WithEventLogger(evlog).Register(mux)
 	dashboardAPI := auditapi.NewHandler(st)
 	dashboardAPI.SetSessionsDir(sessionsDir)
 	dashboardAPI.RegisterDashboard(mux)
