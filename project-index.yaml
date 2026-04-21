@@ -396,8 +396,12 @@ requirements:
       - "AC-004-8: 单元测试：有匹配 Worker、无匹配 Worker、agent 不存在 3 种场景"
     code:
       - internal/router/router.go
+      - internal/taskprep/taskprep.go
+      - internal/dependency/gate.go
     tests:
       - internal/router/router_test.go
+      - internal/taskprep/taskprep_test.go
+      - internal/dependency/gate_test.go
     deps: [REQ-001, REQ-003, REQ-023, REQ-024]
 
   - id: REQ-005
@@ -1151,6 +1155,7 @@ requirements:
     code:
       - cmd/serve.go
       - internal/dependency/dependency.go
+      - internal/dependency/gate.go
       - internal/poller/poller.go
       - internal/statemachine/statemachine.go
       - internal/router/router.go
@@ -1161,6 +1166,7 @@ requirements:
       - docs/implemented/issue-dependencies.md
     tests:
       - internal/dependency/dependency_test.go
+      - internal/dependency/gate_test.go
       - internal/store/store_test.go
       - internal/poller/poller_test.go
       - internal/statemachine/statemachine_test.go
