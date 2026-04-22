@@ -24,6 +24,7 @@ func Execute() error {
 	if err == nil {
 		return nil
 	}
+	err = normalizeCLIError(err)
 	if shouldPrintUsage(err) {
 		if cmd == nil {
 			cmd = rootCmd

@@ -963,6 +963,10 @@ func (e *deploymentNotFoundError) Error() string {
 	return fmt.Sprintf("deployment %q not found in %s scope (installed: %s)", e.name, e.scope, installed)
 }
 
+func (e *deploymentNotFoundError) ExitCode() int {
+	return int(ExitCodeNotFound)
+}
+
 func collectDeployListRows(scope string) ([]deployListRow, error) {
 	records, err := loadDeploymentRecords(scope, defaultDeployListScope)
 	if err != nil {

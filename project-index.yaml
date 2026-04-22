@@ -2079,3 +2079,33 @@ requirements:
     tests:
       - cmd/deploy_test.go
     deps: [REQ-027, REQ-028]
+
+  - id: REQ-063
+    title: CLI semantic exit codes
+    description: >
+      Agent-native CLI callers need stable, semantically meaningful exit codes
+      so automation can distinguish usage mistakes from missing resources and
+      auth failures without scraping stderr strings.
+    priority: P0
+    version: v0.4.0
+    status: tested
+    acceptance_criteria:
+      - "AC-063-1: cmd/exitcodes.go defines typed CLI exit codes for success (0), syntax/usage (2), not found (3), unauthorized (4), conflict (5), cancelled (6), and missing dependency (7)"
+      - "AC-063-2: Unknown subcommands return exit code 2"
+      - "AC-063-3: deploy stop returns exit code 3 when the deployment manifest is missing"
+      - "AC-063-4: worker returns exit code 4 when the coordinator rejects the worker token"
+      - "AC-063-5: cmd/exitcodes_test.go verifies the exit-code constants and the required CLI code paths"
+      - "AC-063-6: go build ./... && go test ./... -count=1 pass after the exit-code changes"
+    code:
+      - cmd/exitcodes.go
+      - cmd/exit_error.go
+      - cmd/root.go
+      - cmd/deploy.go
+      - cmd/worker.go
+      - cmd/status.go
+      - cmd/repo.go
+      - cmd/validate.go
+      - cmd/diagnose.go
+    tests:
+      - cmd/exitcodes_test.go
+    deps: [REQ-017, REQ-028, REQ-036]

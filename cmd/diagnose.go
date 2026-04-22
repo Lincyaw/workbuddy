@@ -142,7 +142,7 @@ func runDiagnoseWithOpts(_ context.Context, opts *diagnoseOpts, stdout io.Writer
 	}
 
 	if len(results) > 0 {
-		return &cliExitError{code: 1}
+		return &cliExitError{code: exitCodeFailure}
 	}
 	return nil
 }

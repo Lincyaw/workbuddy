@@ -2,7 +2,7 @@ package cmd
 
 type cliExitError struct {
 	msg  string
-	code int
+	code ExitCode
 }
 
 func (e *cliExitError) Error() string {
@@ -10,8 +10,8 @@ func (e *cliExitError) Error() string {
 }
 
 func (e *cliExitError) ExitCode() int {
-	if e == nil || e.code == 0 {
-		return 1
+	if e == nil || e.code == ExitCodeSuccess {
+		return int(exitCodeFailure)
 	}
-	return e.code
+	return int(e.code)
 }

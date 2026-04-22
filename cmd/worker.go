@@ -328,7 +328,10 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 
 	if err := registerWorkerRepos(ctx, client, workerID, roles, publicRuntime, bindings.list()); err != nil {
 		if errors.Is(err, workerclient.ErrUnauthorized) {
-			return fmt.Errorf("worker: coordinator rejected the provided token")
+			return &cliExitError{
+				msg:  "worker: coordinator rejected the provided token",
+				code: ExitCodeUnauthorized,
+			}
 		}
 		return fmt.Errorf("worker: register with coordinator: %w", err)
 	}
@@ -351,7 +354,10 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 			}
 			if errors.Is(err, workerclient.ErrUnauthorized) {
 				wg.Wait()
-				return fmt.Errorf("worker: coordinator rejected the provided token")
+				return &cliExitError{
+					msg:  "worker: coordinator rejected the provided token",
+					code: ExitCodeUnauthorized,
+				}
 			}
 			wg.Wait()
 			return fmt.Errorf("worker: poll task: %w", err)
