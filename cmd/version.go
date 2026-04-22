@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -31,6 +32,9 @@ var versionCmd = &cobra.Command{
 }
 
 func init() {
+	rootCmd.Version = versionString()
+	rootCmd.SetVersionTemplate("{{.Version}}\n")
+	rootCmd.InitDefaultVersionFlag()
 	addOutputFormatFlag(versionCmd)
 	rootCmd.AddCommand(versionCmd)
 }
@@ -62,4 +66,20 @@ func runVersionWithOpts(opts *versionOpts, stdout io.Writer) error {
 	}
 	_, err := fmt.Fprintf(stdout, "workbuddy %s (commit %s, built %s)\n", result.Version, result.Commit, result.Date)
 	return err
+}
+
+func versionString() string {
+	version := strings.TrimSpace(Version)
+	if version == "" {
+		version = "dev"
+	}
+	commit := strings.TrimSpace(Commit)
+	if commit == "" {
+		commit = "unknown"
+	}
+	date := strings.TrimSpace(Date)
+	if date == "" {
+		date = "unknown"
+	}
+	return fmt.Sprintf("workbuddy %s (commit %s, built %s)", version, commit, date)
 }

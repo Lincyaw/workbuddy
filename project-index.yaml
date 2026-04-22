@@ -2271,3 +2271,29 @@ requirements:
       - cmd/admin_restart_issue_test.go
       - cmd/worker_repos_test.go
     deps: [REQ-034, REQ-049, REQ-060]
+
+  - id: REQ-069
+    title: CLI introspection surface for version and command schema
+    description: >
+      Expose a machine-readable CLI introspection surface so agents can
+      discover the current workbuddy version and the full Cobra command tree
+      without guessing. The root command must support `--version` and
+      `--dump-schema`, and the schema contract must stay stable when command
+      registration order changes or new commands are added.
+    priority: P2
+    version: v0.4.0
+    status: tested
+    acceptance_criteria:
+      - "AC-069-1: `workbuddy --version` on the root command prints the version string and exits 0"
+      - "AC-069-2: `workbuddy --dump-schema` emits valid JSON that includes the full command tree"
+      - "AC-069-3: Every command entry includes its name/path/use, short description, nested subcommands, and flags keyed by long flag name"
+      - "AC-069-4: Every flag entry includes name, type, default, and required metadata"
+      - "AC-069-5: The schema uses stable object maps for flags and subcommands so flag registration order and new sibling commands do not change the lookup contract"
+      - "AC-069-6: Unit tests cover root `--version`, valid `--dump-schema` JSON, and presence of at least the deploy/coordinator/worker commands"
+    code:
+      - cmd/root.go
+      - cmd/version.go
+      - cmd/introspection.go
+    tests:
+      - cmd/introspection_test.go
+    deps: [REQ-017, REQ-027, REQ-028]

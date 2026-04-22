@@ -16,6 +16,7 @@ var rootCmd = &cobra.Command{
 	Long:          "Hub-Spoke architecture: Coordinator polls GitHub Issues and manages label-based state machine; Workers execute agent instances.",
 	SilenceErrors: true,
 	SilenceUsage:  true,
+	RunE:          runRootCmd,
 }
 
 // Execute runs the root command.
@@ -83,4 +84,19 @@ func (e *reportedCLIError) ExitCode() int {
 		return ec.ExitCode()
 	}
 	return 1
+}
+
+func init() {
+	rootCmd.Flags().Bool("dump-schema", false, "Emit the full CLI command tree as JSON")
+}
+
+func runRootCmd(cmd *cobra.Command, _ []string) error {
+	dumpSchema, _ := cmd.Flags().GetBool("dump-schema")
+	if dumpSchema {
+		return writeSchema(cmd.OutOrStdout(), cmd.Root())
+	}
+	if err := cmd.Help(); err != nil {
+		return fmt.Errorf("render root help: %w", err)
+	}
+	return nil
 }
