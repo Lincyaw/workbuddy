@@ -2034,3 +2034,25 @@ requirements:
       - cmd/coordinator_test.go
       - cmd/status_test.go
     deps: [REQ-019, REQ-034, REQ-057]
+
+  - id: REQ-061
+    title: CLI syntax errors keep usage hints while runtime failures stay quiet
+    description: >
+      Stop dumping the full Cobra usage block on every workbuddy failure while
+      still preserving usage guidance for actual syntax mistakes. Runtime and
+      logic errors should print only the error, but unknown flags, unknown
+      commands, and missing required flags should still emit the relevant usage
+      block.
+    priority: P1
+    version: v0.4.0
+    status: tested
+    acceptance_criteria:
+      - "AC-061-1: `cmd/root.go` sets `rootCmd.SilenceUsage = true` so Cobra does not print usage for every non-nil command error"
+      - "AC-061-2: CLI execution still prints the relevant usage block for syntax errors including unknown flags, unknown commands, and missing required flags"
+      - "AC-061-3: `workbuddy deploy stop --name nonexistent` does not emit usage to stderr, while `workbuddy deploy stop --bad-flag` still does"
+      - "AC-061-4: Unit tests cover both the runtime-error no-usage path and the syntax-error usage path"
+    code:
+      - cmd/root.go
+    tests:
+      - cmd/root_test.go
+    deps: [REQ-017]
