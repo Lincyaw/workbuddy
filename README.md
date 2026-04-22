@@ -82,6 +82,37 @@ sudo workbuddy deploy install \
      --repo owner/repo
 ```
 
+## Authentication
+
+Distributed coordinator auth has two credential types:
+
+- `WORKBUDDY_AUTH_TOKEN` is the shared operator token. It is required for
+  repo and operator endpoints such as `workbuddy repo register`,
+  `workbuddy repo list`, `workbuddy status --coordinator`, and
+  `/api/v1/config/reload`.
+- `workbuddy coordinator token create` mints a per-worker bearer token for
+  one worker identity. Worker-facing endpoints under `/api/v1/workers/*`
+  and `/api/v1/tasks/*` accept either the shared token or a valid
+  per-worker token.
+
+Typical rollout:
+
+```bash
+export WORKBUDDY_AUTH_TOKEN=$(openssl rand -hex 24)
+workbuddy coordinator --listen 0.0.0.0:8081 --auth
+
+workbuddy coordinator token create \
+  --worker-id worker-dev-1 \
+  --repo owner/repo \
+  --roles dev
+
+workbuddy worker \
+  --coordinator http://coordinator.example:8081 \
+  --token <issued-worker-token> \
+  --role dev \
+  --repo owner/repo
+```
+
 This makes the split explicit:
 
 - `workbuddy deploy install ...` with no trailing command => installs `serve`

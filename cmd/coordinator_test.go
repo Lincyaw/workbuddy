@@ -102,6 +102,137 @@ func TestCoordinatorWorkerUnregister(t *testing.T) {
 	_ = unregisterResp.Body.Close()
 }
 
+func TestCoordinatorWorkerTokenCanRegisterAndPollWhenAuthEnabled(t *testing.T) {
+	repo := "owner/repo"
+	configDir := setupNamedConfigDir(t, repo, "dev-agent", "workflow")
+	port := getFreePort(t)
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	sharedToken := "shared-secret"
+
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	issued, err := st.IssueWorkerToken("worker-issued", repo, []string{"dev"}, "host-issued")
+	if err != nil {
+		t.Fatalf("IssueWorkerToken: %v", err)
+	}
+	_ = st.Close()
+
+	gh := &repoAwareGHReader{
+		issuesByRepo: map[string][]poller.Issue{
+			repo: {{Number: 1, Title: "Test", State: "open", Body: "body", Labels: []string{"workbuddy", "status:developing"}}},
+		},
+	}
+
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", sharedToken)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runCoordinatorWithOpts(&coordinatorOpts{
+			port:         port,
+			pollInterval: 50 * time.Millisecond,
+			dbPath:       dbPath,
+			auth:         true,
+		}, gh, ctx)
+	}()
+	waitForHealth(t, port)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	resp := postCoordinatorJSON(t, client, fmt.Sprintf("http://localhost:%d/api/v1/repos/register", port), sharedToken, mustRegistrationRequest(t, configDir))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("register repo status = %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	workerResp := postCoordinatorJSON(t, client, fmt.Sprintf("http://localhost:%d/api/v1/workers/register", port), issued.Token, workerRegisterRequest{
+		WorkerID: "worker-issued",
+		Repo:     repo,
+		Repos:    []string{repo},
+		Roles:    []string{"dev"},
+		Hostname: "host-issued",
+	})
+	if workerResp.StatusCode != http.StatusCreated {
+		t.Fatalf("register worker status = %d", workerResp.StatusCode)
+	}
+	_ = workerResp.Body.Close()
+
+	pollResp := getCoordinator(t, client, fmt.Sprintf("http://localhost:%d/api/v1/tasks/poll?worker_id=worker-issued&timeout=100ms", port), issued.Token)
+	if pollResp.StatusCode != http.StatusOK && pollResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("poll status = %d, want %d or %d", pollResp.StatusCode, http.StatusOK, http.StatusNoContent)
+	}
+	_ = pollResp.Body.Close()
+}
+
+func TestCoordinatorRevokedWorkerTokenReturnsUnauthorized(t *testing.T) {
+	repo := "owner/repo"
+	configDir := setupNamedConfigDir(t, repo, "dev-agent", "workflow")
+	port := getFreePort(t)
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	sharedToken := "shared-secret"
+
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	issued, err := st.IssueWorkerToken("worker-revoked", repo, []string{"dev"}, "host-revoked")
+	if err != nil {
+		t.Fatalf("IssueWorkerToken: %v", err)
+	}
+	_ = st.Close()
+
+	gh := &repoAwareGHReader{
+		issuesByRepo: map[string][]poller.Issue{
+			repo: {{Number: 1, Title: "Test", State: "open", Body: "body", Labels: []string{"workbuddy", "status:developing"}}},
+		},
+	}
+
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", sharedToken)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runCoordinatorWithOpts(&coordinatorOpts{
+			port:         port,
+			pollInterval: 50 * time.Millisecond,
+			dbPath:       dbPath,
+			auth:         true,
+		}, gh, ctx)
+	}()
+	waitForHealth(t, port)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	resp := postCoordinatorJSON(t, client, fmt.Sprintf("http://localhost:%d/api/v1/repos/register", port), sharedToken, mustRegistrationRequest(t, configDir))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("register repo status = %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	st, err = store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore(reopen): %v", err)
+	}
+	if err := st.RevokeWorkerToken("worker-revoked", issued.KID); err != nil {
+		t.Fatalf("RevokeWorkerToken: %v", err)
+	}
+	_ = st.Close()
+
+	workerResp := postCoordinatorJSON(t, client, fmt.Sprintf("http://localhost:%d/api/v1/workers/register", port), issued.Token, workerRegisterRequest{
+		WorkerID: "worker-revoked",
+		Repo:     repo,
+		Repos:    []string{repo},
+		Roles:    []string{"dev"},
+		Hostname: "host-revoked",
+	})
+	if workerResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("register worker status = %d, want %d", workerResp.StatusCode, http.StatusUnauthorized)
+	}
+	_ = workerResp.Body.Close()
+}
+
 func TestCoordinatorWorkerUnregisterWithRunningTask(t *testing.T) {
 	repo := "owner/repo"
 	configDir := setupNamedConfigDir(t, repo, "dev-agent", "workflow")

@@ -1028,19 +1028,20 @@ requirements:
   - id: REQ-029
     title: Worker Authentication
     description: >
-      Authenticate Workers connecting to Coordinator via shared secret.
-      Prevent unauthorized Workers from registering and receiving tasks.
-      v0.1.0 内嵌 Worker 免认证；v0.2.0 HTTP 通信必须认证。
+      Authenticate Workers connecting to Coordinator via shared secret or
+      issued per-worker bearer token. Prevent unauthorized Workers from
+      registering and receiving tasks. v0.1.0 内嵌 Worker 免认证；v0.2.0
+      HTTP 通信必须认证。
     priority: P1
     version: v0.2.0
     status: tested
     acceptance_criteria:
       - "AC-029-1: Coordinator 启动时从 config.yaml 或环境变量 WORKBUDDY_AUTH_TOKEN 读取共享密钥"
-      - "AC-029-2: Worker HTTP 请求须携带 Authorization: Bearer <token> header"
-      - "AC-029-3: 无 token 或 token 不匹配的请求返回 401 Unauthorized"
+      - "AC-029-2: Worker HTTP 请求须携带 Authorization: Bearer <token> header；worker-facing endpoints accept either the shared token or a valid issued worker token"
+      - "AC-029-3: 无 token、无效 token、或已撤销 token 的请求返回 401 Unauthorized"
       - "AC-029-4: v0.1.0 内嵌 Worker 通过 channel 通信，跳过认证"
       - "AC-029-5: 未配置 token 时 Coordinator 启动打印 warning（不阻塞，但明确提示不安全）"
-      - "AC-029-6: 单元测试：有效 token、无效 token、缺失 token、v0.1.0 跳过认证 4 种场景"
+      - "AC-029-6: 单元测试覆盖有效共享 token、有效 worker token、无效/撤销 token、v0.1.0 跳过认证"
     code:
       - cmd/coordinator.go
       - cmd/worker.go

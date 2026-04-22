@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -47,6 +48,10 @@ type coordinatorOpts struct {
 	trustedAuthorsSet bool
 }
 
+type coordinatorAuthContextKey string
+
+const coordinatorWorkerAuthContextKey coordinatorAuthContextKey = "coordinator-worker-auth"
+
 type tokenCreateOpts struct {
 	dbPath   string
 	workerID string
@@ -77,9 +82,10 @@ long-poll.
 Use this for distributed deployments (coordinator on one host, workers on
 others). For single-host development use 'workbuddy serve' instead.
 
-Authentication: pass --auth to require WORKBUDDY_AUTH_TOKEN on the worker
-and repo registration endpoints. Use --loopback-only for auth-free local
-testing. Use 'workbuddy coordinator token' to mint per-worker tokens.
+Authentication: pass --auth to require WORKBUDDY_AUTH_TOKEN on the repo
+and operator endpoints. Worker-facing endpoints also accept per-worker
+tokens minted via 'workbuddy coordinator token'. Use --loopback-only for
+auth-free local testing.
 
 Multi-repo: register additional repos at runtime with 'workbuddy repo
 register' from each repo's root; the coordinator spawns a dedicated poller
@@ -96,7 +102,7 @@ per repo.`,
 
 var coordinatorTokenCmd = &cobra.Command{
 	Use:   "token",
-	Short: "Manage worker authentication tokens",
+	Short: "Manage per-worker authentication tokens for /api/v1/workers/* and /api/v1/tasks/*",
 }
 
 var coordinatorTokenCreateCmd = &cobra.Command{
@@ -124,7 +130,7 @@ func init() {
 	coordinatorCmd.Flags().String("config-dir", "", "Optional bootstrap config directory for single-repo compatibility")
 	coordinatorCmd.Flags().Duration("poll-interval", defaultPollInterval, "GitHub poll interval for managed repos")
 	coordinatorCmd.Flags().Int("port", 8081, "Coordinator API port")
-	coordinatorCmd.Flags().Bool("auth", false, "Require WORKBUDDY_AUTH_TOKEN for worker and repo registration APIs")
+	coordinatorCmd.Flags().Bool("auth", false, "Require auth on coordinator APIs: shared WORKBUDDY_AUTH_TOKEN for repo/operator endpoints, plus optional per-worker tokens on /api/v1/tasks/* and /api/v1/workers/*")
 	coordinatorCmd.Flags().String("trusted-authors", "", "Comma-separated GitHub logins allowed to trigger agent work")
 
 	coordinatorTokenCreateCmd.Flags().String("db", ".workbuddy/workbuddy.db", "SQLite database path")
@@ -600,14 +606,113 @@ func (s *fullCoordinatorServer) wrapAuth(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		const prefix = "Bearer "
-		authz := r.Header.Get("Authorization")
-		if !strings.HasPrefix(authz, prefix) || strings.TrimSpace(strings.TrimPrefix(authz, prefix)) != s.authToken {
+		token, ok := extractCoordinatorBearerToken(r.Header.Get("Authorization"))
+		if !ok {
 			coordWriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
-		next.ServeHTTP(w, r)
+		if token == s.authToken {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if isWorkerAPIPath(r.URL.Path) {
+			worker, err := s.store.AuthenticateWorkerToken(token)
+			if err == nil {
+				ctx := context.WithValue(r.Context(), coordinatorWorkerAuthContextKey, worker)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+		}
+		coordWriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 	})
+}
+
+func extractCoordinatorBearerToken(header string) (string, bool) {
+	const prefix = "Bearer "
+	header = strings.TrimSpace(header)
+	if !strings.HasPrefix(header, prefix) {
+		return "", false
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(header, prefix))
+	if token == "" {
+		return "", false
+	}
+	return token, true
+}
+
+func isWorkerAPIPath(path string) bool {
+	return strings.HasPrefix(path, "/api/v1/tasks/") || strings.HasPrefix(path, "/api/v1/workers/")
+}
+
+func coordinatorWorkerAuthFromContext(ctx context.Context) (*store.WorkerAuthRecord, bool) {
+	worker, ok := ctx.Value(coordinatorWorkerAuthContextKey).(*store.WorkerAuthRecord)
+	return worker, ok
+}
+
+func requireAuthorizedWorkerID(ctx context.Context, workerID string) error {
+	authWorker, ok := coordinatorWorkerAuthFromContext(ctx)
+	if !ok {
+		return nil
+	}
+	if strings.TrimSpace(workerID) != authWorker.WorkerID {
+		return fmt.Errorf("worker token does not match worker_id")
+	}
+	return nil
+}
+
+func requireAuthorizedWorkerRegistration(ctx context.Context, req workerRegisterRequest) error {
+	authWorker, ok := coordinatorWorkerAuthFromContext(ctx)
+	if !ok {
+		return nil
+	}
+	if req.WorkerID != authWorker.WorkerID {
+		return fmt.Errorf("worker token does not match worker_id")
+	}
+	if req.Repo != authWorker.Repo {
+		return fmt.Errorf("worker token does not match repo")
+	}
+	if len(req.Repos) == 0 {
+		req.Repos = []string{req.Repo}
+	}
+	if len(req.Repos) != 1 || strings.TrimSpace(req.Repos[0]) != authWorker.Repo {
+		return fmt.Errorf("worker token is limited to repo %q", authWorker.Repo)
+	}
+	if !workerRolesMatch(req.Roles, authWorker.Roles) {
+		return fmt.Errorf("worker token does not match roles")
+	}
+	return nil
+}
+
+func workerRolesMatch(requestRoles []string, tokenRolesJSON string) bool {
+	var tokenRoles []string
+	if err := json.Unmarshal([]byte(tokenRolesJSON), &tokenRoles); err != nil {
+		return false
+	}
+	normalize := func(values []string) []string {
+		out := make([]string, 0, len(values))
+		for _, value := range values {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+		sort.Strings(out)
+		return out
+	}
+	requestRoles = normalize(requestRoles)
+	tokenRoles = normalize(tokenRoles)
+	if len(requestRoles) != len(tokenRoles) {
+		return false
+	}
+	for i := range requestRoles {
+		if requestRoles[i] != tokenRoles[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func writeCoordinatorUnauthorizedWorkerToken(w http.ResponseWriter, err error) {
+	coordWriteJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 }
 
 func (s *fullCoordinatorServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -726,6 +831,10 @@ func (s *fullCoordinatorServer) handleWorkerByPath(w http.ResponseWriter, r *htt
 		http.NotFound(w, r)
 		return
 	}
+	if err := requireAuthorizedWorkerID(r.Context(), workerID); err != nil {
+		writeCoordinatorUnauthorizedWorkerToken(w, err)
+		return
+	}
 	switch r.Method {
 	case http.MethodDelete:
 		if err := s.registry.Unregister(workerID); err != nil {
@@ -768,6 +877,10 @@ func (s *fullCoordinatorServer) handleRegisterWorker(w http.ResponseWriter, r *h
 		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "worker_id, repo, and roles are required"})
 		return
 	}
+	if err := requireAuthorizedWorkerRegistration(r.Context(), req); err != nil {
+		writeCoordinatorUnauthorizedWorkerToken(w, err)
+		return
+	}
 	for _, repo := range req.Repos {
 		registered, err := s.pollers.IsRegistered(repo)
 		if err != nil {
@@ -801,6 +914,10 @@ func (s *fullCoordinatorServer) handlePollTask(w http.ResponseWriter, r *http.Re
 	workerID := strings.TrimSpace(r.URL.Query().Get("worker_id"))
 	if workerID == "" {
 		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "worker_id is required"})
+		return
+	}
+	if err := requireAuthorizedWorkerID(r.Context(), workerID); err != nil {
+		writeCoordinatorUnauthorizedWorkerToken(w, err)
 		return
 	}
 	timeout := parseLongPollTimeout(r.URL.Query().Get("timeout"))
@@ -874,6 +991,10 @@ func (s *fullCoordinatorServer) handleTaskResult(w http.ResponseWriter, r *http.
 		return
 	}
 	req.WorkerID = strings.TrimSpace(req.WorkerID)
+	if err := requireAuthorizedWorkerID(r.Context(), req.WorkerID); err != nil {
+		writeCoordinatorUnauthorizedWorkerToken(w, err)
+		return
+	}
 	task, err := s.store.GetTask(taskID)
 	if err != nil {
 		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -955,6 +1076,10 @@ func (s *fullCoordinatorServer) handleTaskHeartbeat(w http.ResponseWriter, r *ht
 		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "worker_id is required"})
 		return
 	}
+	if err := requireAuthorizedWorkerID(r.Context(), req.WorkerID); err != nil {
+		writeCoordinatorUnauthorizedWorkerToken(w, err)
+		return
+	}
 	task, err := s.store.GetTask(taskID)
 	if err != nil {
 		coordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -991,6 +1116,10 @@ func (s *fullCoordinatorServer) handleTaskRelease(w http.ResponseWriter, r *http
 	req.WorkerID = strings.TrimSpace(req.WorkerID)
 	if req.WorkerID == "" {
 		coordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "worker_id is required"})
+		return
+	}
+	if err := requireAuthorizedWorkerID(r.Context(), req.WorkerID); err != nil {
+		writeCoordinatorUnauthorizedWorkerToken(w, err)
 		return
 	}
 	released, err := s.store.ReleaseTask(taskID, req.WorkerID)
