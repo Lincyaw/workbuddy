@@ -151,7 +151,7 @@ func (h *HTTPHandler) queryIssueState(repo string, issueNum int) (IssueStateResp
 	if err != nil {
 		return IssueStateResponse{}, err
 	}
-	lastEventAt, err := h.latestIssueEvent(repo, issueNum)
+	lastEvent, err := h.latestIssueEvent(repo, issueNum)
 	if err != nil {
 		return IssueStateResponse{}, err
 	}
@@ -169,16 +169,18 @@ func (h *HTTPHandler) queryIssueState(repo string, issueNum int) (IssueStateResp
 		CurrentState:      currentState,
 		CycleCount:        maxTransitionCount(counts),
 		DependencyVerdict: dependencyVerdict,
-		LastEventAt:       lastEventAt,
 	}
-	if lastEventAt != nil {
-		resp.Stuck = cache.State == "open" && isIntermediateState(currentState) && h.now().Sub(*lastEventAt) > stuckThreshold
+	if lastEvent != nil {
+		resp.LastEventAt = &lastEvent.TS
+		resp.Stuck = cache.State == "open" &&
+			isIntermediateState(currentState) &&
+			(lastEvent.Type == eventlog.TypeDispatchSkippedClaim || h.now().Sub(lastEvent.TS) > stuckThreshold)
 	}
 	return resp, nil
 }
 
-func (h *HTTPHandler) latestIssueEvent(repo string, issueNum int) (*time.Time, error) {
-	return h.store.LatestEventAt(repo, issueNum)
+func (h *HTTPHandler) latestIssueEvent(repo string, issueNum int) (*store.IssueEventMeta, error) {
+	return h.store.LatestIssueEvent(repo, issueNum)
 }
 
 func parseEventFilter(values url.Values) (eventlog.EventFilter, error) {

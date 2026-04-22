@@ -1988,3 +1988,44 @@ requirements:
       - internal/store/store_test.go
       - internal/statemachine/statemachine_test.go
     deps: [REQ-057]
+
+  - id: REQ-060
+    title: Coordinator claim recovery and operator issue restart
+    description: >
+      Fix the silent redispatch freeze seen after coordinator redeploys: stale
+      coordinator-owned issue_claim rows must be swept on startup, graceful
+      shutdown must release the current coordinator's tracked claims, claim
+      contention must become operator-visible, and operators need a first-class
+      restart command instead of ad-hoc SQLite surgery.
+    priority: P0
+    version: v0.2.0
+    status: tested
+    acceptance_criteria:
+      - "AC-060-1: coordinator/serve startup runs a stale-claim sweep before pollers start, deleting issue_claim rows whose worker_id matches coordinator-*-pid-N with N != current pid while leaving current-pid and worker-owned rows intact"
+      - "AC-060-2: coordinator shutdown synchronously releases every tracked issue claim before the store closes, so SIGTERM leaves no residual claims for that coordinator"
+      - "AC-060-3: claim contention emits the existing dispatch_skipped_claim event, logs a WARN once per repo#issue per poll cycle, and audit/status treat a last dispatch_skipped_claim event as stuck immediately"
+      - "AC-060-4: `workbuddy admin restart-issue --repo OWNER/NAME --issue N` exists and deletes issue_cache, clears issue_dependency_state, removes any surviving issue_claim row, and records an issue_restarted event"
+      - "AC-060-5: operator-facing docs/CLI help document restart-issue as the supported recovery path for label-unchanged redispatch stalls"
+      - "AC-060-6: tests cover stale startup sweep, SIGTERM claim release, and restart-issue restoring dispatch on the next unchanged poll"
+    code:
+      - internal/store/store.go
+      - internal/store/queries.go
+      - internal/app/recover.go
+      - internal/app/repo_runtime.go
+      - internal/statemachine/statemachine.go
+      - internal/audit/http.go
+      - internal/eventlog/eventlog.go
+      - cmd/coordinator.go
+      - cmd/serve.go
+      - cmd/admin.go
+      - cmd/admin_restart_issue.go
+      - docs/implemented/pipeline-observability-and-diagnosis.md
+      - docs/implemented/distributed-topology-and-cli.md
+      - docs/implemented/index.md
+    tests:
+      - internal/app/recover_test.go
+      - internal/statemachine/statemachine_test.go
+      - cmd/admin_restart_issue_test.go
+      - cmd/coordinator_test.go
+      - cmd/status_test.go
+    deps: [REQ-019, REQ-034, REQ-057]

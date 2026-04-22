@@ -4,13 +4,52 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
+
+func TestCoordinatorSIGTERMReleasesIssueClaimsHelper(t *testing.T) {
+	if os.Getenv("WORKBUDDY_SIGTERM_HELPER") != "1" {
+		t.Skip("helper process")
+	}
+
+	port, err := strconv.Atoi(os.Getenv("WORKBUDDY_SIGTERM_PORT"))
+	if err != nil {
+		t.Fatalf("parse helper port: %v", err)
+	}
+	repo := os.Getenv("WORKBUDDY_SIGTERM_REPO")
+	dbPath := os.Getenv("WORKBUDDY_SIGTERM_DB")
+	if repo == "" || dbPath == "" {
+		t.Fatal("helper repo/db env is required")
+	}
+
+	gh := &repoAwareGHReader{
+		issuesByRepo: map[string][]poller.Issue{
+			repo: {{
+				Number: 88,
+				Title:  "Held claim",
+				State:  "open",
+				Body:   "body",
+				Labels: []string{"workbuddy", "status:developing"},
+			}},
+		},
+	}
+	if err := runCoordinatorWithOpts(&coordinatorOpts{
+		port:         port,
+		pollInterval: 25 * time.Millisecond,
+		dbPath:       dbPath,
+	}, gh); err != nil {
+		t.Fatalf("helper coordinator: %v", err)
+	}
+}
 
 func TestCoordinatorWorkerUnregister(t *testing.T) {
 	repo := "owner/repo"
@@ -208,4 +247,75 @@ func insertClaimedTaskForWorker(dbPath, repo, taskID string, issueNum int, worke
 		return fmt.Errorf("claim task %s: expected claim to succeed", taskID)
 	}
 	return nil
+}
+
+func TestCoordinatorSIGTERMReleasesIssueClaims(t *testing.T) {
+	repo := "owner/repo"
+	configDir := setupNamedConfigDir(t, repo, "dev-agent", "workflow")
+	port := getFreePort(t)
+	dbPath := filepath.Join(t.TempDir(), "sigterm-coordinator.db")
+
+	cmd := exec.Command(os.Args[0], "-test.run", "^TestCoordinatorSIGTERMReleasesIssueClaimsHelper$")
+	cmd.Env = append(os.Environ(),
+		"WORKBUDDY_SIGTERM_HELPER=1",
+		"WORKBUDDY_SIGTERM_PORT="+strconv.Itoa(port),
+		"WORKBUDDY_SIGTERM_REPO="+repo,
+		"WORKBUDDY_SIGTERM_DB="+dbPath,
+	)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper coordinator: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	waitForHealth(t, port)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp := postCoordinatorJSON(t, client, fmt.Sprintf("http://localhost:%d/api/v1/repos/register", port), "", mustRegistrationRequest(t, configDir))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("register repo status = %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	waitForIssueClaim(t, dbPath, repo, 88)
+
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signal coordinator: %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait helper coordinator: %v", err)
+	}
+
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	claim, err := st.QueryIssueClaim(repo, 88)
+	if err != nil {
+		t.Fatalf("QueryIssueClaim: %v", err)
+	}
+	if claim != nil {
+		t.Fatalf("expected SIGTERM shutdown to release claim, got %+v", claim)
+	}
+}
+
+func waitForIssueClaim(t *testing.T, dbPath, repo string, issueNum int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		st, err := store.NewStore(dbPath)
+		if err == nil {
+			claim, qErr := st.QueryIssueClaim(repo, issueNum)
+			_ = st.Close()
+			if qErr == nil && claim != nil {
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for issue claim %s#%d", repo, issueNum)
 }

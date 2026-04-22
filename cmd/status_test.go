@@ -64,6 +64,7 @@ func TestRunStatusWithOpts_Integration(t *testing.T) {
 			"#3",
 			"status:done",
 			"ready",
+			"#5",
 		} {
 			if !strings.Contains(got, want) {
 				t.Fatalf("table output missing %q:\n%s", want, got)
@@ -88,6 +89,9 @@ func TestRunStatusWithOpts_Integration(t *testing.T) {
 		got := out.String()
 		if !strings.Contains(got, "#1") {
 			t.Fatalf("expected stuck issue in output:\n%s", got)
+		}
+		if !strings.Contains(got, "#5") {
+			t.Fatalf("expected dispatch_skipped_claim issue in stuck output:\n%s", got)
 		}
 		for _, unwanted := range []string{"#2", "#3", "#4"} {
 			if strings.Contains(got, unwanted) {
@@ -114,8 +118,8 @@ func TestRunStatusWithOpts_Integration(t *testing.T) {
 		if got.Repo != "owner/repo" {
 			t.Fatalf("repo = %q, want owner/repo", got.Repo)
 		}
-		if len(got.Issues) != 3 {
-			t.Fatalf("expected 3 open issues, got %d: %+v", len(got.Issues), got.Issues)
+		if len(got.Issues) != 4 {
+			t.Fatalf("expected 4 open issues, got %d: %+v", len(got.Issues), got.Issues)
 		}
 		if !got.Issues[0].Stuck {
 			t.Fatalf("issue #1 should be marked stuck: %+v", got.Issues[0])
@@ -257,7 +261,7 @@ func TestRunStatusWithOpts_Integration(t *testing.T) {
 			t.Fatal("expected recent events")
 		}
 		for _, row := range rows {
-			if row.IssueNum != 2 {
+			if row.IssueNum != 2 && row.IssueNum != 5 {
 				t.Fatalf("event not filtered by since: %+v", row)
 			}
 		}
@@ -322,6 +326,7 @@ func fixtureStatusStore(t *testing.T, st *store.Store) {
 		{num: 2, labels: `["workbuddy","status:reviewing"]`, state: "open"},
 		{num: 3, labels: `["workbuddy","status:done"]`, state: "open"},
 		{num: 4, labels: `["workbuddy","status:developing"]`, state: "closed"},
+		{num: 5, labels: `["workbuddy","status:developing"]`, state: "open"},
 	} {
 		if err := st.UpsertIssueCache(store.IssueCache{
 			Repo:     "owner/repo",
@@ -360,6 +365,7 @@ func fixtureStatusStore(t *testing.T, st *store.Store) {
 	insertEventAt(t, st, "owner/repo", 2, now.Add(-10*time.Minute))
 	insertEventAt(t, st, "owner/repo", 3, now.Add(-3*time.Hour))
 	insertEventAt(t, st, "owner/repo", 4, now.Add(-2*time.Hour))
+	insertEventAt(t, st, "owner/repo", 5, now.Add(-2*time.Minute))
 	dispatchID, err := st.InsertEvent(store.Event{
 		Type:     "dispatch",
 		Repo:     "owner/repo",
@@ -371,6 +377,18 @@ func fixtureStatusStore(t *testing.T, st *store.Store) {
 	}
 	if _, err := st.DB().Exec(`UPDATE events SET ts = ? WHERE id = ?`, now.Add(-5*time.Minute).Format("2006-01-02 15:04:05"), dispatchID); err != nil {
 		t.Fatalf("UPDATE dispatch event ts: %v", err)
+	}
+	claimBlockedID, err := st.InsertEvent(store.Event{
+		Type:     "dispatch_skipped_claim",
+		Repo:     "owner/repo",
+		IssueNum: 5,
+		Payload:  `{"held_by":"coordinator-host-pid-111"}`,
+	})
+	if err != nil {
+		t.Fatalf("InsertEvent(dispatch_skipped_claim): %v", err)
+	}
+	if _, err := st.DB().Exec(`UPDATE events SET ts = ? WHERE id = ?`, now.Add(-30*time.Second).Format("2006-01-02 15:04:05"), claimBlockedID); err != nil {
+		t.Fatalf("UPDATE dispatch_skipped_claim ts: %v", err)
 	}
 	for _, task := range []store.TaskRecord{
 		{ID: "task-pending", Repo: "owner/repo", IssueNum: 1, AgentName: "dev-agent", Status: store.TaskStatusPending},

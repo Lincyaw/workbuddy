@@ -320,6 +320,9 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	defer func() { _ = st.Close() }()
 
 	alertBus := alertbus.NewBus(64)
+	if err := app.RecoverCoordinatorIssueClaims(st, os.Getpid()); err != nil {
+		log.Printf("[coordinator] warning: issue-claim recovery failed: %v", err)
+	}
 	if err := app.RecoverTasks(st, alertBus); err != nil {
 		log.Printf("[coordinator] warning: recovery failed: %v", err)
 	}
@@ -409,6 +412,7 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	}
 
 	cancel()
+	api.Pollers.Shutdown()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
@@ -551,4 +555,3 @@ func mustRepoRoot() string {
 	}
 	return abs
 }
-

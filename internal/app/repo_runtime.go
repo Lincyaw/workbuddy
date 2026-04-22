@@ -574,6 +574,13 @@ func (pm *PollerManager) stopAll() {
 	}
 }
 
+// Shutdown synchronously stops every running repo runtime. It is safe to call
+// multiple times and is used by coordinator shutdown to ensure claim-release
+// cleanup finishes before the store closes.
+func (pm *PollerManager) Shutdown() {
+	pm.stopAll()
+}
+
 func (pm *PollerManager) stopRepo(repo string) error {
 	pm.mu.Lock()
 	runtime := pm.runtimes[repo]
@@ -584,6 +591,7 @@ func (pm *PollerManager) stopRepo(repo string) error {
 	if runtime == nil {
 		return nil
 	}
+	runtime.StateMachine.ReleaseAllIssueClaims()
 	runtime.cancel()
 	select {
 	case <-runtime.done:

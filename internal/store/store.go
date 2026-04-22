@@ -11,6 +11,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -55,6 +57,8 @@ var (
 	// worker already holds an unexpired lease on the issue.
 	ErrIssueClaimHeldByOther = errors.New("issue claim held by other worker")
 )
+
+var coordinatorIssueClaimPattern = regexp.MustCompile(`^coordinator-.*-pid-(\d+)$`)
 
 // Store provides typed CRUD access to the workbuddy SQLite database.
 type Store struct {
@@ -1981,6 +1985,24 @@ func (s *Store) ReleaseIssueClaim(repo string, issueNum int, workerID, claimToke
 	return rows > 0, nil
 }
 
+// DeleteIssueClaim removes the claim on (repo, issueNum) regardless of owner.
+// It is intended for explicit operator/admin recovery flows.
+func (s *Store) DeleteIssueClaim(repo string, issueNum int) (bool, error) {
+	res, err := s.db.Exec(
+		`DELETE FROM issue_claim
+		 WHERE repo = ? AND issue_num = ?`,
+		repo, issueNum,
+	)
+	if err != nil {
+		return false, fmt.Errorf("store: delete issue claim: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: delete issue claim rows affected: %w", err)
+	}
+	return rows > 0, nil
+}
+
 // RefreshIssueClaim extends expires_at for the current holder. Returns true
 // when the row was updated (false when not held by workerID/claimToken or already expired).
 func (s *Store) RefreshIssueClaim(repo string, issueNum int, workerID, claimToken string, lease time.Duration) (bool, error) {
@@ -2035,6 +2057,51 @@ func (s *Store) QueryIssueClaim(repo string, issueNum int) (*IssueClaimRecord, e
 	rec.AcquiredAt, _ = ParseTimestamp(acquiredRaw, "issue_claim.acquired_at")
 	rec.ExpiresAt, _ = ParseTimestamp(expiresRaw, "issue_claim.expires_at")
 	return rec, nil
+}
+
+// DeleteStaleCoordinatorIssueClaims removes claims owned by a coordinator PID
+// other than currentPID. Worker-owned claims and the current coordinator's
+// own claims are left untouched.
+func (s *Store) DeleteStaleCoordinatorIssueClaims(currentPID int) ([]IssueClaimRecord, error) {
+	rows, err := s.db.Query(
+		`SELECT repo, issue_num, worker_id, claim_token, acquired_at, expires_at
+		 FROM issue_claim`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: list issue claims for stale coordinator sweep: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var stale []IssueClaimRecord
+	for rows.Next() {
+		var rec IssueClaimRecord
+		var acquiredRaw, expiresRaw string
+		if err := rows.Scan(&rec.Repo, &rec.IssueNum, &rec.WorkerID, &rec.ClaimToken, &acquiredRaw, &expiresRaw); err != nil {
+			return nil, fmt.Errorf("store: scan issue claim for stale coordinator sweep: %w", err)
+		}
+		rec.AcquiredAt, _ = ParseTimestamp(acquiredRaw, "issue_claim.acquired_at")
+		rec.ExpiresAt, _ = ParseTimestamp(expiresRaw, "issue_claim.expires_at")
+
+		matches := coordinatorIssueClaimPattern.FindStringSubmatch(strings.TrimSpace(rec.WorkerID))
+		if len(matches) != 2 {
+			continue
+		}
+		pid, err := strconv.Atoi(matches[1])
+		if err != nil || pid == currentPID {
+			continue
+		}
+		stale = append(stale, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate issue claims for stale coordinator sweep: %w", err)
+	}
+
+	for _, rec := range stale {
+		if _, err := s.DeleteIssueClaim(rec.Repo, rec.IssueNum); err != nil {
+			return nil, err
+		}
+	}
+	return stale, nil
 }
 
 func boolToInt(v bool) int {

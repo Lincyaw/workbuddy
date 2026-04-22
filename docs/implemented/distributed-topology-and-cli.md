@@ -44,6 +44,7 @@ workbuddy worker --coordinator http://A:8080 --token <secret> --role dev --repo 
 | `workbuddy validate` | 校验配置文件完整性和交叉引用 | REQ-021 | v0.2.0 |
 | `workbuddy logs` | 查看 session 归档日志和 artifact | REQ-022 | v0.2.0 |
 | `workbuddy cache-invalidate` | 清除 issue 缓存强制重新评估 | REQ-034 | v0.2.0 |
+| `workbuddy admin restart-issue` | 清除 issue cache / dependency state / issue claim，强制下一 poll 重新派发 | REQ-060 | v0.2.0 |
 | `workbuddy diagnose` | 自动诊断 pipeline 问题（stuck/orphaned/repeated failure） | REQ-037 | v0.2.0 |
 | `workbuddy recover` | 重启恢复（清理僵尸进程、重置运行时状态） | REQ-032 | v0.2.0 |
 | `workbuddy deploy` | 安装当前 binary、写入 systemd unit，并支持后续 redeploy/upgrade/start/stop/delete | main | main |
