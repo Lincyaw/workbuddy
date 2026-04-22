@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -615,9 +616,31 @@ func newStatusFlagCommand() *cobra.Command {
 	cmd.Flags().Int("issue", 0, "")
 	cmd.Flags().Duration("timeout", defaultWatchTimeout, "")
 	cmd.Flags().String("coordinator", "", "")
-	cmd.Flags().StringP("token", "t", "", "")
+	addCoordinatorAuthFlags(cmd.Flags(), "t", "Bearer token for coordinator auth")
 	cmd.Flags().Bool("repos", false, "")
 	return cmd
+}
+
+func TestParseStatusFlags_TokenFile(t *testing.T) {
+	cmd := newStatusFlagCommand()
+	tokenPath := filepath.Join(t.TempDir(), "token.txt")
+	if err := os.WriteFile(tokenPath, []byte("file-token\n"), 0o644); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
+		t.Fatalf("set coordinator: %v", err)
+	}
+	if err := cmd.Flags().Set("token-file", tokenPath); err != nil {
+		t.Fatalf("set token-file: %v", err)
+	}
+
+	opts, err := parseStatusFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseStatusFlags: %v", err)
+	}
+	if got, want := opts.token, "file-token"; got != want {
+		t.Fatalf("token = %q, want %q", got, want)
+	}
 }
 
 func TestRunStatusCoordinator_Health(t *testing.T) {

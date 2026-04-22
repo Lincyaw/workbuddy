@@ -2109,3 +2109,33 @@ requirements:
     tests:
       - cmd/exitcodes_test.go
     deps: [REQ-017, REQ-028, REQ-036]
+
+  - id: REQ-064
+    title: CLI coordinator auth token files
+    description: >
+      Avoid leaking coordinator bearer tokens into shell history and process
+      listings by allowing `repo`, `worker`, and `status` commands to load
+      auth from `--token-file`. Keep `--token` temporarily for backward
+      compatibility, but warn on stderr so operators migrate to `--token-file`
+      or `WORKBUDDY_AUTH_TOKEN`.
+    priority: P0
+    version: v0.4.1
+    status: tested
+    acceptance_criteria:
+      - "AC-064-1: `workbuddy repo`, `workbuddy worker`, and `workbuddy status` accept `--token-file <path>` and read the bearer token from the file contents"
+      - "AC-064-2: `--token` remains supported for backward compatibility but prints a deprecation warning to stderr"
+      - "AC-064-3: Providing both `--token` and `--token-file` returns a clear CLI error"
+      - "AC-064-4: `WORKBUDDY_AUTH_TOKEN` fallback behavior remains unchanged"
+      - "AC-064-5: Unit tests cover token-file loading, deprecated `--token` warning behavior, conflicting flag rejection, and env-var fallback"
+      - "AC-064-6: `go build ./... && go test ./... -count=1` pass after the change"
+    code:
+      - cmd/auth_flags.go
+      - cmd/repo.go
+      - cmd/worker.go
+      - cmd/status.go
+    tests:
+      - cmd/auth_flags_test.go
+      - cmd/repo_test.go
+      - cmd/worker_test.go
+      - cmd/status_test.go
+    deps: [REQ-028, REQ-029, REQ-042, REQ-051]

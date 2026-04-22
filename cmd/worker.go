@@ -81,7 +81,7 @@ var workerUnregisterCmd = &cobra.Command{
 
 func init() {
 	workerCmd.Flags().String("coordinator", "", "Coordinator base URL")
-	workerCmd.Flags().String("token", "", "Bearer token for Coordinator authentication (defaults to WORKBUDDY_AUTH_TOKEN)")
+	addCoordinatorAuthFlags(workerCmd.Flags(), "", "Bearer token for Coordinator authentication")
 	workerCmd.Flags().String("role", "", "Comma-separated worker roles (default: roles from local agent config)")
 	workerCmd.Flags().String("runtime", config.RuntimeClaudeCode, "Worker runtime capability: claude-code or codex")
 	workerCmd.Flags().String("config-dir", ".github/workbuddy", "Configuration directory (relative to each bound repo unless absolute)")
@@ -93,7 +93,7 @@ func init() {
 	_ = workerCmd.MarkFlagRequired("coordinator")
 
 	workerUnregisterCmd.Flags().String("coordinator", "", "Coordinator base URL")
-	workerUnregisterCmd.Flags().String("token", "", "Bearer token for Coordinator authentication (defaults to WORKBUDDY_AUTH_TOKEN)")
+	addCoordinatorAuthFlags(workerUnregisterCmd.Flags(), "", "Bearer token for Coordinator authentication")
 	workerUnregisterCmd.Flags().String("id", "", "Worker ID to unregister")
 	_ = workerUnregisterCmd.MarkFlagRequired("coordinator")
 	_ = workerUnregisterCmd.MarkFlagRequired("id")
@@ -114,11 +114,13 @@ func runWorker(cmd *cobra.Command, _ []string) error {
 
 func runWorkerUnregister(cmd *cobra.Command, _ []string) error {
 	coordinatorURL, _ := cmd.Flags().GetString("coordinator")
-	token, _ := cmd.Flags().GetString("token")
 	workerID, _ := cmd.Flags().GetString("id")
-	token = resolveWorkerToken(token)
+	token, err := resolveCoordinatorAuthToken(cmd, "worker unregister")
+	if err != nil {
+		return err
+	}
 	if token == "" {
-		return fmt.Errorf("worker unregister: --token or WORKBUDDY_AUTH_TOKEN is required")
+		return fmt.Errorf("worker unregister: --token-file, deprecated --token, or WORKBUDDY_AUTH_TOKEN is required")
 	}
 
 	client := workerclient.New(strings.TrimSpace(coordinatorURL), strings.TrimSpace(token), nil)
@@ -131,7 +133,6 @@ func runWorkerUnregister(cmd *cobra.Command, _ []string) error {
 
 func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	coordinatorURL, _ := cmd.Flags().GetString("coordinator")
-	token, _ := cmd.Flags().GetString("token")
 	roleCSV, _ := cmd.Flags().GetString("role")
 	runtimeName, _ := cmd.Flags().GetString("runtime")
 	configDir, _ := cmd.Flags().GetString("config-dir")
@@ -143,9 +144,12 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	if concurrency < 1 {
 		concurrency = 1
 	}
-	token = resolveWorkerToken(token)
+	token, err := resolveCoordinatorAuthToken(cmd, "worker")
+	if err != nil {
+		return nil, err
+	}
 	if token == "" {
-		return nil, fmt.Errorf("worker: --token or WORKBUDDY_AUTH_TOKEN is required")
+		return nil, fmt.Errorf("worker: --token-file, deprecated --token, or WORKBUDDY_AUTH_TOKEN is required")
 	}
 	return &workerOpts{
 		coordinatorURL:    strings.TrimSpace(coordinatorURL),
@@ -162,14 +166,6 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 		shutdownTimeout:   defaultWorkerShutdownDeadline,
 		concurrency:       concurrency,
 	}, nil
-}
-
-func resolveWorkerToken(token string) string {
-	token = strings.TrimSpace(token)
-	if token != "" {
-		return token
-	}
-	return strings.TrimSpace(os.Getenv("WORKBUDDY_AUTH_TOKEN"))
 }
 
 func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader workerIssueReader, parentCtx ...context.Context) error {
