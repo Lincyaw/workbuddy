@@ -1376,7 +1376,7 @@ requirements:
       - "AC-051-3: `workbuddy repo list --coordinator URL --token TOKEN` lists registered repos"
       - "AC-051-4: All commands support `--json` output for machine-readable format"
       - "AC-051-5: Non-200 responses result in non-zero exit code and printed error"
-      - "AC-051-6: `--coordinator` is mutually exclusive with local-only flags --stuck, --tasks, --events, --watch"
+      - "AC-051-6: `workbuddy status --coordinator URL --stuck/--tasks/--events/--watch` reuses the coordinator read APIs for remote inspection; the four view flags remain mutually exclusive with each other"
       - "AC-051-7: Token falls back to WORKBUDDY_AUTH_TOKEN env var"
       - "AC-051-8: go build && go vet && go test -count=1 all pass"
     code:

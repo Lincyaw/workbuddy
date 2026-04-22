@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -723,6 +724,237 @@ func TestRunStatusCoordinator_Non200(t *testing.T) {
 	if !strings.Contains(exitErr.Error(), "401") {
 		t.Fatalf("expected 401 in error, got %q", exitErr.Error())
 	}
+}
+
+func TestParseStatusFlags_CoordinatorRemoteViews(t *testing.T) {
+	t.Run("allows remote task query", func(t *testing.T) {
+		cmd := newStatusFlagCommand()
+		if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
+			t.Fatalf("set coordinator: %v", err)
+		}
+		if err := cmd.Flags().Set("tasks", "true"); err != nil {
+			t.Fatalf("set tasks: %v", err)
+		}
+		if err := cmd.Flags().Set("status", "running"); err != nil {
+			t.Fatalf("set status: %v", err)
+		}
+
+		opts, err := parseStatusFlags(cmd)
+		if err != nil {
+			t.Fatalf("parseStatusFlags: %v", err)
+		}
+		if !opts.tasks || opts.baseURL != "http://coord:8081" || opts.taskStatus != store.TaskStatusRunning {
+			t.Fatalf("unexpected opts: %+v", opts)
+		}
+	})
+
+	t.Run("still validates remote flag misuse", func(t *testing.T) {
+		cmd := newStatusFlagCommand()
+		if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
+			t.Fatalf("set coordinator: %v", err)
+		}
+		if err := cmd.Flags().Set("status", "running"); err != nil {
+			t.Fatalf("set status: %v", err)
+		}
+
+		_, err := parseStatusFlags(cmd)
+		if err == nil || !strings.Contains(err.Error(), "--status requires --tasks") {
+			t.Fatalf("expected status/tasks validation, got %v", err)
+		}
+	})
+
+	t.Run("allows remote stuck without repo", func(t *testing.T) {
+		cmd := newStatusFlagCommand()
+		if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
+			t.Fatalf("set coordinator: %v", err)
+		}
+		if err := cmd.Flags().Set("stuck", "true"); err != nil {
+			t.Fatalf("set stuck: %v", err)
+		}
+
+		opts, err := parseStatusFlags(cmd)
+		if err != nil {
+			t.Fatalf("parseStatusFlags: %v", err)
+		}
+		if !opts.stuck || opts.repo != "" {
+			t.Fatalf("unexpected opts: %+v", opts)
+		}
+	})
+}
+
+func TestRunStatusWithOpts_RemoteCoordinatorViews(t *testing.T) {
+	var watchCalls atomic.Int32
+	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/issues/owner/repo/1/state":
+			_, _ = fmt.Fprint(w, `{"repo":"owner/repo","issue_num":1,"issue_state":"open","current_state":"status:developing","cycle_count":2,"dependency_verdict":"blocked","last_event_at":"2026-04-22T09:00:00Z","stuck":true}`)
+		case "/issues/owner/repo/2/state":
+			_, _ = fmt.Fprint(w, `{"repo":"owner/repo","issue_num":2,"issue_state":"open","current_state":"status:reviewing","cycle_count":1,"dependency_verdict":"ready","last_event_at":"2026-04-22T11:55:00Z","stuck":false}`)
+		case "/issues/other/repo/3/state":
+			_, _ = fmt.Fprint(w, `{"repo":"other/repo","issue_num":3,"issue_state":"open","current_state":"status:developing","cycle_count":4,"dependency_verdict":"override","last_event_at":"2026-04-22T08:00:00Z","stuck":true}`)
+		case "/events":
+			q := r.URL.Query()
+			switch q.Get("type") {
+			case "":
+				if got := q.Get("repo"); got == "owner/repo" {
+					_, _ = fmt.Fprint(w, `{"events":[{"id":1,"ts":"2026-04-22T09:00:00Z","type":"transition","repo":"owner/repo","issue_num":1},{"id":2,"ts":"2026-04-22T11:55:00Z","type":"transition","repo":"owner/repo","issue_num":2}]}`)
+					return
+				}
+				if got := q.Get("repo"); got == "" {
+					_, _ = fmt.Fprint(w, `{"events":[{"id":1,"ts":"2026-04-22T09:00:00Z","type":"transition","repo":"owner/repo","issue_num":1},{"id":2,"ts":"2026-04-22T11:55:00Z","type":"transition","repo":"owner/repo","issue_num":2},{"id":5,"ts":"2026-04-22T08:00:00Z","type":"transition","repo":"other/repo","issue_num":3}]}`)
+					return
+				}
+				t.Fatalf("summary repo filter = %q", q.Get("repo"))
+			case "dispatch":
+				if got := q.Get("since"); got != "2026-04-22T11:30:00Z" {
+					t.Fatalf("events since = %q", got)
+				}
+				_, _ = fmt.Fprint(w, `{"events":[{"id":3,"ts":"2026-04-22T11:50:00Z","type":"dispatch","repo":"owner/repo","issue_num":2,"payload":{"agent":"review-agent"}}]}`)
+			case "completed":
+				if got := q.Get("issue"); got != "9" {
+					t.Fatalf("watch issue query = %q", got)
+				}
+				if watchCalls.Add(1) == 1 {
+					_, _ = fmt.Fprint(w, `{"events":[]}`)
+					return
+				}
+				_, _ = fmt.Fprint(w, `{"events":[{"id":4,"ts":"2026-04-22T12:00:02Z","type":"completed","repo":"owner/repo","issue_num":9,"payload":{"task_id":"task-9","agent_name":"dev-agent","status":"completed"}}]}`)
+			default:
+				t.Fatalf("unexpected event type query %q", q.Get("type"))
+			}
+		case "/tasks":
+			if got := r.URL.Query().Get("status"); got != "running" {
+				t.Fatalf("tasks status filter = %q", got)
+			}
+			if got := r.URL.Query().Get("repo"); got != "" {
+				t.Fatalf("tasks repo filter = %q, want empty", got)
+			}
+			_, _ = fmt.Fprint(w, mustJSON(t, []store.TaskRecord{{
+				ID:        "task-running",
+				Repo:      "owner/repo",
+				IssueNum:  2,
+				AgentName: "review-agent",
+				Status:    store.TaskStatusRunning,
+				WorkerID:  "worker-1",
+				UpdatedAt: now.Add(-2 * time.Minute),
+			}}))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := &statusClient{baseURL: srv.URL, http: srv.Client()}
+
+	t.Run("stuck", func(t *testing.T) {
+		var out bytes.Buffer
+		err := runStatusWithOpts(context.Background(), &statusOpts{
+			repo:            "owner/repo",
+			stuck:           true,
+			baseURL:         srv.URL,
+			coordinator:     srv.URL,
+			now:             func() time.Time { return now },
+			remoteWatchPoll: 5 * time.Millisecond,
+		}, client, &out)
+		if err != nil {
+			t.Fatalf("runStatusWithOpts: %v", err)
+		}
+		got := out.String()
+		if !strings.Contains(got, "#1") || strings.Contains(got, "#2") {
+			t.Fatalf("unexpected remote stuck output:\n%s", got)
+		}
+	})
+
+	t.Run("stuck across repos", func(t *testing.T) {
+		var out bytes.Buffer
+		err := runStatusWithOpts(context.Background(), &statusOpts{
+			stuck:           true,
+			baseURL:         srv.URL,
+			coordinator:     srv.URL,
+			now:             func() time.Time { return now },
+			remoteWatchPoll: 5 * time.Millisecond,
+		}, client, &out)
+		if err != nil {
+			t.Fatalf("runStatusWithOpts: %v", err)
+		}
+		got := out.String()
+		for _, want := range []string{"owner/repo", "other/repo", "#1", "#3"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("remote stuck-all output missing %q:\n%s", want, got)
+			}
+		}
+		if strings.Contains(got, "#2") {
+			t.Fatalf("unexpected non-stuck issue in output:\n%s", got)
+		}
+	})
+
+	t.Run("tasks", func(t *testing.T) {
+		var out bytes.Buffer
+		err := runStatusWithOpts(context.Background(), &statusOpts{
+			tasks:           true,
+			taskStatus:      store.TaskStatusRunning,
+			baseURL:         srv.URL,
+			coordinator:     srv.URL,
+			now:             func() time.Time { return now },
+			remoteWatchPoll: 5 * time.Millisecond,
+		}, client, &out)
+		if err != nil {
+			t.Fatalf("runStatusWithOpts: %v", err)
+		}
+		got := out.String()
+		for _, want := range []string{"review-agent", "running", "worker-1"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("remote tasks output missing %q:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("events", func(t *testing.T) {
+		var out bytes.Buffer
+		err := runStatusWithOpts(context.Background(), &statusOpts{
+			repo:            "owner/repo",
+			events:          true,
+			eventType:       "dispatch",
+			since:           "30m",
+			baseURL:         srv.URL,
+			coordinator:     srv.URL,
+			now:             func() time.Time { return now },
+			remoteWatchPoll: 5 * time.Millisecond,
+		}, client, &out)
+		if err != nil {
+			t.Fatalf("runStatusWithOpts: %v", err)
+		}
+		got := out.String()
+		for _, want := range []string{"dispatch", "#2", "review-agent"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("remote events output missing %q:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("watch", func(t *testing.T) {
+		var out bytes.Buffer
+		err := runStatusWithOpts(context.Background(), &statusOpts{
+			repo:            "owner/repo",
+			watch:           true,
+			issue:           9,
+			timeout:         200 * time.Millisecond,
+			baseURL:         srv.URL,
+			coordinator:     srv.URL,
+			now:             func() time.Time { return now },
+			remoteWatchPoll: 5 * time.Millisecond,
+		}, client, &out)
+		if err != nil {
+			t.Fatalf("runStatusWithOpts: %v", err)
+		}
+		got := out.String()
+		for _, want := range []string{"Waiting for task completion...", "#9", "dev-agent", "completed"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("remote watch output missing %q:\n%s", want, got)
+			}
+		}
+	})
 }
 
 func TestRenderRepoStatusTable_Empty(t *testing.T) {

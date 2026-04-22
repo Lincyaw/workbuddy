@@ -20,34 +20,37 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/audit"
 	"github.com/Lincyaw/workbuddy/internal/config"
+	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/tasknotify"
 	"github.com/spf13/cobra"
 )
 
 const (
-	statusHTTPTimeout    = 10 * time.Second
-	defaultWatchTimeout  = 30 * time.Minute
-	defaultEventsDisplay = 50
+	statusHTTPTimeout      = 10 * time.Second
+	defaultWatchTimeout    = 30 * time.Minute
+	defaultEventsDisplay   = 50
+	defaultRemoteWatchPoll = time.Second
 )
 
 type statusOpts struct {
-	repo        string
-	stuck       bool
-	tasks       bool
-	events      bool
-	watch       bool
-	jsonOut     bool
-	taskStatus  string
-	eventType   string
-	since       string
-	issue       int
-	timeout     time.Duration
-	baseURL     string
-	coordinator string
-	token       string
-	repos       bool
-	now         func() time.Time
+	repo            string
+	stuck           bool
+	tasks           bool
+	events          bool
+	watch           bool
+	jsonOut         bool
+	taskStatus      string
+	eventType       string
+	since           string
+	issue           int
+	timeout         time.Duration
+	baseURL         string
+	coordinator     string
+	token           string
+	repos           bool
+	now             func() time.Time
+	remoteWatchPoll time.Duration
 }
 
 type statusClient struct {
@@ -57,6 +60,7 @@ type statusClient struct {
 }
 
 type statusIssue struct {
+	Repo              string     `json:"repo"`
 	IssueNum          int        `json:"issue_num"`
 	CurrentState      string     `json:"current_state"`
 	CycleCount        int        `json:"cycle_count"`
@@ -180,24 +184,12 @@ func parseStatusFlags(cmd *cobra.Command) (*statusOpts, error) {
 
 	coordinator = strings.TrimSpace(coordinator)
 	token = strings.TrimSpace(token)
+	repo = strings.TrimSpace(repo)
+	taskStatus = strings.TrimSpace(taskStatus)
+	eventType = strings.TrimSpace(eventType)
+	since = strings.TrimSpace(since)
 	if token == "" {
 		token = strings.TrimSpace(os.Getenv("WORKBUDDY_AUTH_TOKEN"))
-	}
-
-	if coordinator != "" {
-		if stuck || tasks || events || watch {
-			return nil, fmt.Errorf("status: --coordinator is mutually exclusive with --stuck, --tasks, --events, and --watch")
-		}
-		if repos && cmd.Flags().Changed("repo") {
-			return nil, fmt.Errorf("status: --repo is not used with --coordinator")
-		}
-		return &statusOpts{
-			coordinator: strings.TrimRight(coordinator, "/"),
-			token:       token,
-			repos:       repos,
-			jsonOut:     jsonOut,
-			now:         time.Now,
-		}, nil
 	}
 
 	selected := 0
@@ -209,16 +201,13 @@ func parseStatusFlags(cmd *cobra.Command) (*statusOpts, error) {
 	if selected > 1 {
 		return nil, fmt.Errorf("status: --stuck, --tasks, --events, and --watch are mutually exclusive")
 	}
-	if repos {
-		return nil, fmt.Errorf("status: --repos requires --coordinator")
-	}
-	if !tasks && strings.TrimSpace(taskStatus) != "" {
+	if !tasks && taskStatus != "" {
 		return nil, fmt.Errorf("status: --status requires --tasks")
 	}
-	if !events && strings.TrimSpace(eventType) != "" {
+	if !events && eventType != "" {
 		return nil, fmt.Errorf("status: --type requires --events")
 	}
-	if !events && strings.TrimSpace(since) != "" {
+	if !events && since != "" {
 		return nil, fmt.Errorf("status: --since requires --events")
 	}
 	if !watch && issue != 0 {
@@ -236,11 +225,39 @@ func parseStatusFlags(cmd *cobra.Command) (*statusOpts, error) {
 		}
 		timeout = defaultWatchTimeout
 	}
-
-	repo = strings.TrimSpace(repo)
-	taskStatus = strings.TrimSpace(taskStatus)
-	eventType = strings.TrimSpace(eventType)
-	since = strings.TrimSpace(since)
+	if coordinator != "" {
+		if repos && selected > 0 {
+			return nil, fmt.Errorf("status: --repos is mutually exclusive with --stuck, --tasks, --events, and --watch")
+		}
+		if repos && cmd.Flags().Changed("repo") {
+			return nil, fmt.Errorf("status: --repo is not used with --coordinator --repos")
+		}
+		if watch && repo == "" {
+			return nil, fmt.Errorf("status: --repo is required")
+		}
+		return &statusOpts{
+			repo:            repo,
+			stuck:           stuck,
+			tasks:           tasks,
+			events:          events,
+			watch:           watch,
+			jsonOut:         jsonOut,
+			taskStatus:      taskStatus,
+			eventType:       eventType,
+			since:           since,
+			issue:           issue,
+			timeout:         timeout,
+			baseURL:         strings.TrimRight(coordinator, "/"),
+			coordinator:     strings.TrimRight(coordinator, "/"),
+			token:           token,
+			repos:           repos,
+			now:             time.Now,
+			remoteWatchPoll: defaultRemoteWatchPoll,
+		}, nil
+	}
+	if repos {
+		return nil, fmt.Errorf("status: --repos requires --coordinator")
+	}
 
 	cfg, err := loadStatusConfig(repo)
 	if err != nil {
@@ -262,20 +279,21 @@ func parseStatusFlags(cmd *cobra.Command) (*statusOpts, error) {
 	}
 
 	return &statusOpts{
-		repo:       repo,
-		stuck:      stuck,
-		tasks:      tasks,
-		events:     events,
-		watch:      watch,
-		jsonOut:    jsonOut,
-		taskStatus: taskStatus,
-		eventType:  eventType,
-		since:      since,
-		issue:      issue,
-		timeout:    timeout,
-		baseURL:    baseURL,
-		token:      token,
-		now:        time.Now,
+		repo:            repo,
+		stuck:           stuck,
+		tasks:           tasks,
+		events:          events,
+		watch:           watch,
+		jsonOut:         jsonOut,
+		taskStatus:      taskStatus,
+		eventType:       eventType,
+		since:           since,
+		issue:           issue,
+		timeout:         timeout,
+		baseURL:         baseURL,
+		token:           token,
+		now:             time.Now,
+		remoteWatchPoll: defaultRemoteWatchPoll,
 	}, nil
 }
 
@@ -602,7 +620,9 @@ func pathWithin(root, path string) bool {
 
 func runStatusWithOpts(ctx context.Context, opts *statusOpts, client *statusClient, stdout io.Writer) error {
 	switch {
-	case opts.coordinator != "":
+	case opts.coordinator != "" && opts.repos:
+		return runStatusCoordinator(ctx, opts, stdout)
+	case opts.coordinator != "" && !opts.stuck && !opts.tasks && !opts.events && !opts.watch:
 		return runStatusCoordinator(ctx, opts, stdout)
 	case opts.tasks:
 		return runStatusTasks(ctx, opts, client, stdout)
@@ -683,14 +703,14 @@ func renderRepoStatusTable(w io.Writer, repos []repoStatusResponse) {
 }
 
 func runStatusSummary(ctx context.Context, opts *statusOpts, client *statusClient, stdout io.Writer) error {
-	issueNums, err := client.listIssueNums(ctx, opts.repo)
+	issueRefs, err := client.listIssues(ctx, opts.repo)
 	if err != nil {
 		return err
 	}
 
-	issues := make([]statusIssue, 0, len(issueNums))
-	for _, issueNum := range issueNums {
-		issue, err := client.issueState(ctx, opts.repo, issueNum)
+	issues := make([]statusIssue, 0, len(issueRefs))
+	for _, ref := range issueRefs {
+		issue, err := client.issueState(ctx, ref.Repo, ref.IssueNum)
 		if err != nil {
 			var statusErr *statusHTTPStatusError
 			if errors.As(err, &statusErr) && statusErr.status == http.StatusNotFound {
@@ -702,6 +722,7 @@ func runStatusSummary(ctx context.Context, opts *statusOpts, client *statusClien
 			continue
 		}
 		entry := statusIssue{
+			Repo:              issue.Repo,
 			IssueNum:          issue.IssueNum,
 			CurrentState:      issue.CurrentState,
 			CycleCount:        issue.CycleCount,
@@ -715,7 +736,12 @@ func runStatusSummary(ctx context.Context, opts *statusOpts, client *statusClien
 		issues = append(issues, entry)
 	}
 
-	sort.Slice(issues, func(i, j int) bool { return issues[i].IssueNum < issues[j].IssueNum })
+	sort.Slice(issues, func(i, j int) bool {
+		if issues[i].Repo == issues[j].Repo {
+			return issues[i].IssueNum < issues[j].IssueNum
+		}
+		return issues[i].Repo < issues[j].Repo
+	})
 	resp := statusResponse{Repo: opts.repo, Issues: issues}
 	if opts.jsonOut {
 		enc := json.NewEncoder(stdout)
@@ -760,7 +786,7 @@ func runStatusEvents(ctx context.Context, opts *statusOpts, client *statusClient
 		since = &ts
 	}
 
-	events, err := client.listEvents(ctx, opts.repo, opts.eventType, since)
+	events, err := client.listEvents(ctx, opts.repo, 0, opts.eventType, since)
 	if err != nil {
 		return err
 	}
@@ -798,7 +824,7 @@ func runStatusWatch(ctx context.Context, opts *statusOpts, client *statusClient,
 	defer cancel()
 
 	_, _ = fmt.Fprintln(stdout, "Waiting for task completion...")
-	event, err := client.watchTask(watchCtx, opts.repo, opts.issue)
+	event, err := client.watchTask(watchCtx, opts)
 	if err != nil {
 		if watchCtx.Err() == context.DeadlineExceeded {
 			_, _ = fmt.Fprintln(stdout, "No task completed within timeout")
@@ -820,22 +846,36 @@ func runStatusWatch(ctx context.Context, opts *statusOpts, client *statusClient,
 	}
 }
 
-func (c *statusClient) listIssueNums(ctx context.Context, repo string) ([]int, error) {
-	events, err := c.listEvents(ctx, repo, "", nil)
+type statusIssueRef struct {
+	Repo     string
+	IssueNum int
+}
+
+func (c *statusClient) listIssues(ctx context.Context, repo string) ([]statusIssueRef, error) {
+	events, err := c.listEvents(ctx, repo, 0, "", nil)
 	if err != nil {
 		return nil, err
 	}
-	seen := make(map[int]struct{})
+	seen := make(map[statusIssueRef]struct{})
 	for _, ev := range events {
-		if ev.IssueNum > 0 {
-			seen[ev.IssueNum] = struct{}{}
+		ref := statusIssueRef{
+			Repo:     strings.TrimSpace(ev.Repo),
+			IssueNum: ev.IssueNum,
+		}
+		if ref.Repo != "" && ref.IssueNum > 0 {
+			seen[ref] = struct{}{}
 		}
 	}
-	out := make([]int, 0, len(seen))
-	for issueNum := range seen {
-		out = append(out, issueNum)
+	out := make([]statusIssueRef, 0, len(seen))
+	for ref := range seen {
+		out = append(out, ref)
 	}
-	sort.Ints(out)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Repo == out[j].Repo {
+			return out[i].IssueNum < out[j].IssueNum
+		}
+		return out[i].Repo < out[j].Repo
+	})
 	return out, nil
 }
 
@@ -862,13 +902,16 @@ func (c *statusClient) listTasks(ctx context.Context, repo, status string) ([]st
 	return resp, nil
 }
 
-func (c *statusClient) listEvents(ctx context.Context, repo, eventType string, since *time.Time) ([]audit.EventEnvelope, error) {
+func (c *statusClient) listEvents(ctx context.Context, repo string, issue int, eventType string, since *time.Time) ([]audit.EventEnvelope, error) {
 	u, err := url.Parse(c.baseURL + "/events")
 	if err != nil {
 		return nil, fmt.Errorf("status: parse events url: %w", err)
 	}
 	q := u.Query()
 	q.Set("repo", repo)
+	if issue > 0 {
+		q.Set("issue", strconv.Itoa(issue))
+	}
 	if eventType != "" {
 		q.Set("type", eventType)
 	}
@@ -901,15 +944,18 @@ func (c *statusClient) issueState(ctx context.Context, repo string, issueNum int
 	return &resp, nil
 }
 
-func (c *statusClient) watchTask(ctx context.Context, repo string, issue int) (*tasknotify.TaskEvent, error) {
+func (c *statusClient) watchTask(ctx context.Context, opts *statusOpts) (*tasknotify.TaskEvent, error) {
+	if opts != nil && opts.coordinator != "" {
+		return c.watchTaskRemote(ctx, opts)
+	}
 	u, err := url.Parse(c.baseURL + "/tasks/watch")
 	if err != nil {
 		return nil, fmt.Errorf("status: parse tasks/watch url: %w", err)
 	}
 	q := u.Query()
-	q.Set("repo", repo)
-	if issue > 0 {
-		q.Set("issue", strconv.Itoa(issue))
+	q.Set("repo", opts.repo)
+	if opts.issue > 0 {
+		q.Set("issue", strconv.Itoa(opts.issue))
 	}
 	u.RawQuery = q.Encode()
 
@@ -961,6 +1007,96 @@ func (c *statusClient) watchTask(ctx context.Context, repo string, issue int) (*
 		return nil, ctx.Err()
 	}
 	return nil, fmt.Errorf("status: watch stream closed without task event")
+}
+
+func (c *statusClient) watchTaskRemote(ctx context.Context, opts *statusOpts) (*tasknotify.TaskEvent, error) {
+	if opts == nil {
+		return nil, fmt.Errorf("status: missing watch options")
+	}
+	pollEvery := opts.remoteWatchPoll
+	if pollEvery <= 0 {
+		pollEvery = defaultRemoteWatchPoll
+	}
+	nowFn := opts.now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	cursor := nowFn().UTC()
+	ticker := time.NewTicker(pollEvery)
+	defer ticker.Stop()
+
+	for {
+		events, err := c.listEvents(ctx, opts.repo, opts.issue, eventlog.TypeCompleted, &cursor)
+		if err != nil {
+			return nil, err
+		}
+		if len(events) > 0 {
+			sort.Slice(events, func(i, j int) bool {
+				if events[i].TS.Equal(events[j].TS) {
+					return events[i].ID < events[j].ID
+				}
+				return events[i].TS.Before(events[j].TS)
+			})
+			for _, ev := range events {
+				if ev.TS.After(cursor) {
+					cursor = ev.TS
+				}
+				event, ok := remoteWatchTaskEvent(ev)
+				if !ok {
+					continue
+				}
+				if opts.issue > 0 && event.IssueNum != opts.issue {
+					continue
+				}
+				if opts.repo != "" && event.Repo != opts.repo {
+					continue
+				}
+				return event, nil
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func remoteWatchTaskEvent(ev audit.EventEnvelope) (*tasknotify.TaskEvent, bool) {
+	if ev.Type != eventlog.TypeCompleted {
+		return nil, false
+	}
+	var payload struct {
+		TaskID    string `json:"task_id"`
+		AgentName string `json:"agent_name"`
+		Status    string `json:"status"`
+	}
+	if len(ev.Payload) > 0 {
+		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+			return nil, false
+		}
+	}
+	status := strings.TrimSpace(payload.Status)
+	if status == "" {
+		status = store.TaskStatusCompleted
+	}
+	if status != store.TaskStatusCompleted && status != store.TaskStatusFailed && status != store.TaskStatusTimeout {
+		return nil, false
+	}
+	exitCode := 0
+	if status != store.TaskStatusCompleted {
+		exitCode = 1
+	}
+	return &tasknotify.TaskEvent{
+		TaskID:      strings.TrimSpace(payload.TaskID),
+		Repo:        ev.Repo,
+		IssueNum:    ev.IssueNum,
+		AgentName:   strings.TrimSpace(payload.AgentName),
+		Status:      status,
+		ExitCode:    exitCode,
+		CompletedAt: ev.TS.UTC(),
+	}, true
 }
 
 func (c *statusClient) doJSON(req *http.Request, out any) error {
@@ -1020,7 +1156,11 @@ func renderStatusTable(w io.Writer, resp statusResponse) {
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
 	_, _ = fmt.Fprintf(tw, "REPO\tISSUE\tSTATE\tCYCLES\tDEPENDENCY\tLAST EVENT\tSTUCK\n")
 	if len(resp.Issues) == 0 {
-		_, _ = fmt.Fprintf(tw, "%s\t-\t-\t-\t-\t-\t-\n", resp.Repo)
+		repo := resp.Repo
+		if repo == "" {
+			repo = "-"
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t-\t-\t-\t-\t-\t-\n", repo)
 		_ = tw.Flush()
 		return
 	}
@@ -1032,7 +1172,7 @@ func renderStatusTable(w io.Writer, resp statusResponse) {
 		_, _ = fmt.Fprintf(
 			tw,
 			"%s\t#%d\t%s\t%d\t%s\t%s\t%t\n",
-			resp.Repo,
+			issue.Repo,
 			issue.IssueNum,
 			issue.CurrentState,
 			issue.CycleCount,
