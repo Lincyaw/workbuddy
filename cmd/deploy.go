@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -24,6 +25,7 @@ import (
 const (
 	defaultDeployName        = "workbuddy"
 	defaultDeployScope       = "user"
+	defaultDeployListScope   = "all"
 	defaultUpgradeRepo       = "Lincyaw/workbuddy"
 	defaultDeployHTTPTimeout = 30 * time.Second
 	deploymentManifestVer    = 1
@@ -37,6 +39,9 @@ var (
 	deployGitHubAPIBaseURL   = "https://api.github.com"
 	deployGitHubDownloadBase = "https://github.com"
 	deployNamePattern        = regexp.MustCompile(`^[A-Za-z0-9@_.-]+$`)
+	deploySystemBinaryPath   = "/usr/local/bin/workbuddy"
+	deploySystemManifestDir  = "/etc/workbuddy/deployments"
+	deploySystemUnitDir      = "/etc/systemd/system"
 )
 
 type deployInstallOpts struct {
@@ -56,12 +61,18 @@ type deployInstallOpts struct {
 type deployLookupOpts struct {
 	name  string
 	scope string
+	all   bool
 }
 
 type deployUpgradeOpts struct {
 	deployLookupOpts
 	version    string
 	repository string
+}
+
+type deployListOpts struct {
+	scope  string
+	format string
 }
 
 type deploymentManifest struct {
@@ -93,6 +104,29 @@ type deployScopePaths struct {
 	wantedBy          string
 }
 
+type deploymentRecord struct {
+	manifest     *deploymentManifest
+	manifestPath string
+	scopePaths   *deployScopePaths
+}
+
+type deploymentNotFoundError struct {
+	name      string
+	scope     string
+	installed []string
+}
+
+type deployListRow struct {
+	Name       string   `json:"name"`
+	Scope      string   `json:"scope"`
+	BinaryPath string   `json:"binary_path"`
+	Command    []string `json:"command"`
+}
+
+type deployListResponse struct {
+	Deployments []deployListRow `json:"deployments"`
+}
+
 var deployCmd = &cobra.Command{
 	Use:   "deploy",
 	Short: "Install and manage deployed workbuddy services",
@@ -116,6 +150,12 @@ var deployInstallCmd = &cobra.Command{
 `),
 	Args: cobra.ArbitraryArgs,
 	RunE: runDeployInstallCmd,
+}
+
+var deployListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List recorded deployments from user and system scopes",
+	RunE:  runDeployListCmd,
 }
 
 var deployRedeployCmd = &cobra.Command{
@@ -160,24 +200,32 @@ func init() {
 	deployInstallCmd.Flags().Bool("enable", true, "Enable the systemd unit after writing it")
 	deployInstallCmd.Flags().Bool("start", true, "Start the systemd unit after writing it")
 
+	deployListCmd.Flags().String("scope", defaultDeployListScope, "Deployment scope: all, user, or system")
+	deployListCmd.Flags().String("format", "text", "Output format: text or json")
+
 	deployRedeployCmd.Flags().String("name", defaultDeployName, "Deployment name")
 	deployRedeployCmd.Flags().String("scope", defaultDeployScope, "Deployment scope: user or system")
+	deployRedeployCmd.Flags().Bool("all", false, "Operate on every deployment in the requested scope")
 
 	deployStopCmd.Flags().String("name", defaultDeployName, "Deployment name")
 	deployStopCmd.Flags().String("scope", defaultDeployScope, "Deployment scope: user or system")
+	deployStopCmd.Flags().Bool("all", false, "Operate on every deployment in the requested scope")
 
 	deployStartCmd.Flags().String("name", defaultDeployName, "Deployment name")
 	deployStartCmd.Flags().String("scope", defaultDeployScope, "Deployment scope: user or system")
+	deployStartCmd.Flags().Bool("all", false, "Operate on every deployment in the requested scope")
 
 	deployDeleteCmd.Flags().String("name", defaultDeployName, "Deployment name")
 	deployDeleteCmd.Flags().String("scope", defaultDeployScope, "Deployment scope: user or system")
+	deployDeleteCmd.Flags().Bool("all", false, "Operate on every deployment in the requested scope")
 
 	deployUpgradeCmd.Flags().String("name", defaultDeployName, "Deployment name")
 	deployUpgradeCmd.Flags().String("scope", defaultDeployScope, "Deployment scope: user or system")
 	deployUpgradeCmd.Flags().String("version", "latest", "Release version to install (for example latest or v0.2.0)")
 	deployUpgradeCmd.Flags().String("repository", defaultUpgradeRepo, "GitHub repository used for release upgrades in OWNER/NAME form")
+	deployUpgradeCmd.Flags().Bool("all", false, "Operate on every deployment in the requested scope")
 
-	deployCmd.AddCommand(deployInstallCmd, deployRedeployCmd, deployStopCmd, deployStartCmd, deployDeleteCmd, deployUpgradeCmd)
+	deployCmd.AddCommand(deployInstallCmd, deployListCmd, deployRedeployCmd, deployStopCmd, deployStartCmd, deployDeleteCmd, deployUpgradeCmd)
 	rootCmd.AddCommand(deployCmd)
 }
 
@@ -187,6 +235,14 @@ func runDeployInstallCmd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	return runDeployInstallWithOpts(cmd.Context(), opts, cmd.OutOrStdout())
+}
+
+func runDeployListCmd(cmd *cobra.Command, _ []string) error {
+	opts, err := parseDeployListFlags(cmd)
+	if err != nil {
+		return err
+	}
+	return runDeployListWithOpts(opts, cmd.OutOrStdout())
 }
 
 func runDeployRedeployCmd(cmd *cobra.Command, _ []string) error {
@@ -265,9 +321,34 @@ func parseDeployInstallFlags(cmd *cobra.Command, args []string) (*deployInstallO
 func parseDeployLookupFlags(cmd *cobra.Command) (*deployLookupOpts, error) {
 	name, _ := cmd.Flags().GetString("name")
 	scope, _ := cmd.Flags().GetString("scope")
+	all, _ := cmd.Flags().GetBool("all")
+	if all && cmd.Flags().Changed("name") {
+		return nil, fmt.Errorf("deploy %s: --name and --all are mutually exclusive", cmd.Name())
+	}
 	return &deployLookupOpts{
 		name:  strings.TrimSpace(name),
 		scope: strings.TrimSpace(scope),
+		all:   all,
+	}, nil
+}
+
+func parseDeployListFlags(cmd *cobra.Command) (*deployListOpts, error) {
+	scope, _ := cmd.Flags().GetString("scope")
+	format, _ := cmd.Flags().GetString("format")
+	format = strings.ToLower(strings.TrimSpace(format))
+	switch format {
+	case "", "text":
+		format = "text"
+	case "json":
+	default:
+		return nil, fmt.Errorf("deploy list: --format must be one of text or json")
+	}
+	if _, err := resolveDeployScopes(scope, defaultDeployListScope); err != nil {
+		return nil, fmt.Errorf("deploy list: %w", err)
+	}
+	return &deployListOpts{
+		scope:  strings.TrimSpace(scope),
+		format: format,
 	}, nil
 }
 
@@ -380,15 +461,72 @@ func runDeployInstallWithOpts(ctx context.Context, opts *deployInstallOpts, stdo
 	return nil
 }
 
+func runDeployListWithOpts(opts *deployListOpts, stdout io.Writer) error {
+	if opts == nil {
+		return fmt.Errorf("deploy list: options are required")
+	}
+	rows, err := collectDeployListRows(opts.scope)
+	if err != nil {
+		return fmt.Errorf("deploy list: %w", err)
+	}
+	if opts.format == "json" {
+		payload, err := json.MarshalIndent(deployListResponse{Deployments: rows}, "", "  ")
+		if err != nil {
+			return fmt.Errorf("deploy list: marshal output: %w", err)
+		}
+		payload = append(payload, '\n')
+		if _, err := stdout.Write(payload); err != nil {
+			return fmt.Errorf("deploy list: write output: %w", err)
+		}
+		return nil
+	}
+	if len(rows) == 0 {
+		if _, err := fmt.Fprintln(stdout, "no deployments found"); err != nil {
+			return fmt.Errorf("deploy list: write output: %w", err)
+		}
+		return nil
+	}
+	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "NAME\tSCOPE\tBINARY PATH\tCOMMAND"); err != nil {
+		return fmt.Errorf("deploy list: write output: %w", err)
+	}
+	for _, row := range rows {
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\n",
+			row.Name,
+			row.Scope,
+			row.BinaryPath,
+			renderDeployCommand(row.Command),
+		); err != nil {
+			return fmt.Errorf("deploy list: write output: %w", err)
+		}
+	}
+	if err := tw.Flush(); err != nil {
+		return fmt.Errorf("deploy list: flush output: %w", err)
+	}
+	return nil
+}
+
 func runDeployRedeployWithOpts(ctx context.Context, opts *deployLookupOpts, stdout io.Writer) error {
 	if opts == nil {
 		return fmt.Errorf("deploy redeploy: options are required")
 	}
-	manifest, scopePaths, manifestPath, err := loadDeploymentForScope(opts.name, opts.scope)
+	if opts.all {
+		return runDeployAcrossScope(ctx, opts.scope, stdout, "deploy redeploy", runDeployRedeployRecord)
+	}
+	record, err := loadDeploymentRecordForScope(opts.name, opts.scope)
 	if err != nil {
 		return fmt.Errorf("deploy redeploy: %w", err)
 	}
+	return runDeployRedeployRecord(ctx, record, stdout)
+}
 
+func runDeployRedeployRecord(ctx context.Context, record *deploymentRecord, stdout io.Writer) error {
+	if record == nil || record.manifest == nil {
+		return fmt.Errorf("deploy redeploy: deployment record is required")
+	}
+	manifest := record.manifest
 	sourceBinary, err := deployExecutablePath()
 	if err != nil {
 		return fmt.Errorf("deploy redeploy: locate current executable: %w", err)
@@ -403,7 +541,7 @@ func runDeployRedeployWithOpts(ctx context.Context, opts *deployLookupOpts, stdo
 		if runtime.GOOS != "linux" {
 			return fmt.Errorf("deploy redeploy: systemd deployment is only supported on Linux")
 		}
-		unit, err := renderSystemdUnit(manifest, scopePaths.wantedBy)
+		unit, err := renderSystemdUnit(manifest, record.scopePaths.wantedBy)
 		if err != nil {
 			return fmt.Errorf("deploy redeploy: render systemd unit: %w", err)
 		}
@@ -411,7 +549,7 @@ func runDeployRedeployWithOpts(ctx context.Context, opts *deployLookupOpts, stdo
 			return fmt.Errorf("deploy redeploy: write systemd unit: %w", err)
 		}
 	}
-	if err := writeDeploymentManifest(manifestPath, manifest); err != nil {
+	if err := writeDeploymentManifest(record.manifestPath, manifest); err != nil {
 		return fmt.Errorf("deploy redeploy: write manifest: %w", err)
 	}
 
@@ -431,10 +569,21 @@ func runDeployStopWithOpts(ctx context.Context, opts *deployLookupOpts, stdout i
 	if opts == nil {
 		return fmt.Errorf("deploy stop: options are required")
 	}
-	manifest, _, manifestPath, err := loadDeploymentForScope(opts.name, opts.scope)
+	if opts.all {
+		return runDeployAcrossScope(ctx, opts.scope, stdout, "deploy stop", runDeployStopRecord)
+	}
+	record, err := loadDeploymentRecordForScope(opts.name, opts.scope)
 	if err != nil {
 		return fmt.Errorf("deploy stop: %w", err)
 	}
+	return runDeployStopRecord(ctx, record, stdout)
+}
+
+func runDeployStopRecord(ctx context.Context, record *deploymentRecord, stdout io.Writer) error {
+	if record == nil || record.manifest == nil {
+		return fmt.Errorf("deploy stop: deployment record is required")
+	}
+	manifest := record.manifest
 	if manifest.Systemd == nil {
 		return fmt.Errorf("deploy stop: deployment %q is not managed by systemd", manifest.Name)
 	}
@@ -448,7 +597,7 @@ func runDeployStopWithOpts(ctx context.Context, opts *deployLookupOpts, stdout i
 	}
 	_ = deployRunSystemctl(ctx, manifest.Scope, "reset-failed", serviceName)
 	manifest.Systemd.Started = false
-	if err := writeDeploymentManifest(manifestPath, manifest); err != nil {
+	if err := writeDeploymentManifest(record.manifestPath, manifest); err != nil {
 		return fmt.Errorf("deploy stop: write manifest: %w", err)
 	}
 	if _, err := fmt.Fprintf(stdout, "stopped %s\n", serviceName); err != nil {
@@ -461,10 +610,21 @@ func runDeployStartWithOpts(ctx context.Context, opts *deployLookupOpts, stdout 
 	if opts == nil {
 		return fmt.Errorf("deploy start: options are required")
 	}
-	manifest, _, manifestPath, err := loadDeploymentForScope(opts.name, opts.scope)
+	if opts.all {
+		return runDeployAcrossScope(ctx, opts.scope, stdout, "deploy start", runDeployStartRecord)
+	}
+	record, err := loadDeploymentRecordForScope(opts.name, opts.scope)
 	if err != nil {
 		return fmt.Errorf("deploy start: %w", err)
 	}
+	return runDeployStartRecord(ctx, record, stdout)
+}
+
+func runDeployStartRecord(ctx context.Context, record *deploymentRecord, stdout io.Writer) error {
+	if record == nil || record.manifest == nil {
+		return fmt.Errorf("deploy start: deployment record is required")
+	}
+	manifest := record.manifest
 	if manifest.Systemd == nil {
 		return fmt.Errorf("deploy start: deployment %q is not managed by systemd", manifest.Name)
 	}
@@ -480,7 +640,7 @@ func runDeployStartWithOpts(ctx context.Context, opts *deployLookupOpts, stdout 
 		return fmt.Errorf("deploy start: %w", err)
 	}
 	manifest.Systemd.Started = true
-	if err := writeDeploymentManifest(manifestPath, manifest); err != nil {
+	if err := writeDeploymentManifest(record.manifestPath, manifest); err != nil {
 		return fmt.Errorf("deploy start: write manifest: %w", err)
 	}
 	if _, err := fmt.Fprintf(stdout, "started %s\n", serviceName); err != nil {
@@ -493,11 +653,21 @@ func runDeployDeleteWithOpts(ctx context.Context, opts *deployLookupOpts, stdout
 	if opts == nil {
 		return fmt.Errorf("deploy delete: options are required")
 	}
-	manifest, _, manifestPath, err := loadDeploymentForScope(opts.name, opts.scope)
+	if opts.all {
+		return runDeployAcrossScope(ctx, opts.scope, stdout, "deploy delete", runDeployDeleteRecord)
+	}
+	record, err := loadDeploymentRecordForScope(opts.name, opts.scope)
 	if err != nil {
 		return fmt.Errorf("deploy delete: %w", err)
 	}
+	return runDeployDeleteRecord(ctx, record, stdout)
+}
 
+func runDeployDeleteRecord(ctx context.Context, record *deploymentRecord, stdout io.Writer) error {
+	if record == nil || record.manifest == nil {
+		return fmt.Errorf("deploy delete: deployment record is required")
+	}
+	manifest := record.manifest
 	unitRemoved := false
 	if manifest.Systemd != nil {
 		if runtime.GOOS != "linux" {
@@ -519,10 +689,10 @@ func runDeployDeleteWithOpts(ctx context.Context, opts *deployLookupOpts, stdout
 		}
 	}
 
-	if err := os.Remove(manifestPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("deploy delete: remove manifest %s: %w", manifestPath, err)
+	if err := os.Remove(record.manifestPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("deploy delete: remove manifest %s: %w", record.manifestPath, err)
 	}
-	if _, err := fmt.Fprintf(stdout, "deleted deployment manifest %s\n", manifestPath); err != nil {
+	if _, err := fmt.Fprintf(stdout, "deleted deployment manifest %s\n", record.manifestPath); err != nil {
 		return fmt.Errorf("deploy delete: write output: %w", err)
 	}
 	if unitRemoved {
@@ -540,10 +710,6 @@ func runDeployUpgradeWithOpts(ctx context.Context, opts *deployUpgradeOpts, stdo
 	if opts == nil {
 		return fmt.Errorf("deploy upgrade: options are required")
 	}
-	manifest, scopePaths, manifestPath, err := loadDeploymentForScope(opts.name, opts.scope)
-	if err != nil {
-		return fmt.Errorf("deploy upgrade: %w", err)
-	}
 	version := strings.TrimSpace(opts.version)
 	if version == "" {
 		version = "latest"
@@ -552,6 +718,29 @@ func runDeployUpgradeWithOpts(ctx context.Context, opts *deployUpgradeOpts, stdo
 	if repository == "" {
 		repository = defaultUpgradeRepo
 	}
+	if opts.all {
+		return runDeployAcrossScope(ctx, opts.scope, stdout, "deploy upgrade", func(ctx context.Context, record *deploymentRecord, stdout io.Writer) error {
+			return runDeployUpgradeRecord(ctx, record, version, repository, stdout)
+		})
+	}
+	record, err := loadDeploymentRecordForScope(opts.name, opts.scope)
+	if err != nil {
+		return fmt.Errorf("deploy upgrade: %w", err)
+	}
+	return runDeployUpgradeRecord(ctx, record, version, repository, stdout)
+}
+
+func runDeployUpgradeRecord(
+	ctx context.Context,
+	record *deploymentRecord,
+	version string,
+	repository string,
+	stdout io.Writer,
+) error {
+	if record == nil || record.manifest == nil {
+		return fmt.Errorf("deploy upgrade: deployment record is required")
+	}
+	manifest := record.manifest
 	resolvedVersion, err := downloadReleaseBinary(ctx, repository, version, manifest.BinaryPath)
 	if err != nil {
 		return fmt.Errorf("deploy upgrade: %w", err)
@@ -563,7 +752,7 @@ func runDeployUpgradeWithOpts(ctx context.Context, opts *deployUpgradeOpts, stdo
 		if runtime.GOOS != "linux" {
 			return fmt.Errorf("deploy upgrade: systemd deployment is only supported on Linux")
 		}
-		unit, err := renderSystemdUnit(manifest, scopePaths.wantedBy)
+		unit, err := renderSystemdUnit(manifest, record.scopePaths.wantedBy)
 		if err != nil {
 			return fmt.Errorf("deploy upgrade: render systemd unit: %w", err)
 		}
@@ -571,7 +760,7 @@ func runDeployUpgradeWithOpts(ctx context.Context, opts *deployUpgradeOpts, stdo
 			return fmt.Errorf("deploy upgrade: write systemd unit: %w", err)
 		}
 	}
-	if err := writeDeploymentManifest(manifestPath, manifest); err != nil {
+	if err := writeDeploymentManifest(record.manifestPath, manifest); err != nil {
 		return fmt.Errorf("deploy upgrade: write manifest: %w", err)
 	}
 
@@ -657,9 +846,9 @@ func resolveDeployScopePaths(scope string) (string, *deployScopePaths, error) {
 		}, nil
 	case "system":
 		return scope, &deployScopePaths{
-			defaultBinaryPath: "/usr/local/bin/workbuddy",
-			manifestDir:       "/etc/workbuddy/deployments",
-			unitDir:           "/etc/systemd/system",
+			defaultBinaryPath: deploySystemBinaryPath,
+			manifestDir:       deploySystemManifestDir,
+			unitDir:           deploySystemUnitDir,
 			wantedBy:          "multi-user.target",
 		}, nil
 	default:
@@ -763,21 +952,168 @@ func deploymentManifestPath(dir, name string) string {
 	return filepath.Join(dir, name+".json")
 }
 
+func (e *deploymentNotFoundError) Error() string {
+	if e == nil {
+		return "deployment not found"
+	}
+	installed := "none"
+	if len(e.installed) > 0 {
+		installed = strings.Join(e.installed, ", ")
+	}
+	return fmt.Sprintf("deployment %q not found in %s scope (installed: %s)", e.name, e.scope, installed)
+}
+
+func collectDeployListRows(scope string) ([]deployListRow, error) {
+	records, err := loadDeploymentRecords(scope, defaultDeployListScope)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]deployListRow, 0, len(records))
+	for _, record := range records {
+		rows = append(rows, deployListRow{
+			Name:       record.manifest.Name,
+			Scope:      record.manifest.Scope,
+			BinaryPath: record.manifest.BinaryPath,
+			Command:    append([]string(nil), record.manifest.Command...),
+		})
+	}
+	return rows, nil
+}
+
+func renderDeployCommand(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	rendered := make([]string, len(args))
+	for i, arg := range args {
+		if strings.ContainsAny(arg, " \t") {
+			rendered[i] = strconv.Quote(arg)
+			continue
+		}
+		rendered[i] = arg
+	}
+	return strings.Join(rendered, " ")
+}
+
 func loadDeploymentForScope(name, scope string) (*deploymentManifest, *deployScopePaths, string, error) {
-	validatedName, normalizedScope, scopePaths, err := validateDeployIdentity(name, scope)
+	record, err := loadDeploymentRecordForScope(name, scope)
 	if err != nil {
 		return nil, nil, "", err
 	}
-	manifestPath := deploymentManifestPath(scopePaths.manifestDir, validatedName)
-	manifest, err := readDeploymentManifest(manifestPath)
+	return record.manifest, record.scopePaths, record.manifestPath, nil
+}
+
+func loadDeploymentRecordForScope(name, scope string) (*deploymentRecord, error) {
+	validatedName, normalizedScope, _, err := validateDeployIdentity(name, scope)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, err
 	}
-	manifest.Scope = normalizedScope
-	if manifest.Name == "" {
-		manifest.Name = validatedName
+	records, err := loadDeploymentRecords(normalizedScope, defaultDeployScope)
+	if err != nil {
+		return nil, err
 	}
-	return manifest, scopePaths, manifestPath, nil
+	for _, record := range records {
+		if record.manifest.Name == validatedName {
+			return record, nil
+		}
+	}
+	installed := make([]string, 0, len(records))
+	for _, record := range records {
+		installed = append(installed, record.manifest.Name)
+	}
+	return nil, &deploymentNotFoundError{
+		name:      validatedName,
+		scope:     normalizedScope,
+		installed: installed,
+	}
+}
+
+func loadDeploymentRecords(scope, defaultScope string) ([]*deploymentRecord, error) {
+	scopes, err := resolveDeployScopes(scope, defaultScope)
+	if err != nil {
+		return nil, err
+	}
+	records := make([]*deploymentRecord, 0)
+	for _, resolvedScope := range scopes {
+		normalizedScope, scopePaths, err := resolveDeployScopePaths(resolvedScope)
+		if err != nil {
+			return nil, err
+		}
+		entries, err := os.ReadDir(scopePaths.manifestDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("read manifest directory %s: %w", scopePaths.manifestDir, err)
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+				continue
+			}
+			manifestPath := filepath.Join(scopePaths.manifestDir, entry.Name())
+			manifest, err := readDeploymentManifest(manifestPath)
+			if err != nil {
+				return nil, err
+			}
+			manifest.Scope = normalizedScope
+			records = append(records, &deploymentRecord{
+				manifest:     manifest,
+				manifestPath: manifestPath,
+				scopePaths:   scopePaths,
+			})
+		}
+	}
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].manifest.Scope != records[j].manifest.Scope {
+			return records[i].manifest.Scope < records[j].manifest.Scope
+		}
+		if records[i].manifest.Name != records[j].manifest.Name {
+			return records[i].manifest.Name < records[j].manifest.Name
+		}
+		return records[i].manifestPath < records[j].manifestPath
+	})
+	return records, nil
+}
+
+func resolveDeployScopes(scope, defaultScope string) ([]string, error) {
+	scope = strings.ToLower(strings.TrimSpace(scope))
+	if scope == "" {
+		scope = defaultScope
+	}
+	switch scope {
+	case "all":
+		return []string{"system", "user"}, nil
+	case "user", "system":
+		return []string{scope}, nil
+	default:
+		return nil, fmt.Errorf("--scope must be one of all, user, or system")
+	}
+}
+
+func runDeployAcrossScope(
+	ctx context.Context,
+	scope string,
+	stdout io.Writer,
+	op string,
+	run func(context.Context, *deploymentRecord, io.Writer) error,
+) error {
+	records, err := loadDeploymentRecords(scope, defaultDeployScope)
+	if err != nil {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+	resolvedScope, _, err := resolveDeployScopePaths(scope)
+	if err != nil {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+	if len(records) == 0 {
+		return fmt.Errorf("%s: no deployments installed in %s scope", op, resolvedScope)
+	}
+	for _, record := range records {
+		if err := run(ctx, record, stdout); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func readDeploymentManifest(path string) (*deploymentManifest, error) {

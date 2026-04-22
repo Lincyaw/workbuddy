@@ -2056,3 +2056,26 @@ requirements:
     tests:
       - cmd/root_test.go
     deps: [REQ-017]
+
+  - id: REQ-062
+    title: CLI - deploy lifecycle inventory and bulk operations
+    description: >
+      `workbuddy deploy` must expose inventory and bulk-management helpers for
+      installed deployments. Operators need a first-class `deploy list`
+      command, machine-readable output for automation, scope-wide lifecycle
+      operations via `--all`, and helpful errors when a named deployment is not
+      installed.
+    priority: P1
+    version: v0.4.0
+    status: tested
+    acceptance_criteria:
+      - "AC-062-1: `workbuddy deploy list` reads user manifests from `~/.config/workbuddy/deployments/*.json` and system manifests from `/etc/workbuddy/deployments/*.json`, then prints each deployment's name, scope, binary path, and command"
+      - "AC-062-2: `workbuddy deploy list --format json` emits stable JSON with deployments sorted deterministically"
+      - "AC-062-3: `workbuddy deploy stop/start/delete/redeploy/upgrade --all` applies the requested operation to every deployment in the selected scope"
+      - "AC-062-4: When `--name` does not match a deployment, the error names the requested scope and enumerates installed deployments instead of surfacing raw filesystem/syscall text"
+      - "AC-062-5: Unit tests cover list output, stable JSON, missing-name diagnostics, and `--all` handling in `cmd/deploy_test.go`"
+    code:
+      - cmd/deploy.go
+    tests:
+      - cmd/deploy_test.go
+    deps: [REQ-027, REQ-028]
