@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -154,6 +155,8 @@ func TestParseWorkerFlagsFallsBackToEnvToken(t *testing.T) {
 }
 
 func TestParseWorkerFlagsRequiresTokenWhenFlagAndEnvMissing(t *testing.T) {
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", "")
+
 	cmd := &cobra.Command{Use: "worker"}
 	cmd.Flags().String("coordinator", "", "")
 	cmd.Flags().String("token", "", "")
@@ -914,7 +917,7 @@ func TestExecuteRemoteTaskStopsHeartbeatAfterKilledProcess(t *testing.T) {
 		context.Background(),
 		task,
 		client,
-		cfg,
+		newWorkerRepoConfigStore(map[string]*config.FullConfig{task.Repo: cfg}),
 		lnch,
 		auditor,
 		rep,
@@ -995,7 +998,7 @@ func TestExecuteRemoteTaskRequeuesWorktreeSetupFailure(t *testing.T) {
 		context.Background(),
 		task,
 		client,
-		cfg,
+		newWorkerRepoConfigStore(map[string]*config.FullConfig{task.Repo: cfg}),
 		launcher.NewLauncher(),
 		auditor,
 		rep,
@@ -1030,6 +1033,158 @@ func TestExecuteRemoteTaskRequeuesWorktreeSetupFailure(t *testing.T) {
 	}
 	if !strings.Contains(allComments[0], wsErr.Error()) {
 		t.Fatalf("comment missing worktree error: %s", allComments[0])
+	}
+}
+
+func TestExecuteRemoteTaskUsesRepoSpecificConfig(t *testing.T) {
+	setupFakeGHCLI(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/heartbeat"):
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/result"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"completed"}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	repoA := "owner/repo-a"
+	repoB := "owner/repo-b"
+	configs := newWorkerRepoConfigStore(map[string]*config.FullConfig{
+		repoA: {
+			Agents: map[string]*config.AgentConfig{
+				"dev-agent": {
+					Name:    "dev-agent",
+					Role:    "dev",
+					Runtime: config.RuntimeClaudeCode,
+					Command: "echo repo-a",
+				},
+			},
+		},
+		repoB: {
+			Agents: map[string]*config.AgentConfig{
+				"dev-agent": {
+					Name:    "dev-agent",
+					Role:    "dev",
+					Runtime: config.RuntimeClaudeCode,
+					Command: "echo repo-b",
+				},
+			},
+		},
+	})
+	reader := &mockGHReader{
+		issues: []poller.Issue{
+			{Number: 21, Body: "body", Labels: []string{"workbuddy", "status:developing"}},
+			{Number: 22, Body: "body", Labels: []string{"workbuddy", "status:developing"}},
+		},
+		labelSnapshots: [][]string{
+			{"workbuddy", "status:done"},
+			{"workbuddy", "status:done"},
+		},
+	}
+
+	var (
+		mu       sync.Mutex
+		commands []string
+	)
+	mockRT := &mockRuntime{name: config.RuntimeClaudeCode, resultFn: func(_ context.Context, agent *config.AgentConfig, task *launcher.TaskContext) (*launcher.Result, error) {
+		mu.Lock()
+		commands = append(commands, fmt.Sprintf("%s:%s", task.Repo, agent.Command))
+		mu.Unlock()
+		return &launcher.Result{ExitCode: 0, LastMessage: "done", Meta: map[string]string{}}, nil
+	}}
+	lnch := launcher.NewLauncher()
+	lnch.Register(mockRT, config.RuntimeClaudeCode)
+	client := workerclient.New(server.URL, "", server.Client())
+	rep := reporter.NewReporter(&mockCommentWriter{})
+	localStore, err := store.NewStore(filepath.Join(t.TempDir(), "worker.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer func() { _ = localStore.Close() }()
+	auditor := audit.NewAuditor(localStore, filepath.Join(t.TempDir(), "sessions"))
+
+	for _, task := range []*workerclient.Task{
+		{TaskID: "task-a", Repo: repoA, IssueNum: 21, AgentName: "dev-agent"},
+		{TaskID: "task-b", Repo: repoB, IssueNum: 22, AgentName: "dev-agent"},
+	} {
+		if err := executeRemoteTask(
+			context.Background(),
+			task,
+			client,
+			configs,
+			lnch,
+			auditor,
+			rep,
+			reader,
+			t.TempDir(),
+			filepath.Join(t.TempDir(), "sessions"),
+			"worker-1",
+			"",
+			20*time.Millisecond,
+			200*time.Millisecond,
+			nil,
+		); err != nil {
+			t.Fatalf("executeRemoteTask(%s): %v", task.Repo, err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got, want := commands, []string{
+		repoA + ":echo repo-a",
+		repoB + ":echo repo-b",
+	}; !slices.Equal(got, want) {
+		t.Fatalf("commands = %v, want %v", got, want)
+	}
+}
+
+func TestExecuteRemoteTaskMissingAgentIsRepoSpecific(t *testing.T) {
+	task := &workerclient.Task{
+		TaskID:    "task-missing-agent",
+		Repo:      "owner/repo-b",
+		IssueNum:  23,
+		AgentName: "review-agent",
+	}
+
+	err := executeRemoteTask(
+		context.Background(),
+		task,
+		nil,
+		newWorkerRepoConfigStore(map[string]*config.FullConfig{
+			"owner/repo-a": {
+				Agents: map[string]*config.AgentConfig{
+					"review-agent": {Name: "review-agent", Role: "review", Runtime: config.RuntimeClaudeCode, Command: "echo a"},
+				},
+			},
+			"owner/repo-b": {
+				Agents: map[string]*config.AgentConfig{
+					"dev-agent": {Name: "dev-agent", Role: "dev", Runtime: config.RuntimeClaudeCode, Command: "echo b"},
+				},
+			},
+		}),
+		launcher.NewLauncher(),
+		audit.NewAuditor(nil, filepath.Join(t.TempDir(), "sessions")),
+		reporter.NewReporter(&mockCommentWriter{}),
+		&mockGHReader{},
+		t.TempDir(),
+		filepath.Join(t.TempDir(), "sessions"),
+		"worker-1",
+		"",
+		20*time.Millisecond,
+		200*time.Millisecond,
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected missing agent error")
+	}
+	if !strings.Contains(err.Error(), `repo "owner/repo-b" does not define agent "review-agent"`) {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,6 +40,53 @@ func TestResolveWorkerRepoBindings(t *testing.T) {
 	}
 	if len(bindings) != 1 || bindings[0].Repo != "owner/d" {
 		t.Fatalf("unexpected config binding: %+v", bindings)
+	}
+}
+
+func TestLoadWorkerRepoConfigsLoadsEachBindingPath(t *testing.T) {
+	repoAPath := t.TempDir()
+	repoBPath := t.TempDir()
+	writeRepoConfig := func(repoPath, repoName, command string) {
+		writeFile(t, filepath.Join(repoPath, ".github", "workbuddy", "config.yaml"), fmt.Sprintf("repo: %s\n", repoName))
+		writeFile(t, filepath.Join(repoPath, ".github", "workbuddy", "agents", "dev-agent.md"), fmt.Sprintf(`---
+name: dev-agent
+description: Dev agent
+triggers:
+  - label: "status:developing"
+role: dev
+runtime: claude-code
+command: %s
+---
+# Dev Agent
+`, command))
+		writeFile(t, filepath.Join(repoPath, ".github", "workbuddy", "workflows", "dev-workflow.md"), `---
+name: dev-workflow
+description: Dev workflow
+trigger:
+  issue_label: "workbuddy"
+---
+# Dev Workflow
+
+`+"```yaml\nstates:\n  developing:\n    enter_label: \"status:developing\"\n    agent: dev-agent\n    transitions:\n      - to: done\n        when: 'labeled \"status:done\"'\n  done:\n    enter_label: \"status:done\"\n```\n")
+	}
+	writeRepoConfig(repoAPath, "owner/a", "echo repo-a")
+	writeRepoConfig(repoBPath, "owner/b", "echo repo-b")
+
+	configs, warnings, err := loadWorkerRepoConfigs([]workerRepoBinding{
+		{Repo: "owner/a", Path: repoAPath},
+		{Repo: "owner/b", Path: repoBPath},
+	}, ".github/workbuddy")
+	if err != nil {
+		t.Fatalf("loadWorkerRepoConfigs: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+	if got := configs["owner/a"].Agents["dev-agent"].Command; got != "echo repo-a" {
+		t.Fatalf("repo A command = %q, want echo repo-a", got)
+	}
+	if got := configs["owner/b"].Agents["dev-agent"].Command; got != "echo repo-b" {
+		t.Fatalf("repo B command = %q, want echo repo-b", got)
 	}
 }
 

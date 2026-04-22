@@ -68,6 +68,106 @@ type workerIssueReader interface {
 	ReadIssue(repo string, issueNum int) (poller.IssueDetails, error)
 }
 
+type workerRepoConfigStore struct {
+	mu      sync.RWMutex
+	configs map[string]*config.FullConfig
+}
+
+func newWorkerRepoConfigStore(initial map[string]*config.FullConfig) *workerRepoConfigStore {
+	configs := make(map[string]*config.FullConfig, len(initial))
+	for repo, cfg := range initial {
+		if cfg == nil {
+			continue
+		}
+		configs[repo] = cfg
+	}
+	return &workerRepoConfigStore{configs: configs}
+}
+
+func (s *workerRepoConfigStore) get(repo string) (*config.FullConfig, bool) {
+	if s == nil {
+		return nil, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cfg, ok := s.configs[repo]
+	return cfg, ok
+}
+
+func (s *workerRepoConfigStore) replaceAll(next map[string]*config.FullConfig) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	configs := make(map[string]*config.FullConfig, len(next))
+	for repo, cfg := range next {
+		if cfg == nil {
+			continue
+		}
+		configs[repo] = cfg
+	}
+	s.configs = configs
+}
+
+func (s *workerRepoConfigStore) roles() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []string
+	for _, cfg := range s.configs {
+		for _, role := range parseWorkerRoles("", cfg.Agents) {
+			if role == "" || slices.Contains(out, role) {
+				continue
+			}
+			out = append(out, role)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+func resolveWorkerConfigDir(repoPath, configDir string) string {
+	if filepath.IsAbs(configDir) {
+		return configDir
+	}
+	return filepath.Join(repoPath, configDir)
+}
+
+func loadWorkerRepoConfigs(bindings []workerRepoBinding, configDir string) (map[string]*config.FullConfig, []string, error) {
+	configs := make(map[string]*config.FullConfig, len(bindings))
+	var warnings []string
+	for _, binding := range bindings {
+		resolvedConfigDir := resolveWorkerConfigDir(binding.Path, configDir)
+		cfg, cfgWarnings, err := config.LoadConfig(resolvedConfigDir)
+		if err != nil {
+			return nil, nil, fmt.Errorf("worker: load config for repo %s from %s: %w", binding.Repo, resolvedConfigDir, err)
+		}
+		configs[binding.Repo] = cfg
+		for _, warning := range cfgWarnings {
+			warnings = append(warnings, fmt.Sprintf("repo %s: %s", binding.Repo, warning))
+		}
+	}
+	return configs, warnings, nil
+}
+
+func configForRemoteTask(configs *workerRepoConfigStore, task *workerclient.Task) (*config.FullConfig, *config.AgentConfig, error) {
+	if task == nil {
+		return nil, nil, fmt.Errorf("worker: task is required")
+	}
+	cfg, ok := configs.get(task.Repo)
+	if !ok {
+		return nil, nil, fmt.Errorf("worker: no config loaded for repo %q", task.Repo)
+	}
+	agentCfg, ok := cfg.Agents[task.AgentName]
+	if !ok {
+		return nil, nil, fmt.Errorf("worker: repo %q does not define agent %q", task.Repo, task.AgentName)
+	}
+	return cfg, agentCfg, nil
+}
+
 var workerCmd = &cobra.Command{
 	Use:   "worker",
 	Short: "Run a standalone Worker that long-polls a Coordinator",
@@ -176,13 +276,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 	if opts == nil {
 		return fmt.Errorf("worker: options are required")
 	}
-	cfg, warnings, err := config.LoadConfig(opts.configDir)
-	if err != nil {
-		return fmt.Errorf("worker: load config: %w", err)
-	}
-	for _, w := range warnings {
-		log.Printf("[worker] warning: %s", w)
-	}
+	var err error
 
 	workDir := opts.workDir
 	if workDir == "" {
@@ -195,10 +289,32 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 	if err != nil {
 		return fmt.Errorf("worker: resolve working directory: %w", err)
 	}
-	repoBindings, err := resolveWorkerRepoBindings(opts, strings.TrimSpace(cfg.Global.Repo), workDir)
+
+	var bootstrapRepo string
+	if strings.TrimSpace(opts.reposCSV) == "" && strings.TrimSpace(opts.repo) == "" {
+		bootstrapConfigDir := resolveWorkerConfigDir(workDir, opts.configDir)
+		bootstrapCfg, warnings, err := config.LoadConfig(bootstrapConfigDir)
+		if err != nil {
+			return fmt.Errorf("worker: load config: %w", err)
+		}
+		for _, w := range warnings {
+			log.Printf("[worker] warning: %s", w)
+		}
+		bootstrapRepo = strings.TrimSpace(bootstrapCfg.Global.Repo)
+	}
+
+	repoBindings, err := resolveWorkerRepoBindings(opts, bootstrapRepo, workDir)
 	if err != nil {
 		return err
 	}
+	repoConfigs, warnings, err := loadWorkerRepoConfigs(repoBindings, opts.configDir)
+	if err != nil {
+		return err
+	}
+	for _, w := range warnings {
+		log.Printf("[worker] warning: %s", w)
+	}
+	configs := newWorkerRepoConfigStore(repoConfigs)
 
 	if opts.dbPath == "" {
 		opts.dbPath = filepath.Join(workDir, ".workbuddy", "worker.db")
@@ -211,7 +327,10 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 	if err != nil {
 		return err
 	}
-	roles := parseWorkerRoles(opts.roleCSV, cfg.Agents)
+	roles := parseWorkerRoles(opts.roleCSV, nil)
+	if len(roles) == 0 {
+		roles = configs.roles()
+	}
 	if len(roles) == 0 {
 		return fmt.Errorf("worker: at least one role is required")
 	}
@@ -271,7 +390,22 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 
 	addrFile := workerAddrFile(workDir)
 	mgmtServer, err := startWorkerMgmtServer(opts.mgmtAddr, addrFile, bindings, func(changeCtx context.Context, _ []string) error {
-		return registerWorkerRepos(changeCtx, client, workerID, roles, publicRuntime, bindings.list())
+		updatedConfigs, warnings, err := loadWorkerRepoConfigs(bindings.list(), opts.configDir)
+		if err != nil {
+			return err
+		}
+		for _, w := range warnings {
+			log.Printf("[worker] warning: %s", w)
+		}
+		registerRoles := parseWorkerRoles(opts.roleCSV, nil)
+		if len(registerRoles) == 0 {
+			registerRoles = newWorkerRepoConfigStore(updatedConfigs).roles()
+		}
+		if err := registerWorkerRepos(changeCtx, client, workerID, registerRoles, publicRuntime, bindings.list()); err != nil {
+			return err
+		}
+		configs.replaceAll(updatedConfigs)
+		return nil
 	})
 	if err != nil {
 		return err
@@ -348,7 +482,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 			wsMgr := workspaces.forRepoPath(repoPath, func(path string) workspaceManager {
 				return workspace.NewManager(path)
 			})
-			if err := executeRemoteTask(ctx, t, client, cfg, lnch, auditor, rep, reader, repoPath, opts.sessionsDir, workerID, runtimeAlias, opts.heartbeatInterval, opts.shutdownTimeout, wsMgr); err != nil {
+			if err := executeRemoteTask(ctx, t, client, configs, lnch, auditor, rep, reader, repoPath, opts.sessionsDir, workerID, runtimeAlias, opts.heartbeatInterval, opts.shutdownTimeout, wsMgr); err != nil {
 				taskErrMu.Lock()
 				if taskErrVal == nil {
 					taskErrVal = err
@@ -367,10 +501,10 @@ func runWorkerWithOpts(opts *workerOpts, lnch *launcher.Launcher, reader workerI
 	return taskErrVal
 }
 
-func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *workerclient.Client, cfg *config.FullConfig, lnch *launcher.Launcher, auditor *audit.Auditor, rep *reporter.Reporter, reader workerIssueReader, workDir, sessionsDir, workerID, runtimeAlias string, heartbeatInterval, shutdownTimeout time.Duration, wsMgr workspaceManager) error {
-	agentCfg, ok := cfg.Agents[task.AgentName]
-	if !ok {
-		return fmt.Errorf("worker: agent %q not found in local config", task.AgentName)
+func executeRemoteTask(ctx context.Context, task *workerclient.Task, client *workerclient.Client, configs *workerRepoConfigStore, lnch *launcher.Launcher, auditor *audit.Auditor, rep *reporter.Reporter, reader workerIssueReader, workDir, sessionsDir, workerID, runtimeAlias string, heartbeatInterval, shutdownTimeout time.Duration, wsMgr workspaceManager) error {
+	cfg, agentCfg, err := configForRemoteTask(configs, task)
+	if err != nil {
+		return err
 	}
 	agentCopy := *agentCfg
 	if runtimeAlias != "" {

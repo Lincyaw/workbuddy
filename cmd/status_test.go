@@ -468,6 +468,7 @@ func TestParseStatusFlags_UsesManagedCoordinatorDeployment(t *testing.T) {
 	configHome := filepath.Join(t.TempDir(), ".config")
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", "")
 
 	writeFile(t, filepath.Join(dir, ".github", "workbuddy", "config.yaml"), "repo: owner/repo\nport: 8090\npoll_interval: 30s\n")
 	envFile := filepath.Join(configHome, "workbuddy", "workbuddy.env")

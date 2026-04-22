@@ -1654,6 +1654,7 @@ requirements:
       - cmd/worker_test.go
       - cmd/worker_repos_test.go
     deps: [REQ-025, REQ-028]
+    notes: Repo-bound worker configs are now loaded per binding path; see docs/decisions/2026-04-22-worker-per-repo-config-resolution.md.
 
   - id: REQ-050
     title: Issue author allowlist for agent dispatch
