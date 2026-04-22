@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -415,9 +417,13 @@ func newWorkerMgmtClient(baseURL string) *workerMgmtClient {
 }
 
 func workerMgmtClientFromControlDir(controlDir string) (*workerMgmtClient, error) {
-	addrBytes, err := os.ReadFile(workerAddrFile(controlDir))
+	addrPath := workerAddrFile(controlDir)
+	addrBytes, err := os.ReadFile(addrPath)
 	if err != nil {
-		return nil, fmt.Errorf("worker repos: read worker addr: %w", err)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, actionableError("worker repos", fmt.Sprintf("worker control file %q was not found", addrPath), "Start `workbuddy worker` in this repo before managing repo bindings")
+		}
+		return nil, fmt.Errorf("worker repos: read worker addr %q: %w", addrPath, err)
 	}
 	baseURL := strings.TrimSpace(string(addrBytes))
 	if baseURL == "" {

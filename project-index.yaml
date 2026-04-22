@@ -2180,3 +2180,26 @@ requirements:
       - cmd/worker_repos_test.go
       - cmd/deploy_test.go
     deps: [REQ-019, REQ-028, REQ-051, REQ-060]
+
+  - id: REQ-066
+    title: Actionable CLI file-missing errors
+    description: >
+      CLI commands that depend on required local files (prompt files, worker
+      control files, etc.) should classify missing-file failures and return
+      clean, actionable guidance instead of bubbling raw `open/read: no such
+      file or directory` syscall text to operators.
+    priority: P1
+    version: v0.4.0
+    status: tested
+    acceptance_criteria:
+      - "AC-066-1: CLI file readers that have an obvious operator fix (prompt files, worker control files) classify `fs.ErrNotExist` and return clean guidance instead of raw syscall text"
+      - "AC-066-2: a shared `actionableError` helper produces consistent `context: cause. suggestion.` error messages"
+      - "AC-066-3: unit tests cover the missing prompt-file and missing worker-control-file paths, asserting the messages are actionable and omit raw `no such file or directory` output"
+    code:
+      - cmd/actionable_error.go
+      - cmd/run.go
+      - cmd/worker_repos.go
+    tests:
+      - cmd/run_test.go
+      - cmd/worker_repos_test.go
+    deps: [REQ-019, REQ-028]

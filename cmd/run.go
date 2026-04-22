@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -181,7 +183,10 @@ func resolveRunPrompt(opts *runOpts) (string, error) {
 	if opts.promptFile != "" {
 		data, err := os.ReadFile(opts.promptFile)
 		if err != nil {
-			return "", fmt.Errorf("run: read prompt file: %w", err)
+			if errors.Is(err, fs.ErrNotExist) {
+				return "", actionableError("run", fmt.Sprintf("prompt file %q was not found", opts.promptFile), "Create the file or pass the prompt directly with --prompt")
+			}
+			return "", fmt.Errorf("run: read prompt file %q: %w", opts.promptFile, err)
 		}
 		return strings.TrimSpace(string(data)), nil
 	}
