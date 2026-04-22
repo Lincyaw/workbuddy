@@ -95,8 +95,9 @@ Simpler code that maps clearly to requirements > clever abstractions.
 **Status**: 4/4 requirements `tested`: workflow engine, parallel dispatch, issue dependency graph, dashboard API.
 **Scope**: REQ-012, REQ-014~016
 
-### Post-v0.3 additions
-`project-index.yaml` also tracks REQ-031..060 (issue dependency mechanism, recover/diagnose/cache-invalidate/metrics commands, scoped PAT permissions, stale-agent inference, dynamic worker binding, author allowlist, claim token fencing, coordinator claim recovery + operator restart, multi-repo dynamic registration, etc.). These landed after v0.3 scope was frozen; all currently `tested`. No formal milestone tag yet — the next tag should cover this surface plus the 2026-04 singleton-codex / worker-SessionManager / stale-claim-sweep fixes.
+### v0.4.0 — 扩展能力与运维加固 ✅ shipped (2026-04-22)
+**Status**: REQ-031..060 全部 `tested`（26 条）。覆盖：issue dependency mechanism、recover/diagnose/cache-invalidate/metrics/admin restart-issue 等运维命令、scoped PAT permissions、stale-agent inference、dynamic worker repo binding、issue author allowlist、per-issue claim token fencing、coordinator claim recovery + stale-claim sweep、multi-repo dynamic registration、reporter comment overflow guard、dispatch cap on consecutive failures，以及 2026-04 的 codex app-server singleton multiplexing、worker SessionManager wiring（修死锁）、post-merge stale claim sweep 等修复。
+**Scope**: REQ-031~060 (26 additional requirements)
 
 ## Dev-loop stages
 
