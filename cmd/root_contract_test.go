@@ -7,6 +7,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/Lincyaw/workbuddy/internal/config"
 )
 
 func TestRootFlagNoColor_StripsANSIFromSubcommandOutput(t *testing.T) {
@@ -24,6 +27,33 @@ func TestRootFlagNoColor_StripsANSIFromSubcommandOutput(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "owner/a") {
 		t.Fatalf("expected stripped repo name in output, got %q", stdout)
+	}
+}
+
+func TestRootFlagNoColor_StripsANSIFromServeBanner(t *testing.T) {
+	resetRootContractFlagsForTest(t)
+	_ = rootCmd.PersistentFlags().Set(flagNoColor, "true")
+
+	var stdout bytes.Buffer
+	serveCmd.SetOut(&stdout)
+
+	writeServeBanner(cmdStdout(serveCmd), &config.FullConfig{
+		Global: config.GlobalConfig{
+			Repo:         "\x1b[31mowner/repo\x1b[0m",
+			PollInterval: 2 * time.Second,
+			Port:         8080,
+		},
+	}, &serveOpts{
+		roles:          []string{"\x1b[32mdev\x1b[0m"},
+		coordinatorAPI: true,
+	})
+
+	got := stdout.String()
+	if strings.Contains(got, "\x1b[") {
+		t.Fatalf("expected ANSI escapes to be stripped from serve banner, got %q", got)
+	}
+	if !strings.Contains(got, "owner/repo") {
+		t.Fatalf("expected stripped repo name in output, got %q", got)
 	}
 }
 

@@ -39,8 +39,15 @@ func flagEnabled(cmd *cobra.Command, name string) bool {
 	if cmd == nil {
 		return false
 	}
-	value, err := cmd.Flags().GetBool(name)
-	return err == nil && value
+	if flags := cmd.Flags(); flags != nil && flags.Lookup(name) != nil {
+		value, err := flags.GetBool(name)
+		return err == nil && value
+	}
+	if flags := cmd.InheritedFlags(); flags != nil && flags.Lookup(name) != nil {
+		value, err := flags.GetBool(name)
+		return err == nil && value
+	}
+	return false
 }
 
 func isNonInteractive(cmd *cobra.Command) bool {
