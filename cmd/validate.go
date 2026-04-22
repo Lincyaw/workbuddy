@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	intvalidate "github.com/Lincyaw/workbuddy/internal/validate"
@@ -13,6 +12,18 @@ import (
 
 type validateOpts struct {
 	configDir string
+	format    string
+}
+
+type validateResult struct {
+	Valid       bool                     `json:"valid"`
+	Diagnostics []validateJSONDiagnostic `json:"diagnostics"`
+}
+
+type validateJSONDiagnostic struct {
+	Path    string `json:"path"`
+	Line    int    `json:"line"`
+	Message string `json:"message"`
 }
 
 var validateCmd = &cobra.Command{
@@ -32,6 +43,7 @@ or 'repo register' to catch config mistakes early.`,
 
 func init() {
 	validateCmd.Flags().String("config-dir", ".github/workbuddy", "Configuration directory to validate")
+	addOutputFormatFlag(validateCmd)
 	rootCmd.AddCommand(validateCmd)
 }
 
@@ -40,22 +52,46 @@ func runValidateCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runValidateWithOpts(cmd.Context(), opts, os.Stdout, os.Stderr)
+	return runValidateWithOpts(cmd.Context(), opts, cmd.OutOrStdout(), cmd.ErrOrStderr())
 }
 
 func parseValidateFlags(cmd *cobra.Command) (*validateOpts, error) {
 	configDir, _ := cmd.Flags().GetString("config-dir")
+	format, err := resolveOutputFormat(cmd, "validate")
+	if err != nil {
+		return nil, err
+	}
 	configDir = strings.TrimSpace(configDir)
 	if configDir == "" {
 		return nil, fmt.Errorf("validate: --config-dir is required")
 	}
-	return &validateOpts{configDir: configDir}, nil
+	return &validateOpts{configDir: configDir, format: format}, nil
 }
 
 func runValidateWithOpts(_ context.Context, opts *validateOpts, stdout, stderr io.Writer) error {
 	diags, err := intvalidate.ValidateDir(opts.configDir)
 	if err != nil {
 		return err
+	}
+	if isJSONOutput(opts.format) {
+		result := validateResult{
+			Valid:       len(diags) == 0,
+			Diagnostics: make([]validateJSONDiagnostic, 0, len(diags)),
+		}
+		for _, diag := range diags {
+			result.Diagnostics = append(result.Diagnostics, validateJSONDiagnostic{
+				Path:    diag.Path,
+				Line:    diag.Line,
+				Message: diag.Message,
+			})
+		}
+		if err := writeJSON(stdout, result); err != nil {
+			return err
+		}
+		if len(diags) > 0 {
+			return &cliExitError{code: 1}
+		}
+		return nil
 	}
 	if len(diags) == 0 {
 		return nil

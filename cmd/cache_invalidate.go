@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -23,11 +22,11 @@ type cacheInvalidateOpts struct {
 }
 
 type cacheInvalidateResult struct {
-	Repo                    string `json:"repo"`
-	IssueNum                int    `json:"issue_num"`
-	Result                  string `json:"result"`
-	DependencyStateCleared  bool   `json:"dependency_state_cleared"`
-	EventLogged             bool   `json:"event_logged"`
+	Repo                   string `json:"repo"`
+	IssueNum               int    `json:"issue_num"`
+	Result                 string `json:"result"`
+	DependencyStateCleared bool   `json:"dependency_state_cleared"`
+	EventLogged            bool   `json:"event_logged"`
 }
 
 var cacheInvalidateCmd = &cobra.Command{
@@ -54,7 +53,8 @@ func init() {
 	cacheInvalidateCmd.Flags().String("repo", "", "GitHub repository in OWNER/NAME form")
 	cacheInvalidateCmd.Flags().String("issue", "", "Comma-separated issue numbers")
 	cacheInvalidateCmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "SQLite database path")
-	cacheInvalidateCmd.Flags().Bool("json", false, "Emit machine-readable JSON")
+	addOutputFormatFlag(cacheInvalidateCmd)
+	addDeprecatedJSONAliasFlag(cacheInvalidateCmd)
 	rootCmd.AddCommand(cacheInvalidateCmd)
 }
 
@@ -63,14 +63,17 @@ func runCacheInvalidateCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runCacheInvalidateWithOpts(cmd.Context(), opts, os.Stdout)
+	return runCacheInvalidateWithOpts(cmd.Context(), opts, cmd.OutOrStdout())
 }
 
 func parseCacheInvalidateFlags(cmd *cobra.Command) (*cacheInvalidateOpts, error) {
 	repo, _ := cmd.Flags().GetString("repo")
 	rawIssues, _ := cmd.Flags().GetString("issue")
 	dbPath, _ := cmd.Flags().GetString("db-path")
-	jsonOut, _ := cmd.Flags().GetBool("json")
+	format, err := resolveOutputFormat(cmd, "cache-invalidate")
+	if err != nil {
+		return nil, err
+	}
 
 	repo = strings.TrimSpace(repo)
 	if repo == "" {
@@ -93,7 +96,7 @@ func parseCacheInvalidateFlags(cmd *cobra.Command) (*cacheInvalidateOpts, error)
 		issues:  issues,
 		dbPath:  dbPath,
 		source:  "cli:cache-invalidate",
-		jsonOut: jsonOut,
+		jsonOut: isJSONOutput(format),
 	}, nil
 }
 

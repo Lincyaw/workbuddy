@@ -179,6 +179,49 @@ func TestWorkerReposCommands(t *testing.T) {
 	}
 }
 
+func TestWorkerReposList_JSON(t *testing.T) {
+	controlDir := t.TempDir()
+	t.Chdir(controlDir)
+	if err := os.MkdirAll(filepath.Join(controlDir, ".workbuddy"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	repoPath := t.TempDir()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/mgmt/repos" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"repo":"owner/a","path":"` + repoPath + `"}]`))
+	}))
+	defer server.Close()
+
+	if err := os.WriteFile(workerAddrFile(controlDir), []byte(server.URL+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	workerReposListCmd.SetContext(context.Background())
+	workerReposListCmd.SetOut(&out)
+	if err := workerReposListCmd.Flags().Set("format", outputFormatJSON); err != nil {
+		t.Fatalf("Set format: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = workerReposListCmd.Flags().Set("format", outputFormatText)
+	})
+	if err := workerReposListCmd.RunE(workerReposListCmd, nil); err != nil {
+		t.Fatalf("worker repos list: %v", err)
+	}
+
+	var bindings []workerRepoBinding
+	if err := json.Unmarshal(out.Bytes(), &bindings); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if len(bindings) != 1 || bindings[0].Repo != "owner/a" || bindings[0].Path != repoPath {
+		t.Fatalf("unexpected bindings: %+v", bindings)
+	}
+}
+
 func TestWorkerMgmtServerRejectsInvalidBinding(t *testing.T) {
 	controlDir := t.TempDir()
 	server, err := startWorkerMgmtServer("127.0.0.1:0", workerAddrFile(controlDir), newWorkerRepoBindingStore(nil), func(_ context.Context, repos []string) error {

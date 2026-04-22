@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
@@ -40,13 +39,14 @@ Each finding includes a severity, a plain-English diagnosis, and a suggested
 fix. Pass --fix to apply safe automated remediations (for example cache
 invalidation for stuck issues); destructive actions are never auto-applied.
 
-Use --json when piping into another tool. Exit code is non-zero if any
+Use --format json when piping into another tool. --json remains a deprecated
+alias for backwards compatibility. Exit code is non-zero if any
 error-severity findings remain after --fix.`,
 	Example: `  # Scan all repos
   workbuddy diagnose
 
   # Focus on one repo, emit JSON
-  workbuddy diagnose --repo owner/name --json
+  workbuddy diagnose --repo owner/name --format json
 
   # Apply safe fixes (cache invalidation, etc.)
   workbuddy diagnose --fix`,
@@ -57,7 +57,8 @@ func init() {
 	diagnoseCmd.Flags().String("repo", "", "GitHub repository in OWNER/NAME form")
 	diagnoseCmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "SQLite database path")
 	diagnoseCmd.Flags().Bool("fix", false, "Apply safe fixes such as cache invalidation")
-	diagnoseCmd.Flags().Bool("json", false, "Emit machine-readable JSON")
+	addOutputFormatFlag(diagnoseCmd)
+	addDeprecatedJSONAliasFlag(diagnoseCmd)
 	rootCmd.AddCommand(diagnoseCmd)
 }
 
@@ -66,14 +67,17 @@ func runDiagnoseCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runDiagnoseWithOpts(cmd.Context(), opts, os.Stdout)
+	return runDiagnoseWithOpts(cmd.Context(), opts, cmd.OutOrStdout())
 }
 
 func parseDiagnoseFlags(cmd *cobra.Command) (*diagnoseOpts, error) {
 	repo, _ := cmd.Flags().GetString("repo")
 	dbPath, _ := cmd.Flags().GetString("db-path")
 	fix, _ := cmd.Flags().GetBool("fix")
-	jsonOut, _ := cmd.Flags().GetBool("json")
+	format, err := resolveOutputFormat(cmd, "diagnose")
+	if err != nil {
+		return nil, err
+	}
 
 	if strings.TrimSpace(dbPath) == "" {
 		return nil, fmt.Errorf("diagnose: --db-path is required")
@@ -82,7 +86,7 @@ func parseDiagnoseFlags(cmd *cobra.Command) (*diagnoseOpts, error) {
 		repo:    strings.TrimSpace(repo),
 		dbPath:  strings.TrimSpace(dbPath),
 		fix:     fix,
-		jsonOut: jsonOut,
+		jsonOut: isJSONOutput(format),
 		now:     time.Now,
 	}, nil
 }

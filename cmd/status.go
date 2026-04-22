@@ -110,7 +110,8 @@ The flag combinations select the view:
   --watch         — block until the next matching task completes
   --repos         — list repos registered on a coordinator (needs --coordinator)
 
-Combine with --repo to scope by repository and --json for machine output.`,
+Combine with --repo to scope by repository and --format json for machine output
+(--json remains a deprecated alias).`,
 	Example: `  # Current issue state
   workbuddy status --repo owner/name
 
@@ -137,7 +138,8 @@ func init() {
 	statusCmd.Flags().Bool("tasks", false, "Show task queue entries")
 	statusCmd.Flags().Bool("events", false, "Show recent structured events")
 	statusCmd.Flags().Bool("watch", false, "Block until the next matching task completes")
-	statusCmd.Flags().Bool("json", false, "Emit machine-readable JSON")
+	addOutputFormatFlag(statusCmd)
+	addDeprecatedJSONAliasFlag(statusCmd)
 	statusCmd.Flags().String("status", "", "Task status filter for --tasks")
 	statusCmd.Flags().String("type", "", "Event type filter for --events")
 	statusCmd.Flags().String("since", "", "Relative time filter for --events, for example 10m or 1h")
@@ -163,7 +165,7 @@ func runStatusCmd(cmd *cobra.Command, _ []string) error {
 		token:   opts.token,
 		http:    &http.Client{Timeout: httpTimeout},
 	}
-	return runStatusWithOpts(cmd.Context(), opts, client, os.Stdout)
+	return runStatusWithOpts(cmd.Context(), opts, client, cmd.OutOrStdout())
 }
 
 func parseStatusFlags(cmd *cobra.Command) (*statusOpts, error) {
@@ -172,7 +174,10 @@ func parseStatusFlags(cmd *cobra.Command) (*statusOpts, error) {
 	tasks, _ := cmd.Flags().GetBool("tasks")
 	events, _ := cmd.Flags().GetBool("events")
 	watch, _ := cmd.Flags().GetBool("watch")
-	jsonOut, _ := cmd.Flags().GetBool("json")
+	format, err := resolveOutputFormat(cmd, "status")
+	if err != nil {
+		return nil, err
+	}
 	taskStatus, _ := cmd.Flags().GetString("status")
 	eventType, _ := cmd.Flags().GetString("type")
 	since, _ := cmd.Flags().GetString("since")
@@ -240,7 +245,7 @@ func parseStatusFlags(cmd *cobra.Command) (*statusOpts, error) {
 			tasks:           tasks,
 			events:          events,
 			watch:           watch,
-			jsonOut:         jsonOut,
+			jsonOut:         isJSONOutput(format),
 			taskStatus:      taskStatus,
 			eventType:       eventType,
 			since:           since,
@@ -283,7 +288,7 @@ func parseStatusFlags(cmd *cobra.Command) (*statusOpts, error) {
 		tasks:           tasks,
 		events:          events,
 		watch:           watch,
-		jsonOut:         jsonOut,
+		jsonOut:         isJSONOutput(format),
 		taskStatus:      taskStatus,
 		eventType:       eventType,
 		since:           since,

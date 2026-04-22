@@ -98,6 +98,7 @@ func init() {
 	_ = workerUnregisterCmd.MarkFlagRequired("coordinator")
 	_ = workerUnregisterCmd.MarkFlagRequired("id")
 
+	addOutputFormatFlag(workerReposListCmd)
 	workerReposCmd.AddCommand(workerReposAddCmd, workerReposRemoveCmd, workerReposListCmd)
 	workerCmd.AddCommand(workerReposCmd)
 	workerCmd.AddCommand(workerUnregisterCmd)

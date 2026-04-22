@@ -21,8 +21,15 @@ import (
 var initTemplates embed.FS
 
 type initOpts struct {
-	repo  string
-	force bool
+	repo   string
+	force  bool
+	format string
+}
+
+type initResult struct {
+	Repo        string   `json:"repo"`
+	Directories []string `json:"directories"`
+	Files       []string `json:"files"`
 }
 
 var initCmd = &cobra.Command{
@@ -48,6 +55,7 @@ afterwards. Combine with label creation to fully onboard a repo.`,
 func init() {
 	initCmd.Flags().String("repo", "", "Repository in OWNER/NAME form; defaults to the local git origin when available")
 	initCmd.Flags().Bool("force", false, "Overwrite existing scaffold files")
+	addOutputFormatFlag(initCmd)
 	rootCmd.AddCommand(initCmd)
 }
 
@@ -62,7 +70,11 @@ func runInitCmd(cmd *cobra.Command, _ []string) error {
 func parseInitFlags(cmd *cobra.Command) (*initOpts, error) {
 	repo, _ := cmd.Flags().GetString("repo")
 	force, _ := cmd.Flags().GetBool("force")
-	return &initOpts{repo: strings.TrimSpace(repo), force: force}, nil
+	format, err := resolveOutputFormat(cmd, "init")
+	if err != nil {
+		return nil, err
+	}
+	return &initOpts{repo: strings.TrimSpace(repo), force: force, format: format}, nil
 }
 
 func runInitWithOpts(ctx context.Context, root string, opts *initOpts, stdout io.Writer) error {
@@ -83,7 +95,20 @@ func runInitWithOpts(ctx context.Context, root string, opts *initOpts, stdout io
 		return err
 	}
 
-	for _, dir := range initDirs() {
+	directories := initDirs()
+	filePaths := make([]string, 0, len(files))
+	for _, file := range files {
+		filePaths = append(filePaths, filepath.ToSlash(file.path))
+	}
+	if isJSONOutput(opts.format) {
+		return writeJSON(stdout, initResult{
+			Repo:        repo,
+			Directories: directories,
+			Files:       filePaths,
+		})
+	}
+
+	for _, dir := range directories {
 		if _, err := fmt.Fprintf(stdout, "created %s\n", filepath.ToSlash(dir)); err != nil {
 			return fmt.Errorf("init: write output: %w", err)
 		}

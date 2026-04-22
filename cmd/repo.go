@@ -19,13 +19,23 @@ type repoRegisterOpts struct {
 	token       string
 	configDir   string
 	timeout     time.Duration
+	format      string
 }
 
 type repoListOpts struct {
 	coordinator string
 	token       string
-	jsonOut     bool
+	format      string
 	timeout     time.Duration
+}
+
+type repoRegisterResult struct {
+	Status        string `json:"status"`
+	Repo          string `json:"repo"`
+	Environment   string `json:"environment,omitempty"`
+	PollInterval  string `json:"poll_interval,omitempty"`
+	AgentCount    int    `json:"agent_count"`
+	WorkflowCount int    `json:"workflow_count"`
 }
 
 var repoCmd = &cobra.Command{
@@ -66,12 +76,14 @@ func init() {
 	addCoordinatorAuthFlags(repoRegisterCmd.Flags(), "t", "Bearer token for coordinator auth")
 	repoRegisterCmd.Flags().String("config-dir", ".github/workbuddy", "Workbuddy config directory")
 	repoRegisterCmd.Flags().Duration("timeout", 15*time.Second, "HTTP timeout")
+	addOutputFormatFlag(repoRegisterCmd)
 	repoCmd.AddCommand(repoRegisterCmd)
 
 	repoListCmd.Flags().String("coordinator", "", "Coordinator base URL")
 	addCoordinatorAuthFlags(repoListCmd.Flags(), "t", "Bearer token for coordinator auth")
-	repoListCmd.Flags().Bool("json", false, "Emit machine-readable JSON")
 	repoListCmd.Flags().Duration("timeout", 15*time.Second, "HTTP timeout")
+	addOutputFormatFlag(repoListCmd)
+	addDeprecatedJSONAliasFlag(repoListCmd)
 	repoCmd.AddCommand(repoListCmd)
 
 	rootCmd.AddCommand(repoCmd)
@@ -85,6 +97,16 @@ func runRepoRegisterCmd(cmd *cobra.Command, _ []string) error {
 	payload, err := runRepoRegister(cmd.Context(), opts)
 	if err != nil {
 		return err
+	}
+	if isJSONOutput(opts.format) {
+		return writeJSON(cmd.OutOrStdout(), repoRegisterResult{
+			Status:        "registered",
+			Repo:          payload.Repo,
+			Environment:   payload.Environment,
+			PollInterval:  payload.PollInterval.String(),
+			AgentCount:    len(payload.Agents),
+			WorkflowCount: len(payload.Workflows),
+		})
 	}
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "registered %s\n", payload.Repo)
 	return nil
@@ -100,7 +122,10 @@ func runRepoListCmd(cmd *cobra.Command, _ []string) error {
 
 func parseRepoListFlags(cmd *cobra.Command) (*repoListOpts, error) {
 	coordinatorURL, _ := cmd.Flags().GetString("coordinator")
-	jsonOut, _ := cmd.Flags().GetBool("json")
+	format, err := resolveOutputFormat(cmd, "repo list")
+	if err != nil {
+		return nil, err
+	}
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 	token, err := resolveCoordinatorAuthToken(cmd, "repo list")
 	if err != nil {
@@ -112,7 +137,7 @@ func parseRepoListFlags(cmd *cobra.Command) (*repoListOpts, error) {
 	return &repoListOpts{
 		coordinator: strings.TrimRight(strings.TrimSpace(coordinatorURL), "/"),
 		token:       token,
-		jsonOut:     jsonOut,
+		format:      format,
 		timeout:     timeout,
 	}, nil
 }
@@ -135,7 +160,7 @@ func runRepoList(ctx context.Context, opts *repoListOpts, stdout io.Writer) erro
 		body, _ := io.ReadAll(resp.Body)
 		return &cliExitError{msg: fmt.Sprintf("repo list: coordinator returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body))), code: exitCodeFailure}
 	}
-	if opts.jsonOut {
+	if isJSONOutput(opts.format) {
 		_, err = io.Copy(stdout, resp.Body)
 		if err != nil {
 			return fmt.Errorf("repo list: copy response: %w", err)
@@ -153,6 +178,10 @@ func runRepoList(ctx context.Context, opts *repoListOpts, stdout io.Writer) erro
 func parseRepoRegisterFlags(cmd *cobra.Command) (*repoRegisterOpts, error) {
 	coordinatorURL, _ := cmd.Flags().GetString("coordinator")
 	configDir, _ := cmd.Flags().GetString("config-dir")
+	format, err := resolveOutputFormat(cmd, "repo register")
+	if err != nil {
+		return nil, err
+	}
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 	token, err := resolveCoordinatorAuthToken(cmd, "repo register")
 	if err != nil {
@@ -166,6 +195,7 @@ func parseRepoRegisterFlags(cmd *cobra.Command) (*repoRegisterOpts, error) {
 		token:       token,
 		configDir:   strings.TrimSpace(configDir),
 		timeout:     timeout,
+		format:      format,
 	}, nil
 }
 

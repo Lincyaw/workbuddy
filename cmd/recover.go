@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"os"
 
 	recovery "github.com/Lincyaw/workbuddy/internal/recover"
@@ -15,6 +16,17 @@ type recoverOpts struct {
 	pruneRemoteBranches bool
 	force               bool
 	dryRun              bool
+	format              string
+}
+
+type recoverResult struct {
+	KillZombies         bool              `json:"kill_zombies"`
+	ResetDB             bool              `json:"reset_db"`
+	PruneWorktrees      bool              `json:"prune_worktrees"`
+	PruneRemoteBranches bool              `json:"prune_remote_branches"`
+	Force               bool              `json:"force"`
+	DryRun              bool              `json:"dry_run"`
+	Actions             []recovery.Action `json:"actions"`
 }
 
 var recoverCmd = &cobra.Command{
@@ -31,6 +43,7 @@ func init() {
 	recoverCmd.Flags().Bool("prune-remote-branches", false, "Delete orphaned origin/workbuddy/issue-* branches that have no open PR")
 	recoverCmd.Flags().Bool("force", false, "Skip confirmation prompts for destructive actions")
 	recoverCmd.Flags().Bool("dry-run", false, "Print the actions that would be taken without executing them")
+	addOutputFormatFlag(recoverCmd)
 	rootCmd.AddCommand(recoverCmd)
 }
 
@@ -39,7 +52,12 @@ func runRecoverCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return recovery.Run(cmd.Context(), recovery.Options{
+	var actions []recovery.Action
+	runStdout := cmd.OutOrStdout()
+	if isJSONOutput(opts.format) {
+		runStdout = &bytes.Buffer{}
+	}
+	if err := recovery.Run(cmd.Context(), recovery.Options{
 		KillZombies:         opts.killZombies,
 		ResetDB:             opts.resetDB,
 		PruneWorktrees:      opts.pruneWorktrees,
@@ -48,9 +66,26 @@ func runRecoverCmd(cmd *cobra.Command, _ []string) error {
 		DryRun:              opts.dryRun,
 		Interactive:         isInteractiveTerminal(),
 		Stdin:               cmd.InOrStdin(),
-		Stdout:              cmd.OutOrStdout(),
+		Stdout:              runStdout,
 		Stderr:              cmd.ErrOrStderr(),
-	})
+		RecordAction: func(action recovery.Action) {
+			actions = append(actions, action)
+		},
+	}); err != nil {
+		return err
+	}
+	if isJSONOutput(opts.format) {
+		return writeJSON(cmd.OutOrStdout(), recoverResult{
+			KillZombies:         opts.killZombies,
+			ResetDB:             opts.resetDB,
+			PruneWorktrees:      opts.pruneWorktrees,
+			PruneRemoteBranches: opts.pruneRemoteBranches,
+			Force:               opts.force,
+			DryRun:              opts.dryRun,
+			Actions:             actions,
+		})
+	}
+	return nil
 }
 
 func parseRecoverFlags(cmd *cobra.Command) (*recoverOpts, error) {
@@ -60,6 +95,10 @@ func parseRecoverFlags(cmd *cobra.Command) (*recoverOpts, error) {
 	pruneRemoteBranches, _ := cmd.Flags().GetBool("prune-remote-branches")
 	force, _ := cmd.Flags().GetBool("force")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	format, err := resolveOutputFormat(cmd, "recover")
+	if err != nil {
+		return nil, err
+	}
 
 	if !killZombies && !resetDB && !pruneWorktrees && !pruneRemoteBranches {
 		killZombies = true
@@ -73,6 +112,7 @@ func parseRecoverFlags(cmd *cobra.Command) (*recoverOpts, error) {
 		pruneRemoteBranches: pruneRemoteBranches,
 		force:               force,
 		dryRun:              dryRun,
+		format:              format,
 	}, nil
 }
 
