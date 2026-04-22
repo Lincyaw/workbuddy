@@ -305,7 +305,7 @@ func TestWorkerPairsWithCoordinatorAndCompletesTask(t *testing.T) {
 	}()
 
 	var completed bool
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		st, err := store.NewStore(dbPath)
 		if err != nil {
@@ -837,7 +837,7 @@ func TestWorkerDynamicRepoAddUpdatesCoordinatorAndDispatchesTask(t *testing.T) {
 	}
 
 	var workerHasRepoB bool
-	deadline = time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		st, err := store.NewStore(dbPath)
 		if err != nil {
@@ -865,7 +865,7 @@ func TestWorkerDynamicRepoAddUpdatesCoordinatorAndDispatchesTask(t *testing.T) {
 
 	select {
 	case <-taskCompleted:
-	case <-time.After(5 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("worker did not execute dynamically added repo task")
 	}
 

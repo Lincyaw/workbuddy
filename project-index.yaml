@@ -310,9 +310,11 @@ requirements:
       - "AC-001-15: 仓库样例 .github/workbuddy/config.yaml 只展示 loader 当前真实支持的 GlobalConfig 顶层字段，schema 以 internal/config/types.go 和 loader 为准"
     code:
       - .github/workbuddy/config.yaml
+      - .github/workbuddy/workflows/default.md
       - internal/config/loader.go
       - internal/config/types.go
-    tests: []
+    tests:
+      - internal/config/loader_test.go
     deps: []
 
   - id: REQ-002

@@ -47,7 +47,6 @@ states:
 
   done:
     enter_label: "status:done"
-    action: close_issue
 
   failed:
     enter_label: "status:failed"
@@ -55,6 +54,10 @@ states:
 
 `failed` 仍然是 workflow schema 中可识别的终态 label，但当前 Go runtime 不会在 retry 超限时直接写入
 `status:failed` 或 `needs-human`；它只记录 retry/failure intent，后续 label 写回仍由 agent 或人工执行。
+
+`status:done` is the post-merge terminal label; the review-agent (or the human
+who merged the PR) is responsible for closing the issue. The state machine
+does not close issues on behalf of agents.
 
 ### State graph
 
@@ -67,12 +70,13 @@ states:
          │  ▲
          │  │ (review: any criterion fails; retry, max 3)
          ▼  │
-     reviewing ──► done (all criteria pass; close_issue)
+     reviewing ──► done (all criteria pass; issue close stays with merge owner)
 
 Dev agent: reads `## Acceptance Criteria`, produces the artifact, flips to
 reviewing (or to blocked if criteria missing).
 Review agent: verifies each criterion against the artifact, flips to done or
-back to developing.
+back to developing. Closing the issue after merge remains the responsibility of
+the review-agent or the human who merged the PR.
 Any revisit of a state — including developing↔blocked — counts toward
 max_retries; exceeding the limit will record retry/failure intent.
 ```
