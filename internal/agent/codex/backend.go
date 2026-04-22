@@ -4,10 +4,10 @@
 // A single `codex app-server --listen stdio://` child process is shared by
 // every concurrent agent session on a worker. Each session is a JSON-RPC
 // "thread" on that shared process. Per-agent cwd/model/sandbox/approval
-// policy is passed via thread/start parameters. Per-agent env (e.g. gh-cli
-// keyring tokens) is carried in ThreadStartParams.config so the server
-// applies it when it spawns tools, rather than being scoped to the child
-// process as a whole.
+// policy is passed via thread/start parameters. Tools that codex spawns
+// inherit the shared app-server process environment; this worker-wide
+// singleton model does not provide per-agent env isolation, and the
+// current deployment does not require it.
 //
 // See decisions.md 2026-04-22 for rationale; that entry supersedes the
 // 2026-04-20 [L4][flagged] per-session-process decision.
@@ -259,25 +259,11 @@ func (s *session) startThread(ctx context.Context) error {
 	if s.spec.Approval != "" {
 		params["approvalPolicy"] = s.spec.Approval
 	}
-	// Per-agent env is delivered via ThreadStartParams.config.env so the
-	// server merges it into its own environment when it spawns tools
-	// (shell_environment_policy -> include map). This keeps per-agent token
-	// isolation without forcing a fresh process per session.
-	if len(s.spec.Env) > 0 {
-		params["config"] = map[string]any{
-			"shell_environment_policy": map[string]any{
-				"inherit":               "all",
-				"include_only":          []string{},
-				"r#set":                 s.spec.Env, // tolerated by additionalProperties:true
-				"workbuddy_env_include": s.spec.Env,
-			},
-			// Also stash the raw map so operators inspecting config dumps
-			// can correlate; codex silently ignores unknown keys.
-			"workbuddy": map[string]any{
-				"env": s.spec.Env,
-			},
-		}
-	}
+	// Per-agent env (spec.Env) is intentionally not forwarded here. The
+	// app-server protocol has no documented per-thread env-injection hook,
+	// and tools spawned by codex inherit the shared process environment.
+	// See decisions.md 2026-04-22 for why this deployment does not require
+	// per-agent env isolation.
 
 	result, err := s.server.call(ctx, "thread/start", params)
 	if err != nil {
