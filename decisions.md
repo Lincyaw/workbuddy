@@ -31,6 +31,7 @@
 - `[L3]` Issue/PR #143/#144 assumed Codex should be driven through `codex mcp-server`, but local schema generation from `codex app-server` and live handshake validation showed the supported control plane is the app-server JSON-RPC protocol (`initialize`, `thread/start`, `turn/start`, `turn/interrupt`, server requests, framed notifications), so the backend was rewritten around that contract instead of retrofitting MCP semantics.
 - `[L4][flagged]` The new Codex app-server backend currently spawns one app-server child per agent session instead of multiplexing a worker-wide singleton, because workbuddy depends on per-agent scoped env/token isolation and the app-server protocol does not expose per-thread environment injection; this favors correctness and simpler cancellation over the thread-resume benefits of a shared process.
 - `[L2]` After verifying the app-server path end-to-end, the legacy local Codex launcher and its temporary compatibility switch were removed entirely, so `runtime: codex` now resolves directly to the JSON-RPC backend and CLI/session metadata no longer report a stale legacy runtime name.
+<<<<<<< HEAD
 - `[L2]` Distributed worker task execution now delegates launcher/session/label-snapshot handling to `internal/worker.Executor`, so `cmd/worker.go` retains only transport concerns (heartbeat, release, submit/report) while embedded and remote paths share one execution core.
 - `[L4][flagged]` Remote stale-inference remains injected as a task-level `RunSession` hook on the shared executor instead of moving the watchdog fully into `internal/worker/` in this slice; this keeps #143 shutdown/ownership-loss behavior intact while reducing duplicated session orchestration first.
 
@@ -48,3 +49,7 @@
 - `[L2]` Production event hot paths no longer call `MustPayload(...)`; they use explicit payload encoding with safe fallback JSON instead, preferring degraded-but-reportable events over panic-driven worker loss.
 - `[L2]` The canonical runtime boundary now lives in `internal/runtime` for shared types, generic registry, session-manager persistence, and infra-failure classification, while `internal/launcher` was reduced to builtin runtime registration plus compatibility wrappers so the worker-boundary migration can keep moving without a single large rename sweep.
 - `[L2]` Claude/GHA concrete runtime sessions plus prompt/template/output-contract/tool-call helpers now also live under `internal/runtime`, which lets production execution go through one canonical runtime package while `internal/launcher` stays as a thin compatibility shim instead of a second implementation surface.
+
+## 2026-04-22
+
+- `[L2]` README architecture now documents the implemented shared-core model and both runtime topologies (`serve` and `coordinator` + `worker`) with a Mermaid diagram, because the previous top-level description underrepresented the current executable surface and made module boundaries harder to review.

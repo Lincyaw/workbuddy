@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/agent"
+	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 )
 
 const (
@@ -61,7 +62,13 @@ func NewBackend(cfg Config) (*Backend, error) {
 }
 
 func (b *Backend) NewSession(ctx context.Context, spec agent.Spec) (agent.Session, error) {
-	cmd := exec.CommandContext(ctx, b.cfg.Binary, "app-server", "--listen", "stdio://")
+	cmdArgs := []string{}
+	// This is a top-level Codex CLI flag, not an app-server subcommand flag.
+	if spec.Sandbox == "danger-full-access" {
+		cmdArgs = append(cmdArgs, "--dangerously-bypass-approvals-and-sandbox")
+	}
+	cmdArgs = append(cmdArgs, "app-server", "--listen", "stdio://")
+	cmd := exec.CommandContext(ctx, b.cfg.Binary, cmdArgs...)
 	if spec.Workdir != "" {
 		cmd.Dir = spec.Workdir
 	}
@@ -259,6 +266,9 @@ func (s *session) startThread(ctx context.Context) error {
 	if s.spec.Model != "" {
 		params["model"] = s.spec.Model
 	}
+	// App-server does not inherit the top-level dangerous bypass flag into the
+	// thread sandbox policy. Even in danger mode we must still set the thread
+	// sandbox explicitly or Codex falls back to a read-only sandbox.
 	if s.spec.Sandbox != "" {
 		params["sandbox"] = s.spec.Sandbox
 	}
@@ -329,6 +339,18 @@ func (s *session) captureStderr() {
 	if s.stderr == nil {
 		return
 	}
+	scanner := bufio.NewScanner(s.stderr)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		s.emit(newEvent("log", s.currentTurnID(), launcherevents.LogPayload{
+			Stream: "stderr",
+			Line:   line,
+		}, nil))
+	}
 	_, _ = io.Copy(io.Discard, s.stderr)
 }
 
@@ -369,11 +391,27 @@ func (s *session) call(ctx context.Context, method string, params any) (json.Raw
 		}
 		return resp.Result, nil
 	case <-ctx.Done():
+		select {
+		case resp := <-ch:
+			if resp.Error != nil {
+				return nil, resp.Error
+			}
+			return resp.Result, nil
+		default:
+		}
 		s.mu.Lock()
 		delete(s.pending, key)
 		s.mu.Unlock()
 		return nil, ctx.Err()
 	case <-s.done:
+		select {
+		case resp := <-ch:
+			if resp.Error != nil {
+				return nil, resp.Error
+			}
+			return resp.Result, nil
+		default:
+		}
 		return nil, errors.New("codex: session closed")
 	}
 }
@@ -622,6 +660,19 @@ func (s *session) emit(evt agent.Event) {
 	select {
 	case s.events <- evt:
 	case <-s.done:
+	}
+}
+
+func (s *session) currentTurnID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case s.turnID != "":
+		return s.turnID
+	case s.threadID != "":
+		return s.threadID
+	default:
+		return s.sessionRef.ID
 	}
 }
 

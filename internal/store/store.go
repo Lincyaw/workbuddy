@@ -749,8 +749,9 @@ func (s *Store) claimNextTaskOnce(workerID string, roles []string, repos []strin
 		completed_at, exit_code, session_refs, created_at, updated_at
 		FROM task_queue
 		WHERE status IN (?, ?)
-		  AND (lease_expires_at IS NULL OR lease_expires_at < CURRENT_TIMESTAMP)`
-	args := []any{TaskStatusPending, TaskStatusRunning}
+		  AND (lease_expires_at IS NULL OR lease_expires_at < CURRENT_TIMESTAMP)
+		  AND NOT (status = ? AND worker_id = ?)`
+	args := []any{TaskStatusPending, TaskStatusRunning, TaskStatusRunning, workerID}
 	if len(conds) > 0 {
 		query += ` AND (` + strings.Join(conds, " OR ") + `)`
 		args = append(args, roleArgs...)

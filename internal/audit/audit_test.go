@@ -228,6 +228,51 @@ func TestCapture_CodexEventSchemaArtifact(t *testing.T) {
 	}
 }
 
+func TestCapture_CodexSessionRefKindOverridesAgentName(t *testing.T) {
+	aud, tmpDir := setup(t)
+
+	sessionFile := filepath.Join(tmpDir, "events-v1.jsonl")
+	event := launcherevents.Event{
+		Kind:      launcherevents.KindCommandExec,
+		Timestamp: time.Unix(1710000100, 0).UTC(),
+		SessionID: "sess-kind",
+		TurnID:    "turn-1",
+		Seq:       1,
+		Payload:   mustJSON(t, launcherevents.CommandExecPayload{Cmd: []string{"bash", "-lc", "echo hi"}, CallID: "cmd-1"}),
+	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("marshal event: %v", err)
+	}
+	if err := os.WriteFile(sessionFile, append(data, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := &launcher.Result{
+		ExitCode:    0,
+		LastMessage: "hi",
+		SessionPath: sessionFile,
+		SessionRef: launcher.SessionRef{
+			ID:   "thread-1",
+			Kind: "codex-thread",
+		},
+	}
+	if err := aud.Capture("sess-kind", "task-kind", "owner/repo", 9, "dev-agent", result); err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+
+	sessions, err := aud.Query(Filter{SessionID: "sess-kind"})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if !strings.Contains(sessions[0].Summary, "Codex Session Summary") {
+		t.Fatalf("summary missing codex header: %s", sessions[0].Summary)
+	}
+}
+
 func TestRecordLabelValidation(t *testing.T) {
 	aud, _ := setup(t)
 

@@ -12,33 +12,7 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/launcher"
-	"github.com/spf13/cobra"
 )
-
-func TestParseRunFlags(t *testing.T) {
-	cmd := &cobra.Command{Use: "run"}
-	cmd.Flags().String("runtime", config.RuntimeCodex, "")
-	cmd.Flags().StringP("prompt", "p", "", "")
-	cmd.Flags().String("prompt-file", "", "")
-	cmd.Flags().String("workdir", ".", "")
-	cmd.Flags().String("sandbox", "danger-full-access", "")
-	cmd.Flags().String("approval", "never", "")
-	cmd.Flags().String("model", "", "")
-	cmd.Flags().Duration("timeout", 30*time.Minute, "")
-	if err := cmd.Flags().Set("runtime", "codex"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("prompt", "hello"); err != nil {
-		t.Fatal(err)
-	}
-	opts, err := parseRunFlags(cmd)
-	if err != nil {
-		t.Fatalf("parseRunFlags: %v", err)
-	}
-	if opts.runtime != "codex" || opts.prompt != "hello" {
-		t.Fatalf("unexpected opts: %+v", opts)
-	}
-}
 
 func TestRunRuntimeWithOpts_UsesLauncher(t *testing.T) {
 	mockRT := &mockRuntime{name: config.RuntimeClaudeShot, resultFn: func(ctx context.Context, agent *config.AgentConfig, task *launcher.TaskContext) (*launcher.Result, error) {

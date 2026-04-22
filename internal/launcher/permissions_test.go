@@ -3,6 +3,9 @@ package launcher
 import (
 	"context"
 	"encoding/json"
+	"os/exec"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -197,6 +200,135 @@ func TestCodexSessionRun_EmitsPermissionEvent(t *testing.T) {
 	}
 }
 
+func TestCodexSessionRun_DangerBypassesSandboxThroughLauncher(t *testing.T) {
+	restore := installFakeCodex(t)
+	defer restore()
+
+	logPath := filepath.Join(t.TempDir(), "fake-codex.log")
+	t.Setenv("FAKE_CODEX_LOG", logPath)
+
+	task := newTestTask(t)
+	agent := &config.AgentConfig{
+		Name:    "codex-agent",
+		Role:    "dev",
+		Runtime: config.RuntimeCodex,
+		Prompt:  "Reply with exactly HELLO",
+		Policy:  config.PolicyConfig{Sandbox: "danger-full-access", Approval: "never"},
+		Timeout: 10 * time.Second,
+	}
+	session, err := NewLauncher().Start(context.Background(), agent, task)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = session.Close() }()
+
+	_, result, err := collectSessionEvents(t, session)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", result.ExitCode)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read fake codex log: %v", err)
+	}
+	var (
+		argv        []any
+		threadStart map[string]any
+	)
+	for _, line := range splitNonEmptyLines(string(logData)) {
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(line), &obj); err != nil {
+			t.Fatalf("unmarshal fake codex log line %q: %v", line, err)
+		}
+		if rawArgv, ok := obj["argv"].([]any); ok {
+			argv = rawArgv
+		}
+		if obj["method"] == "thread/start" {
+			threadStart, _ = obj["params"].(map[string]any)
+		}
+	}
+	if len(argv) < 2 {
+		t.Fatalf("argv = %#v, want top-level bypass flag plus app-server", argv)
+	}
+	if got, _ := argv[0].(string); got != "--dangerously-bypass-approvals-and-sandbox" {
+		t.Fatalf("argv[0] = %q, want top-level bypass flag; argv=%#v", got, argv)
+	}
+	if got, _ := argv[1].(string); got != "app-server" {
+		t.Fatalf("argv[1] = %q, want app-server; argv=%#v", got, argv)
+	}
+	if threadStart == nil {
+		t.Fatal("missing thread/start request in fake codex log")
+	}
+	if got, _ := threadStart["sandbox"].(string); got != "danger-full-access" {
+		t.Fatalf("thread/start sandbox = %q, want danger-full-access; params=%#v", got, threadStart)
+	}
+}
+
+func TestCodexSessionRun_DangerFullAccessE2E_FileWrite(t *testing.T) {
+	if os.Getenv("CODEX_E2E") != "1" {
+		t.Skip("set CODEX_E2E=1 to run real Codex end-to-end test")
+	}
+	if _, err := exec.LookPath("codex"); err != nil {
+		t.Skip("codex not installed")
+	}
+
+	workdir := t.TempDir()
+	filename := "wb_e2e_sandbox_check.txt"
+	expected := "SANDBOX_OK\n"
+
+	task := newTestTask(t)
+	task.RepoRoot = workdir
+	task.WorkDir = workdir
+
+	agent := &config.AgentConfig{
+		Name:    "codex-agent",
+		Role:    "dev",
+		Runtime: config.RuntimeCodex,
+		Prompt: "Use your tools to create a file named " + filename + " in the current working directory with exactly the contents SANDBOX_OK followed by a newline. " +
+			"Then read the file back to confirm it and reply with E2E_OK plus the filename on one line.",
+		Policy:  config.PolicyConfig{Sandbox: "danger-full-access", Approval: "never"},
+		Timeout: 2 * time.Minute,
+	}
+	session, err := NewLauncher().Start(context.Background(), agent, task)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = session.Close() }()
+
+	events, result, err := collectSessionEvents(t, session)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", result.ExitCode)
+	}
+	if !strings.Contains(result.LastMessage, "E2E_OK") || !strings.Contains(result.LastMessage, filename) {
+		t.Fatalf("final message = %q, want E2E_OK and filename", result.LastMessage)
+	}
+
+	data, err := os.ReadFile(filepath.Join(workdir, filename))
+	if err != nil {
+		t.Fatalf("read written file: %v", err)
+	}
+	if got := string(data); got != expected {
+		t.Fatalf("file contents = %q, want %q", got, expected)
+	}
+
+	sawTooling := false
+	for _, evt := range events {
+		if evt.Kind == launcherevents.KindCommandExec || evt.Kind == launcherevents.KindFileChange {
+			sawTooling = true
+			break
+		}
+	}
+	if !sawTooling {
+		t.Fatalf("expected command.exec or file.change event, got %s", eventKinds(events))
+	}
+}
+
 func TestClaudeStreamSessionRun_EmitsPermissionEvent(t *testing.T) {
 	restore := installFakeClaude(t, []string{
 		`{"type":"system.init","session_id":"claude-session-1"}`,
@@ -257,6 +389,19 @@ func firstPermissionPayload(t *testing.T, events []launcherevents.Event) launche
 func envHas(env []string, key string) bool {
 	_, ok := envGet(env, key)
 	return ok
+}
+
+func splitNonEmptyLines(data string) []string {
+	raw := strings.Split(strings.ReplaceAll(data, "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(raw))
+	for _, line := range raw {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
 }
 
 func envGet(env []string, key string) (string, bool) {

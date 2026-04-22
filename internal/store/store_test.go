@@ -439,6 +439,49 @@ func TestTaskOwnershipConflicts(t *testing.T) {
 	}
 }
 
+func TestClaimNextTaskDoesNotSelfReclaimExpiredRunningTask(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.InsertTask(TaskRecord{
+		ID:        "task-self-reclaim",
+		Repo:      "org/repo",
+		IssueNum:  9,
+		AgentName: "dev-agent",
+		Role:      "dev",
+		Runtime:   "codex",
+		Status:    TaskStatusPending,
+	}); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+
+	task, err := s.ClaimNextTask("worker-a", []string{"dev"}, []string{"org/repo"}, "", 30*time.Second)
+	if err != nil {
+		t.Fatalf("ClaimNextTask: %v", err)
+	}
+	if task == nil || task.ID != "task-self-reclaim" {
+		t.Fatalf("unexpected claimed task: %+v", task)
+	}
+
+	if _, err := s.DB().Exec(`UPDATE task_queue SET lease_expires_at = datetime('now', '-1 second') WHERE id = ?`, task.ID); err != nil {
+		t.Fatalf("expire lease: %v", err)
+	}
+
+	again, err := s.ClaimNextTask("worker-a", []string{"dev"}, []string{"org/repo"}, "", 30*time.Second)
+	if err != nil {
+		t.Fatalf("ClaimNextTask self reclaim: %v", err)
+	}
+	if again != nil {
+		t.Fatalf("expected expired running task to be hidden from original worker, got %+v", again)
+	}
+
+	other, err := s.ClaimNextTask("worker-b", []string{"dev"}, []string{"org/repo"}, "", 30*time.Second)
+	if err != nil {
+		t.Fatalf("ClaimNextTask other worker: %v", err)
+	}
+	if other == nil || other.ID != task.ID {
+		t.Fatalf("expected another worker to reclaim expired task, got %+v", other)
+	}
+}
+
 // TestParseTimestamp verifies the multi-format timestamp parser.
 func TestParseTimestamp(t *testing.T) {
 	tests := []struct {

@@ -12,13 +12,24 @@ func installFakeCodex(t *testing.T) func() {
 	scriptPath := filepath.Join(dir, "codex")
 	script := `#!/usr/bin/env python3
 import json
+import os
 import sys
 
 final_text = "OK"
+log_path = os.environ.get("FAKE_CODEX_LOG", "")
+
+def log(obj):
+    if not log_path:
+        return
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(obj) + "\n")
+
+log({"argv": sys.argv[1:]})
 
 for line in sys.stdin:
     msg = json.loads(line)
     method = msg.get("method")
+    log({"method": method, "params": msg.get("params")})
     if method == "initialize":
         print(json.dumps({"id": msg["id"], "result": {"userAgent": "fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "linux"}}), flush=True)
     elif method == "initialized":

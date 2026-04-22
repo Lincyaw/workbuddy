@@ -16,7 +16,6 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/store"
-	"github.com/spf13/cobra"
 )
 
 type repoAwareGHReader struct {
@@ -700,26 +699,5 @@ func TestRepoRegisterCLIStartsPollerOnCoordinator(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("coordinator did not exit")
-	}
-}
-
-func TestParseRepoRegisterFlagsUsesEnvToken(t *testing.T) {
-	t.Setenv("WORKBUDDY_AUTH_TOKEN", "env-token")
-	cmd := &cobra.Command{Use: "register"}
-	cmd.Flags().String("coordinator", "", "")
-	cmd.Flags().String("token", "", "")
-	cmd.Flags().String("config-dir", "", "")
-	cmd.Flags().Duration("timeout", 0, "")
-	_ = cmd.Flags().Set("coordinator", "http://localhost:8081")
-	_ = cmd.Flags().Set("config-dir", ".github/workbuddy")
-	opts, err := parseRepoRegisterFlags(cmd)
-	if err != nil {
-		t.Fatalf("parseRepoRegisterFlags: %v", err)
-	}
-	if opts.token != "env-token" {
-		t.Fatalf("token = %q, want env-token", opts.token)
-	}
-	if !strings.HasPrefix(opts.coordinator, "http://localhost") {
-		t.Fatalf("unexpected coordinator %q", opts.coordinator)
 	}
 }

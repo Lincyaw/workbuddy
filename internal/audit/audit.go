@@ -77,6 +77,8 @@ func (a *Auditor) Capture(sessionID, taskID, repo string, issueNum int, agentNam
 
 			// Generate summary based on runtime.
 			switch {
+			case result != nil && result.SessionRef.Kind == "codex-thread":
+				summary = summarizeCodex(result, string(data))
 			case strings.Contains(strings.ToLower(agentName), "codex"):
 				summary = summarizeCodex(result, string(data))
 			default: // claude-code or unknown — try JSON parse

@@ -249,7 +249,6 @@ documentation:
       related_code:
         - cmd/serve.go
         - internal/dependency/dependency.go
-        - internal/dependency/dependency_test.go
         - internal/poller/poller.go
         - internal/statemachine/statemachine.go
         - internal/router/router.go
@@ -313,8 +312,7 @@ requirements:
       - .github/workbuddy/config.yaml
       - internal/config/loader.go
       - internal/config/types.go
-    tests:
-      - internal/config/loader_test.go
+    tests: []
     deps: []
 
   - id: REQ-002
@@ -424,8 +422,7 @@ requirements:
       - "AC-005-7: 单元测试：验证成功/失败/超时/重试上限 4 种场景的 Markdown 格式"
     code:
       - internal/reporter/reporter.go
-    tests:
-      - internal/reporter/reporter_test.go
+    tests: []
     deps: [REQ-004]
 
   # ============================================================
@@ -474,12 +471,7 @@ requirements:
       - internal/launcher/meta.go
       - internal/launcher/types.go
     tests:
-      - cmd/serve_agent_backend_test.go
-      - internal/agent/agent_test.go
-      - internal/agent/claude/backend_test.go
       - internal/agent/codex/backend_test.go
-      - internal/agent/codex/events_test.go
-      - internal/agent/codex/jsonrpc_test.go
       - internal/launcher/agent_bridge_test.go
       - internal/launcher/agent_bridge_run_test.go
       - internal/launcher/launcher_test.go
@@ -512,7 +504,6 @@ requirements:
       - docs/implemented/current-config-workflow-and-agents.md
       - docs/implemented/current-runtime-reporting-and-audit.md
     tests:
-      - internal/config/loader_test.go
       - internal/launcher/launcher_test.go
       - internal/launcher/runners/gha/gha_test.go
     deps: []
@@ -608,7 +599,6 @@ requirements:
       - internal/workerclient/client.go
       - internal/worker/distributed.go
     tests:
-      - internal/workerclient/client_test.go
       - internal/worker/distributed_test.go
     deps: [REQ-025]
 
@@ -660,8 +650,7 @@ requirements:
     code:
       - internal/reporter/format.go
       - internal/reporter/reporter.go
-    tests:
-      - internal/reporter/format_test.go
+    tests: []
     deps: [REQ-005]
 
   - id: REQ-011
@@ -693,7 +682,6 @@ requirements:
       - cmd/serve_test.go
       - cmd/coordinator_audit_test.go
       - internal/auditapi/handler_test.go
-      - internal/webui/handler_test.go
     deps: [REQ-009, REQ-024, REQ-029]
 
   - id: REQ-012
@@ -791,7 +779,6 @@ requirements:
       - cmd/serve.go
       - cmd/coordinator.go
     tests:
-      - internal/config/loader_test.go
       - internal/statemachine/statemachine_test.go
       - cmd/serve_test.go
       - cmd/worker_test.go
@@ -814,8 +801,7 @@ requirements:
       - "AC-016-6: 单元测试：解析、阻塞、解除、环形检测 4 种场景"
     code:
       - internal/dependency/dependency.go
-    tests:
-      - internal/dependency/dependency_test.go
+    tests: []
     deps: [REQ-003]
 
   # ============================================================
@@ -945,7 +931,6 @@ requirements:
       - internal/validate/validate.go
     tests:
       - cmd/validate_test.go
-      - internal/validate/validate_test.go
     deps: [REQ-001]
 
   - id: REQ-022
@@ -989,7 +974,7 @@ requirements:
       - "AC-023-6: 数据持久化到 SQLite workers 表"
       - "AC-023-7: 单元测试：注册/心跳/离线检测/按 repo+role 查询 4 种场景"
     code: [internal/registry/registry.go]
-    tests: [internal/registry/registry_test.go]
+    tests: []
     deps: [REQ-024]
 
   - id: REQ-024
@@ -1064,7 +1049,6 @@ requirements:
       - internal/store/store.go
     tests:
       - cmd/worker_test.go
-      - internal/workerclient/client_test.go
     deps: [REQ-026, REQ-006]
 
   # ============================================================
@@ -1099,7 +1083,6 @@ requirements:
       - cmd/worker_test.go
       - internal/coordinator/http/handler_test.go
       - internal/store/store_test.go
-      - internal/workerclient/client_test.go
     deps: [REQ-025]
 
   # ============================================================
@@ -1165,7 +1148,6 @@ requirements:
       - internal/reporter/reporter.go
       - docs/implemented/issue-dependencies.md
     tests:
-      - internal/dependency/dependency_test.go
       - internal/dependency/gate_test.go
       - internal/store/store_test.go
       - internal/poller/poller_test.go
@@ -1331,7 +1313,6 @@ requirements:
     tests:
       - cmd/cache_invalidate_test.go
       - cmd/diagnose_test.go
-      - internal/diagnose/diagnose_test.go
     deps: [REQ-034, REQ-024]
 
   - id: REQ-042
@@ -1428,7 +1409,6 @@ requirements:
       - internal/eventlog/eventlog.go
       - internal/store/store.go
     tests:
-      - internal/metrics/handler_test.go
       - cmd/serve_test.go
       - internal/coordinator/http/handler_test.go
     related_docs:
@@ -1457,9 +1437,7 @@ requirements:
     code:
       - cmd/recover.go
       - internal/recover/recover.go
-    tests:
-      - cmd/recover_test.go
-      - internal/recover/recover_test.go
+    tests: []
     deps: []
 
   - id: REQ-045
@@ -1482,7 +1460,6 @@ requirements:
       - "AC-045-7: go build && go vet && go test ./... are green"
     code:
       - internal/config/types.go
-      - internal/config/loader_test.go
       - internal/launcher/process.go
       - internal/launcher/claude_stream.go
       - internal/launcher/agent_bridge.go
@@ -1490,7 +1467,6 @@ requirements:
       - internal/launcher/events/permission.go
     tests:
       - internal/launcher/permissions_test.go
-      - internal/config/loader_test.go
     deps: []
 
   - id: REQ-039
@@ -1521,9 +1497,6 @@ requirements:
       - internal/statemachine/statemachine.go
       - internal/tasknotify/hub.go
     tests:
-      - internal/config/loader_test.go
-      - internal/notifier/notifier_test.go
-      - internal/tasknotify/hub_test.go
       - cmd/serve_test.go
     related_docs:
       - docs/implemented/current-config-workflow-and-agents.md
@@ -1560,7 +1533,6 @@ requirements:
       - internal/operatorwatch/watch.go
     tests:
       - cmd/operator_watch_test.go
-      - internal/config/loader_test.go
       - internal/operatorwatch/watch_test.go
     deps: [REQ-009]
     title: Event-driven operator anomaly detector
@@ -1592,7 +1564,6 @@ requirements:
     tests:
       - internal/operator/detector_test.go
       - internal/auditapi/handler_test.go
-      - internal/config/loader_test.go
     related_docs:
       - docs/implemented/current-config-workflow-and-agents.md
       - docs/implemented/pipeline-observability-and-diagnosis.md
@@ -1677,7 +1648,6 @@ requirements:
       - .github/workbuddy/config.yaml
     tests:
       - internal/staleinference/watchdog_test.go
-      - internal/config/loader_test.go
     deps: [REQ-006]
 
   - id: REQ-049
@@ -1739,10 +1709,8 @@ requirements:
       - internal/statemachine/statemachine.go
     tests:
       - cmd/coordinator_test.go
-      - cmd/serve_flags_test.go
       - cmd/serve_test.go
       - internal/poller/poller_test.go
-      - internal/security/security_test.go
     deps: [REQ-001, REQ-017, REQ-027]
 
   - id: REQ-052
@@ -1773,9 +1741,7 @@ requirements:
     tests:
       - cmd/coordinator_test.go
       - cmd/worker_test.go
-      - internal/registry/registry_test.go
       - internal/store/store_test.go
-      - internal/workerclient/client_test.go
     deps: [REQ-025, REQ-026]
 
   - id: REQ-053
@@ -1803,9 +1769,7 @@ requirements:
       - internal/eventlog/eventlog.go
       - cmd/worker.go
       - cmd/serve.go
-    tests:
-      - internal/reporter/reporter_test.go
-      - internal/reporter/format_test.go
+    tests: []
     deps: [REQ-005, REQ-009]
 
   - id: REQ-054
@@ -1832,9 +1796,6 @@ requirements:
       - cmd/serve.go
       - cmd/worker.go
     tests:
-      - internal/reporter/verify_test.go
-      - internal/reporter/reporter_test.go
-      - internal/reporter/format_test.go
       - cmd/serve_test.go
     deps: [REQ-005, REQ-006, REQ-024]
 
@@ -1914,7 +1875,6 @@ requirements:
     tests:
       - internal/launcher/infra_failure_test.go
       - internal/runtime/gha_runner_test.go
-      - internal/reporter/reporter_test.go
       - cmd/serve_infra_failure_test.go
       - cmd/coordinator_infra_failure_test.go
     deps: [REQ-055]

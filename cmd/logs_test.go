@@ -16,39 +16,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func TestParseLogsFlags(t *testing.T) {
-	cmd := &cobra.Command{Use: "logs"}
-	cmd.Flags().String("repo", "", "")
-	cmd.Flags().Int("issue", 0, "")
-	cmd.Flags().Int("attempt", 0, "")
-	cmd.Flags().String("stream", "stdout", "")
-	cmd.Flags().Bool("follow", false, "")
-	cmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "")
-	if err := cmd.Flags().Set("repo", "owner/name"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("issue", "48"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("stream", "tool-calls"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("attempt", "2"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("follow", "true"); err != nil {
-		t.Fatal(err)
-	}
-
-	opts, err := parseLogsFlags(cmd)
-	if err != nil {
-		t.Fatalf("parseLogsFlags: %v", err)
-	}
-	if opts.repo != "owner/name" || opts.issue != 48 || opts.stream != "tool-calls" || opts.attempt != 2 || !opts.follow {
-		t.Fatalf("unexpected opts: %+v", opts)
-	}
-}
-
 func TestResolveLogsSession_DefaultsToLatestAttempt(t *testing.T) {
 	fixture := newLogsFixture(t)
 
@@ -61,34 +28,164 @@ func TestResolveLogsSession_DefaultsToLatestAttempt(t *testing.T) {
 	}
 }
 
-func TestRunLogsWithOpts_FollowPrintsNewLines(t *testing.T) {
+func TestRunLogsWithOpts_DefaultSummaryTextOutput(t *testing.T) {
+	fixture := newLogsFixture(t)
+
+	var out bytes.Buffer
+	if err := runLogsWithOpts(context.Background(), &logsOpts{
+		repo:   "owner/repo",
+		issue:  48,
+		dbPath: fixture.dbPath,
+		view:   "summary",
+		format: "text",
+	}, &out); err != nil {
+		t.Fatalf("runLogsWithOpts: %v", err)
+	}
+
+	got := out.String()
+	for _, want := range []string{
+		"repo: owner/repo",
+		"issue: 48",
+		"attempt: 2",
+		"session: session-002",
+		"agent: dev-agent",
+		"status: running",
+		"created_at:",
+		"[2] command.exec: bash -lc echo hi",
+		"[3] tool.call: github.search",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary text missing %q in %q", want, got)
+		}
+	}
+	if strings.Contains(got, "attempt-2 start") {
+		t.Fatalf("summary text should not replay raw stdout: %q", got)
+	}
+}
+
+func TestRunLogsWithOpts_SummaryJSONOutput(t *testing.T) {
+	fixture := newLogsFixture(t)
+
+	var out bytes.Buffer
+	if err := runLogsWithOpts(context.Background(), &logsOpts{
+		repo:    "owner/repo",
+		issue:   48,
+		attempt: 2,
+		dbPath:  fixture.dbPath,
+		view:    "summary",
+		format:  "json",
+	}, &out); err != nil {
+		t.Fatalf("runLogsWithOpts: %v", err)
+	}
+
+	var summary logsSummary
+	if err := json.Unmarshal(out.Bytes(), &summary); err != nil {
+		t.Fatalf("json.Unmarshal: %v\nbody=%s", err, out.String())
+	}
+	if summary.Repo != "owner/repo" || summary.Issue != 48 || summary.Attempt != 2 {
+		t.Fatalf("unexpected summary header: %+v", summary)
+	}
+	if summary.SessionID != "session-002" || summary.AgentName != "dev-agent" || summary.TaskStatus != store.TaskStatusRunning {
+		t.Fatalf("unexpected summary session: %+v", summary)
+	}
+	if len(summary.RecentEvents) < 2 {
+		t.Fatalf("recent events too short: %+v", summary.RecentEvents)
+	}
+	if summary.RecentEvents[0].Kind != string(launcherevents.KindCommandExec) {
+		t.Fatalf("first recent event = %+v", summary.RecentEvents[0])
+	}
+}
+
+func TestRunLogsWithOpts_ArtifactToolCallsStillWork(t *testing.T) {
+	fixture := newLogsFixture(t)
+
+	var out bytes.Buffer
+	if err := runLogsWithOpts(context.Background(), &logsOpts{
+		repo:    "owner/repo",
+		issue:   48,
+		attempt: 2,
+		dbPath:  fixture.dbPath,
+		view:    "artifact",
+		stream:  "tool-calls",
+	}, &out); err != nil {
+		t.Fatalf("runLogsWithOpts: %v", err)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, `"kind":"command.exec"`) {
+		t.Fatalf("artifact output missing command.exec: %q", got)
+	}
+	if !strings.Contains(got, `"kind":"tool.call"`) {
+		t.Fatalf("artifact output missing tool.call: %q", got)
+	}
+}
+
+func TestParseLogsFlags_RejectsInvalidViewStreamCombination(t *testing.T) {
+	cmd := &cobra.Command{Use: "logs"}
+	cmd.Flags().String("repo", "", "")
+	cmd.Flags().Int("issue", 0, "")
+	cmd.Flags().Int("attempt", 0, "")
+	cmd.Flags().String("view", "summary", "")
+	cmd.Flags().String("format", "text", "")
+	cmd.Flags().String("stream", "stdout", "")
+	cmd.Flags().Bool("follow", false, "")
+	cmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "")
+
+	_ = cmd.Flags().Set("repo", "owner/repo")
+	_ = cmd.Flags().Set("issue", "48")
+	_ = cmd.Flags().Set("stream", "stderr")
+
+	_, err := parseLogsFlags(cmd)
+	if err == nil || !strings.Contains(err.Error(), "--stream is only valid with --view artifact") {
+		t.Fatalf("parseLogsFlags error = %v, want invalid stream/view diagnostic", err)
+	}
+}
+
+func TestParseLogsFlags_RejectsInvalidArtifactFormatCombination(t *testing.T) {
+	cmd := &cobra.Command{Use: "logs"}
+	cmd.Flags().String("repo", "", "")
+	cmd.Flags().Int("issue", 0, "")
+	cmd.Flags().Int("attempt", 0, "")
+	cmd.Flags().String("view", "summary", "")
+	cmd.Flags().String("format", "text", "")
+	cmd.Flags().String("stream", "stdout", "")
+	cmd.Flags().Bool("follow", false, "")
+	cmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "")
+
+	_ = cmd.Flags().Set("repo", "owner/repo")
+	_ = cmd.Flags().Set("issue", "48")
+	_ = cmd.Flags().Set("view", "artifact")
+	_ = cmd.Flags().Set("format", "json")
+
+	_, err := parseLogsFlags(cmd)
+	if err == nil || !strings.Contains(err.Error(), "--format is only valid with --view summary") {
+		t.Fatalf("parseLogsFlags error = %v, want invalid format/view diagnostic", err)
+	}
+}
+
+func TestRunLogsWithOpts_FollowSummaryPrintsFinalState(t *testing.T) {
 	fixture := newLogsFixture(t)
 	path := filepath.Join(fixture.sessionsDir, "session-002", "events-v1.jsonl")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	var out bytes.Buffer
 	done := make(chan error, 1)
 	go func() {
-		done <- runLogsWithOpts(ctx, &logsOpts{
+		done <- runLogsWithOpts(context.Background(), &logsOpts{
 			repo:         "owner/repo",
 			issue:        48,
 			attempt:      2,
-			stream:       "stdout",
-			follow:       true,
 			dbPath:       fixture.dbPath,
+			view:         "summary",
+			format:       "text",
+			follow:       true,
 			pollInterval: 20 * time.Millisecond,
 		}, &out)
 	}()
 
-	requireEventually(t, 2*time.Second, func() bool {
-		return strings.Contains(out.String(), "attempt-2 start")
-	})
-
+	time.Sleep(60 * time.Millisecond)
 	appendEvents(t, path,
-		makeLogEvent(2, "session-002", "stdout", "follow one"),
-		makeCommandOutputEvent(3, "session-002", "stdout", "follow two\n"),
+		makeCommandOutputEvent(4, "session-002", "stderr", "fatal: branch already exists\n"),
+		makeTaskCompleteEvent(5, "session-002", "completed"),
 	)
 	if err := fixture.store.UpdateTaskStatus("task-002", store.TaskStatusCompleted); err != nil {
 		t.Fatalf("UpdateTaskStatus: %v", err)
@@ -104,8 +201,73 @@ func TestRunLogsWithOpts_FollowPrintsNewLines(t *testing.T) {
 	}
 
 	got := out.String()
-	if !strings.Contains(got, "follow one") || !strings.Contains(got, "follow two") {
-		t.Fatalf("stdout missing followed output: %q", got)
+	if !strings.Contains(got, "status: completed") {
+		t.Fatalf("follow summary missing final status: %q", got)
+	}
+	if !strings.Contains(got, "[4] command.output: fatal: branch already exists") {
+		t.Fatalf("follow summary missing bounded recent event: %q", got)
+	}
+	if strings.Count(got, "repo: owner/repo") != 1 {
+		t.Fatalf("follow summary should print one final summary: %q", got)
+	}
+}
+
+func TestRunLogsWithOpts_UsesManagedWorkerDeployment(t *testing.T) {
+	repoDir := t.TempDir()
+	workerDir := t.TempDir()
+	configHome := filepath.Join(t.TempDir(), ".config")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+
+	dbPath := filepath.Join(workerDir, ".workbuddy", "worker.db")
+	sessionsDir := filepath.Join(workerDir, ".workbuddy", "sessions")
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	insertSessionFixture(t, st, "task-001", "session-001", store.TaskStatusCompleted)
+	writeEventsFile(t, filepath.Join(sessionsDir, "session-001", "events-v1.jsonl"),
+		makeCommandExecEvent(1, "session-001", "cmd-1", []string{"bash", "-lc", "echo managed"}),
+	)
+
+	manifest := &deploymentManifest{
+		SchemaVersion:    deploymentManifestVer,
+		Name:             "workbuddy-worker",
+		Scope:            "user",
+		BinaryPath:       "/tmp/workbuddy",
+		WorkingDirectory: workerDir,
+		Command:          []string{"worker", "--coordinator", "http://127.0.0.1:8081", "--repos", "owner/repo=" + repoDir},
+	}
+	manifestPath := filepath.Join(configHome, "workbuddy", "deployments", "workbuddy-worker.json")
+	if err := writeDeploymentManifest(manifestPath, manifest); err != nil {
+		t.Fatalf("writeDeploymentManifest: %v", err)
+	}
+
+	prevWD, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatalf("Abs(.): %v", err)
+	}
+	if err := os.Chdir(repoDir); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(prevWD)
+	})
+
+	var out bytes.Buffer
+	if err := runLogsWithOpts(context.Background(), &logsOpts{
+		repo:   "owner/repo",
+		issue:  48,
+		view:   "summary",
+		format: "text",
+		dbPath: ".workbuddy/workbuddy.db",
+	}, &out); err != nil {
+		t.Fatalf("runLogsWithOpts: %v", err)
+	}
+	if !strings.Contains(out.String(), "echo managed") {
+		t.Fatalf("summary missing managed worker command: %q", out.String())
 	}
 }
 
@@ -117,6 +279,7 @@ func TestLogsCommand_E2E(t *testing.T) {
 		"--repo", "owner/repo",
 		"--issue", "48",
 		"--attempt", "2",
+		"--view", "artifact",
 		"--stream", "tool-calls",
 		"--db-path", fixture.dbPath,
 	)
@@ -263,6 +426,16 @@ func makeToolCallEvent(seq uint64, sessionID, callID, name string) launcherevent
 	}
 }
 
+func makeTaskCompleteEvent(seq uint64, sessionID, status string) launcherevents.Event {
+	return launcherevents.Event{
+		Kind:      launcherevents.KindTaskComplete,
+		Timestamp: time.Date(2026, 4, 16, 9, 0, 0, 0, time.UTC),
+		SessionID: sessionID,
+		Seq:       seq,
+		Payload:   launcherevents.MustPayload(launcherevents.TaskCompletePayload{TurnID: "turn-1", Status: status}),
+	}
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd()
@@ -270,16 +443,4 @@ func repoRoot(t *testing.T) string {
 		t.Fatalf("Getwd: %v", err)
 	}
 	return filepath.Dir(wd)
-}
-
-func requireEventually(t *testing.T, timeout time.Duration, fn func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if fn() {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatal("condition not met before timeout")
 }

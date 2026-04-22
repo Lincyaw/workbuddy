@@ -66,7 +66,7 @@ Run `workbuddy --help` for the full list. Grouped by intent:
 
 **Observe**
 - `workbuddy status` — issues, tasks, events, stuck issues, or watch until done
-- `workbuddy logs <issue>` — per-attempt session logs (stdout/stderr/tool calls)
+- `workbuddy logs --issue N --repo owner/name` — per-attempt session logs (stdout/stderr/tool calls)
 - `workbuddy diagnose` — surfaces stuck issues, 3-retry caps, stale claims; `--fix` for safe auto-remediation
 
 **Recover**

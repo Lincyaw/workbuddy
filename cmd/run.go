@@ -11,7 +11,10 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/launcher"
+	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
+	"github.com/Lincyaw/workbuddy/internal/store"
+	workersession "github.com/Lincyaw/workbuddy/internal/worker/session"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
@@ -108,10 +111,60 @@ func runRuntimeWithOpts(ctx context.Context, opts *runOpts, lnch *runtimepkg.Reg
 		WorkDir:  workdir,
 		Session:  runtimepkg.SessionContext{ID: "session-" + uuid.NewString()},
 	}
-	result, err := lnch.Launch(ctx, agent, task)
+
+	storePath := filepath.Join(workdir, ".workbuddy", "run.db")
+	sessionsDir := filepath.Join(workdir, ".workbuddy", "sessions")
+	st, err := store.NewStore(storePath)
 	if err != nil {
+		return fmt.Errorf("run: init local session store: %w", err)
+	}
+	defer func() { _ = st.Close() }()
+	lnch.SetSessionManager(runtimepkg.NewSessionManager(sessionsDir, st))
+
+	sess, err := lnch.Start(ctx, agent, task)
+	if err != nil {
+		if handle := task.SessionHandle(); handle != nil {
+			_ = handle.Close(store.TaskStatusFailed)
+		}
 		return err
 	}
+	defer func() { _ = sess.Close() }()
+
+	var result *runtimepkg.Result
+	var runErr error
+	defer func() {
+		if handle := task.SessionHandle(); handle != nil {
+			status := store.TaskStatusCompleted
+			if runErr != nil || (result != nil && result.ExitCode != 0) {
+				status = store.TaskStatusFailed
+			}
+			if result != nil && result.Meta != nil && result.Meta["timeout"] == "true" {
+				status = store.TaskStatusTimeout
+			}
+			_ = handle.Close(status)
+		}
+	}()
+
+	eventsCh := make(chan launcherevents.Event, 64)
+	eventsPath, waitEvents := workersession.Stream(task, eventsCh)
+	result, runErr = sess.Run(ctx, eventsCh)
+	close(eventsCh)
+	if err := waitEvents(); err != nil {
+		return fmt.Errorf("run: capture session events: %w", err)
+	}
+	if runErr != nil {
+		return runErr
+	}
+	if result == nil {
+		return fmt.Errorf("run: runtime returned nil result")
+	}
+	if eventsPath != "" {
+		if result.RawSessionPath == "" {
+			result.RawSessionPath = result.SessionPath
+		}
+		result.SessionPath = eventsPath
+	}
+
 	if result.LastMessage != "" {
 		_, _ = fmt.Fprintln(stdout, result.LastMessage)
 	} else if result.Stdout != "" {

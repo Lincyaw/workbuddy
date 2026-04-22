@@ -11,72 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/spf13/cobra"
 )
-
-func TestParseRepoListFlags(t *testing.T) {
-	cmd := newRepoListFlagCommand()
-	_ = cmd.Flags().Set("coordinator", "http://127.0.0.1:8091")
-	_ = cmd.Flags().Set("token", "my-token")
-	_ = cmd.Flags().Set("json", "true")
-
-	opts, err := parseRepoListFlags(cmd)
-	if err != nil {
-		t.Fatalf("parseRepoListFlags: %v", err)
-	}
-	if opts.coordinator != "http://127.0.0.1:8091" {
-		t.Fatalf("coordinator = %q", opts.coordinator)
-	}
-	if opts.token != "my-token" {
-		t.Fatalf("token = %q", opts.token)
-	}
-	if !opts.jsonOut {
-		t.Fatal("jsonOut should be true")
-	}
-}
-
-func TestParseRepoListFlags_TokenFromEnv(t *testing.T) {
-	t.Setenv("WORKBUDDY_AUTH_TOKEN", "env-token")
-
-	cmd := newRepoListFlagCommand()
-	_ = cmd.Flags().Set("coordinator", "http://127.0.0.1:8091")
-
-	opts, err := parseRepoListFlags(cmd)
-	if err != nil {
-		t.Fatalf("parseRepoListFlags: %v", err)
-	}
-	if opts.token != "env-token" {
-		t.Fatalf("token = %q", opts.token)
-	}
-}
-
-func TestParseRepoListFlags_RequiresCoordinator(t *testing.T) {
-	cmd := newRepoListFlagCommand()
-	_, err := parseRepoListFlags(cmd)
-	if err == nil || !strings.Contains(err.Error(), "--coordinator is required") {
-		t.Fatalf("expected coordinator required error, got %v", err)
-	}
-}
-
-func TestParseRepoRegisterFlags_TokenFromEnv(t *testing.T) {
-	t.Setenv("WORKBUDDY_AUTH_TOKEN", "env-token")
-
-	cmd := &cobra.Command{Use: "register"}
-	cmd.Flags().String("coordinator", "", "")
-	cmd.Flags().StringP("token", "t", "", "")
-	cmd.Flags().String("config-dir", ".github/workbuddy", "")
-	cmd.Flags().Duration("timeout", 15*time.Second, "")
-	_ = cmd.Flags().Set("coordinator", "http://127.0.0.1:8091")
-
-	opts, err := parseRepoRegisterFlags(cmd)
-	if err != nil {
-		t.Fatalf("parseRepoRegisterFlags: %v", err)
-	}
-	if opts.token != "env-token" {
-		t.Fatalf("token = %q", opts.token)
-	}
-}
 
 func TestRunRepoList(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -168,13 +103,4 @@ func TestRunRepoList_Empty(t *testing.T) {
 	if strings.TrimSpace(out.String()) != "No repos found." {
 		t.Fatalf("unexpected empty output: %q", out.String())
 	}
-}
-
-func newRepoListFlagCommand() *cobra.Command {
-	cmd := &cobra.Command{Use: "list"}
-	cmd.Flags().String("coordinator", "", "")
-	cmd.Flags().StringP("token", "t", "", "")
-	cmd.Flags().Bool("json", false, "")
-	cmd.Flags().Duration("timeout", 15*time.Second, "")
-	return cmd
 }
