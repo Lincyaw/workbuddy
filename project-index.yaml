@@ -1499,6 +1499,7 @@ requirements:
       - "AC-046-8: Records `operator_invoked` events with incident id, exit code, and duration for every attempted invocation"
       - "AC-046-9: Backlog scan logs when pending inbox size exceeds 50 incidents"
       - "AC-046-10: Tests cover fsnotify pickup, serial processing, timeout handling, crash recovery, kill switches, and event recording"
+      - "AC-046-11: Rejects mixed operator-watch inbox/db/config scopes; only all-global (`~/.workbuddy/...`) or all repo-local paths are accepted, with clear mismatch errors and parser tests"
     code:
       - .github/workbuddy/config.yaml
       - cmd/operator_watch.go
