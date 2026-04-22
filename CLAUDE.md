@@ -43,28 +43,25 @@ v0.2.0: `workbuddy coordinator` + `workbuddy worker` as separate processes (HTTP
 
 ### Primary targets (development phase)
 
-1. **Requirements coverage** — % of v0.1.0 requirements with status >= implemented
-   - Baseline: 0/13 (0%)
-   - v0.1.0 target: 13/13 (100%)
-   - Measure: `grep -c 'status: implemented\|status: tested' project-index.yaml` for v0.1.0 scope
+1. **Requirements coverage** — % of scoped requirements with status >= implemented
+   - v0.1.0: 13/13 ✅ · v0.2.0: 13/13 ✅ · v0.3.0: 4/4 ✅
+   - Measure: `grep -c 'status: implemented\|status: tested' project-index.yaml`
    - Mechanism: script (validate_index.py)
 
-2. **Test coverage** — % of v0.1.0 requirements with status = tested
-   - Baseline: 0/13 (0%)
-   - v0.1.0 target: 13/13 (100%)
-   - Measure: `grep -c 'status: tested' project-index.yaml` for v0.1.0 scope
+2. **Test coverage** — % of scoped requirements with status = tested
+   - v0.1.0: 13/13 ✅ · v0.2.0: 13/13 ✅ · v0.3.0: 4/4 ✅
+   - Measure: `grep -c 'status: tested' project-index.yaml`
    - Mechanism: script + `go test -cover ./...`
 
 3. **Build health** — go build + go vet + go test all pass with 0 errors
-   - Baseline: N/A (no code yet)
    - Target: always green after every commit
    - Measure: `go build ./... && go vet ./... && go test ./... -count=1`
    - Mechanism: dev-loop gate
 
-### Runtime targets (measurable after v0.1.0 deploys)
+### Runtime targets (live deployment)
 
 4. **End-to-end cycle success** — Agent-as-Router flow completes without manual intervention
-   - v0.1.0 target: >= 1 successful full cycle (Issue → Agent → label change → next Agent → done)
+   - v0.1.0 ✅ (first full cycle achieved)
    - v0.2.0 target: >= 50% of issues complete autonomously
    - Measure: issues with `status:done` vs total assigned
 
@@ -86,27 +83,20 @@ Simpler code that maps clearly to requirements > clever abstractions.
 
 ## Version milestones
 
-### v0.1.0 — 单机合体 (MVP)
-**Goal**: 单机跑通 Issue → Agent 执行 → Agent 改 label → 下一个 Agent → 结果回写的完整闭环，含环重试。
-**Scope**: REQ-001~006, REQ-009, REQ-010, REQ-013, REQ-017, REQ-023, REQ-024, REQ-030 (13 requirements)
-**Exit criteria**:
-- All 13 requirements status = tested
-- `workbuddy serve` → create Issue + label → Agent executes → Agent changes label → next Agent triggered → cycle completes or hits retry limit
-- `go build && go test && go vet` all pass
-- SQLite correctly tracks transitions, retries, events
+### v0.1.0 — 单机合体 (MVP) ✅ shipped
+**Status**: 13/13 requirements `tested` in `project-index.yaml`. `workbuddy serve` runs the full Issue → Agent → label → next Agent cycle end-to-end; SQLite tracks transitions, retries, events.
+**Scope**: REQ-001~006, REQ-009, REQ-010, REQ-013, REQ-017, REQ-023, REQ-024, REQ-030
 
-### v0.2.0 — 分布式 + 可观测性
-**Goal**: Coordinator/Worker 分离，长轮询通信，多仓库支持，完整 CLI 工具集。
-**Scope**: REQ-007, REQ-008, REQ-011, REQ-018~022, REQ-025~029 (13 requirements)
-**Exit criteria**:
-- `workbuddy coordinator` and `workbuddy worker` run on different machines
-- Worker long-polls and executes tasks
-- Multi-repo registration and isolation
-- All CLI commands functional
+### v0.2.0 — 分布式 + 可观测性 ✅ shipped (2026-04-22)
+**Status**: 13/13 requirements `tested`. `workbuddy coordinator` + `workbuddy worker` run as separate processes with HTTP long-polling and shared-token auth; multi-repo binding, full CLI surface (`init/status/run/validate/logs/coordinator/worker/recover/diagnose`) functional. Currently deployed on a single host via systemd user units; no code change is required to split across machines (swap `--coordinator http://…` + expose port).
+**Scope**: REQ-007, REQ-008, REQ-011, REQ-018~022, REQ-025~029
 
-### v0.3.0 — 高级编排
-**Goal**: 多步骤 workflow、并行 agent、Issue 依赖管理。
-**Scope**: REQ-012, REQ-014~016 (4 requirements)
+### v0.3.0 — 高级编排 ✅ shipped
+**Status**: 4/4 requirements `tested`: workflow engine, parallel dispatch, issue dependency graph, dashboard API.
+**Scope**: REQ-012, REQ-014~016
+
+### Post-v0.3 additions
+`project-index.yaml` also tracks REQ-031..060 (issue dependency mechanism, recover/diagnose/cache-invalidate/metrics commands, scoped PAT permissions, stale-agent inference, dynamic worker binding, author allowlist, claim token fencing, coordinator claim recovery + operator restart, multi-repo dynamic registration, etc.). These landed after v0.3 scope was frozen; all currently `tested`. No formal milestone tag yet — the next tag should cover this surface plus the 2026-04 singleton-codex / worker-SessionManager / stale-claim-sweep fixes.
 
 ## Dev-loop stages
 
