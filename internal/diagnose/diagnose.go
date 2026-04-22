@@ -1,15 +1,18 @@
 package diagnose
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
+	recoverpkg "github.com/Lincyaw/workbuddy/internal/recover"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
@@ -24,7 +27,9 @@ const (
 
 	stuckThreshold       = time.Hour
 	defaultAgentTimeout  = 60 * time.Minute
+	defaultIdleThreshold = 10 * time.Minute
 	defaultOrphanedAfter = 2 * defaultAgentTimeout
+	noChildGracePeriod   = 2 * time.Minute
 )
 
 type Finding struct {
@@ -36,17 +41,70 @@ type Finding struct {
 	Diagnosis    string `json:"diagnosis"`
 	SuggestedFix string `json:"suggested_fix"`
 	AutoFixable  bool   `json:"auto_fixable"`
+	TaskID       string `json:"-"`
+	FixAction    string `json:"-"`
 }
 
 func Analyze(st *store.Store, repo string, now time.Time) ([]Finding, error) {
-	agentTimeouts, err := loadAgentTimeouts("")
+	cfg, err := loadDiagnoseConfig("")
 	if err != nil {
 		return nil, err
 	}
-	return analyzeWithTimeouts(st, repo, now, agentTimeouts)
+	return analyzeWithConfig(st, repo, now, cfg)
 }
 
-func analyzeWithTimeouts(st *store.Store, repo string, now time.Time, agentTimeouts map[string]time.Duration) ([]Finding, error) {
+type diagnoseConfig struct {
+	AgentTimeouts map[string]time.Duration
+	IdleThreshold time.Duration
+}
+
+type taskProcess struct {
+	PID     int
+	Base    string
+	Command string
+	CWD     string
+	Elapsed time.Duration
+}
+
+var listTaskProcesses = func() ([]taskProcess, error) {
+	cmd := exec.CommandContext(context.Background(), "ps", "-eo", "pid=,ppid=,etimes=,args=")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("diagnose: ps: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	parsed, err := recoverpkg.ParseProcessList(string(out))
+	if err != nil {
+		return nil, err
+	}
+	processes := make([]taskProcess, 0, len(parsed))
+	for _, proc := range parsed {
+		if len(proc.Args) == 0 {
+			continue
+		}
+		base := filepath.Base(proc.Args[0])
+		switch base {
+		case "codex", "claude":
+		default:
+			continue
+		}
+		cwd, err := os.Readlink(filepath.Join("/proc", fmt.Sprintf("%d", proc.PID), "cwd"))
+		if err != nil {
+			continue
+		}
+		processes = append(processes, taskProcess{
+			PID:     proc.PID,
+			Base:    base,
+			Command: proc.Command,
+			CWD:     cwd,
+			Elapsed: time.Duration(proc.ElapsedSeconds) * time.Second,
+		})
+	}
+	return processes, nil
+}
+
+var statPath = os.Stat
+
+func analyzeWithConfig(st *store.Store, repo string, now time.Time, cfg diagnoseConfig) ([]Finding, error) {
 	caches, err := listIssueCaches(st, repo)
 	if err != nil {
 		return nil, err
@@ -58,6 +116,10 @@ func analyzeWithTimeouts(st *store.Store, repo string, now time.Time, agentTimeo
 	tasks, err := st.QueryTasks("")
 	if err != nil {
 		return nil, fmt.Errorf("diagnose: query tasks: %w", err)
+	}
+	processes, err := listTaskProcesses()
+	if err != nil {
+		return nil, err
 	}
 
 	latestEvent := make(map[string]time.Time)
@@ -133,7 +195,7 @@ func analyzeWithTimeouts(st *store.Store, repo string, now time.Time, agentTimeo
 		if repo != "" && task.Repo != repo {
 			continue
 		}
-		orphanedThreshold := orphanedThresholdForTask(task, agentTimeouts)
+		orphanedThreshold := orphanedThresholdForTask(task, cfg.AgentTimeouts)
 		if task.Status == store.TaskStatusRunning && now.Sub(task.UpdatedAt) > orphanedThreshold {
 			findings = append(findings, Finding{
 				Kind:         KindOrphanedTask,
@@ -146,29 +208,59 @@ func analyzeWithTimeouts(st *store.Store, repo string, now time.Time, agentTimeo
 			})
 			continue
 		}
+		if task.Status != store.TaskStatusRunning {
+			continue
+		}
+		worktreeRoot, sessionIdle, sessionStale, err := taskSessionSignal(st, task, now, cfg.IdleThreshold)
+		if err != nil {
+			return nil, err
+		}
+		advanced, cur := taskAdvancedPastIssueState(task, issueCurrentState)
+		if sessionStale {
+			findings = append(findings, Finding{
+				Kind:         KindOrphanedTask,
+				Repo:         task.Repo,
+				IssueNum:     task.IssueNum,
+				AgentName:    task.AgentName,
+				Severity:     SeverityError,
+				Diagnosis:    fmt.Sprintf("heartbeat-only zombie (session log static for %s)", sessionIdle.Round(time.Minute)),
+				SuggestedFix: orphanedTaskSuggestedFix(advanced),
+				AutoFixable:  true,
+				TaskID:       task.ID,
+				FixAction:    orphanedTaskFixAction(advanced),
+			})
+			continue
+		}
+		if taskMissingChildProcess(task, worktreeRoot, now, processes) {
+			findings = append(findings, Finding{
+				Kind:         KindOrphanedTask,
+				Repo:         task.Repo,
+				IssueNum:     task.IssueNum,
+				AgentName:    task.AgentName,
+				Severity:     SeverityError,
+				Diagnosis:    "heartbeat-only zombie (no child process)",
+				SuggestedFix: orphanedTaskSuggestedFix(advanced),
+				AutoFixable:  true,
+				TaskID:       task.ID,
+				FixAction:    orphanedTaskFixAction(advanced),
+			})
+			continue
+		}
 		// Heartbeat-only zombie detection: running task whose dispatch state
 		// is no longer the issue's current state. The agent has demonstrably
 		// finished (label already flipped) even though the DB row never
 		// transitioned off 'running'.
-		if task.Status == store.TaskStatusRunning && strings.TrimSpace(task.State) != "" {
-			key := issueKey(task.Repo, task.IssueNum)
-			if cur, ok := issueCurrentState[key]; ok && cur != "" && cur != task.State {
-				findings = append(findings, Finding{
-					Kind:      KindOrphanedTask,
-					Repo:      task.Repo,
-					IssueNum:  task.IssueNum,
-					AgentName: task.AgentName,
-					Severity:  SeverityError,
-					Diagnosis: fmt.Sprintf("task %s (%s) is running for state %q but issue is now in %q — agent already done",
-						task.ID, task.AgentName, task.State, cur),
-					// Not auto-fixable by cache-invalidate (the default diagnose
-					// --fix action): we need to mark the task completed so its
-					// worker slot is released. Leave this to the operator; they
-					// can verify the dev agent truly succeeded (PR created,
-					// label flipped) before unblocking.
-					SuggestedFix: "mark task completed so slot is released; restart worker if heartbeat is stuck",
-				})
-			}
+		if advanced {
+			findings = append(findings, Finding{
+				Kind:      KindOrphanedTask,
+				Repo:      task.Repo,
+				IssueNum:  task.IssueNum,
+				AgentName: task.AgentName,
+				Severity:  SeverityError,
+				Diagnosis: fmt.Sprintf("task %s (%s) is running for state %q but issue is now in %q — agent already done",
+					task.ID, task.AgentName, task.State, cur),
+				SuggestedFix: "mark task completed so slot is released; restart worker if heartbeat is stuck",
+			})
 		}
 	}
 
@@ -204,23 +296,29 @@ func analyzeWithTimeouts(st *store.Store, repo string, now time.Time, agentTimeo
 	return findings, nil
 }
 
-func loadAgentTimeouts(configDir string) (map[string]time.Duration, error) {
+func loadDiagnoseConfig(configDir string) (diagnoseConfig, error) {
 	if strings.TrimSpace(configDir) == "" {
 		resolved, err := findConfigDir()
 		if err != nil {
-			return nil, err
+			return diagnoseConfig{}, err
 		}
 		configDir = resolved
 	}
 	if configDir == "" {
-		return map[string]time.Duration{}, nil
+		return diagnoseConfig{
+			AgentTimeouts: map[string]time.Duration{},
+			IdleThreshold: defaultIdleThreshold,
+		}, nil
 	}
 	cfg, _, err := config.LoadConfig(configDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return map[string]time.Duration{}, nil
+			return diagnoseConfig{
+				AgentTimeouts: map[string]time.Duration{},
+				IdleThreshold: defaultIdleThreshold,
+			}, nil
 		}
-		return nil, fmt.Errorf("diagnose: load config: %w", err)
+		return diagnoseConfig{}, fmt.Errorf("diagnose: load config: %w", err)
 	}
 	timeouts := make(map[string]time.Duration, len(cfg.Agents))
 	for name, agent := range cfg.Agents {
@@ -228,7 +326,14 @@ func loadAgentTimeouts(configDir string) (map[string]time.Duration, error) {
 			timeouts[name] = agent.Timeout
 		}
 	}
-	return timeouts, nil
+	idleThreshold := cfg.Worker.StaleInference.IdleThreshold
+	if idleThreshold <= 0 {
+		idleThreshold = defaultIdleThreshold
+	}
+	return diagnoseConfig{
+		AgentTimeouts: timeouts,
+		IdleThreshold: idleThreshold,
+	}, nil
 }
 
 func findConfigDir() (string, error) {
@@ -260,6 +365,138 @@ func orphanedThresholdForTask(task store.TaskRecord, agentTimeouts map[string]ti
 		timeout = d
 	}
 	return 2 * timeout
+}
+
+func taskSessionSignal(st *store.Store, task store.TaskRecord, now time.Time, idleThreshold time.Duration) (string, time.Duration, bool, error) {
+	record, err := latestSessionForTask(st, task)
+	if err != nil || record == nil {
+		return "", 0, false, err
+	}
+	artifactPath := sessionArtifactPath(*record)
+	if artifactPath == "" {
+		return sessionWorktreeRoot(record.Dir), 0, false, nil
+	}
+	info, err := statPath(artifactPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return sessionWorktreeRoot(record.Dir), 0, false, nil
+		}
+		return "", 0, false, fmt.Errorf("diagnose: stat session artifact for task %s: %w", task.ID, err)
+	}
+	idleFor := now.Sub(info.ModTime().UTC())
+	return sessionWorktreeRoot(record.Dir), idleFor, idleFor > 2*idleThreshold, nil
+}
+
+func latestSessionForTask(st *store.Store, task store.TaskRecord) (*store.SessionRecord, error) {
+	records, err := st.ListSessions(store.SessionFilter{
+		Repo:      task.Repo,
+		IssueNum:  task.IssueNum,
+		AgentName: task.AgentName,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("diagnose: list sessions for task %s: %w", task.ID, err)
+	}
+	for _, record := range records {
+		if record.TaskID == task.ID {
+			rec := record
+			return &rec, nil
+		}
+	}
+	return nil, nil
+}
+
+func sessionArtifactPath(record store.SessionRecord) string {
+	candidates := []string{
+		filepath.Join(record.Dir, "events-v1.jsonl"),
+		filepath.Join(record.Dir, "codex-exec.jsonl"),
+		record.RawPath,
+	}
+	var fallback string
+	for _, candidate := range candidates {
+		if strings.TrimSpace(candidate) == "" {
+			continue
+		}
+		if fallback == "" {
+			fallback = candidate
+		}
+		if _, err := statPath(candidate); err == nil {
+			return candidate
+		}
+	}
+	return fallback
+}
+
+func sessionWorktreeRoot(sessionDir string) string {
+	dir := filepath.Clean(sessionDir)
+	for dir != "" && dir != string(filepath.Separator) && dir != "." {
+		if filepath.Base(dir) == ".workbuddy" {
+			return filepath.Dir(dir)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return ""
+}
+
+func taskMissingChildProcess(task store.TaskRecord, worktreeRoot string, now time.Time, processes []taskProcess) bool {
+	if strings.TrimSpace(worktreeRoot) == "" {
+		return false
+	}
+	startedAt := task.CreatedAt
+	if !task.AckedAt.IsZero() {
+		startedAt = task.AckedAt
+	}
+	if startedAt.IsZero() || now.Sub(startedAt) < noChildGracePeriod {
+		return false
+	}
+	for _, proc := range processes {
+		if !taskProcessMatchesRuntime(task.Runtime, proc.Base) {
+			continue
+		}
+		if isWithinRoot(worktreeRoot, proc.CWD) {
+			return false
+		}
+	}
+	return true
+}
+
+func taskProcessMatchesRuntime(runtimeName, procBase string) bool {
+	switch strings.TrimSpace(runtimeName) {
+	case "claude-code", "claude":
+		return procBase == "claude"
+	case "codex":
+		return procBase == "codex"
+	default:
+		return procBase == "claude" || procBase == "codex"
+	}
+}
+
+func taskAdvancedPastIssueState(task store.TaskRecord, issueCurrentState map[string]string) (bool, string) {
+	if strings.TrimSpace(task.State) == "" {
+		return false, ""
+	}
+	cur, ok := issueCurrentState[issueKey(task.Repo, task.IssueNum)]
+	if !ok || cur == "" || cur == task.State {
+		return false, cur
+	}
+	return true, cur
+}
+
+func orphanedTaskFixAction(advanced bool) string {
+	if advanced {
+		return "mark_completed"
+	}
+	return "mark_failed"
+}
+
+func orphanedTaskSuggestedFix(advanced bool) string {
+	if advanced {
+		return "mark task completed so slot is released; worker heartbeat should stop once it observes terminal status"
+	}
+	return "mark task failed so coordinator can redispatch cleanly; inspect worker/session artifacts for the zombie source"
 }
 
 func listIssueCaches(st *store.Store, repo string) ([]store.IssueCache, error) {
@@ -355,4 +592,15 @@ func currentState(labelsJSON, fallback string) string {
 
 func isIntermediateState(state string) bool {
 	return state == "status:developing" || state == "status:reviewing"
+}
+
+func isWithinRoot(root, path string) bool {
+	if root == "" || path == "" {
+		return false
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
