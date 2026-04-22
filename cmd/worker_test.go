@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -72,6 +73,52 @@ func initGitRepo(t *testing.T) string {
 		t.Fatalf("git commit: %s: %v", out, err)
 	}
 	return dir
+}
+
+func setupWorkerRepoConfig(t *testing.T, repo, command, triggerLabel string) string {
+	t.Helper()
+	repoPath := initGitRepo(t)
+	setupWorkerRepoConfigAtPath(t, repoPath, repo, command, triggerLabel)
+	return repoPath
+}
+
+func setupWorkerRepoConfigAtPath(t *testing.T, repoPath, repo, command, triggerLabel string) {
+	t.Helper()
+	configDir := filepath.Join(repoPath, ".github", "workbuddy")
+	writeFile(t, filepath.Join(configDir, "config.yaml"), fmt.Sprintf("repo: %s\npoll_interval: 1s\nport: 0\n", repo))
+
+	if strings.TrimSpace(triggerLabel) == "" {
+		triggerLabel = "status:developing"
+	}
+	agentMD := fmt.Sprintf(`---
+name: dev-agent
+description: Dev agent
+triggers:
+  - label: %q
+role: dev
+runtime: claude-code
+command: %s
+timeout: 30s
+---
+# Dev Agent
+`, triggerLabel, command)
+	writeFile(t, filepath.Join(configDir, "agents", "dev-agent.md"), agentMD)
+
+	workflowLabel := triggerLabel
+	if triggerLabel == "status:missing" {
+		workflowLabel = "status:developing"
+	}
+	workflowMD := fmt.Sprintf(`---
+name: dev-workflow
+description: Dev workflow
+trigger:
+  issue_label: "workbuddy"
+max_retries: 3
+---
+# Dev Workflow
+
+`+"```yaml\nstates:\n  developing:\n    enter_label: %q\n    agent: dev-agent\n    transitions:\n      - to: done\n        when: 'labeled \"status:done\"'\n  done:\n    enter_label: \"status:done\"\n```\n", workflowLabel)
+	writeFile(t, filepath.Join(configDir, "workflows", "dev-workflow.md"), workflowMD)
 }
 
 func TestWorkerUnregisterCmd(t *testing.T) {
@@ -301,6 +348,110 @@ func TestWorkerPairsWithCoordinatorAndCompletesTask(t *testing.T) {
 
 	if mockRT.CallCount() == 0 {
 		t.Fatal("expected worker runtime to execute task")
+	}
+}
+
+func TestWorkerUsesTaskRepoConfigForMultiRepoBindings(t *testing.T) {
+	setupFakeGHCLI(t)
+
+	repoA := "owner/repo-a"
+	repoB := "owner/repo-b"
+	repoAPath := setupWorkerRepoConfig(t, repoA, `echo repo-a`, "")
+	repoBPath := setupWorkerRepoConfig(t, repoB, `echo repo-b`, "")
+
+	var (
+		registerCalls [][]string
+		pollCount     atomic.Int64
+		gotCommand    atomic.Value
+	)
+	gotCommand.Store("")
+	taskDone := make(chan struct{})
+	var taskDoneOnce sync.Once
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/workers/register":
+			var req workerclient.RegisterRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode register: %v", err)
+			}
+			registerCalls = append(registerCalls, append([]string(nil), req.Repos...))
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tasks/poll":
+			if pollCount.Add(1) == 1 {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"task_id":"task-1","repo":"%s","issue_num":7,"agent_name":"dev-agent","workflow":"dev-workflow"}`, repoB)))
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/heartbeat"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/result"):
+			w.WriteHeader(http.StatusOK)
+			taskDoneOnce.Do(func() { close(taskDone) })
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/release"):
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	reader := &mockGHReader{
+		issues: []poller.Issue{{Number: 7, Body: "body", Labels: []string{"workbuddy", "status:done"}}},
+		labelSnapshots: [][]string{
+			{"workbuddy", "status:done"},
+		},
+	}
+
+	mockRT := &mockRuntime{name: config.RuntimeClaudeCode, resultFn: func(_ context.Context, agent *config.AgentConfig, _ *launcher.TaskContext) (*launcher.Result, error) {
+		if agent != nil {
+			gotCommand.Store(agent.Command)
+		}
+		return &launcher.Result{ExitCode: 0, LastMessage: "done", Meta: map[string]string{}}, nil
+	}}
+	lnch := launcher.NewLauncher()
+	lnch.Register(mockRT, config.RuntimeClaudeCode)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runWorkerWithOpts(&workerOpts{
+			coordinatorURL:    server.URL,
+			token:             "secret-token",
+			runtime:           config.RuntimeClaudeCode,
+			reposCSV:          repoA + "=" + repoAPath + "," + repoB + "=" + repoBPath,
+			configDir:         ".github/workbuddy",
+			workDir:           repoAPath,
+			dbPath:            filepath.Join(t.TempDir(), "worker.db"),
+			sessionsDir:       filepath.Join(t.TempDir(), "sessions"),
+			pollTimeout:       50 * time.Millisecond,
+			heartbeatInterval: 20 * time.Millisecond,
+			shutdownTimeout:   200 * time.Millisecond,
+		}, lnch, reader, ctx)
+	}()
+
+	select {
+	case <-taskDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not complete repo B task")
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("worker: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not exit")
+	}
+
+	if got := gotCommand.Load().(string); got != "echo repo-b" {
+		t.Fatalf("agent command = %q, want repo B command", got)
+	}
+	if len(registerCalls) == 0 || !reflect.DeepEqual(registerCalls[0], []string{repoA, repoB}) {
+		t.Fatalf("register repos = %v, want [%s %s]", registerCalls, repoA, repoB)
 	}
 }
 
