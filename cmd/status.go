@@ -60,6 +60,7 @@ type statusClient struct {
 }
 
 type statusIssue struct {
+	Repo              string     `json:"repo"`
 	IssueNum          int        `json:"issue_num"`
 	CurrentState      string     `json:"current_state"`
 	CycleCount        int        `json:"cycle_count"`
@@ -231,7 +232,7 @@ func parseStatusFlags(cmd *cobra.Command) (*statusOpts, error) {
 		if repos && cmd.Flags().Changed("repo") {
 			return nil, fmt.Errorf("status: --repo is not used with --coordinator --repos")
 		}
-		if (stuck || watch) && repo == "" {
+		if watch && repo == "" {
 			return nil, fmt.Errorf("status: --repo is required")
 		}
 		return &statusOpts{
@@ -702,14 +703,14 @@ func renderRepoStatusTable(w io.Writer, repos []repoStatusResponse) {
 }
 
 func runStatusSummary(ctx context.Context, opts *statusOpts, client *statusClient, stdout io.Writer) error {
-	issueNums, err := client.listIssueNums(ctx, opts.repo)
+	issueRefs, err := client.listIssues(ctx, opts.repo)
 	if err != nil {
 		return err
 	}
 
-	issues := make([]statusIssue, 0, len(issueNums))
-	for _, issueNum := range issueNums {
-		issue, err := client.issueState(ctx, opts.repo, issueNum)
+	issues := make([]statusIssue, 0, len(issueRefs))
+	for _, ref := range issueRefs {
+		issue, err := client.issueState(ctx, ref.Repo, ref.IssueNum)
 		if err != nil {
 			var statusErr *statusHTTPStatusError
 			if errors.As(err, &statusErr) && statusErr.status == http.StatusNotFound {
@@ -721,6 +722,7 @@ func runStatusSummary(ctx context.Context, opts *statusOpts, client *statusClien
 			continue
 		}
 		entry := statusIssue{
+			Repo:              issue.Repo,
 			IssueNum:          issue.IssueNum,
 			CurrentState:      issue.CurrentState,
 			CycleCount:        issue.CycleCount,
@@ -734,7 +736,12 @@ func runStatusSummary(ctx context.Context, opts *statusOpts, client *statusClien
 		issues = append(issues, entry)
 	}
 
-	sort.Slice(issues, func(i, j int) bool { return issues[i].IssueNum < issues[j].IssueNum })
+	sort.Slice(issues, func(i, j int) bool {
+		if issues[i].Repo == issues[j].Repo {
+			return issues[i].IssueNum < issues[j].IssueNum
+		}
+		return issues[i].Repo < issues[j].Repo
+	})
 	resp := statusResponse{Repo: opts.repo, Issues: issues}
 	if opts.jsonOut {
 		enc := json.NewEncoder(stdout)
@@ -839,22 +846,36 @@ func runStatusWatch(ctx context.Context, opts *statusOpts, client *statusClient,
 	}
 }
 
-func (c *statusClient) listIssueNums(ctx context.Context, repo string) ([]int, error) {
+type statusIssueRef struct {
+	Repo     string
+	IssueNum int
+}
+
+func (c *statusClient) listIssues(ctx context.Context, repo string) ([]statusIssueRef, error) {
 	events, err := c.listEvents(ctx, repo, 0, "", nil)
 	if err != nil {
 		return nil, err
 	}
-	seen := make(map[int]struct{})
+	seen := make(map[statusIssueRef]struct{})
 	for _, ev := range events {
-		if ev.IssueNum > 0 {
-			seen[ev.IssueNum] = struct{}{}
+		ref := statusIssueRef{
+			Repo:     strings.TrimSpace(ev.Repo),
+			IssueNum: ev.IssueNum,
+		}
+		if ref.Repo != "" && ref.IssueNum > 0 {
+			seen[ref] = struct{}{}
 		}
 	}
-	out := make([]int, 0, len(seen))
-	for issueNum := range seen {
-		out = append(out, issueNum)
+	out := make([]statusIssueRef, 0, len(seen))
+	for ref := range seen {
+		out = append(out, ref)
 	}
-	sort.Ints(out)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Repo == out[j].Repo {
+			return out[i].IssueNum < out[j].IssueNum
+		}
+		return out[i].Repo < out[j].Repo
+	})
 	return out, nil
 }
 
@@ -1135,7 +1156,11 @@ func renderStatusTable(w io.Writer, resp statusResponse) {
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
 	_, _ = fmt.Fprintf(tw, "REPO\tISSUE\tSTATE\tCYCLES\tDEPENDENCY\tLAST EVENT\tSTUCK\n")
 	if len(resp.Issues) == 0 {
-		_, _ = fmt.Fprintf(tw, "%s\t-\t-\t-\t-\t-\t-\n", resp.Repo)
+		repo := resp.Repo
+		if repo == "" {
+			repo = "-"
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t-\t-\t-\t-\t-\t-\n", repo)
 		_ = tw.Flush()
 		return
 	}
@@ -1147,7 +1172,7 @@ func renderStatusTable(w io.Writer, resp statusResponse) {
 		_, _ = fmt.Fprintf(
 			tw,
 			"%s\t#%d\t%s\t%d\t%s\t%s\t%t\n",
-			resp.Repo,
+			issue.Repo,
 			issue.IssueNum,
 			issue.CurrentState,
 			issue.CycleCount,

@@ -762,6 +762,24 @@ func TestParseStatusFlags_CoordinatorRemoteViews(t *testing.T) {
 			t.Fatalf("expected status/tasks validation, got %v", err)
 		}
 	})
+
+	t.Run("allows remote stuck without repo", func(t *testing.T) {
+		cmd := newStatusFlagCommand()
+		if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
+			t.Fatalf("set coordinator: %v", err)
+		}
+		if err := cmd.Flags().Set("stuck", "true"); err != nil {
+			t.Fatalf("set stuck: %v", err)
+		}
+
+		opts, err := parseStatusFlags(cmd)
+		if err != nil {
+			t.Fatalf("parseStatusFlags: %v", err)
+		}
+		if !opts.stuck || opts.repo != "" {
+			t.Fatalf("unexpected opts: %+v", opts)
+		}
+	})
 }
 
 func TestRunStatusWithOpts_RemoteCoordinatorViews(t *testing.T) {
@@ -773,14 +791,21 @@ func TestRunStatusWithOpts_RemoteCoordinatorViews(t *testing.T) {
 			_, _ = fmt.Fprint(w, `{"repo":"owner/repo","issue_num":1,"issue_state":"open","current_state":"status:developing","cycle_count":2,"dependency_verdict":"blocked","last_event_at":"2026-04-22T09:00:00Z","stuck":true}`)
 		case "/issues/owner/repo/2/state":
 			_, _ = fmt.Fprint(w, `{"repo":"owner/repo","issue_num":2,"issue_state":"open","current_state":"status:reviewing","cycle_count":1,"dependency_verdict":"ready","last_event_at":"2026-04-22T11:55:00Z","stuck":false}`)
+		case "/issues/other/repo/3/state":
+			_, _ = fmt.Fprint(w, `{"repo":"other/repo","issue_num":3,"issue_state":"open","current_state":"status:developing","cycle_count":4,"dependency_verdict":"override","last_event_at":"2026-04-22T08:00:00Z","stuck":true}`)
 		case "/events":
 			q := r.URL.Query()
 			switch q.Get("type") {
 			case "":
-				if got := q.Get("repo"); got != "owner/repo" {
-					t.Fatalf("summary repo filter = %q", got)
+				if got := q.Get("repo"); got == "owner/repo" {
+					_, _ = fmt.Fprint(w, `{"events":[{"id":1,"ts":"2026-04-22T09:00:00Z","type":"transition","repo":"owner/repo","issue_num":1},{"id":2,"ts":"2026-04-22T11:55:00Z","type":"transition","repo":"owner/repo","issue_num":2}]}`)
+					return
 				}
-				_, _ = fmt.Fprint(w, `{"events":[{"id":1,"ts":"2026-04-22T09:00:00Z","type":"transition","repo":"owner/repo","issue_num":1},{"id":2,"ts":"2026-04-22T11:55:00Z","type":"transition","repo":"owner/repo","issue_num":2}]}`)
+				if got := q.Get("repo"); got == "" {
+					_, _ = fmt.Fprint(w, `{"events":[{"id":1,"ts":"2026-04-22T09:00:00Z","type":"transition","repo":"owner/repo","issue_num":1},{"id":2,"ts":"2026-04-22T11:55:00Z","type":"transition","repo":"owner/repo","issue_num":2},{"id":5,"ts":"2026-04-22T08:00:00Z","type":"transition","repo":"other/repo","issue_num":3}]}`)
+					return
+				}
+				t.Fatalf("summary repo filter = %q", q.Get("repo"))
 			case "dispatch":
 				if got := q.Get("since"); got != "2026-04-22T11:30:00Z" {
 					t.Fatalf("events since = %q", got)
@@ -838,6 +863,29 @@ func TestRunStatusWithOpts_RemoteCoordinatorViews(t *testing.T) {
 		got := out.String()
 		if !strings.Contains(got, "#1") || strings.Contains(got, "#2") {
 			t.Fatalf("unexpected remote stuck output:\n%s", got)
+		}
+	})
+
+	t.Run("stuck across repos", func(t *testing.T) {
+		var out bytes.Buffer
+		err := runStatusWithOpts(context.Background(), &statusOpts{
+			stuck:           true,
+			baseURL:         srv.URL,
+			coordinator:     srv.URL,
+			now:             func() time.Time { return now },
+			remoteWatchPoll: 5 * time.Millisecond,
+		}, client, &out)
+		if err != nil {
+			t.Fatalf("runStatusWithOpts: %v", err)
+		}
+		got := out.String()
+		for _, want := range []string{"owner/repo", "other/repo", "#1", "#3"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("remote stuck-all output missing %q:\n%s", want, got)
+			}
+		}
+		if strings.Contains(got, "#2") {
+			t.Fatalf("unexpected non-stuck issue in output:\n%s", got)
 		}
 	})
 
