@@ -63,5 +63,5 @@ func runValidateWithOpts(_ context.Context, opts *validateOpts, stdout, stderr i
 	for _, diag := range diags {
 		_, _ = fmt.Fprintln(stderr, diag.String())
 	}
-	return &cliExitError{code: 1}
+	return &cliExitError{code: exitCodeFailure}
 }

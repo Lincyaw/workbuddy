@@ -655,7 +655,7 @@ func runStatusCoordinator(ctx context.Context, opts *statusOpts, stdout io.Write
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return &cliExitError{msg: fmt.Sprintf("status: coordinator returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body))), code: 1}
+		return &cliExitError{msg: fmt.Sprintf("status: coordinator returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body))), code: exitCodeFailure}
 	}
 	if opts.jsonOut {
 		_, err = io.Copy(stdout, resp.Body)
@@ -828,7 +828,7 @@ func runStatusWatch(ctx context.Context, opts *statusOpts, client *statusClient,
 	if err != nil {
 		if watchCtx.Err() == context.DeadlineExceeded {
 			_, _ = fmt.Fprintln(stdout, "No task completed within timeout")
-			return &cliExitError{code: 3}
+			return &cliExitError{code: ExitCodeNotFound}
 		}
 		return err
 	}
@@ -838,11 +838,11 @@ func runStatusWatch(ctx context.Context, opts *statusOpts, client *statusClient,
 	case store.TaskStatusCompleted:
 		return nil
 	case store.TaskStatusFailed:
-		return &cliExitError{code: 1}
+		return &cliExitError{code: exitCodeFailure}
 	case store.TaskStatusTimeout:
-		return &cliExitError{code: 2}
+		return &cliExitError{code: exitCodeFailure}
 	default:
-		return &cliExitError{msg: fmt.Sprintf("status: unknown task status %q", event.Status), code: 1}
+		return &cliExitError{msg: fmt.Sprintf("status: unknown task status %q", event.Status), code: exitCodeFailure}
 	}
 }
 
@@ -966,7 +966,7 @@ func (c *statusClient) watchTask(ctx context.Context, opts *statusOpts) (*taskno
 	c.applyAuth(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, &cliExitError{msg: "Cannot connect to workbuddy server", code: 1}
+		return nil, &cliExitError{msg: "Cannot connect to workbuddy server", code: exitCodeFailure}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
@@ -978,7 +978,7 @@ func (c *statusClient) watchTask(ctx context.Context, opts *statusOpts) (*taskno
 		if resp.StatusCode >= 500 {
 			msg = "Cannot connect to workbuddy server"
 		}
-		return nil, &cliExitError{msg: msg, code: 1}
+		return nil, &cliExitError{msg: msg, code: exitCodeFailure}
 	}
 
 	scanner := bufio.NewScanner(resp.Body)

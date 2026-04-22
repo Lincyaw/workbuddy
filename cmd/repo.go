@@ -135,7 +135,7 @@ func runRepoList(ctx context.Context, opts *repoListOpts, stdout io.Writer) erro
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return &cliExitError{msg: fmt.Sprintf("repo list: coordinator returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body))), code: 1}
+		return &cliExitError{msg: fmt.Sprintf("repo list: coordinator returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body))), code: exitCodeFailure}
 	}
 	if opts.jsonOut {
 		_, err = io.Copy(stdout, resp.Body)
