@@ -119,13 +119,18 @@ func (b *Backend) NewSession(ctx context.Context, spec agent.Spec) (agent.Sessio
 	defer cancel()
 	if err := sess.startThread(startCtx); err != nil {
 		sess.finishWithDuration("failed", 1, err, 0)
+		sess.closeEvents()
 		return nil, err
 	}
 	if err := sess.startTurn(startCtx); err != nil {
 		// Thread was started but we failed to kick off a turn: archive it
 		// best-effort so the server can reclaim resources.
 		sess.archiveBestEffort()
+		if sess.threadID != "" {
+			sess.server.unregisterSession(sess.threadID)
+		}
 		sess.finishWithDuration("failed", 1, err, 0)
+		sess.closeEvents()
 		return nil, err
 	}
 	return sess, nil
@@ -148,12 +153,12 @@ func (b *Backend) Shutdown(ctx context.Context) error {
 type session struct {
 	server *appServer
 
-	mu      sync.Mutex
-	events  chan agent.Event
-	done    chan struct{}
-	start   time.Time
-	spec    agent.Spec
-	closed  bool
+	mu     sync.Mutex
+	events chan agent.Event
+	done   chan struct{}
+	start  time.Time
+	spec   agent.Spec
+	closed bool
 
 	threadID string
 	turnID   string
@@ -167,6 +172,7 @@ type session struct {
 	sessionRef   agent.SessionRef
 
 	finishOnce sync.Once
+	closeOnce  sync.Once
 
 	// droppedEvents counts notifications that emit() had to drop because the
 	// events channel was full. Incremented atomically by the readLoop caller.
@@ -234,6 +240,7 @@ func (s *session) Close() error {
 	if s.threadID != "" {
 		s.server.unregisterSession(s.threadID)
 	}
+	s.closeEvents()
 	return nil
 }
 
@@ -470,6 +477,7 @@ func (s *session) observeNotification(method string, params json.RawMessage) {
 			if s.threadID != "" {
 				s.server.unregisterSession(s.threadID)
 			}
+			s.closeEvents()
 		}()
 	case "error":
 		var payload struct {
@@ -546,9 +554,11 @@ func (s *session) finishWithDuration(_ string, exitCode int, err error, duration
 		s.closed = true
 		s.mu.Unlock()
 		close(s.done)
-		// Close the events channel so consumers see EOF exactly once, and
-		// so recorder goroutines can terminate. Safe because emit() guards
-		// against sending on a closed channel via the done select.
+	})
+}
+
+func (s *session) closeEvents() {
+	s.closeOnce.Do(func() {
 		close(s.events)
 	})
 }
@@ -563,4 +573,3 @@ func exitCodeForStatus(status string) int {
 		return 1
 	}
 }
-
