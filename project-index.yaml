@@ -1058,7 +1058,8 @@ requirements:
   - id: REQ-029
     title: Worker Authentication
     description: >
-      Authenticate Workers connecting to Coordinator via shared secret.
+      Authenticate Workers connecting to Coordinator via shared secret or
+      coordinator-issued per-worker bearer tokens.
       Prevent unauthorized Workers from registering and receiving tasks.
       v0.1.0 内嵌 Worker 免认证；v0.2.0 HTTP 通信必须认证。
     priority: P1
@@ -1074,6 +1075,7 @@ requirements:
     code:
       - cmd/coordinator.go
       - cmd/worker.go
+      - internal/app/coordinator.go
       - internal/coordinator/http/handler.go
       - internal/store/store.go
       - internal/store/worker_tokens.go
@@ -1081,6 +1083,7 @@ requirements:
     tests:
       - cmd/coordinator_test.go
       - cmd/worker_test.go
+      - internal/app/coordinator_test.go
       - internal/coordinator/http/handler_test.go
       - internal/store/store_test.go
     deps: [REQ-025]

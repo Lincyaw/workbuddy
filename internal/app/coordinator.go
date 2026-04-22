@@ -122,12 +122,27 @@ func (s *FullCoordinatorServer) WrapAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		const prefix = "Bearer "
 		authz := r.Header.Get("Authorization")
-		if !strings.HasPrefix(authz, prefix) || strings.TrimSpace(strings.TrimPrefix(authz, prefix)) != s.AuthToken {
+		if !strings.HasPrefix(authz, prefix) || !s.isAuthorizedBearer(strings.TrimSpace(strings.TrimPrefix(authz, prefix))) {
 			CoordWriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *FullCoordinatorServer) isAuthorizedBearer(token string) bool {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return false
+	}
+	if s.AuthToken != "" && token == s.AuthToken {
+		return true
+	}
+	if s.Store == nil {
+		return false
+	}
+	_, err := s.Store.AuthenticateWorkerToken(token)
+	return err == nil
 }
 
 // HandleHealth serves GET /health.
