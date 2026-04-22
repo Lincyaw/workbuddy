@@ -381,11 +381,6 @@ func handleServerRequestWithWriter(req ServerRequest, w rpcReplier) {
 }
 
 func (s *session) handleNotification(notif Notification, raw json.RawMessage) {
-	// emit is drop-on-full (see emit doc); it cannot block the readLoop. So
-	// it is safe to emit the mapped events first to preserve their visibility
-	// to the consumer, then run observeNotification which may close s.done
-	// (e.g. turn/completed). Even if the events channel is saturated, emit
-	// returns immediately and observeNotification still runs.
 	for _, evt := range mapNotification(notif.Method, notif.Params, raw) {
 		s.emit(evt)
 	}
@@ -491,17 +486,11 @@ func (s *session) observeNotification(method string, params json.RawMessage) {
 	}
 }
 
-// emit delivers an event to consumers of Events(). MUST NOT BLOCK the caller —
-// emit is called inline from the shared app-server readLoop, so any block here
-// halts notification routing for every other session on the same app-server
-// process (and eventually halts codex itself when its stdout pipe fills up).
-//
-// If the consumer drains s.events slower than codex produces notifications,
-// events are dropped rather than back-pressured. The dropped count is exposed
-// via droppedEvents so operators can see the gap in the recorded artifact.
-//
-// Safe to call concurrently with finishWithDuration (which closes s.events) —
-// a send-on-closed-channel panic is recovered and ignored.
+// emit must not block: it is called inline from the shared app-server
+// readLoop, and blocking here halts notification routing for every other
+// session on the same process. Drops are counted in droppedEvents. Safe to
+// race with finishWithDuration's close — a send-on-closed-channel panic is
+// recovered.
 func (s *session) emit(evt agent.Event) {
 	defer func() { _ = recover() }()
 	select {

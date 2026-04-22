@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -388,14 +389,9 @@ func TestCodexSessionInterfaceCompliance(t *testing.T) {
 	var _ agent.Session = (*session)(nil)
 }
 
-// TestCodexSessionDoesNotDeadlockOnSlowConsumer reproduces the scenario where
-// codex emits more notifications than the events-channel buffer can hold while
-// the consumer is not actively draining. Under the old blocking-emit the
-// inline readLoop wedged on a full channel and turn/completed was never
-// processed; Wait hung forever, the session kept a per-issue execution lock,
-// and the whole pipeline stalled silently. The fix (drop-on-full emit) lets
-// observeNotification run for turn/completed even when events are being
-// dropped, so Wait returns cleanly and droppedEvents records the gap.
+// Pins the drop-on-full emit: a flood that overruns the events buffer
+// without a consumer must still let Wait return, and must actually record
+// drops — otherwise the test would silently stop exercising the regression.
 func TestCodexSessionDoesNotDeadlockOnSlowConsumer(t *testing.T) {
 	bin, logPath := writeFakeCodexBinary(t, "flood")
 	t.Setenv("FAKE_CODEX_LOG", logPath)
@@ -421,15 +417,16 @@ func TestCodexSessionDoesNotDeadlockOnSlowConsumer(t *testing.T) {
 	}
 	defer func() { _ = sess.Close() }()
 
-	// Deliberately do NOT drain sess.Events(). The 256-buffered channel will
-	// fill up quickly under the flood; with the old blocking emit this test
-	// would deadlock waiting for turn/completed.
 	result, err := sess.Wait(ctx)
 	if err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
 	if result.ExitCode != 0 {
 		t.Fatalf("ExitCode = %d, want 0", result.ExitCode)
+	}
+	dropped := atomic.LoadInt64(&sess.(*session).droppedEvents)
+	if dropped == 0 {
+		t.Fatalf("expected events to be dropped under flood; got 0 — flood may no longer overflow the buffer")
 	}
 }
 
@@ -480,6 +477,8 @@ for line in sys.stdin:
         if mode == "stderr":
             print("rpc warning on stderr", file=sys.stderr, flush=True)
         if mode == "flood":
+            # 500 pairs = 1000 notifications, comfortably above the 256
+            # events-channel buffer so drops are guaranteed.
             for i in range(500):
                 print(json.dumps({"method": "item/started", "params": {"threadId": tid, "turnId": "turn-test", "item": {"type": "agentMessage", "id": "msg-" + str(i), "text": "", "phase": "final_answer"}}}), flush=True)
                 print(json.dumps({"method": "item/completed", "params": {"threadId": tid, "turnId": "turn-test", "item": {"type": "agentMessage", "id": "msg-" + str(i), "text": "chunk", "phase": "final_answer"}}}), flush=True)
