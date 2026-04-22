@@ -245,7 +245,10 @@ func runDeployInstallCmd(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	return runDeployInstallWithOpts(cmd.Context(), opts, cmd.OutOrStdout())
+	if err := requireWritable(cmd, "deploy install"); err != nil {
+		return err
+	}
+	return runDeployInstallWithOpts(cmd.Context(), opts, cmdStdout(cmd))
 }
 
 func runDeployListCmd(cmd *cobra.Command, _ []string) error {
@@ -261,7 +264,10 @@ func runDeployRedeployCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runDeployRedeployWithOpts(cmd.Context(), opts, cmd.OutOrStdout())
+	if err := requireWritable(cmd, "deploy redeploy"); err != nil {
+		return err
+	}
+	return runDeployRedeployWithOpts(cmd.Context(), opts, cmdStdout(cmd))
 }
 
 func runDeployStopCmd(cmd *cobra.Command, _ []string) error {
@@ -269,7 +275,10 @@ func runDeployStopCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runDeployStopWithOpts(cmd.Context(), opts, cmd.OutOrStdout())
+	if err := requireWritable(cmd, "deploy stop"); err != nil {
+		return err
+	}
+	return runDeployStopWithOpts(cmd.Context(), opts, cmdStdout(cmd))
 }
 
 func runDeployStartCmd(cmd *cobra.Command, _ []string) error {
@@ -277,7 +286,10 @@ func runDeployStartCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runDeployStartWithOpts(cmd.Context(), opts, cmd.OutOrStdout())
+	if err := requireWritable(cmd, "deploy start"); err != nil {
+		return err
+	}
+	return runDeployStartWithOpts(cmd.Context(), opts, cmdStdout(cmd))
 }
 
 func runDeployDeleteCmd(cmd *cobra.Command, _ []string) error {
@@ -285,12 +297,18 @@ func runDeployDeleteCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runDeployDeleteWithOpts(cmd.Context(), opts, cmd.OutOrStdout())
+	if err := requireWritable(cmd, "deploy delete"); err != nil {
+		return err
+	}
+	return runDeployDeleteWithOpts(cmd.Context(), opts, cmdStdout(cmd))
 }
 
 func runDeployUpgradeCmd(cmd *cobra.Command, _ []string) error {
 	lookup, err := parseDeployLookupFlags(cmd)
 	if err != nil {
+		return err
+	}
+	if err := requireWritable(cmd, "deploy upgrade"); err != nil {
 		return err
 	}
 	version, _ := cmd.Flags().GetString("version")
@@ -299,7 +317,7 @@ func runDeployUpgradeCmd(cmd *cobra.Command, _ []string) error {
 		deployLookupOpts: *lookup,
 		version:          strings.TrimSpace(version),
 		repository:       strings.TrimSpace(repository),
-	}, cmd.OutOrStdout())
+	}, cmdStdout(cmd))
 }
 
 func parseDeployListFlags(cmd *cobra.Command) (*deployListOpts, error) {

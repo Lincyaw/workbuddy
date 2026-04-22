@@ -50,8 +50,19 @@ func runRecoverCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	if !opts.dryRun {
+		if err := requireWritable(cmd, "recover"); err != nil {
+			return err
+		}
+	}
+	if isNonInteractive(cmd) && opts.pruneRemoteBranches && !opts.force && !opts.dryRun {
+		return &cliExitError{
+			msg:  "recover: --non-interactive cannot prompt for remote branch deletion; re-run with --force or --dry-run",
+			code: exitCodeFailure,
+		}
+	}
 	var actions []recovery.Action
-	runStdout := cmd.OutOrStdout()
+	runStdout := cmdStdout(cmd)
 	if isJSONOutput(opts.format) {
 		runStdout = &bytes.Buffer{}
 	}
@@ -62,10 +73,10 @@ func runRecoverCmd(cmd *cobra.Command, _ []string) error {
 		PruneRemoteBranches: opts.pruneRemoteBranches,
 		Force:               opts.force,
 		DryRun:              opts.dryRun,
-		Interactive:         commandIsInteractiveTerminal(),
+		Interactive:         !isNonInteractive(cmd) && commandIsInteractiveTerminal(),
 		Stdin:               cmd.InOrStdin(),
 		Stdout:              runStdout,
-		Stderr:              cmd.ErrOrStderr(),
+		Stderr:              cmdStderr(cmd),
 		RecordAction: func(action recovery.Action) {
 			actions = append(actions, action)
 		},
@@ -73,7 +84,7 @@ func runRecoverCmd(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if isJSONOutput(opts.format) {
-		return writeJSON(cmd.OutOrStdout(), recoverResult{
+		return writeJSON(cmdStdout(cmd), recoverResult{
 			KillZombies:         opts.killZombies,
 			ResetDB:             opts.resetDB,
 			PruneWorktrees:      opts.pruneWorktrees,

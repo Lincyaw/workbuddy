@@ -10,6 +10,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	flagNoColor        = "no-color"
+	flagNonInteractive = "non-interactive"
+	flagReadOnly       = "read-only"
+)
+
 var rootCmd = &cobra.Command{
 	Use:           "workbuddy",
 	Short:         "GitHub Issue-driven agent orchestration platform",
@@ -17,6 +23,12 @@ var rootCmd = &cobra.Command{
 	SilenceErrors: true,
 	SilenceUsage:  true,
 	RunE:          runRootCmd,
+}
+
+func init() {
+	rootCmd.PersistentFlags().Bool(flagNoColor, false, "Strip ANSI color codes from all command output")
+	rootCmd.PersistentFlags().Bool(flagNonInteractive, false, "Fail instead of prompting for interactive confirmation")
+	rootCmd.PersistentFlags().Bool(flagReadOnly, false, "Reject commands that would write or mutate state")
 }
 
 // Execute runs the root command.

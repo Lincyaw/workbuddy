@@ -169,6 +169,9 @@ func runCoordinatorCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	if err := requireWritable(cmd, "coordinator"); err != nil {
+		return err
+	}
 	return runCoordinatorWithOpts(opts, nil, cmd.Context())
 }
 
@@ -230,6 +233,9 @@ func runCoordinatorTokenCreateCmd(cmd *cobra.Command, _ []string) error {
 			hostname = "unknown"
 		}
 	}
+	if err := requireWritable(cmd, "coordinator token create"); err != nil {
+		return err
+	}
 
 	st, err := store.NewStore(dbPath)
 	if err != nil {
@@ -242,7 +248,7 @@ func runCoordinatorTokenCreateCmd(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "worker_id\t%s\nkid\t%s\ntoken\t%s\n", issued.WorkerID, issued.KID, issued.Token)
+	fmt.Fprintf(cmdStdout(cmd), "worker_id\t%s\nkid\t%s\ntoken\t%s\n", issued.WorkerID, issued.KID, issued.Token)
 	return nil
 }
 
@@ -261,7 +267,7 @@ func runCoordinatorTokenListCmd(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 8, 2, ' ', 0)
+	tw := tabwriter.NewWriter(cmdStdout(cmd), 0, 8, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "WORKER ID\tREPO\tKID\tSTATUS\tREVOKED")
 	for _, rec := range records {
 		revoked := "active"
@@ -277,6 +283,9 @@ func runCoordinatorTokenRevokeCmd(cmd *cobra.Command, _ []string) error {
 	dbPath, _ := cmd.Flags().GetString("db")
 	workerID, _ := cmd.Flags().GetString("worker-id")
 	kid, _ := cmd.Flags().GetString("kid")
+	if err := requireWritable(cmd, "coordinator token revoke"); err != nil {
+		return err
+	}
 
 	st, err := store.NewStore(dbPath)
 	if err != nil {
@@ -287,7 +296,7 @@ func runCoordinatorTokenRevokeCmd(cmd *cobra.Command, _ []string) error {
 	if err := st.RevokeWorkerToken(workerID, kid); err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "revoked worker_id=%s kid=%s\n", workerID, kid)
+	fmt.Fprintf(cmdStdout(cmd), "revoked worker_id=%s kid=%s\n", workerID, kid)
 	return nil
 }
 

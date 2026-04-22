@@ -72,7 +72,10 @@ func runCacheInvalidateCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runCacheInvalidateWithOpts(cmd.Context(), opts, cmd.OutOrStdout())
+	if err := requireWritable(cmd, "cache-invalidate"); err != nil {
+		return err
+	}
+	return runCacheInvalidateWithOpts(cmd.Context(), opts, cmdStdout(cmd))
 }
 
 func runCacheInvalidateAliasCmd(cmd *cobra.Command, args []string) error {

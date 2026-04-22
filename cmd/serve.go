@@ -108,6 +108,9 @@ func runServe(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	if err := requireWritable(cmd, "serve"); err != nil {
+		return err
+	}
 	return runServeWithOpts(opts, nil, nil)
 }
 

@@ -44,7 +44,7 @@ func runVersionCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runVersionWithOpts(opts, cmd.OutOrStdout())
+	return runVersionWithOpts(opts, cmdStdout(cmd))
 }
 
 func parseVersionFlags(cmd *cobra.Command) (*versionOpts, error) {

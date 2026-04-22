@@ -56,7 +56,10 @@ func runRuntimeCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runRuntimeWithOpts(cmd.Context(), opts, launcher.NewLauncher(), os.Stdout, os.Stderr)
+	if err := requireWritable(cmd, "run"); err != nil {
+		return err
+	}
+	return runRuntimeWithOpts(cmd.Context(), opts, launcher.NewLauncher(), cmdStdout(cmd), cmdStderr(cmd))
 }
 
 func parseRunFlags(cmd *cobra.Command) (*runOpts, error) {

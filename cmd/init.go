@@ -64,7 +64,10 @@ func runInitCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runInitWithOpts(cmd.Context(), ".", opts, cmd.OutOrStdout())
+	if err := requireWritable(cmd, "init"); err != nil {
+		return err
+	}
+	return runInitWithOpts(cmd.Context(), ".", opts, cmdStdout(cmd))
 }
 
 func parseInitFlags(cmd *cobra.Command) (*initOpts, error) {

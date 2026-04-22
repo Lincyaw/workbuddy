@@ -71,7 +71,10 @@ func runRestartIssueCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runRestartIssueWithOpts(cmd.Context(), opts, cmd.OutOrStdout())
+	if err := requireWritable(cmd, "admin restart-issue"); err != nil {
+		return err
+	}
+	return runRestartIssueWithOpts(cmd.Context(), opts, cmdStdout(cmd))
 }
 
 func runAdminRestartIssueCmd(cmd *cobra.Command, args []string) error {

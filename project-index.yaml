@@ -2297,3 +2297,46 @@ requirements:
     tests:
       - cmd/introspection_test.go
     deps: [REQ-017, REQ-027, REQ-028]
+
+  - id: REQ-070
+    title: CLI global non-interactive and safe-execution flags
+    description: >
+      Add root-level CLI contract flags for automation-safe execution:
+      `--no-color` strips ANSI escape sequences from command output,
+      `--non-interactive` fails fast instead of waiting on TTY-gated prompts,
+      and `--read-only` rejects commands that would mutate local or remote
+      state. Declare the flags once on `cmd/root.go` so Cobra inherits them to
+      all subcommands.
+    priority: P2
+    version: v0.4.0
+    status: tested
+    acceptance_criteria:
+      - "AC-070-1: `workbuddy --no-color ...` strips ANSI color codes from subcommand stdout/stderr"
+      - "AC-070-2: `workbuddy --non-interactive recover --prune-remote-branches` fails fast instead of prompting"
+      - "AC-070-3: `workbuddy --read-only repo register ...` exits with an error before any side effect occurs"
+      - "AC-070-4: The three flags are declared on `cmd/root.go` and inherited by subcommands via Cobra persistent flags"
+      - "AC-070-5: Unit tests cover no-color, non-interactive, and read-only behavior"
+      - "AC-070-6: go build ./... && go test ./... -count=1 pass"
+    code:
+      - cmd/root.go
+      - cmd/cli_contract.go
+      - cmd/recover.go
+      - cmd/repo.go
+      - cmd/deploy.go
+      - cmd/init.go
+      - cmd/run.go
+      - cmd/serve.go
+      - cmd/coordinator.go
+      - cmd/worker.go
+      - cmd/worker_repos.go
+      - cmd/cache_invalidate.go
+      - cmd/admin_restart_issue.go
+      - cmd/operator_watch.go
+      - cmd/status.go
+      - cmd/validate.go
+      - cmd/diagnose.go
+      - cmd/logs.go
+      - cmd/version.go
+    tests:
+      - cmd/root_contract_test.go
+    deps: [REQ-032, REQ-042, REQ-060]

@@ -52,7 +52,7 @@ func runValidateCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runValidateWithOpts(cmd.Context(), opts, cmd.OutOrStdout(), cmd.ErrOrStderr())
+	return runValidateWithOpts(cmd.Context(), opts, cmdStdout(cmd), cmdStderr(cmd))
 }
 
 func parseValidateFlags(cmd *cobra.Command) (*validateOpts, error) {
