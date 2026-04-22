@@ -1301,9 +1301,11 @@ requirements:
       - "AC-037-2: 检测 stuck issue：中间状态（status:developing/reviewing）+ 无 active task（pending/running）+ 最后事件距今 > 1 hour"
       - "AC-037-3: 检测 missed redispatch：issue_dependency_state.verdict=ready + 无 active task + issue 仍在中间状态"
       - "AC-037-4: 检测 orphaned task：task_queue.status=running + updated_at 距今 > 2x agent timeout（默认 60min）"
+      - "AC-037-4a: 额外检测 heartbeat-only zombie：session artifact（events-v1.jsonl / codex-exec.jsonl）mtime 距今 > 2x worker.stale_inference.idle_threshold，诊断文案区分 `session log static`"
+      - "AC-037-4b: 额外检测 heartbeat-only zombie：task 已运行超过 grace period 且 worktree 下无匹配的 codex/claude 子进程，诊断文案区分 `no child process`"
       - "AC-037-5: 检测 repeated failure：同一 repo+issue_num+agent_name 在 task_queue 中连续 failed >= 3 条"
       - "AC-037-6: 每条诊断输出 ISSUE, SEVERITY(warn/error), DIAGNOSIS, SUGGESTED_FIX"
-      - "AC-037-7: --fix 自动执行 cache-invalidate 类修复（stuck 和 missed redispatch），记录 event；对 repeated failure 只报告不修复"
+      - "AC-037-7: --fix 自动执行 cache-invalidate 类修复（stuck 和 missed redispatch），并可将 heartbeat-only zombie 任务标记为 completed/failed，记录 event；对 repeated failure 只报告不修复"
       - "AC-037-8: --fix 执行的每个修复操作在 events 表记录 type=auto_fix 事件"
       - "AC-037-9: 直连 SQLite，不依赖 serve 运行"
       - "AC-037-10: 无诊断问题时输出 Pipeline healthy: no issues detected 并 exit 0；有问题时 exit 1（warn 也算）"
@@ -1320,6 +1322,7 @@ requirements:
     tests:
       - cmd/cache_invalidate_test.go
       - cmd/diagnose_test.go
+      - internal/diagnose/diagnose_test.go
     deps: [REQ-034, REQ-024]
 
   - id: REQ-042

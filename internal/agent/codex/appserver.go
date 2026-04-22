@@ -28,24 +28,24 @@ import (
 // multiplexes JSON-RPC traffic for many concurrent sessions (threads). It is
 // safe for concurrent use from multiple goroutines.
 type appServer struct {
-	cfg    Config
+	cfg             Config
 	dangerousBypass bool
 
-	mu        sync.Mutex
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	stdout    io.ReadCloser
-	stderr    io.ReadCloser
-	writeMu   sync.Mutex
-	pending   map[string]chan Response
-	threads   map[string]*session
-	nextID    atomic.Int64
-	started   bool
-	closed    bool
-	initErr   error
-	procDone  chan error
-	doneOnce  sync.Once
-	deadErr   error
+	mu       sync.Mutex
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	stdout   io.ReadCloser
+	stderr   io.ReadCloser
+	writeMu  sync.Mutex
+	pending  map[string]chan Response
+	threads  map[string]*session
+	nextID   atomic.Int64
+	started  bool
+	closed   bool
+	initErr  error
+	procDone chan error
+	doneOnce sync.Once
+	deadErr  error
 }
 
 // newAppServer creates an idle manager. The child process is started on the
@@ -417,6 +417,7 @@ func (a *appServer) onProcessExit(waitErr error) {
 		// Finish every active session.
 		for _, s := range threads {
 			s.finishWithDuration("failed", 1, fmt.Errorf("codex: shared app-server exited: %w", waitErr), 0)
+			s.closeEvents()
 		}
 		select {
 		case a.procDone <- waitErr:

@@ -107,7 +107,7 @@ func runDiagnoseWithOpts(_ context.Context, opts *diagnoseOpts, stdout io.Writer
 		for _, finding := range findings {
 			result := diagnoseResult{Finding: finding}
 			if finding.AutoFixable {
-				if _, err := runCacheInvalidateStore(st, finding.Repo, []int{finding.IssueNum}, "cli:diagnose --fix"); err != nil {
+				if err := applyDiagnoseFindingFix(st, finding); err != nil {
 					return fmt.Errorf("diagnose: apply fix for %s#%d: %w", finding.Repo, finding.IssueNum, err)
 				}
 				payload := fmt.Sprintf(`{"repo":%q,"issue_num":%d,"kind":%q}`, finding.Repo, finding.IssueNum, finding.Kind)
@@ -145,6 +145,20 @@ func runDiagnoseWithOpts(_ context.Context, opts *diagnoseOpts, stdout io.Writer
 		return &cliExitError{code: 1}
 	}
 	return nil
+}
+
+func applyDiagnoseFindingFix(st *store.Store, finding diag.Finding) error {
+	switch finding.FixAction {
+	case "", "cache_invalidate":
+		_, err := runCacheInvalidateStore(st, finding.Repo, []int{finding.IssueNum}, "cli:diagnose --fix")
+		return err
+	case "mark_completed":
+		return st.FinalizeTaskForOperator(finding.TaskID, store.TaskStatusCompleted, 0)
+	case "mark_failed":
+		return st.FinalizeTaskForOperator(finding.TaskID, store.TaskStatusFailed, 1)
+	default:
+		return fmt.Errorf("unsupported fix action %q", finding.FixAction)
+	}
 }
 
 func renderDiagnoseTable(w io.Writer, rows []diagnoseResult) {

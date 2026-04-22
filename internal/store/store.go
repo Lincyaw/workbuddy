@@ -641,6 +641,46 @@ func (s *Store) TransitionTaskStatusIfRunning(taskID, status string) error {
 	return nil
 }
 
+// FinalizeTaskForOperator moves a pending/running task to a terminal status
+// without requiring live worker ownership. It is intended for explicit
+// operator/admin flows such as diagnose --fix.
+func (s *Store) FinalizeTaskForOperator(taskID, status string, exitCode int) error {
+	switch status {
+	case TaskStatusCompleted, TaskStatusFailed, TaskStatusTimeout:
+	default:
+		return fmt.Errorf("store: finalize task: unsupported terminal status %q", status)
+	}
+	res, err := s.db.Exec(
+		`UPDATE task_queue
+		 SET status = ?, exit_code = ?, completed_at = CURRENT_TIMESTAMP,
+		     heartbeat_at = CURRENT_TIMESTAMP, lease_expires_at = NULL, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ?
+		   AND status IN (?, ?)`,
+		status, exitCode, taskID, TaskStatusPending, TaskStatusRunning,
+	)
+	if err != nil {
+		return fmt.Errorf("store: finalize task: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		var existing string
+		row := s.db.QueryRow(`SELECT status FROM task_queue WHERE id = ?`, taskID)
+		if scanErr := row.Scan(&existing); scanErr != nil {
+			if errors.Is(scanErr, sql.ErrNoRows) {
+				return fmt.Errorf("store: finalize task: task %q not found", taskID)
+			}
+			return fmt.Errorf("store: finalize task: inspect existing: %w", scanErr)
+		}
+		switch existing {
+		case TaskStatusCompleted, TaskStatusFailed, TaskStatusTimeout:
+			return ErrTaskStatusTerminal
+		default:
+			return fmt.Errorf("store: finalize task: task %q has unexpected status %q", taskID, existing)
+		}
+	}
+	return nil
+}
+
 // ClaimTask atomically assigns a pending task to a worker and marks it running.
 // It returns true when the claim succeeded, or false when the task was no longer pending.
 func (s *Store) ClaimTask(taskID, workerID string) (bool, error) {
