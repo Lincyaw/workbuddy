@@ -18,8 +18,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/agent"
@@ -165,6 +167,10 @@ type session struct {
 	sessionRef   agent.SessionRef
 
 	finishOnce sync.Once
+
+	// droppedEvents counts notifications that emit() had to drop because the
+	// events channel was full. Incremented atomically by the readLoop caller.
+	droppedEvents int64
 }
 
 func (s *session) ID() string {
@@ -375,6 +381,11 @@ func handleServerRequestWithWriter(req ServerRequest, w rpcReplier) {
 }
 
 func (s *session) handleNotification(notif Notification, raw json.RawMessage) {
+	// emit is drop-on-full (see emit doc); it cannot block the readLoop. So
+	// it is safe to emit the mapped events first to preserve their visibility
+	// to the consumer, then run observeNotification which may close s.done
+	// (e.g. turn/completed). Even if the events channel is saturated, emit
+	// returns immediately and observeNotification still runs.
 	for _, evt := range mapNotification(notif.Method, notif.Params, raw) {
 		s.emit(evt)
 	}
@@ -480,19 +491,23 @@ func (s *session) observeNotification(method string, params json.RawMessage) {
 	}
 }
 
-// emit delivers an event to consumers of Events(). Must not block forever.
-// Safe to call concurrently with finishWithDuration (which closes the
-// channel) — a send-on-closed-channel panic is recovered and ignored.
+// emit delivers an event to consumers of Events(). MUST NOT BLOCK the caller —
+// emit is called inline from the shared app-server readLoop, so any block here
+// halts notification routing for every other session on the same app-server
+// process (and eventually halts codex itself when its stdout pipe fills up).
+//
+// If the consumer drains s.events slower than codex produces notifications,
+// events are dropped rather than back-pressured. The dropped count is exposed
+// via droppedEvents so operators can see the gap in the recorded artifact.
+//
+// Safe to call concurrently with finishWithDuration (which closes s.events) —
+// a send-on-closed-channel panic is recovered and ignored.
 func (s *session) emit(evt agent.Event) {
-	select {
-	case <-s.done:
-		return
-	default:
-	}
 	defer func() { _ = recover() }()
 	select {
 	case s.events <- evt:
-	case <-s.done:
+	default:
+		atomic.AddInt64(&s.droppedEvents, 1)
 	}
 }
 
@@ -528,6 +543,9 @@ func (s *session) finish(status string, err error) {
 
 func (s *session) finishWithDuration(_ string, exitCode int, err error, durationMS int64) {
 	s.finishOnce.Do(func() {
+		if dropped := atomic.LoadInt64(&s.droppedEvents); dropped > 0 {
+			log.Printf("codex: session %s: %d events dropped due to slow consumer", s.threadID, dropped)
+		}
 		s.mu.Lock()
 		s.exitCode = exitCode
 		s.waitErr = err

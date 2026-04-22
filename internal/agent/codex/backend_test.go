@@ -388,6 +388,51 @@ func TestCodexSessionInterfaceCompliance(t *testing.T) {
 	var _ agent.Session = (*session)(nil)
 }
 
+// TestCodexSessionDoesNotDeadlockOnSlowConsumer reproduces the scenario where
+// codex emits more notifications than the events-channel buffer can hold while
+// the consumer is not actively draining. Under the old blocking-emit the
+// inline readLoop wedged on a full channel and turn/completed was never
+// processed; Wait hung forever, the session kept a per-issue execution lock,
+// and the whole pipeline stalled silently. The fix (drop-on-full emit) lets
+// observeNotification run for turn/completed even when events are being
+// dropped, so Wait returns cleanly and droppedEvents records the gap.
+func TestCodexSessionDoesNotDeadlockOnSlowConsumer(t *testing.T) {
+	bin, logPath := writeFakeCodexBinary(t, "flood")
+	t.Setenv("FAKE_CODEX_LOG", logPath)
+	backend, err := NewBackend(Config{Binary: bin})
+	if err != nil {
+		t.Fatalf("NewBackend: %v", err)
+	}
+	defer func() { _ = backend.Shutdown(context.Background()) }()
+
+	spec := agent.Spec{
+		Workdir:  t.TempDir(),
+		Prompt:   "flood me",
+		Sandbox:  "workspace-write",
+		Approval: "never",
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+
+	sess, err := backend.NewSession(ctx, spec)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+
+	// Deliberately do NOT drain sess.Events(). The 256-buffered channel will
+	// fill up quickly under the flood; with the old blocking emit this test
+	// would deadlock waiting for turn/completed.
+	result, err := sess.Wait(ctx)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", result.ExitCode)
+	}
+}
+
 func writeFakeCodexBinary(t *testing.T, mode string) (string, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -434,6 +479,11 @@ for line in sys.stdin:
         print(json.dumps({"method": "turn/started", "params": {"threadId": tid, "turn": {"id": "turn-test", "items": [], "status": "inProgress"}}}), flush=True)
         if mode == "stderr":
             print("rpc warning on stderr", file=sys.stderr, flush=True)
+        if mode == "flood":
+            for i in range(500):
+                print(json.dumps({"method": "item/started", "params": {"threadId": tid, "turnId": "turn-test", "item": {"type": "agentMessage", "id": "msg-" + str(i), "text": "", "phase": "final_answer"}}}), flush=True)
+                print(json.dumps({"method": "item/completed", "params": {"threadId": tid, "turnId": "turn-test", "item": {"type": "agentMessage", "id": "msg-" + str(i), "text": "chunk", "phase": "final_answer"}}}), flush=True)
+            print(json.dumps({"method": "turn/completed", "params": {"threadId": tid, "turn": {"id": "turn-test", "items": [], "status": "completed", "durationMs": 5}}}), flush=True)
         if mode == "complete" or mode == "stderr":
             print(json.dumps({"method": "item/started", "params": {"threadId": tid, "turnId": "turn-test", "item": {"type": "agentMessage", "id": "msg-1", "text": "", "phase": "final_answer"}}}), flush=True)
             print(json.dumps({"method": "item/agentMessage/delta", "params": {"threadId": tid, "turnId": "turn-test", "itemId": "msg-1", "delta": "OK"}}), flush=True)
