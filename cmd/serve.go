@@ -172,7 +172,7 @@ func runServeWithOutput(opts *serveOpts, ghReader poller.GHReader, launcherOverr
 		log.Printf("[serve] warning: recovery failed: %v", err)
 	}
 
-	evlog := eventlog.NewEventLogger(st)
+	evlog := eventlog.NewEventLoggerWithWriter(st, log.Writer())
 	reg := registry.NewRegistry(st, cfg.Global.PollInterval)
 
 	repoDir, err := os.Getwd()

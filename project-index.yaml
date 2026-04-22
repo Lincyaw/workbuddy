@@ -2337,6 +2337,8 @@ requirements:
       - cmd/diagnose.go
       - cmd/logs.go
       - cmd/version.go
+      - internal/eventlog/eventlog.go
+      - internal/operatorwatch/watch.go
     tests:
       - cmd/root_contract_test.go
     deps: [REQ-032, REQ-042, REQ-060]

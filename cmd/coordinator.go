@@ -351,7 +351,7 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	}
 	app.LogSecurityPosture(secRuntime.Current())
 
-	evlog := eventlog.NewEventLogger(st)
+	evlog := eventlog.NewEventLoggerWithWriter(st, log.Writer())
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
 	rep.SetEventRecorder(evlog)
 	reg := registry.NewRegistry(st, pollInterval)

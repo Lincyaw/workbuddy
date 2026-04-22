@@ -4,6 +4,7 @@ package eventlog
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -118,7 +119,8 @@ type Health struct {
 // while tracking failures on a per-instance health counter so operators can
 // detect degraded observability via Health().
 type EventLogger struct {
-	store *store.Store
+	store     *store.Store
+	errWriter io.Writer
 
 	writeFailures atomic.Int64
 
@@ -129,7 +131,16 @@ type EventLogger struct {
 
 // NewEventLogger creates an EventLogger backed by the given Store.
 func NewEventLogger(s *store.Store) *EventLogger {
-	return &EventLogger{store: s}
+	return NewEventLoggerWithWriter(s, os.Stderr)
+}
+
+// NewEventLoggerWithWriter creates an EventLogger backed by the given Store
+// and writes best-effort error diagnostics to errWriter.
+func NewEventLoggerWithWriter(s *store.Store, errWriter io.Writer) *EventLogger {
+	if errWriter == nil {
+		errWriter = io.Discard
+	}
+	return &EventLogger{store: s, errWriter: errWriter}
 }
 
 // Log records an event. The payload is marshalled to JSON automatically.
@@ -140,7 +151,7 @@ func (l *EventLogger) Log(eventType, repo string, issueNum int, payload interfac
 	if payload != nil {
 		data, err := json.Marshal(payload)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "eventlog: marshal payload: %v\n", err)
+			fmt.Fprintf(l.errWriter, "eventlog: marshal payload: %v\n", err)
 			payloadStr = fmt.Sprintf(`{"marshal_error":%q}`, err.Error())
 		} else {
 			payloadStr = string(data)
@@ -154,7 +165,7 @@ func (l *EventLogger) Log(eventType, repo string, issueNum int, payload interfac
 		Payload:  payloadStr,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "eventlog: write failed: %v\n", err)
+		fmt.Fprintf(l.errWriter, "eventlog: write failed: %v\n", err)
 		l.recordFailure(err)
 	}
 }

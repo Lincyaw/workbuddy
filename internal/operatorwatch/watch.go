@@ -101,7 +101,7 @@ func New(opts Options) (*Service, error) {
 		opts.LoadConfig = config.LoadConfig
 	}
 	if opts.Runner == nil {
-		opts.Runner = commandRunner{}
+		opts.Runner = commandRunner{stderr: opts.Stderr}
 	}
 
 	inboxDir, err := expandPath(opts.InboxDir)
@@ -434,20 +434,24 @@ func incidentFilename(incidentID string) string {
 	return incidentID + ".json"
 }
 
-type commandRunner struct{}
+type commandRunner struct {
+	stderr io.Writer
+}
 
-func (commandRunner) Run(ctx context.Context, claudePath, incidentPath string) (int, error) {
+func (r commandRunner) Run(ctx context.Context, claudePath, incidentPath string) (int, error) {
 	bin := strings.TrimSpace(claudePath)
 	if bin == "" {
 		bin = "claude"
 	}
+	if r.stderr == nil {
+		r.stderr = os.Stderr
+	}
 
 	prompt := fmt.Sprintf("/workbuddy:handle-incident %s", incidentPath)
 	cmd := exec.CommandContext(ctx, bin, "-p", "--plugin", "workbuddy", prompt)
-	output, err := cmd.CombinedOutput()
-	if len(output) > 0 {
-		fmt.Fprint(os.Stderr, string(output))
-	}
+	cmd.Stdout = r.stderr
+	cmd.Stderr = r.stderr
+	err := cmd.Run()
 	if err == nil {
 		if cmd.ProcessState == nil {
 			return 0, nil

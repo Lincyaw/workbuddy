@@ -92,7 +92,7 @@ func runOperatorWatchCmd(cmd *cobra.Command, _ []string) error {
 		DryRun:     opts.dryRun,
 		Stdout:     cmdStdout(cmd),
 		Stderr:     cmdStderr(cmd),
-		Logger:     eventlog.NewEventLogger(st),
+		Logger:     eventlog.NewEventLoggerWithWriter(st, cmdStderr(cmd)),
 	})
 }
 

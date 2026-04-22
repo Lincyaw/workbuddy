@@ -2,14 +2,21 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
+	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/store"
+	"github.com/spf13/cobra"
 )
 
 func TestRootFlagNoColor_StripsANSIFromSubcommandOutput(t *testing.T) {
@@ -57,6 +64,68 @@ func TestRootFlagNoColor_StripsANSIFromServeBanner(t *testing.T) {
 	}
 }
 
+func TestRootFlagNoColor_StripsANSIFromLogOutput(t *testing.T) {
+	resetRootContractFlagsForTest(t)
+
+	logCmd := &cobra.Command{
+		Use: "test-log",
+		Run: func(_ *cobra.Command, _ []string) {
+			log.Print("\x1b[31mlog-ansi\x1b[0m")
+		},
+	}
+	rootCmd.AddCommand(logCmd)
+	t.Cleanup(func() {
+		rootCmd.RemoveCommand(logCmd)
+		log.SetOutput(os.Stderr)
+	})
+
+	_, stderr, err := executeRootContractTest(t, "--no-color", "test-log")
+	if err != nil {
+		t.Fatalf("execute root: %v", err)
+	}
+	if strings.Contains(stderr, "\x1b[") {
+		t.Fatalf("expected ANSI escapes to be stripped from log output, got %q", stderr)
+	}
+	if !strings.Contains(stderr, "log-ansi") {
+		t.Fatalf("expected stripped log output, got %q", stderr)
+	}
+}
+
+func TestRootFlagNoColor_StripsANSIFromEventlogStderr(t *testing.T) {
+	resetRootContractFlagsForTest(t)
+
+	eventlogCmd := &cobra.Command{
+		Use: "test-eventlog",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			dbPath := filepath.Join(t.TempDir(), "workbuddy.db")
+			st, err := store.NewStore(dbPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = st.Close() }()
+
+			eventlog.NewEventLoggerWithWriter(st, cmdStderr(cmd)).Log(eventlog.TypeError, "owner/repo", 1, ansiMarshalPayload{})
+			return nil
+		},
+	}
+	rootCmd.AddCommand(eventlogCmd)
+	t.Cleanup(func() {
+		rootCmd.RemoveCommand(eventlogCmd)
+		log.SetOutput(os.Stderr)
+	})
+
+	_, stderr, err := executeRootContractTest(t, "--no-color", "test-eventlog")
+	if err != nil {
+		t.Fatalf("execute root: %v", err)
+	}
+	if strings.Contains(stderr, "\x1b[") {
+		t.Fatalf("expected ANSI escapes to be stripped from eventlog stderr, got %q", stderr)
+	}
+	if !strings.Contains(stderr, "eventlog: marshal payload: json: error calling MarshalJSON") || !strings.Contains(stderr, "boom") {
+		t.Fatalf("expected stripped eventlog stderr, got %q", stderr)
+	}
+}
+
 func TestRootFlagNonInteractive_RecoverFailsFast(t *testing.T) {
 	_, _, err := executeRootContractTest(t, "--non-interactive", "recover", "--prune-remote-branches")
 	if err == nil {
@@ -86,6 +155,9 @@ func executeRootContractTest(t *testing.T, args ...string) (string, string, erro
 	t.Helper()
 
 	resetRootContractFlagsForTest(t)
+	t.Cleanup(func() {
+		log.SetOutput(os.Stderr)
+	})
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -96,6 +168,12 @@ func executeRootContractTest(t *testing.T, args ...string) (string, string, erro
 
 	err := rootCmd.Execute()
 	return stdout.String(), stderr.String(), err
+}
+
+type ansiMarshalPayload struct{}
+
+func (ansiMarshalPayload) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("\x1b[31mboom\x1b[0m")
 }
 
 func resetRootContractFlagsForTest(t *testing.T) {
