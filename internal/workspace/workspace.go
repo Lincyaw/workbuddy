@@ -17,14 +17,32 @@ import (
 const worktreeDir = ".workbuddy/worktrees"
 
 // Manager handles creation and cleanup of git worktrees for agent tasks.
+//
+// When multiple agents share the same per-issue worktree (e.g. dev-agent
+// finishes and review-agent starts while dev-agent's cleanup is still
+// pending), the manager tracks an active-session reference count per
+// worktree path. Remove only performs the actual git removal when the last
+// active reference releases; earlier Remove calls decrement the count and
+// return nil so a late defer from a finished agent cannot pull the
+// filesystem out from under a still-running one.
 type Manager struct {
 	baseDir string // root of the main repo (where .git lives)
 	mu      sync.Mutex
+	refs    map[string]int // absolute worktree path -> active session count
 }
 
 // NewManager creates a Manager rooted at the given repo directory.
 func NewManager(baseDir string) *Manager {
-	return &Manager{baseDir: baseDir}
+	return &Manager{baseDir: baseDir, refs: make(map[string]int)}
+}
+
+// refKey returns the canonical refcount key for a worktree path.
+func refKey(wtPath string) string {
+	abs, err := filepath.Abs(wtPath)
+	if err != nil {
+		return wtPath
+	}
+	return abs
 }
 
 // Create creates a new git worktree for the given task and returns its path.
@@ -68,7 +86,9 @@ func (m *Manager) Create(issueNum int, taskID string) (string, error) {
 		if err := m.syncExistingWorktree(wtPath, branchName); err != nil {
 			return "", err
 		}
-		log.Printf("[workspace] reused worktree %s (branch %s) for issue #%d", wtPath, branchName, issueNum)
+		m.refs[refKey(wtPath)]++
+		log.Printf("[workspace] reused worktree %s (branch %s) for issue #%d (active=%d)",
+			wtPath, branchName, issueNum, m.refs[refKey(wtPath)])
 		return wtPath, nil
 	}
 
@@ -98,6 +118,7 @@ func (m *Manager) Create(issueNum int, taskID string) (string, error) {
 		log.Printf("[workspace] created worktree %s (branch %s from %s) for issue #%d",
 			wtPath, branchName, baseRef, issueNum)
 	}
+	m.refs[refKey(wtPath)]++
 	return wtPath, nil
 }
 
@@ -147,13 +168,38 @@ func (m *Manager) gitIsClean(wtPath string) bool {
 	return strings.TrimSpace(string(out)) == ""
 }
 
-// Remove cleans up a worktree and its associated branch.
-// Best-effort: if worktree removal fails but prune succeeds, no error is returned.
-// Returns a combined error only when cleanup truly fails (both remove+prune fail,
-// or branch deletion fails).
+// Remove releases one active reference to the worktree and, when the last
+// reference is released, performs the actual git worktree removal and branch
+// deletion.
+//
+// Sharing: the same per-issue worktree is reused across a dev-agent → review-agent
+// handoff. Each Create/Remove pair is a reference, not necessarily a full
+// lifecycle; the underlying worktree must survive until every active agent
+// has released its reference. A Remove on a path whose refcount is > 1
+// decrements the count and returns nil (no-op) to preserve the filesystem for
+// the still-running sessions.
+//
+// A Remove on a path with no tracked refcount (e.g. recovery paths, Prune,
+// callers from before this change) proceeds with the actual removal, matching
+// prior behaviour.
+//
+// Best-effort on the actual removal: if worktree removal fails but prune
+// succeeds, no error is returned. Returns a combined error only when cleanup
+// truly fails (both remove+prune fail, or branch deletion fails).
 func (m *Manager) Remove(wtPath string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	key := refKey(wtPath)
+	if count, tracked := m.refs[key]; tracked {
+		if count > 1 {
+			m.refs[key] = count - 1
+			log.Printf("[workspace] retaining worktree %s (still in use by %d session(s))",
+				wtPath, count-1)
+			return nil
+		}
+		delete(m.refs, key)
+	}
 
 	var errs []error
 
