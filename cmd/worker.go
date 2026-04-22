@@ -239,6 +239,13 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	}
 	defer func() { _ = localStore.Close() }()
 
+	// Wire the session manager so the runtime registry creates a ManagedSession
+	// per task and populates taskCtx.SessionHandle(). Without this, the bridge
+	// pump races a non-existent session stream reader and can wedge on a full
+	// events channel, holding the per-issue execution lock until stale-inference
+	// tears the agent down at 30m.
+	lnch.SetSessionManager(runtimepkg.NewSessionManager(opts.sessionsDir, localStore))
+
 	client := workerclient.New(opts.coordinatorURL, opts.token, nil)
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
 	recorder := workersession.NewRecorder(localStore, opts.sessionsDir)
