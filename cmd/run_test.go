@@ -73,6 +73,21 @@ func TestRunRuntimeWithOpts_FailsOnNonZeroExit(t *testing.T) {
 	}
 }
 
+func TestResolveRunPromptMissingFileShowsSuggestedFix(t *testing.T) {
+	missingPath := filepath.Join(t.TempDir(), "missing-prompt.txt")
+
+	_, err := resolveRunPrompt(&runOpts{promptFile: missingPath})
+	if err == nil {
+		t.Fatal("expected missing prompt file to fail")
+	}
+	if got, want := err.Error(), `run: prompt file "`+missingPath+`" was not found. Create the file or pass the prompt directly with --prompt.`; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+	if strings.Contains(err.Error(), "no such file or directory") {
+		t.Fatalf("error leaked raw syscall text: %v", err)
+	}
+}
+
 func TestRunRuntime_CodexPromptE2E(t *testing.T) {
 	if os.Getenv("CODEX_E2E") != "1" {
 		t.Skip("set CODEX_E2E=1 to run codex CLI review e2e")

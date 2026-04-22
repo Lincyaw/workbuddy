@@ -244,6 +244,22 @@ func TestWorkerMgmtServerRejectsInvalidBinding(t *testing.T) {
 	}
 }
 
+func TestWorkerMgmtClientFromControlDirMissingFileShowsSuggestedFix(t *testing.T) {
+	controlDir := t.TempDir()
+
+	_, err := workerMgmtClientFromControlDir(controlDir)
+	if err == nil {
+		t.Fatal("expected missing worker control file to fail")
+	}
+	addrPath := workerAddrFile(controlDir)
+	if got, want := err.Error(), `worker repos: worker control file "`+addrPath+`" was not found. Start `+"`workbuddy worker`"+` in this repo before managing repo bindings.`; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+	if strings.Contains(err.Error(), "no such file or directory") {
+		t.Fatalf("error leaked raw syscall text: %v", err)
+	}
+}
+
 func TestWorkerMgmtClientTimesOutWithReadableError(t *testing.T) {
 	client := newWorkerMgmtClient("http://127.0.0.1:1")
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
