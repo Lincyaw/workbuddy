@@ -8,9 +8,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
 )
 
 func TestRunRepoList(t *testing.T) {
@@ -102,5 +106,32 @@ func TestRunRepoList_Empty(t *testing.T) {
 	}
 	if strings.TrimSpace(out.String()) != "No repos found." {
 		t.Fatalf("unexpected empty output: %q", out.String())
+	}
+}
+
+func TestParseRepoListFlags_TokenFile(t *testing.T) {
+	tokenPath := filepath.Join(t.TempDir(), "token.txt")
+	if err := os.WriteFile(tokenPath, []byte("file-token\n"), 0o644); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+
+	cmd := &cobra.Command{Use: "list"}
+	cmd.Flags().String("coordinator", "", "")
+	addCoordinatorAuthFlags(cmd.Flags(), "t", "Bearer token for coordinator auth")
+	cmd.Flags().Bool("json", false, "")
+	cmd.Flags().Duration("timeout", 15*time.Second, "")
+	if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
+		t.Fatalf("set coordinator: %v", err)
+	}
+	if err := cmd.Flags().Set("token-file", tokenPath); err != nil {
+		t.Fatalf("set token-file: %v", err)
+	}
+
+	opts, err := parseRepoListFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseRepoListFlags: %v", err)
+	}
+	if got, want := opts.token, "file-token"; got != want {
+		t.Fatalf("token = %q, want %q", got, want)
 	}
 }

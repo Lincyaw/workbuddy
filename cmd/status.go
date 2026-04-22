@@ -144,7 +144,7 @@ func init() {
 	statusCmd.Flags().Int("issue", 0, "Issue number filter for --watch")
 	statusCmd.Flags().Duration("timeout", defaultWatchTimeout, "Maximum time to wait for --watch")
 	statusCmd.Flags().String("coordinator", "", "Coordinator base URL for remote status queries")
-	statusCmd.Flags().StringP("token", "t", "", "Bearer token for coordinator auth (defaults to WORKBUDDY_AUTH_TOKEN)")
+	addCoordinatorAuthFlags(statusCmd.Flags(), "t", "Bearer token for coordinator auth")
 	statusCmd.Flags().Bool("repos", false, "List registered repos from coordinator (requires --coordinator)")
 	rootCmd.AddCommand(statusCmd)
 }
@@ -179,18 +179,17 @@ func parseStatusFlags(cmd *cobra.Command) (*statusOpts, error) {
 	issue, _ := cmd.Flags().GetInt("issue")
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 	coordinator, _ := cmd.Flags().GetString("coordinator")
-	token, _ := cmd.Flags().GetString("token")
 	repos, _ := cmd.Flags().GetBool("repos")
+	token, err := resolveCoordinatorAuthToken(cmd, "status")
+	if err != nil {
+		return nil, err
+	}
 
 	coordinator = strings.TrimSpace(coordinator)
-	token = strings.TrimSpace(token)
 	repo = strings.TrimSpace(repo)
 	taskStatus = strings.TrimSpace(taskStatus)
 	eventType = strings.TrimSpace(eventType)
 	since = strings.TrimSpace(since)
-	if token == "" {
-		token = strings.TrimSpace(os.Getenv("WORKBUDDY_AUTH_TOKEN"))
-	}
 
 	selected := 0
 	for _, enabled := range []bool{stuck, tasks, events, watch} {

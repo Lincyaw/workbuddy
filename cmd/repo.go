@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -64,13 +63,13 @@ var repoListCmd = &cobra.Command{
 
 func init() {
 	repoRegisterCmd.Flags().String("coordinator", "", "Coordinator base URL")
-	repoRegisterCmd.Flags().StringP("token", "t", "", "Bearer token for coordinator auth (defaults to WORKBUDDY_AUTH_TOKEN)")
+	addCoordinatorAuthFlags(repoRegisterCmd.Flags(), "t", "Bearer token for coordinator auth")
 	repoRegisterCmd.Flags().String("config-dir", ".github/workbuddy", "Workbuddy config directory")
 	repoRegisterCmd.Flags().Duration("timeout", 15*time.Second, "HTTP timeout")
 	repoCmd.AddCommand(repoRegisterCmd)
 
 	repoListCmd.Flags().String("coordinator", "", "Coordinator base URL")
-	repoListCmd.Flags().StringP("token", "t", "", "Bearer token for coordinator auth (defaults to WORKBUDDY_AUTH_TOKEN)")
+	addCoordinatorAuthFlags(repoListCmd.Flags(), "t", "Bearer token for coordinator auth")
 	repoListCmd.Flags().Bool("json", false, "Emit machine-readable JSON")
 	repoListCmd.Flags().Duration("timeout", 15*time.Second, "HTTP timeout")
 	repoCmd.AddCommand(repoListCmd)
@@ -101,12 +100,11 @@ func runRepoListCmd(cmd *cobra.Command, _ []string) error {
 
 func parseRepoListFlags(cmd *cobra.Command) (*repoListOpts, error) {
 	coordinatorURL, _ := cmd.Flags().GetString("coordinator")
-	token, _ := cmd.Flags().GetString("token")
 	jsonOut, _ := cmd.Flags().GetBool("json")
 	timeout, _ := cmd.Flags().GetDuration("timeout")
-	token = strings.TrimSpace(token)
-	if token == "" {
-		token = strings.TrimSpace(os.Getenv("WORKBUDDY_AUTH_TOKEN"))
+	token, err := resolveCoordinatorAuthToken(cmd, "repo list")
+	if err != nil {
+		return nil, err
 	}
 	if strings.TrimSpace(coordinatorURL) == "" {
 		return nil, fmt.Errorf("repo list: --coordinator is required")
@@ -154,12 +152,11 @@ func runRepoList(ctx context.Context, opts *repoListOpts, stdout io.Writer) erro
 
 func parseRepoRegisterFlags(cmd *cobra.Command) (*repoRegisterOpts, error) {
 	coordinatorURL, _ := cmd.Flags().GetString("coordinator")
-	token, _ := cmd.Flags().GetString("token")
 	configDir, _ := cmd.Flags().GetString("config-dir")
 	timeout, _ := cmd.Flags().GetDuration("timeout")
-	token = strings.TrimSpace(token)
-	if token == "" {
-		token = strings.TrimSpace(os.Getenv("WORKBUDDY_AUTH_TOKEN"))
+	token, err := resolveCoordinatorAuthToken(cmd, "repo register")
+	if err != nil {
+		return nil, err
 	}
 	if strings.TrimSpace(coordinatorURL) == "" {
 		return nil, fmt.Errorf("repo register: --coordinator is required")

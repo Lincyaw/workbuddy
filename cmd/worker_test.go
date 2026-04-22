@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -119,6 +120,21 @@ max_retries: 3
 
 `+"```yaml\nstates:\n  developing:\n    enter_label: %q\n    agent: dev-agent\n    transitions:\n      - to: done\n        when: 'labeled \"status:done\"'\n  done:\n    enter_label: \"status:done\"\n```\n", workflowLabel)
 	writeFile(t, filepath.Join(configDir, "workflows", "dev-workflow.md"), workflowMD)
+}
+
+func newWorkerFlagCommand() *cobra.Command {
+	cmd := &cobra.Command{Use: "worker"}
+	cmd.Flags().String("coordinator", "", "")
+	addCoordinatorAuthFlags(cmd.Flags(), "", "Bearer token for Coordinator authentication")
+	cmd.Flags().String("role", "", "")
+	cmd.Flags().String("runtime", config.RuntimeClaudeCode, "")
+	cmd.Flags().String("config-dir", ".github/workbuddy", "")
+	cmd.Flags().String("repo", "", "")
+	cmd.Flags().String("repos", "", "")
+	cmd.Flags().String("id", "", "")
+	cmd.Flags().String("mgmt-addr", defaultWorkerMgmtAddr, "")
+	cmd.Flags().Int("concurrency", 1, "")
+	return cmd
 }
 
 func TestWorkerUnregisterCmd(t *testing.T) {
@@ -241,6 +257,52 @@ func TestWorkerRejectsInvalidToken(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("coordinator did not exit")
+	}
+}
+
+func TestParseWorkerFlags_TokenFile(t *testing.T) {
+	tokenPath := filepath.Join(t.TempDir(), "token.txt")
+	if err := os.WriteFile(tokenPath, []byte("file-token\n"), 0o644); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+
+	cmd := newWorkerFlagCommand()
+	if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
+		t.Fatalf("set coordinator: %v", err)
+	}
+	if err := cmd.Flags().Set("token-file", tokenPath); err != nil {
+		t.Fatalf("set token-file: %v", err)
+	}
+
+	opts, err := parseWorkerFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseWorkerFlags: %v", err)
+	}
+	if got, want := opts.token, "file-token"; got != want {
+		t.Fatalf("token = %q, want %q", got, want)
+	}
+}
+
+func TestParseWorkerFlags_DeprecatedTokenWarns(t *testing.T) {
+	cmd := newWorkerFlagCommand()
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
+		t.Fatalf("set coordinator: %v", err)
+	}
+	if err := cmd.Flags().Set("token", "legacy-token"); err != nil {
+		t.Fatalf("set token: %v", err)
+	}
+
+	opts, err := parseWorkerFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseWorkerFlags: %v", err)
+	}
+	if got, want := opts.token, "legacy-token"; got != want {
+		t.Fatalf("token = %q, want %q", got, want)
+	}
+	if got := stderr.String(); !strings.Contains(got, "--token is deprecated") {
+		t.Fatalf("stderr = %q, want deprecation warning", got)
 	}
 }
 
