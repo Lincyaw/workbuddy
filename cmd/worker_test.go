@@ -154,6 +154,8 @@ func TestParseWorkerFlagsFallsBackToEnvToken(t *testing.T) {
 }
 
 func TestParseWorkerFlagsRequiresTokenWhenFlagAndEnvMissing(t *testing.T) {
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", "")
+
 	cmd := &cobra.Command{Use: "worker"}
 	cmd.Flags().String("coordinator", "", "")
 	cmd.Flags().String("token", "", "")

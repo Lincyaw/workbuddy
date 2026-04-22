@@ -184,21 +184,10 @@ func parseStatusFlags(cmd *cobra.Command) (*statusOpts, error) {
 		token = strings.TrimSpace(os.Getenv("WORKBUDDY_AUTH_TOKEN"))
 	}
 
-	if coordinator != "" {
-		if stuck || tasks || events || watch {
-			return nil, fmt.Errorf("status: --coordinator is mutually exclusive with --stuck, --tasks, --events, and --watch")
-		}
-		if repos && cmd.Flags().Changed("repo") {
-			return nil, fmt.Errorf("status: --repo is not used with --coordinator")
-		}
-		return &statusOpts{
-			coordinator: strings.TrimRight(coordinator, "/"),
-			token:       token,
-			repos:       repos,
-			jsonOut:     jsonOut,
-			now:         time.Now,
-		}, nil
-	}
+	repo = strings.TrimSpace(repo)
+	taskStatus = strings.TrimSpace(taskStatus)
+	eventType = strings.TrimSpace(eventType)
+	since = strings.TrimSpace(since)
 
 	selected := 0
 	for _, enabled := range []bool{stuck, tasks, events, watch} {
@@ -209,16 +198,16 @@ func parseStatusFlags(cmd *cobra.Command) (*statusOpts, error) {
 	if selected > 1 {
 		return nil, fmt.Errorf("status: --stuck, --tasks, --events, and --watch are mutually exclusive")
 	}
-	if repos {
-		return nil, fmt.Errorf("status: --repos requires --coordinator")
+	if repos && selected > 0 {
+		return nil, fmt.Errorf("status: --repos is mutually exclusive with --stuck, --tasks, --events, and --watch")
 	}
-	if !tasks && strings.TrimSpace(taskStatus) != "" {
+	if !tasks && taskStatus != "" {
 		return nil, fmt.Errorf("status: --status requires --tasks")
 	}
-	if !events && strings.TrimSpace(eventType) != "" {
+	if !events && eventType != "" {
 		return nil, fmt.Errorf("status: --type requires --events")
 	}
-	if !events && strings.TrimSpace(since) != "" {
+	if !events && since != "" {
 		return nil, fmt.Errorf("status: --since requires --events")
 	}
 	if !watch && issue != 0 {
@@ -237,10 +226,53 @@ func parseStatusFlags(cmd *cobra.Command) (*statusOpts, error) {
 		timeout = defaultWatchTimeout
 	}
 
-	repo = strings.TrimSpace(repo)
-	taskStatus = strings.TrimSpace(taskStatus)
-	eventType = strings.TrimSpace(eventType)
-	since = strings.TrimSpace(since)
+	if coordinator != "" {
+		if cmd.Flags().Changed("repo") {
+			return nil, fmt.Errorf("status: --repo is not used with --coordinator")
+		}
+		if repos {
+			return &statusOpts{
+				coordinator: strings.TrimRight(coordinator, "/"),
+				token:       token,
+				repos:       true,
+				jsonOut:     jsonOut,
+				now:         time.Now,
+			}, nil
+		}
+		if !stuck && !tasks && !events && !watch {
+			return &statusOpts{
+				coordinator: strings.TrimRight(coordinator, "/"),
+				token:       token,
+				jsonOut:     jsonOut,
+				now:         time.Now,
+			}, nil
+		}
+
+		resolvedRepo, err := resolveStatusRepoFromConfig()
+		if err != nil {
+			return nil, err
+		}
+		return &statusOpts{
+			repo:        resolvedRepo,
+			stuck:       stuck,
+			tasks:       tasks,
+			events:      events,
+			watch:       watch,
+			jsonOut:     jsonOut,
+			taskStatus:  taskStatus,
+			eventType:   eventType,
+			since:       since,
+			issue:       issue,
+			timeout:     timeout,
+			baseURL:     strings.TrimRight(coordinator, "/"),
+			coordinator: strings.TrimRight(coordinator, "/"),
+			token:       token,
+			now:         time.Now,
+		}, nil
+	}
+	if repos {
+		return nil, fmt.Errorf("status: --repos requires --coordinator")
+	}
 
 	cfg, err := loadStatusConfig(repo)
 	if err != nil {
@@ -277,6 +309,24 @@ func parseStatusFlags(cmd *cobra.Command) (*statusOpts, error) {
 		token:      token,
 		now:        time.Now,
 	}, nil
+}
+
+func resolveStatusRepoFromConfig() (string, error) {
+	if _, err := os.Stat(".github/workbuddy"); err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("status: --coordinator with --stuck, --tasks, --events, or --watch requires repo config in .github/workbuddy/config.yaml")
+		}
+		return "", fmt.Errorf("status: stat config dir: %w", err)
+	}
+	cfg, err := loadStatusConfig("")
+	if err != nil {
+		return "", err
+	}
+	repo := strings.TrimSpace(cfg.Global.Repo)
+	if repo == "" {
+		return "", fmt.Errorf("status: --coordinator with --stuck, --tasks, --events, or --watch requires repo config in .github/workbuddy/config.yaml")
+	}
+	return repo, nil
 }
 
 func loadStatusConfig(explicitRepo string) (*config.FullConfig, error) {
@@ -602,7 +652,7 @@ func pathWithin(root, path string) bool {
 
 func runStatusWithOpts(ctx context.Context, opts *statusOpts, client *statusClient, stdout io.Writer) error {
 	switch {
-	case opts.coordinator != "":
+	case opts.coordinator != "" && !opts.stuck && !opts.tasks && !opts.events && !opts.watch:
 		return runStatusCoordinator(ctx, opts, stdout)
 	case opts.tasks:
 		return runStatusTasks(ctx, opts, client, stdout)

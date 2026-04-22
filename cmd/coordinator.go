@@ -511,6 +511,7 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	readOnlyAudit.Register(readOnlyAuditMux)
 	mux.Handle("/events", api.wrapAuth(readOnlyAuditMux))
 	mux.Handle("/tasks", api.wrapAuth(readOnlyAuditMux))
+	mux.Handle("/tasks/watch", api.wrapAuth(newTaskWatchHandler(taskHub)))
 	mux.Handle("/issues/", api.wrapAuth(readOnlyAuditMux))
 	dashboardAPI := auditapi.NewHandler(st)
 	dashboardAPI.SetSessionsDir(filepath.Join(filepath.Dir(opts.dbPath), "sessions"))

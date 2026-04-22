@@ -300,6 +300,72 @@ func TestRunStatusWithOpts_SkipsMissingIssueState(t *testing.T) {
 	}
 }
 
+func TestRunStatusWithOpts_CoordinatorRemoteInspect(t *testing.T) {
+	st := newStatusTestStore(t)
+	fixtureStatusStore(t, st)
+
+	mux := http.NewServeMux()
+	audit.NewHTTPHandler(st).Register(mux)
+	mux.HandleFunc("/tasks/watch", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", mustJSON(t, tasknotify.TaskEvent{
+			Repo:       "owner/repo",
+			IssueNum:   2,
+			AgentName:  "review-agent",
+			Status:     store.TaskStatusCompleted,
+			ExitCode:   0,
+			DurationMS: int64((5 * time.Second).Milliseconds()),
+		}))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	client := &statusClient{baseURL: srv.URL, http: srv.Client()}
+
+	tests := []struct {
+		name string
+		opts statusOpts
+		want []string
+	}{
+		{
+			name: "stuck",
+			opts: statusOpts{repo: "owner/repo", stuck: true, coordinator: srv.URL, baseURL: srv.URL},
+			want: []string{"REPO", "#1", "status:developing"},
+		},
+		{
+			name: "tasks",
+			opts: statusOpts{repo: "owner/repo", tasks: true, coordinator: srv.URL, baseURL: srv.URL},
+			want: []string{"REPO", "AGENT", "pending", "running", "failed"},
+		},
+		{
+			name: "events",
+			opts: statusOpts{repo: "owner/repo", events: true, coordinator: srv.URL, baseURL: srv.URL, eventType: "dispatch", now: func() time.Time { return time.Now().UTC() }},
+			want: []string{"TIME", "dispatch", "#2"},
+		},
+		{
+			name: "watch",
+			opts: statusOpts{repo: "owner/repo", watch: true, coordinator: srv.URL, baseURL: srv.URL, timeout: time.Second},
+			want: []string{"Waiting for task completion...", "ISSUE", "#2", "completed"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			err := runStatusWithOpts(context.Background(), &tc.opts, client, &out)
+			if err != nil {
+				t.Fatalf("runStatusWithOpts: %v", err)
+			}
+			got := out.String()
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("output missing %q:\n%s", want, got)
+				}
+			}
+		})
+	}
+}
+
 func newStatusTestStore(t *testing.T) *store.Store {
 	t.Helper()
 	st, err := store.NewStore(filepath.Join(t.TempDir(), "status.db"))
@@ -468,6 +534,7 @@ func TestParseStatusFlags_UsesManagedCoordinatorDeployment(t *testing.T) {
 	configHome := filepath.Join(t.TempDir(), ".config")
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", "")
 
 	writeFile(t, filepath.Join(dir, ".github", "workbuddy", "config.yaml"), "repo: owner/repo\nport: 8090\npoll_interval: 30s\n")
 	envFile := filepath.Join(configHome, "workbuddy", "workbuddy.env")
@@ -742,6 +809,66 @@ func TestParseStatusFlags_Coordinator(t *testing.T) {
 	}
 }
 
+func TestParseStatusFlags_CoordinatorRemoteInspectUsesConfigRepo(t *testing.T) {
+	isolateStatusConfigHome(t)
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, ".github", "workbuddy", "config.yaml"), "repo: cfg/repo\nport: 9123\npoll_interval: 30s\n")
+
+	prevWD, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatalf("Abs(.): %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(prevWD)
+	})
+
+	cmd := newStatusFlagCommand()
+	_ = cmd.Flags().Set("coordinator", "http://127.0.0.1:8091")
+	_ = cmd.Flags().Set("tasks", "true")
+
+	opts, err := parseStatusFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseStatusFlags: %v", err)
+	}
+	if opts.repo != "cfg/repo" {
+		t.Fatalf("repo = %q, want cfg/repo", opts.repo)
+	}
+	if opts.baseURL != "http://127.0.0.1:8091" {
+		t.Fatalf("baseURL = %q, want coordinator URL", opts.baseURL)
+	}
+	if !opts.tasks {
+		t.Fatal("tasks should be true")
+	}
+}
+
+func TestParseStatusFlags_CoordinatorRemoteInspectRequiresConfigRepo(t *testing.T) {
+	isolateStatusConfigHome(t)
+	dir := t.TempDir()
+
+	prevWD, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatalf("Abs(.): %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(prevWD)
+	})
+
+	cmd := newStatusFlagCommand()
+	_ = cmd.Flags().Set("coordinator", "http://127.0.0.1:8091")
+	_ = cmd.Flags().Set("stuck", "true")
+
+	_, err = parseStatusFlags(cmd)
+	if err == nil || !strings.Contains(err.Error(), "requires repo config") {
+		t.Fatalf("expected repo config error, got %v", err)
+	}
+}
+
 func TestParseStatusFlags_CoordinatorRepos(t *testing.T) {
 	cmd := newStatusFlagCommand()
 	_ = cmd.Flags().Set("coordinator", "http://127.0.0.1:8091")
@@ -757,6 +884,18 @@ func TestParseStatusFlags_CoordinatorRepos(t *testing.T) {
 	}
 	if !opts.jsonOut {
 		t.Fatal("jsonOut should be true")
+	}
+}
+
+func TestParseStatusFlags_ReposMutuallyExclusiveWithInspectViews(t *testing.T) {
+	cmd := newStatusFlagCommand()
+	_ = cmd.Flags().Set("coordinator", "http://127.0.0.1:8091")
+	_ = cmd.Flags().Set("repos", "true")
+	_ = cmd.Flags().Set("tasks", "true")
+
+	_, err := parseStatusFlags(cmd)
+	if err == nil || !strings.Contains(err.Error(), "--repos is mutually exclusive") {
+		t.Fatalf("expected repos mutual exclusion error, got %v", err)
 	}
 }
 
@@ -776,15 +915,13 @@ func TestParseStatusFlags_CoordinatorTokenFromEnv(t *testing.T) {
 }
 
 func TestParseStatusFlags_CoordinatorMutualExclusion(t *testing.T) {
-	for _, flag := range []string{"stuck", "tasks", "events", "watch"} {
-		cmd := newStatusFlagCommand()
-		_ = cmd.Flags().Set("coordinator", "http://127.0.0.1:8091")
-		_ = cmd.Flags().Set(flag, "true")
+	cmd := newStatusFlagCommand()
+	_ = cmd.Flags().Set("coordinator", "http://127.0.0.1:8091")
+	_ = cmd.Flags().Set("repo", "owner/repo")
 
-		_, err := parseStatusFlags(cmd)
-		if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
-			t.Fatalf("expected mutual exclusion error for --%s, got %v", flag, err)
-		}
+	_, err := parseStatusFlags(cmd)
+	if err == nil || !strings.Contains(err.Error(), "--repo is not used with --coordinator") {
+		t.Fatalf("expected repo/coordinator error, got %v", err)
 	}
 }
 
