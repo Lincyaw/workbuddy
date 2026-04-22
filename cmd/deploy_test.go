@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
 )
 
 func TestRunDeployInstallWithSystemdWritesManifestAndUnit(t *testing.T) {
@@ -356,7 +358,7 @@ func TestRunDeployStopStopsSystemdAndUpdatesManifest(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	err := runDeployStopWithOpts(context.Background(), &deployLookupOpts{name: "demo", scope: "user"}, &stdout)
+	err := runDeployStopWithOpts(context.Background(), &deployLookupOpts{name: "demo", scope: "user", force: true}, &stdout)
 	if err != nil {
 		t.Fatalf("runDeployStopWithOpts: %v", err)
 	}
@@ -373,6 +375,99 @@ func TestRunDeployStopStopsSystemdAndUpdatesManifest(t *testing.T) {
 	updated := mustReadManifest(t, manifestPath)
 	if updated.Systemd == nil || updated.Systemd.Started {
 		t.Fatalf("updated manifest systemd.started = %#v, want false", updated.Systemd)
+	}
+}
+
+func TestRunDeployStopForceBypassesTTYConfirmation(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd deployment is only supported on Linux")
+	}
+
+	tempDir := t.TempDir()
+	homeDir := filepath.Join(tempDir, "home")
+	configDir := filepath.Join(tempDir, "xdg")
+	repoDir := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+
+	deployedBinary := filepath.Join(homeDir, ".local", "bin", "workbuddy")
+	if err := os.MkdirAll(filepath.Dir(deployedBinary), 0o755); err != nil {
+		t.Fatalf("mkdir binary dir: %v", err)
+	}
+	if err := os.WriteFile(deployedBinary, []byte("binary"), 0o755); err != nil {
+		t.Fatalf("write deployed binary: %v", err)
+	}
+
+	unitPath := filepath.Join(configDir, "systemd", "user", "demo.service")
+	manifestPath := filepath.Join(configDir, "workbuddy", "deployments", "demo.json")
+	manifest := &deploymentManifest{
+		SchemaVersion:    deploymentManifestVer,
+		Name:             "demo",
+		Scope:            "user",
+		BinaryPath:       deployedBinary,
+		WorkingDirectory: repoDir,
+		Command:          []string{"serve"},
+		Systemd: &deploymentSystemd{
+			ServiceName: "demo",
+			UnitPath:    unitPath,
+			Description: "Workbuddy demo (serve)",
+			Enabled:     true,
+			Started:     true,
+		},
+	}
+	if err := writeDeploymentManifest(manifestPath, manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	var systemctlCalls []string
+	deployRunSystemctl = func(_ context.Context, scope string, args ...string) error {
+		systemctlCalls = append(systemctlCalls, scope+":"+strings.Join(args, " "))
+		return nil
+	}
+
+	restoreTTY := overrideCommandIsInteractiveTerminal(t, true)
+	defer restoreTTY()
+
+	cmd := &cobra.Command{}
+	cmd.Flags().String("name", "", "")
+	cmd.Flags().String("scope", "", "")
+	cmd.Flags().Bool("force", false, "")
+	cmd.Flags().Bool("dry-run", false, "")
+	if err := cmd.Flags().Set("name", "demo"); err != nil {
+		t.Fatalf("set name: %v", err)
+	}
+	if err := cmd.Flags().Set("scope", "user"); err != nil {
+		t.Fatalf("set scope: %v", err)
+	}
+	if err := cmd.Flags().Set("force", "true"); err != nil {
+		t.Fatalf("set force: %v", err)
+	}
+	cmd.SetIn(strings.NewReader("no\n"))
+
+	opts, err := parseDeployLookupFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseDeployLookupFlags: %v", err)
+	}
+	if !opts.interactive {
+		t.Fatal("expected mocked interactive terminal")
+	}
+
+	var stdout bytes.Buffer
+	err = runDeployStopWithOpts(context.Background(), opts, &stdout)
+	if err != nil {
+		t.Fatalf("runDeployStopWithOpts: %v", err)
+	}
+	if strings.Contains(stdout.String(), "Type 'yes' to continue:") {
+		t.Fatalf("unexpected confirmation prompt with --force: %q", stdout.String())
+	}
+
+	gotCalls := strings.Join(systemctlCalls, " | ")
+	wantCalls := "user:stop demo.service | user:reset-failed demo.service"
+	if gotCalls != wantCalls {
+		t.Fatalf("systemctl calls = %q, want %q", gotCalls, wantCalls)
 	}
 }
 
@@ -396,7 +491,7 @@ func TestRunDeployStopRejectsNonSystemdDeployment(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	err := runDeployStopWithOpts(context.Background(), &deployLookupOpts{name: "demo", scope: "user"}, &stdout)
+	err := runDeployStopWithOpts(context.Background(), &deployLookupOpts{name: "demo", scope: "user", force: true}, &stdout)
 	if err == nil {
 		t.Fatal("expected non-systemd deployment stop to fail")
 	}
@@ -764,7 +859,7 @@ func TestRunDeployDeleteRemovesSystemdDeploymentButKeepsBinary(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	err := runDeployDeleteWithOpts(context.Background(), &deployLookupOpts{name: "demo", scope: "user"}, &stdout)
+	err := runDeployDeleteWithOpts(context.Background(), &deployLookupOpts{name: "demo", scope: "user", force: true}, &stdout)
 	if err != nil {
 		t.Fatalf("runDeployDeleteWithOpts: %v", err)
 	}
@@ -812,7 +907,7 @@ func TestRunDeployDeleteRemovesNonSystemdManifest(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	err := runDeployDeleteWithOpts(context.Background(), &deployLookupOpts{name: "demo", scope: "user"}, &stdout)
+	err := runDeployDeleteWithOpts(context.Background(), &deployLookupOpts{name: "demo", scope: "user", force: true}, &stdout)
 	if err != nil {
 		t.Fatalf("runDeployDeleteWithOpts: %v", err)
 	}
@@ -1065,7 +1160,7 @@ func TestRunDeployStopAllStopsEveryDeploymentInScope(t *testing.T) {
 	defer func() { deployRunSystemctl = runSystemctl }()
 
 	var stdout bytes.Buffer
-	err := runDeployStopWithOpts(context.Background(), &deployLookupOpts{scope: "user", all: true}, &stdout)
+	err := runDeployStopWithOpts(context.Background(), &deployLookupOpts{scope: "user", all: true, force: true}, &stdout)
 	if err != nil {
 		t.Fatalf("runDeployStopWithOpts: %v", err)
 	}
@@ -1367,7 +1462,7 @@ func TestRunDeployDeleteAllDeletesEveryDeploymentInScope(t *testing.T) {
 	defer func() { deployRunSystemctl = runSystemctl }()
 
 	var stdout bytes.Buffer
-	err := runDeployDeleteWithOpts(context.Background(), &deployLookupOpts{scope: "user", all: true}, &stdout)
+	err := runDeployDeleteWithOpts(context.Background(), &deployLookupOpts{scope: "user", all: true, force: true}, &stdout)
 	if err != nil {
 		t.Fatalf("runDeployDeleteWithOpts: %v", err)
 	}
@@ -1464,6 +1559,16 @@ func writeScopedManifest(t *testing.T, scope, name string, manifest *deploymentM
 	}
 	return manifestPath
 }
+
+func overrideCommandIsInteractiveTerminal(t *testing.T, interactive bool) func() {
+	t.Helper()
+	old := commandIsInteractiveTerminal
+	commandIsInteractiveTerminal = func() bool { return interactive }
+	return func() {
+		commandIsInteractiveTerminal = old
+	}
+}
+
 
 func mustReadManifest(t *testing.T, path string) *deploymentManifest {
 	t.Helper()

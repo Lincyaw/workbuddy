@@ -2203,3 +2203,32 @@ requirements:
       - cmd/run_test.go
       - cmd/worker_repos_test.go
     deps: [REQ-019, REQ-028]
+
+  - id: REQ-067
+    title: Destructive CLI dry-run and force safeguards
+    description: >
+      Destructive operator commands must offer a safe preview path and explicit
+      confirmation semantics. `deploy stop`, `deploy delete`,
+      `admin restart-issue`, and `cache-invalidate` need `--dry-run`, while the
+      destructive subset (`deploy stop`, `deploy delete`, `admin restart-issue`)
+      must require either TTY confirmation or `--force` before mutating state.
+    priority: P1
+    version: v0.4.0
+    status: tested
+    acceptance_criteria:
+      - "AC-067-1: `workbuddy deploy stop`, `workbuddy deploy delete`, `workbuddy admin restart-issue`, and `workbuddy cache-invalidate` accept `--dry-run` and print the actions they would take without mutating manifests, SQLite state, systemd state, or events"
+      - "AC-067-2: `workbuddy deploy stop`, `workbuddy deploy delete`, and `workbuddy admin restart-issue` accept `--force` to bypass confirmation for destructive execution"
+      - "AC-067-3: when `--force` is absent and stdin/stdout are TTYs, destructive commands prompt for confirmation before mutating state"
+      - "AC-067-4: when `--force` is absent and stdin/stdout are not TTYs, destructive commands fail fast with a clear error explaining that `--force` is required"
+      - "AC-067-5: unit tests cover dry-run no-side-effect behavior for at least two commands and verify that `--force` bypasses the TTY confirmation prompt"
+    code:
+      - cmd/admin_restart_issue.go
+      - cmd/cache_invalidate.go
+      - cmd/deploy.go
+      - cmd/destructive.go
+      - cmd/terminal.go
+    tests:
+      - cmd/admin_restart_issue_test.go
+      - cmd/cache_invalidate_test.go
+      - cmd/deploy_test.go
+    deps: [REQ-034, REQ-060]

@@ -154,7 +154,7 @@ func runDiagnoseWithOpts(_ context.Context, opts *diagnoseOpts, stdout io.Writer
 func applyDiagnoseFindingFix(st *store.Store, finding diag.Finding) error {
 	switch finding.FixAction {
 	case "", "cache_invalidate":
-		_, err := runCacheInvalidateStore(st, finding.Repo, []int{finding.IssueNum}, "cli:diagnose --fix")
+		_, err := runCacheInvalidateStore(st, finding.Repo, []int{finding.IssueNum}, "cli:diagnose --fix", false)
 		return err
 	case "mark_completed":
 		return st.FinalizeTaskForOperator(finding.TaskID, store.TaskStatusCompleted, 0)

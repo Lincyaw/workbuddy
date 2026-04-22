@@ -14,11 +14,15 @@ import (
 )
 
 type restartIssueOpts struct {
-	repo    string
-	issue   int
-	dbPath  string
-	source  string
-	jsonOut bool
+	repo        string
+	issue       int
+	dbPath      string
+	source      string
+	jsonOut     bool
+	force       bool
+	dryRun      bool
+	interactive bool
+	stdin       io.Reader
 }
 
 type restartIssueResult struct {
@@ -51,6 +55,8 @@ func init() {
 	restartIssueCmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "SQLite database path")
 	addOutputFormatFlag(restartIssueCmd)
 	addDeprecatedJSONAliasFlag(restartIssueCmd)
+	restartIssueCmd.Flags().Bool("force", false, "Skip confirmation prompts for destructive actions")
+	restartIssueCmd.Flags().Bool("dry-run", false, "Print the actions that would be taken without executing them")
 	adminCmd.AddCommand(restartIssueCmd)
 }
 
@@ -70,6 +76,8 @@ func parseRestartIssueFlags(cmd *cobra.Command) (*restartIssueOpts, error) {
 	if err != nil {
 		return nil, err
 	}
+	force, _ := cmd.Flags().GetBool("force")
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
 
 	repo = strings.TrimSpace(repo)
 	if repo == "" {
@@ -83,11 +91,15 @@ func parseRestartIssueFlags(cmd *cobra.Command) (*restartIssueOpts, error) {
 		return nil, fmt.Errorf("restart-issue: --db-path is required")
 	}
 	return &restartIssueOpts{
-		repo:    repo,
-		issue:   issue,
-		dbPath:  dbPath,
-		source:  "cli:admin:restart-issue",
-		jsonOut: isJSONOutput(format),
+		repo:        repo,
+		issue:       issue,
+		dbPath:      dbPath,
+		source:      "cli:admin:restart-issue",
+		jsonOut:     isJSONOutput(format),
+		force:       force,
+		dryRun:      dryRun,
+		stdin:       cmd.InOrStdin(),
+		interactive: commandIsInteractiveTerminal(),
 	}, nil
 }
 
@@ -102,55 +114,120 @@ func runRestartIssueWithOpts(_ context.Context, opts *restartIssueOpts, stdout i
 	}
 	defer func() { _ = st.Close() }()
 
+	preview, err := inspectRestartIssueStore(st, opts.repo, opts.issue)
+	if err != nil {
+		return err
+	}
+	if opts.dryRun {
+		return writeRestartIssueResult(stdout, preview, true, opts.jsonOut)
+	}
+	ok, err := confirmDestructiveAction(
+		"restart-issue",
+		opts.stdin,
+		stdout,
+		opts.interactive,
+		opts.force,
+		opts.dryRun,
+		fmt.Sprintf("Restart %s#%d?", preview.Repo, preview.IssueNum),
+		[]string{
+			fmt.Sprintf("clear issue cache: %t", preview.CacheCleared),
+			fmt.Sprintf("clear dependency state: %t", preview.DependencyStateCleared),
+			fmt.Sprintf("clear issue claim: %t", preview.ClaimCleared),
+			"log issue_restarted event",
+		},
+	)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+
 	result, err := runRestartIssueStore(st, opts.repo, opts.issue, opts.source)
 	if err != nil {
 		return err
 	}
-	if opts.jsonOut {
+	return writeRestartIssueResult(stdout, result, false, opts.jsonOut)
+}
+
+func writeRestartIssueResult(stdout io.Writer, result restartIssueResult, dryRun, jsonOut bool) error {
+	if jsonOut {
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
+		if dryRun {
+			return enc.Encode(struct {
+				restartIssueResult
+				DryRun bool `json:"dry_run"`
+			}{
+				restartIssueResult: result,
+				DryRun:             true,
+			})
+		}
 		return enc.Encode(result)
 	}
-
-	_, _ = fmt.Fprintf(stdout, "%s#%d: cache=%t dependency_state=%t claim=%t", result.Repo, result.IssueNum, result.CacheCleared, result.DependencyStateCleared, result.ClaimCleared)
+	prefix := ""
+	if dryRun {
+		prefix = "dry-run: "
+	}
+	_, _ = fmt.Fprintf(stdout, "%s%s#%d: cache=%t dependency_state=%t claim=%t", prefix, result.Repo, result.IssueNum, result.CacheCleared, result.DependencyStateCleared, result.ClaimCleared)
 	if result.ClaimOwner != "" {
 		_, _ = fmt.Fprintf(stdout, " held_by=%s", result.ClaimOwner)
+	}
+	if dryRun {
+		_, _ = fmt.Fprintf(stdout, " event=true")
 	}
 	_, _ = fmt.Fprintln(stdout)
 	return nil
 }
 
-func runRestartIssueStore(st *store.Store, repo string, issueNum int, source string) (restartIssueResult, error) {
+func inspectRestartIssueStore(st *store.Store, repo string, issueNum int) (restartIssueResult, error) {
 	result := restartIssueResult{Repo: repo, IssueNum: issueNum}
 
 	cached, err := st.QueryIssueCache(repo, issueNum)
 	if err != nil {
 		return result, fmt.Errorf("restart-issue: query issue cache #%d: %w", issueNum, err)
 	}
-	if cached != nil {
-		if err := st.DeleteIssueCache(repo, issueNum); err != nil {
-			return result, fmt.Errorf("restart-issue: delete issue cache #%d: %w", issueNum, err)
-		}
-		result.CacheCleared = true
-	}
+	result.CacheCleared = cached != nil
 
-	deletedDepState, err := st.DeleteIssueDependencyState(repo, issueNum)
+	depState, err := st.QueryIssueDependencyState(repo, issueNum)
 	if err != nil {
-		return result, fmt.Errorf("restart-issue: reset dependency state #%d: %w", issueNum, err)
+		return result, fmt.Errorf("restart-issue: query dependency state #%d: %w", issueNum, err)
 	}
-	result.DependencyStateCleared = deletedDepState
+	result.DependencyStateCleared = depState != nil
 
 	claim, err := st.QueryIssueClaim(repo, issueNum)
 	if err != nil {
 		return result, fmt.Errorf("restart-issue: query issue claim #%d: %w", issueNum, err)
 	}
 	if claim != nil {
+		result.ClaimCleared = true
+		result.ClaimOwner = claim.WorkerID
+	}
+	return result, nil
+}
+
+func runRestartIssueStore(st *store.Store, repo string, issueNum int, source string) (restartIssueResult, error) {
+	result, err := inspectRestartIssueStore(st, repo, issueNum)
+	if err != nil {
+		return result, err
+	}
+
+	if result.CacheCleared {
+		if err := st.DeleteIssueCache(repo, issueNum); err != nil {
+			return result, fmt.Errorf("restart-issue: delete issue cache #%d: %w", issueNum, err)
+		}
+	}
+	if result.DependencyStateCleared {
+		if _, err := st.DeleteIssueDependencyState(repo, issueNum); err != nil {
+			return result, fmt.Errorf("restart-issue: reset dependency state #%d: %w", issueNum, err)
+		}
+	}
+	if result.ClaimCleared {
 		deletedClaim, err := st.DeleteIssueClaim(repo, issueNum)
 		if err != nil {
 			return result, fmt.Errorf("restart-issue: delete issue claim #%d: %w", issueNum, err)
 		}
 		result.ClaimCleared = deletedClaim
-		result.ClaimOwner = claim.WorkerID
 	}
 
 	payload, err := json.Marshal(map[string]any{

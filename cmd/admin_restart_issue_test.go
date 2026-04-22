@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,6 +121,77 @@ func TestRestartIssueRedispatchesOnNextPoll(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("expected dispatch after restart-issue")
+	}
+}
+
+func TestRunRestartIssueWithOpts_DryRunHasNoSideEffects(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "restart-dry-run.db")
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	const (
+		repo     = "owner/repo"
+		issueNum = 173
+	)
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     repo,
+		IssueNum: issueNum,
+		Labels:   `["workbuddy","status:developing"]`,
+		State:    "open",
+	}); err != nil {
+		t.Fatalf("UpsertIssueCache: %v", err)
+	}
+	if err := st.UpsertIssueDependencyState(store.IssueDependencyState{Repo: repo, IssueNum: issueNum, Verdict: store.DependencyVerdictBlocked}); err != nil {
+		t.Fatalf("UpsertIssueDependencyState: %v", err)
+	}
+	if _, err := st.AcquireIssueClaim(repo, issueNum, "coordinator-host-pid-123", time.Hour); err != nil {
+		t.Fatalf("AcquireIssueClaim: %v", err)
+	}
+	_ = st.Close()
+
+	var out bytes.Buffer
+	err = runRestartIssueWithOpts(context.Background(), &restartIssueOpts{
+		repo:        repo,
+		issue:       issueNum,
+		dbPath:      dbPath,
+		source:      "test",
+		dryRun:      true,
+		interactive: false,
+	}, &out)
+	if err != nil {
+		t.Fatalf("runRestartIssueWithOpts: %v", err)
+	}
+	if !strings.Contains(out.String(), "dry-run: owner/repo#173: cache=true dependency_state=true claim=true") {
+		t.Fatalf("dry-run output missing preview: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "event=true") {
+		t.Fatalf("dry-run output missing event preview: %q", out.String())
+	}
+
+	verify, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	t.Cleanup(func() { _ = verify.Close() })
+	cache, err := verify.QueryIssueCache(repo, issueNum)
+	if err != nil || cache == nil {
+		t.Fatalf("QueryIssueCache after dry-run = %+v, err=%v", cache, err)
+	}
+	depState, err := verify.QueryIssueDependencyState(repo, issueNum)
+	if err != nil || depState == nil {
+		t.Fatalf("QueryIssueDependencyState after dry-run = %+v, err=%v", depState, err)
+	}
+	claim, err := verify.QueryIssueClaim(repo, issueNum)
+	if err != nil || claim == nil {
+		t.Fatalf("QueryIssueClaim after dry-run = %+v, err=%v", claim, err)
+	}
+	events, err := verify.QueryEvents(repo)
+	if err != nil {
+		t.Fatalf("QueryEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("events after dry-run = %+v, want none", events)
 	}
 }
 
