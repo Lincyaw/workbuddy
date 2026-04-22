@@ -307,7 +307,6 @@ states:
 
   done:
     enter_label: "status:done"
-    action: close_issue
 ```
 
 ### State graph
@@ -319,7 +318,8 @@ developing ⇄ reviewing → done
 
 Any revisit of a state — including developing↔blocked — counts toward
 max_retries; exceeding the limit records retry/failure intent. Label
-writeback remains an agent/human action.
+writeback remains an agent/human action, and closing the issue after merge is
+still the responsibility of the review-agent or the human who merged the PR.
 ```
 ````
 
