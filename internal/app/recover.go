@@ -9,6 +9,23 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
+// RecoverCoordinatorIssueClaims removes stale coordinator-owned claim rows for
+// prior coordinator PIDs before pollers start up again.
+func RecoverCoordinatorIssueClaims(st *store.Store, currentPID int) error {
+	stale, err := st.DeleteStaleCoordinatorIssueClaims(currentPID)
+	if err != nil {
+		return fmt.Errorf("sweep stale coordinator issue claims: %w", err)
+	}
+	if len(stale) == 0 {
+		return nil
+	}
+	for _, rec := range stale {
+		log.Printf("[app] recovery: released stale coordinator issue claim %s#%d held_by=%s", rec.Repo, rec.IssueNum, rec.WorkerID)
+	}
+	log.Printf("[app] recovery: released %d stale coordinator issue claims", len(stale))
+	return nil
+}
+
 // RecoverTasks marks tasks that were running when the process died as failed
 // and logs the count of pending tasks that will be re-dispatched through the
 // next poll cycle. It is a startup step shared by both serve and coordinator

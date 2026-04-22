@@ -154,6 +154,9 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	}
 	defer func() { _ = st.Close() }()
 	alertBus := alertbus.NewBus(64)
+	if err := app.RecoverCoordinatorIssueClaims(st, os.Getpid()); err != nil {
+		log.Printf("[serve] warning: issue-claim recovery failed: %v", err)
+	}
 	if err := app.RecoverTasks(st, alertBus); err != nil {
 		log.Printf("[serve] warning: recovery failed: %v", err)
 	}

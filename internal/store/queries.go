@@ -26,6 +26,13 @@ type EventQueryFilter struct {
 	IssueNum int
 }
 
+// IssueEventMeta is the compact latest-event view used by audit/status
+// surfaces when they only need the last event's timestamp and type.
+type IssueEventMeta struct {
+	Type string
+	TS   time.Time
+}
+
 // QueryEventsFiltered returns events matching the provided filter. It exists
 // so eventlog.EventLogger can run filtered queries without needing a raw
 // *sql.DB handle.
@@ -96,6 +103,27 @@ func (s *Store) LatestEventAt(repo string, issueNum int) (*time.Time, error) {
 	}
 	ts = ts.UTC()
 	return &ts, nil
+}
+
+// LatestIssueEvent returns the type and timestamp of the most recent event for
+// the given repo/issue pair, or nil if there are no events.
+func (s *Store) LatestIssueEvent(repo string, issueNum int) (*IssueEventMeta, error) {
+	var rawTS, eventType string
+	err := s.db.QueryRow(
+		`SELECT ts, type FROM events WHERE repo = ? AND issue_num = ? ORDER BY ts DESC, id DESC LIMIT 1`,
+		repo, issueNum,
+	).Scan(&rawTS, &eventType)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: latest issue event: %w", err)
+	}
+	ts, ok := ParseTimestamp(rawTS, "event.ts")
+	if !ok {
+		return nil, nil
+	}
+	return &IssueEventMeta{Type: eventType, TS: ts.UTC()}, nil
 }
 
 // ---------------------------------------------------------------------------

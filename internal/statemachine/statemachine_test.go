@@ -1225,6 +1225,38 @@ func TestDispatchAgentReleasesOnContextCancel(t *testing.T) {
 	}
 }
 
+func TestReleaseAllIssueClaims(t *testing.T) {
+	sm, _, dispatch := newTestSM(t)
+	sm.SetIssueClaim("coordinator-a", time.Minute)
+
+	if err := sm.DispatchAgent(context.Background(), "test/repo", 7, "dev-agent", "dev-flow", "developing"); err != nil {
+		t.Fatalf("DispatchAgent: %v", err)
+	}
+	select {
+	case <-dispatch:
+	case <-time.After(time.Second):
+		t.Fatal("expected dispatch request")
+	}
+
+	claim, err := sm.store.QueryIssueClaim("test/repo", 7)
+	if err != nil {
+		t.Fatalf("QueryIssueClaim before release: %v", err)
+	}
+	if claim == nil {
+		t.Fatal("expected claim before ReleaseAllIssueClaims")
+	}
+
+	sm.ReleaseAllIssueClaims()
+
+	claim, err = sm.store.QueryIssueClaim("test/repo", 7)
+	if err != nil {
+		t.Fatalf("QueryIssueClaim after release: %v", err)
+	}
+	if claim != nil {
+		t.Fatalf("expected claim to be deleted on shutdown, got %+v", claim)
+	}
+}
+
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }

@@ -60,6 +60,21 @@ workbuddy cache-invalidate --repo OWNER/NAME --issue 47,48,49
 - 记录 `cache_invalidated` 事件
 - 直连 SQLite，不依赖 serve 进程
 
+### admin restart-issue（REQ-060）
+
+显式重启单个 issue 的调度状态，解决“标签没变但就是不再派发”的恢复场景：
+
+```bash
+workbuddy admin restart-issue --repo OWNER/NAME --issue 173
+```
+
+- 删除该 issue 的 `issue_cache` 行，让下一次 poll 把它当成新 issue
+- 清除 `issue_dependency_state`，避免沿用旧 verdict
+- 如果存在残留 `issue_claim`，一并删除
+- 记录 `issue_restarted` 事件，方便事后审计
+
+相比直接操作 SQLite，这个命令把手工恢复流程固化成了可审计的 CLI。
+
 ### diagnose（REQ-037）
 
 自动诊断 pipeline 常见故障模式：
@@ -83,10 +98,14 @@ workbuddy diagnose [--repo R] [--fix] [--json]
 
 `--tasks`、`--events`、`--watch`、`--stuck` 四个 flag 互斥，同时指定返回明确错误。
 
+`status --stuck` 除了传统的“中间状态 + 最后事件超过 1h”外，也会把最后一个事件是
+`dispatch_skipped_claim` 的 issue 直接视为 stuck，这样 coordinator 被旧 claim 卡住时会马上出现在 operator 视图里。
+
 ## 主要代码
 
 - `cmd/status.go` — status 命令及 --tasks/--events/--watch 子模式
 - `cmd/cache_invalidate.go` — cache-invalidate 命令
+- `cmd/admin_restart_issue.go` — 显式重启单个 issue 的 operator 命令
 - `cmd/diagnose.go` — diagnose 命令
 - `internal/operator/detector.go` — 进程内自愈告警 detector
 - `internal/diagnose/diagnose.go` — 诊断逻辑（纯逻辑，无副作用）

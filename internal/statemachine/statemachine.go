@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -133,6 +134,8 @@ type StateMachine struct {
 	issueClaimLease time.Duration
 	claimTokensMu   sync.Mutex
 	claimTokens     map[string]string // key: "repo#issueNum" → active claim token
+	claimWarnedMu   sync.Mutex
+	claimWarned     map[string]struct{} // per-poll-cycle warning dedup
 }
 
 type completionRecord struct {
@@ -163,6 +166,7 @@ func NewStateMachine(
 		completionTimes: make(map[string]completionRecord),
 		workflowManager: workflowManager,
 		claimTokens:     make(map[string]string),
+		claimWarned:     make(map[string]struct{}),
 	}
 }
 
@@ -190,6 +194,9 @@ func (sm *StateMachine) ResetDedup() {
 		sm.processedEvents.Delete(key)
 		return true
 	})
+	sm.claimWarnedMu.Lock()
+	sm.claimWarned = make(map[string]struct{})
+	sm.claimWarnedMu.Unlock()
 }
 
 // HandleEvent processes a single ChangeEvent from the Poller.
@@ -463,6 +470,16 @@ func (sm *StateMachine) isBlockedByIssueClaim(repo string, issueNum int, agentNa
 			if claim, qErr := sm.store.QueryIssueClaim(repo, issueNum); qErr == nil && claim != nil {
 				other = claim.WorkerID
 			}
+			warnKey := sm.issueKey(repo, issueNum)
+			sm.claimWarnedMu.Lock()
+			_, alreadyWarned := sm.claimWarned[warnKey]
+			if !alreadyWarned {
+				sm.claimWarned[warnKey] = struct{}{}
+			}
+			sm.claimWarnedMu.Unlock()
+			if !alreadyWarned {
+				log.Printf("[statemachine] WARN dispatch blocked by issue claim for %s#%d claimer=%s held_by=%s workflow=%s state=%s", repo, issueNum, sm.issueClaimerID, other, workflow, state)
+			}
 			sm.eventlog.Log(eventlog.TypeDispatchSkippedClaim, repo, issueNum, map[string]any{
 				"agent":    agentName,
 				"workflow": workflow,
@@ -507,6 +524,36 @@ func (sm *StateMachine) releaseIssueClaim(repo string, issueNum int) {
 	}
 	if _, err := sm.store.ReleaseIssueClaim(repo, issueNum, sm.issueClaimerID, token); err != nil {
 		log.Printf("[statemachine] release issue claim for %s#%d failed: %v", repo, issueNum, err)
+	}
+}
+
+// ReleaseAllIssueClaims drops every currently tracked claim for this state
+// machine instance. Used during coordinator shutdown so a clean restart does
+// not inherit stale coordinator-owned claims.
+func (sm *StateMachine) ReleaseAllIssueClaims() {
+	if sm.store == nil || sm.issueClaimerID == "" {
+		return
+	}
+	sm.claimTokensMu.Lock()
+	tracked := make(map[string]string, len(sm.claimTokens))
+	for key, token := range sm.claimTokens {
+		tracked[key] = token
+	}
+	sm.claimTokens = make(map[string]string)
+	sm.claimTokensMu.Unlock()
+
+	for key, token := range tracked {
+		if token == "" {
+			continue
+		}
+		repo, issueNum, ok := parseIssueKey(key)
+		if !ok {
+			log.Printf("[statemachine] release all issue claims: invalid issue key %q", key)
+			continue
+		}
+		if _, err := sm.store.ReleaseIssueClaim(repo, issueNum, sm.issueClaimerID, token); err != nil {
+			log.Printf("[statemachine] release issue claim for %s#%d during shutdown failed: %v", repo, issueNum, err)
+		}
 	}
 }
 
@@ -1026,4 +1073,16 @@ func (sm *StateMachine) stateHasAgents(state *config.State) bool {
 
 func (sm *StateMachine) issueKey(repo string, issueNum int) string {
 	return fmt.Sprintf("%s#%d", repo, issueNum)
+}
+
+func parseIssueKey(raw string) (string, int, bool) {
+	idx := strings.LastIndex(raw, "#")
+	if idx <= 0 || idx == len(raw)-1 {
+		return "", 0, false
+	}
+	issueNum, err := strconv.Atoi(raw[idx+1:])
+	if err != nil || issueNum <= 0 {
+		return "", 0, false
+	}
+	return raw[:idx], issueNum, true
 }

@@ -45,6 +45,7 @@ const (
 	TypeDispatchBlockedByDone       = "dispatch_blocked_by_done"
 	TypeDispatchSkippedClaim        = "dispatch_skipped_claim"
 	TypeIssueClaimExpired           = "issue_claim_expired"
+	TypeIssueRestarted              = "issue_restarted"
 	TypeInfraFailure                = "infra_failure"
 )
 
@@ -81,6 +82,7 @@ var AllEventTypes = []string{
 	TypeDispatchBlockedByDone,
 	TypeDispatchSkippedClaim,
 	TypeIssueClaimExpired,
+	TypeIssueRestarted,
 	TypeInfraFailure,
 }
 
