@@ -882,6 +882,521 @@ func TestDeployHTTPClientHasTimeout(t *testing.T) {
 	}
 }
 
+func TestRunDeployListIncludesUserAndSystemDeployments(t *testing.T) {
+	tempDir := t.TempDir()
+	homeDir := filepath.Join(tempDir, "home")
+	configDir := filepath.Join(tempDir, "xdg")
+	systemRoot := filepath.Join(tempDir, "system")
+	repoDir := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	restoreSystem := overrideDeploySystemPaths(t, systemRoot)
+	defer restoreSystem()
+
+	writeScopedManifest(t, "user", "workbuddy-worker", &deploymentManifest{
+		BinaryPath:       "/home/demo/.local/bin/workbuddy",
+		WorkingDirectory: repoDir,
+		Command:          []string{"worker", "--repo", "owner/repo"},
+	})
+	writeScopedManifest(t, "system", "workbuddy-coordinator", &deploymentManifest{
+		BinaryPath:       "/opt/workbuddy-coordinator",
+		WorkingDirectory: repoDir,
+		Command:          []string{"coordinator", "--db", "/srv/workbuddy.db"},
+	})
+
+	var stdout bytes.Buffer
+	if err := runDeployListWithOpts(&deployListOpts{scope: "all", format: "text"}, &stdout); err != nil {
+		t.Fatalf("runDeployListWithOpts: %v", err)
+	}
+
+	output := stdout.String()
+	for _, want := range []string{
+		"NAME",
+		"SCOPE",
+		"BINARY PATH",
+		"COMMAND",
+		"workbuddy-coordinator",
+		"system",
+		"/opt/workbuddy-coordinator",
+		"coordinator --db /srv/workbuddy.db",
+		"workbuddy-worker",
+		"user",
+		"/home/demo/.local/bin/workbuddy",
+		"worker --repo owner/repo",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("list output missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestRunDeployListJSONIsStable(t *testing.T) {
+	tempDir := t.TempDir()
+	homeDir := filepath.Join(tempDir, "home")
+	configDir := filepath.Join(tempDir, "xdg")
+	systemRoot := filepath.Join(tempDir, "system")
+	repoDir := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	restoreSystem := overrideDeploySystemPaths(t, systemRoot)
+	defer restoreSystem()
+
+	writeScopedManifest(t, "user", "workbuddy-worker", &deploymentManifest{
+		BinaryPath:       "/home/demo/.local/bin/workbuddy",
+		WorkingDirectory: repoDir,
+		Command:          []string{"worker", "--repo", "owner/repo"},
+	})
+	writeScopedManifest(t, "system", "workbuddy-coordinator", &deploymentManifest{
+		BinaryPath:       "/opt/workbuddy-coordinator",
+		WorkingDirectory: repoDir,
+		Command:          []string{"coordinator", "--db", "/srv/workbuddy.db"},
+	})
+
+	var stdout bytes.Buffer
+	if err := runDeployListWithOpts(&deployListOpts{scope: "all", format: "json"}, &stdout); err != nil {
+		t.Fatalf("runDeployListWithOpts: %v", err)
+	}
+
+	const want = `{
+  "deployments": [
+    {
+      "name": "workbuddy-coordinator",
+      "scope": "system",
+      "binary_path": "/opt/workbuddy-coordinator",
+      "command": [
+        "coordinator",
+        "--db",
+        "/srv/workbuddy.db"
+      ]
+    },
+    {
+      "name": "workbuddy-worker",
+      "scope": "user",
+      "binary_path": "/home/demo/.local/bin/workbuddy",
+      "command": [
+        "worker",
+        "--repo",
+        "owner/repo"
+      ]
+    }
+  ]
+}
+`
+	if got := stdout.String(); got != want {
+		t.Fatalf("json output = %q, want %q", got, want)
+	}
+}
+
+func TestRunDeployStopMissingNameListsInstalledDeployments(t *testing.T) {
+	tempDir := t.TempDir()
+	configDir := filepath.Join(tempDir, "xdg")
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	t.Setenv("HOME", filepath.Join(tempDir, "home"))
+
+	writeScopedManifest(t, "user", "workbuddy-coordinator", &deploymentManifest{
+		BinaryPath:       "/opt/workbuddy-coordinator",
+		WorkingDirectory: tempDir,
+		Command:          []string{"coordinator"},
+	})
+	writeScopedManifest(t, "user", "workbuddy-worker", &deploymentManifest{
+		BinaryPath:       "/opt/workbuddy-worker",
+		WorkingDirectory: tempDir,
+		Command:          []string{"worker"},
+	})
+
+	var stdout bytes.Buffer
+	err := runDeployStopWithOpts(context.Background(), &deployLookupOpts{name: "missing", scope: "user"}, &stdout)
+	if err == nil {
+		t.Fatal("expected missing deployment to fail")
+	}
+	if !strings.Contains(err.Error(), `deployment "missing" not found in user scope`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "installed: workbuddy-coordinator, workbuddy-worker") {
+		t.Fatalf("missing installed deployments in error: %v", err)
+	}
+}
+
+func TestRunDeployStopAllStopsEveryDeploymentInScope(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd deployment is only supported on Linux")
+	}
+
+	tempDir := t.TempDir()
+	homeDir := filepath.Join(tempDir, "home")
+	configDir := filepath.Join(tempDir, "xdg")
+	repoDir := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+
+	writeScopedManifest(t, "user", "alpha", &deploymentManifest{
+		BinaryPath:       filepath.Join(homeDir, ".local", "bin", "alpha"),
+		WorkingDirectory: repoDir,
+		Command:          []string{"serve"},
+		Systemd: &deploymentSystemd{
+			Enabled: true,
+			Started: true,
+		},
+	})
+	writeScopedManifest(t, "user", "beta", &deploymentManifest{
+		BinaryPath:       filepath.Join(homeDir, ".local", "bin", "beta"),
+		WorkingDirectory: repoDir,
+		Command:          []string{"worker"},
+		Systemd: &deploymentSystemd{
+			Enabled: true,
+			Started: true,
+		},
+	})
+
+	var systemctlCalls []string
+	deployRunSystemctl = func(_ context.Context, scope string, args ...string) error {
+		systemctlCalls = append(systemctlCalls, scope+":"+strings.Join(args, " "))
+		return nil
+	}
+	defer func() { deployRunSystemctl = runSystemctl }()
+
+	var stdout bytes.Buffer
+	err := runDeployStopWithOpts(context.Background(), &deployLookupOpts{scope: "user", all: true}, &stdout)
+	if err != nil {
+		t.Fatalf("runDeployStopWithOpts: %v", err)
+	}
+
+	gotCalls := strings.Join(systemctlCalls, " | ")
+	wantCalls := "user:stop alpha.service | user:reset-failed alpha.service | user:stop beta.service | user:reset-failed beta.service"
+	if gotCalls != wantCalls {
+		t.Fatalf("systemctl calls = %q, want %q", gotCalls, wantCalls)
+	}
+	for _, name := range []string{"alpha", "beta"} {
+		manifestPath := filepath.Join(configDir, "workbuddy", "deployments", name+".json")
+		if got := mustReadManifest(t, manifestPath).Systemd.Started; got {
+			t.Fatalf("%s started = %v, want false", name, got)
+		}
+	}
+}
+
+func TestRunDeployStartAllStartsEveryDeploymentInScope(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd deployment is only supported on Linux")
+	}
+
+	tempDir := t.TempDir()
+	homeDir := filepath.Join(tempDir, "home")
+	configDir := filepath.Join(tempDir, "xdg")
+	repoDir := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+
+	writeScopedManifest(t, "user", "alpha", &deploymentManifest{
+		BinaryPath:       filepath.Join(homeDir, ".local", "bin", "alpha"),
+		WorkingDirectory: repoDir,
+		Command:          []string{"serve"},
+		Systemd: &deploymentSystemd{
+			Enabled: false,
+			Started: false,
+		},
+	})
+	writeScopedManifest(t, "user", "beta", &deploymentManifest{
+		BinaryPath:       filepath.Join(homeDir, ".local", "bin", "beta"),
+		WorkingDirectory: repoDir,
+		Command:          []string{"worker"},
+		Systemd: &deploymentSystemd{
+			Enabled: false,
+			Started: false,
+		},
+	})
+
+	var systemctlCalls []string
+	deployRunSystemctl = func(_ context.Context, scope string, args ...string) error {
+		systemctlCalls = append(systemctlCalls, scope+":"+strings.Join(args, " "))
+		return nil
+	}
+	defer func() { deployRunSystemctl = runSystemctl }()
+
+	var stdout bytes.Buffer
+	err := runDeployStartWithOpts(context.Background(), &deployLookupOpts{scope: "user", all: true}, &stdout)
+	if err != nil {
+		t.Fatalf("runDeployStartWithOpts: %v", err)
+	}
+
+	gotCalls := strings.Join(systemctlCalls, " | ")
+	wantCalls := "user:daemon-reload | user:start alpha.service | user:daemon-reload | user:start beta.service"
+	if gotCalls != wantCalls {
+		t.Fatalf("systemctl calls = %q, want %q", gotCalls, wantCalls)
+	}
+	for _, name := range []string{"alpha", "beta"} {
+		manifestPath := filepath.Join(configDir, "workbuddy", "deployments", name+".json")
+		if got := mustReadManifest(t, manifestPath).Systemd.Started; !got {
+			t.Fatalf("%s started = %v, want true", name, got)
+		}
+	}
+}
+
+func TestRunDeployRedeployAllReinstallsEveryDeploymentInScope(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd deployment is only supported on Linux")
+	}
+
+	tempDir := t.TempDir()
+	homeDir := filepath.Join(tempDir, "home")
+	configDir := filepath.Join(tempDir, "xdg")
+	repoDir := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+
+	sourceBinary := filepath.Join(tempDir, "current-workbuddy")
+	if err := os.WriteFile(sourceBinary, []byte("new-binary"), 0o755); err != nil {
+		t.Fatalf("write source binary: %v", err)
+	}
+	restore := overrideDeployGlobals(t, sourceBinary)
+	defer restore()
+
+	for _, name := range []string{"alpha", "beta"} {
+		binaryPath := filepath.Join(homeDir, ".local", "bin", name)
+		if err := os.MkdirAll(filepath.Dir(binaryPath), 0o755); err != nil {
+			t.Fatalf("mkdir binary dir: %v", err)
+		}
+		if err := os.WriteFile(binaryPath, []byte("old-binary"), 0o755); err != nil {
+			t.Fatalf("write deployed binary: %v", err)
+		}
+		writeScopedManifest(t, "user", name, &deploymentManifest{
+			BinaryPath:       binaryPath,
+			WorkingDirectory: repoDir,
+			Command:          []string{"serve"},
+			InstalledVersion: "old",
+			Systemd: &deploymentSystemd{
+				Enabled: true,
+				Started: true,
+			},
+		})
+	}
+
+	var systemctlCalls []string
+	deployRunSystemctl = func(_ context.Context, scope string, args ...string) error {
+		systemctlCalls = append(systemctlCalls, scope+":"+strings.Join(args, " "))
+		return nil
+	}
+	deployNow = func() time.Time {
+		return time.Date(2026, 4, 18, 15, 0, 0, 0, time.UTC)
+	}
+
+	var stdout bytes.Buffer
+	err := runDeployRedeployWithOpts(context.Background(), &deployLookupOpts{scope: "user", all: true}, &stdout)
+	if err != nil {
+		t.Fatalf("runDeployRedeployWithOpts: %v", err)
+	}
+
+	gotCalls := strings.Join(systemctlCalls, " | ")
+	wantCalls := "user:daemon-reload | user:enable alpha.service | user:restart alpha.service | user:daemon-reload | user:enable beta.service | user:restart beta.service"
+	if gotCalls != wantCalls {
+		t.Fatalf("systemctl calls = %q, want %q", gotCalls, wantCalls)
+	}
+	for _, name := range []string{"alpha", "beta"} {
+		binaryPath := filepath.Join(homeDir, ".local", "bin", name)
+		content, err := os.ReadFile(binaryPath)
+		if err != nil {
+			t.Fatalf("read binary %s: %v", name, err)
+		}
+		if got := string(content); got != "new-binary" {
+			t.Fatalf("%s binary = %q, want %q", name, got, "new-binary")
+		}
+		manifestPath := filepath.Join(configDir, "workbuddy", "deployments", name+".json")
+		if got := mustReadManifest(t, manifestPath).InstalledVersion; got != deployedVersionLabel() {
+			t.Fatalf("%s installed version = %q, want %q", name, got, deployedVersionLabel())
+		}
+	}
+}
+
+func TestRunDeployUpgradeAllUpgradesEveryDeploymentInScope(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd deployment is only supported on Linux")
+	}
+
+	tempDir := t.TempDir()
+	homeDir := filepath.Join(tempDir, "home")
+	configDir := filepath.Join(tempDir, "xdg")
+	repoDir := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+
+	for _, name := range []string{"alpha", "beta"} {
+		binaryPath := filepath.Join(homeDir, ".local", "bin", name)
+		if err := os.MkdirAll(filepath.Dir(binaryPath), 0o755); err != nil {
+			t.Fatalf("mkdir binary dir: %v", err)
+		}
+		if err := os.WriteFile(binaryPath, []byte("old-binary"), 0o755); err != nil {
+			t.Fatalf("write deployed binary: %v", err)
+		}
+		writeScopedManifest(t, "user", name, &deploymentManifest{
+			BinaryPath:       binaryPath,
+			WorkingDirectory: repoDir,
+			Command:          []string{"serve"},
+			InstalledVersion: "old",
+			Systemd: &deploymentSystemd{
+				Enabled: true,
+				Started: true,
+			},
+		})
+	}
+
+	archive := buildReleaseArchive(t, "release-binary")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/acme/workbuddy/releases/latest":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"tag_name":"v1.2.3"}`)
+		case "/acme/workbuddy/releases/download/v1.2.3/" + releaseArchiveName("1.2.3"):
+			w.Header().Set("Content-Type", "application/gzip")
+			_, _ = w.Write(archive)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	restore := overrideDeployGlobals(t, filepath.Join(tempDir, "unused-current-binary"))
+	defer restore()
+	deployHTTPClient = server.Client()
+	deployGitHubAPIBaseURL = server.URL
+	deployGitHubDownloadBase = server.URL
+
+	var systemctlCalls []string
+	deployRunSystemctl = func(_ context.Context, scope string, args ...string) error {
+		systemctlCalls = append(systemctlCalls, scope+":"+strings.Join(args, " "))
+		return nil
+	}
+	deployNow = func() time.Time {
+		return time.Date(2026, 4, 18, 16, 0, 0, 0, time.UTC)
+	}
+
+	var stdout bytes.Buffer
+	err := runDeployUpgradeWithOpts(context.Background(), &deployUpgradeOpts{
+		deployLookupOpts: deployLookupOpts{scope: "user", all: true},
+		version:          "latest",
+		repository:       "acme/workbuddy",
+	}, &stdout)
+	if err != nil {
+		t.Fatalf("runDeployUpgradeWithOpts: %v", err)
+	}
+
+	gotCalls := strings.Join(systemctlCalls, " | ")
+	wantCalls := "user:daemon-reload | user:enable alpha.service | user:restart alpha.service | user:daemon-reload | user:enable beta.service | user:restart beta.service"
+	if gotCalls != wantCalls {
+		t.Fatalf("systemctl calls = %q, want %q", gotCalls, wantCalls)
+	}
+	for _, name := range []string{"alpha", "beta"} {
+		binaryPath := filepath.Join(homeDir, ".local", "bin", name)
+		content, err := os.ReadFile(binaryPath)
+		if err != nil {
+			t.Fatalf("read binary %s: %v", name, err)
+		}
+		if got := string(content); got != "release-binary" {
+			t.Fatalf("%s binary = %q, want %q", name, got, "release-binary")
+		}
+		manifestPath := filepath.Join(configDir, "workbuddy", "deployments", name+".json")
+		if got := mustReadManifest(t, manifestPath).InstalledVersion; got != "1.2.3" {
+			t.Fatalf("%s installed version = %q, want %q", name, got, "1.2.3")
+		}
+	}
+}
+
+func TestRunDeployDeleteAllDeletesEveryDeploymentInScope(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd deployment is only supported on Linux")
+	}
+
+	tempDir := t.TempDir()
+	homeDir := filepath.Join(tempDir, "home")
+	configDir := filepath.Join(tempDir, "xdg")
+	repoDir := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+
+	for _, name := range []string{"alpha", "beta"} {
+		binaryPath := filepath.Join(homeDir, ".local", "bin", name)
+		unitPath := filepath.Join(configDir, "systemd", "user", name+".service")
+		if err := os.MkdirAll(filepath.Dir(binaryPath), 0o755); err != nil {
+			t.Fatalf("mkdir binary dir: %v", err)
+		}
+		if err := os.WriteFile(binaryPath, []byte("binary"), 0o755); err != nil {
+			t.Fatalf("write deployed binary: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
+			t.Fatalf("mkdir unit dir: %v", err)
+		}
+		if err := os.WriteFile(unitPath, []byte("[Unit]\nDescription=demo\n"), 0o644); err != nil {
+			t.Fatalf("write unit: %v", err)
+		}
+		writeScopedManifest(t, "user", name, &deploymentManifest{
+			BinaryPath:       binaryPath,
+			WorkingDirectory: repoDir,
+			Command:          []string{"serve"},
+			Systemd: &deploymentSystemd{
+				Enabled:  true,
+				Started:  true,
+				UnitPath: unitPath,
+			},
+		})
+	}
+
+	var systemctlCalls []string
+	deployRunSystemctl = func(_ context.Context, scope string, args ...string) error {
+		systemctlCalls = append(systemctlCalls, scope+":"+strings.Join(args, " "))
+		return nil
+	}
+	defer func() { deployRunSystemctl = runSystemctl }()
+
+	var stdout bytes.Buffer
+	err := runDeployDeleteWithOpts(context.Background(), &deployLookupOpts{scope: "user", all: true}, &stdout)
+	if err != nil {
+		t.Fatalf("runDeployDeleteWithOpts: %v", err)
+	}
+
+	gotCalls := strings.Join(systemctlCalls, " | ")
+	wantCalls := "user:disable --now alpha.service | user:reset-failed alpha.service | user:daemon-reload | user:disable --now beta.service | user:reset-failed beta.service | user:daemon-reload"
+	if gotCalls != wantCalls {
+		t.Fatalf("systemctl calls = %q, want %q", gotCalls, wantCalls)
+	}
+	for _, name := range []string{"alpha", "beta"} {
+		manifestPath := filepath.Join(configDir, "workbuddy", "deployments", name+".json")
+		if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
+			t.Fatalf("%s manifest still exists: err=%v", name, err)
+		}
+		unitPath := filepath.Join(configDir, "systemd", "user", name+".service")
+		if _, err := os.Stat(unitPath); !os.IsNotExist(err) {
+			t.Fatalf("%s unit still exists: err=%v", name, err)
+		}
+		binaryPath := filepath.Join(homeDir, ".local", "bin", name)
+		content, err := os.ReadFile(binaryPath)
+		if err != nil {
+			t.Fatalf("read binary %s: %v", name, err)
+		}
+		if got := string(content); got != "binary" {
+			t.Fatalf("%s binary = %q, want %q", name, got, "binary")
+		}
+	}
+}
+
 func overrideDeployGlobals(t *testing.T, executablePath string) func() {
 	t.Helper()
 	oldExec := deployExecutablePath
@@ -904,6 +1419,50 @@ func overrideDeployGlobals(t *testing.T, executablePath string) func() {
 		deployGitHubAPIBaseURL = oldAPIBase
 		deployGitHubDownloadBase = oldDownloadBase
 	}
+}
+
+func overrideDeploySystemPaths(t *testing.T, root string) func() {
+	t.Helper()
+	oldBinary := deploySystemBinaryPath
+	oldManifestDir := deploySystemManifestDir
+	oldUnitDir := deploySystemUnitDir
+	deploySystemBinaryPath = filepath.Join(root, "bin", "workbuddy")
+	deploySystemManifestDir = filepath.Join(root, "deployments")
+	deploySystemUnitDir = filepath.Join(root, "systemd")
+	return func() {
+		deploySystemBinaryPath = oldBinary
+		deploySystemManifestDir = oldManifestDir
+		deploySystemUnitDir = oldUnitDir
+	}
+}
+
+func writeScopedManifest(t *testing.T, scope, name string, manifest *deploymentManifest) string {
+	t.Helper()
+	_, scopePaths, err := resolveDeployScopePaths(scope)
+	if err != nil {
+		t.Fatalf("resolve scope paths: %v", err)
+	}
+	clone := *manifest
+	if clone.SchemaVersion == 0 {
+		clone.SchemaVersion = deploymentManifestVer
+	}
+	clone.Name = name
+	clone.Scope = scope
+	if clone.Systemd != nil {
+		systemdClone := *clone.Systemd
+		if systemdClone.ServiceName == "" {
+			systemdClone.ServiceName = name
+		}
+		if systemdClone.UnitPath == "" {
+			systemdClone.UnitPath = filepath.Join(scopePaths.unitDir, name+".service")
+		}
+		clone.Systemd = &systemdClone
+	}
+	manifestPath := deploymentManifestPath(scopePaths.manifestDir, name)
+	if err := writeDeploymentManifest(manifestPath, &clone); err != nil {
+		t.Fatalf("write manifest %s: %v", name, err)
+	}
+	return manifestPath
 }
 
 func mustReadManifest(t *testing.T, path string) *deploymentManifest {
