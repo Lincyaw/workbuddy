@@ -46,6 +46,16 @@ type Options struct {
 	Stdin               io.Reader
 	Stdout              io.Writer
 	Stderr              io.Writer
+	RecordAction        func(Action)
+}
+
+// Action describes one observable recover step.
+type Action struct {
+	Step    string `json:"step"`
+	Kind    string `json:"kind"`
+	Target  string `json:"target,omitempty"`
+	Preview bool   `json:"preview,omitempty"`
+	Message string `json:"message"`
 }
 
 // Process describes one candidate row from `ps`.
@@ -152,11 +162,23 @@ func killZombies(ctx context.Context, commonRoot string, opts Options) error {
 		victims = append(victims, proc)
 	}
 	if len(victims) == 0 {
+		emitAction(opts, Action{
+			Step:    "kill_zombies",
+			Kind:    "note",
+			Message: "No matching zombie processes found.",
+		})
 		fmt.Fprintln(opts.Stdout, "No matching zombie processes found.")
 		return nil
 	}
 
 	for _, proc := range victims {
+		emitAction(opts, Action{
+			Step:    "kill_zombies",
+			Kind:    "process",
+			Target:  strconv.Itoa(proc.PID),
+			Preview: opts.DryRun,
+			Message: fmt.Sprintf("%s process %d: %s", actionText(opts.DryRun, "Would terminate", "Terminating"), proc.PID, proc.Command),
+		})
 		fmt.Fprintf(opts.Stdout, "%s process %d: %s\n", actionText(opts.DryRun, "Would terminate", "Terminating"), proc.PID, proc.Command)
 		if opts.DryRun {
 			continue
@@ -231,6 +253,13 @@ func pruneWorktrees(ctx context.Context, commonRoot string, opts Options) error 
 	}
 	for _, entry := range entries {
 		target := filepath.Join(wtRoot, entry.Name())
+		emitAction(opts, Action{
+			Step:    "prune_worktrees",
+			Kind:    "worktree_path",
+			Target:  target,
+			Preview: opts.DryRun,
+			Message: fmt.Sprintf("%s worktree path %s", actionText(opts.DryRun, "Would remove", "Removing"), target),
+		})
 		fmt.Fprintf(opts.Stdout, "%s worktree path %s\n", actionText(opts.DryRun, "Would remove", "Removing"), target)
 		if opts.DryRun {
 			continue
@@ -239,6 +268,12 @@ func pruneWorktrees(ctx context.Context, commonRoot string, opts Options) error 
 			return fmt.Errorf("recover: remove worktree %s: %w", target, err)
 		}
 	}
+	emitAction(opts, Action{
+		Step:    "prune_worktrees",
+		Kind:    "git_worktree_prune",
+		Preview: opts.DryRun,
+		Message: fmt.Sprintf("%s git worktree prune", actionText(opts.DryRun, "Would run", "Running")),
+	})
 	fmt.Fprintf(opts.Stdout, "%s git worktree prune\n", actionText(opts.DryRun, "Would run", "Running"))
 	if opts.DryRun {
 		return nil
@@ -252,6 +287,12 @@ func pruneWorktrees(ctx context.Context, commonRoot string, opts Options) error 
 func resetDB(dbPath string, opts Options) error {
 	if _, err := os.Stat(dbPath); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
+			emitAction(opts, Action{
+				Step:    "reset_db",
+				Kind:    "note",
+				Target:  dbPath,
+				Message: fmt.Sprintf("Database not found, skipping reset: %s", dbPath),
+			})
 			fmt.Fprintf(opts.Stdout, "Database not found, skipping reset: %s\n", dbPath)
 			return nil
 		}
@@ -259,6 +300,13 @@ func resetDB(dbPath string, opts Options) error {
 	}
 
 	for _, table := range runtimeTables {
+		emitAction(opts, Action{
+			Step:    "reset_db",
+			Kind:    "sqlite_table",
+			Target:  table,
+			Preview: opts.DryRun,
+			Message: fmt.Sprintf("%s sqlite table %s", actionText(opts.DryRun, "Would clear", "Clearing"), table),
+		})
 		fmt.Fprintf(opts.Stdout, "%s sqlite table %s\n", actionText(opts.DryRun, "Would clear", "Clearing"), table)
 	}
 	if opts.DryRun {
@@ -293,6 +341,11 @@ func pruneRemoteBranches(ctx context.Context, repoRoot, commonRoot string, opts 
 		return fmt.Errorf("recover: list remote branches: %w", err)
 	}
 	if len(branches) == 0 {
+		emitAction(opts, Action{
+			Step:    "prune_remote_branches",
+			Kind:    "note",
+			Message: "No remote workbuddy issue branches found.",
+		})
 		fmt.Fprintln(opts.Stdout, "No remote workbuddy issue branches found.")
 		return nil
 	}
@@ -313,19 +366,42 @@ func pruneRemoteBranches(ctx context.Context, repoRoot, commonRoot string, opts 
 		}
 	}
 	if len(orphans) == 0 {
+		emitAction(opts, Action{
+			Step:    "prune_remote_branches",
+			Kind:    "note",
+			Message: "No orphaned remote branches found.",
+		})
 		fmt.Fprintln(opts.Stdout, "No orphaned remote branches found.")
 		return nil
 	}
 
 	if opts.DryRun {
 		for _, branch := range orphans {
+			emitAction(opts, Action{
+				Step:    "prune_remote_branches",
+				Kind:    "remote_branch",
+				Target:  branch,
+				Preview: true,
+				Message: fmt.Sprintf("%s remote branch %s", actionText(true, "Would delete", "Deleting"), branch),
+			})
 			fmt.Fprintf(opts.Stdout, "%s remote branch %s\n", actionText(true, "Would delete", "Deleting"), branch)
 		}
 		return nil
 	}
 	if !opts.Force && !opts.Interactive {
+		emitAction(opts, Action{
+			Step:    "prune_remote_branches",
+			Kind:    "note",
+			Message: "Skipping remote branch deletion in non-interactive mode. Re-run with --force to delete:",
+		})
 		fmt.Fprintln(opts.Stdout, "Skipping remote branch deletion in non-interactive mode. Re-run with --force to delete:")
 		for _, branch := range orphans {
+			emitAction(opts, Action{
+				Step:    "prune_remote_branches",
+				Kind:    "remote_branch",
+				Target:  branch,
+				Message: branch,
+			})
 			fmt.Fprintln(opts.Stdout, branch)
 		}
 		return nil
@@ -336,12 +412,23 @@ func pruneRemoteBranches(ctx context.Context, repoRoot, commonRoot string, opts 
 			return err
 		}
 		if !ok {
+			emitAction(opts, Action{
+				Step:    "prune_remote_branches",
+				Kind:    "note",
+				Message: "Remote branch deletion canceled.",
+			})
 			fmt.Fprintln(opts.Stdout, "Remote branch deletion canceled.")
 			return nil
 		}
 	}
 
 	for _, branch := range orphans {
+		emitAction(opts, Action{
+			Step:    "prune_remote_branches",
+			Kind:    "remote_branch",
+			Target:  branch,
+			Message: fmt.Sprintf("%s remote branch %s", actionText(false, "Would delete", "Deleting"), branch),
+		})
 		fmt.Fprintf(opts.Stdout, "%s remote branch %s\n", actionText(false, "Would delete", "Deleting"), branch)
 		if _, err := gitOutput(ctx, commonRoot, "push", "origin", "--delete", branch); err != nil {
 			return fmt.Errorf("recover: delete remote branch %s: %w", branch, err)
@@ -568,6 +655,12 @@ func actionText(dryRun bool, preview string, live string) string {
 		return preview
 	}
 	return live
+}
+
+func emitAction(opts Options, action Action) {
+	if opts.RecordAction != nil {
+		opts.RecordAction(action)
+	}
 }
 
 var jsonUnmarshal = func(data []byte, v any) error {

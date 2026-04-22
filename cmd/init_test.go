@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,6 +54,30 @@ func TestRunInitWithOpts_CreatesFunctionalServeScaffold(t *testing.T) {
 	}
 	if got := out.String(); !strings.Contains(got, "wrote .github/workbuddy/config.yaml") {
 		t.Fatalf("stdout missing scaffold summary: %q", got)
+	}
+}
+
+func TestRunInitWithOpts_JSON(t *testing.T) {
+	root := t.TempDir()
+	var out bytes.Buffer
+
+	err := runInitWithOpts(context.Background(), root, &initOpts{repo: "octo/workbuddy", format: outputFormatJSON}, &out)
+	if err != nil {
+		t.Fatalf("runInitWithOpts: %v", err)
+	}
+
+	var result initResult
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if result.Repo != "octo/workbuddy" {
+		t.Fatalf("repo = %q", result.Repo)
+	}
+	if len(result.Directories) != len(initDirs()) {
+		t.Fatalf("directories = %v", result.Directories)
+	}
+	if len(result.Files) != 5 {
+		t.Fatalf("files = %v", result.Files)
 	}
 }
 

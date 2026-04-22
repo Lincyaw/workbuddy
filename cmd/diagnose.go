@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
@@ -46,7 +45,7 @@ error-severity findings remain after --fix.`,
   workbuddy diagnose
 
   # Focus on one repo, emit JSON
-  workbuddy diagnose --repo owner/name --json
+  workbuddy diagnose --repo owner/name --format json
 
   # Apply safe fixes (cache invalidation, etc.)
   workbuddy diagnose --fix`,
@@ -57,7 +56,8 @@ func init() {
 	diagnoseCmd.Flags().String("repo", "", "GitHub repository in OWNER/NAME form")
 	diagnoseCmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "SQLite database path")
 	diagnoseCmd.Flags().Bool("fix", false, "Apply safe fixes such as cache invalidation")
-	diagnoseCmd.Flags().Bool("json", false, "Emit machine-readable JSON")
+	addOutputFormatFlag(diagnoseCmd)
+	addDeprecatedJSONAliasFlag(diagnoseCmd)
 	rootCmd.AddCommand(diagnoseCmd)
 }
 
@@ -66,14 +66,17 @@ func runDiagnoseCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runDiagnoseWithOpts(cmd.Context(), opts, os.Stdout)
+	return runDiagnoseWithOpts(cmd.Context(), opts, cmd.OutOrStdout())
 }
 
 func parseDiagnoseFlags(cmd *cobra.Command) (*diagnoseOpts, error) {
 	repo, _ := cmd.Flags().GetString("repo")
 	dbPath, _ := cmd.Flags().GetString("db-path")
 	fix, _ := cmd.Flags().GetBool("fix")
-	jsonOut, _ := cmd.Flags().GetBool("json")
+	format, err := resolveOutputFormat(cmd, "diagnose")
+	if err != nil {
+		return nil, err
+	}
 
 	if strings.TrimSpace(dbPath) == "" {
 		return nil, fmt.Errorf("diagnose: --db-path is required")
@@ -82,7 +85,7 @@ func parseDiagnoseFlags(cmd *cobra.Command) (*diagnoseOpts, error) {
 		repo:    strings.TrimSpace(repo),
 		dbPath:  strings.TrimSpace(dbPath),
 		fix:     fix,
-		jsonOut: jsonOut,
+		jsonOut: isJSONOutput(format),
 		now:     time.Now,
 	}, nil
 }

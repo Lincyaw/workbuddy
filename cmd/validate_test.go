@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -32,6 +33,28 @@ func TestRunValidateWithOpts_ValidConfig(t *testing.T) {
 	}
 }
 
+func TestRunValidateWithOpts_JSON(t *testing.T) {
+	configDir := writeValidateFixture(t, validateFixtureFiles{
+		"config.yaml":            "repo: octo/workbuddy\n",
+		"agents/dev-agent.md":    validateAgentFixture("dev-agent", "status:developing"),
+		"agents/review-agent.md": validateAgentFixture("review-agent", "status:reviewing"),
+		"workflows/default.md":   validateWorkflowFixture(),
+	})
+
+	var stdout bytes.Buffer
+	if err := runValidateWithOpts(t.Context(), &validateOpts{configDir: configDir, format: outputFormatJSON}, &stdout, io.Discard); err != nil {
+		t.Fatalf("runValidateWithOpts: %v", err)
+	}
+
+	var result validateResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if !result.Valid || len(result.Diagnostics) != 0 {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
 func TestRunValidateWithOpts_MissingAgentExitsOne(t *testing.T) {
 	configDir := writeValidateFixture(t, validateFixtureFiles{
 		"config.yaml":            "repo: octo/workbuddy\n",
@@ -50,6 +73,35 @@ func TestRunValidateWithOpts_MissingAgentExitsOne(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "ghost-agent") {
 		t.Fatalf("stderr missing missing-agent detail: %q", stderr.String())
+	}
+}
+
+func TestRunValidateWithOpts_JSONInvalid(t *testing.T) {
+	configDir := writeValidateFixture(t, validateFixtureFiles{
+		"config.yaml":            "repo: octo/workbuddy\n",
+		"agents/review-agent.md": validateAgentFixture("review-agent", "status:reviewing"),
+		"workflows/default.md":   strings.Replace(validateWorkflowFixture(), "agent: dev-agent", "agent: ghost-agent", 1),
+	})
+
+	var stdout bytes.Buffer
+	err := runValidateWithOpts(t.Context(), &validateOpts{configDir: configDir, format: outputFormatJSON}, &stdout, io.Discard)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	var exitErr *cliExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected exit 1, got %v", err)
+	}
+
+	var result validateResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if result.Valid {
+		t.Fatalf("expected invalid result, got %+v", result)
+	}
+	if len(result.Diagnostics) != 1 || !strings.Contains(result.Diagnostics[0].Message, "ghost-agent") {
+		t.Fatalf("unexpected diagnostics: %+v", result.Diagnostics)
 	}
 }
 

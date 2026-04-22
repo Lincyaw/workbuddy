@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -42,7 +41,7 @@ var restartIssueCmd = &cobra.Command{
  and simple label toggles are ignored because the poller cache already matches
  GitHub.`,
 	Example: `  workbuddy admin restart-issue --repo owner/name --issue 173
-  workbuddy admin restart-issue --repo owner/name --issue 173 --json`,
+  workbuddy admin restart-issue --repo owner/name --issue 173 --format json`,
 	RunE: runRestartIssueCmd,
 }
 
@@ -50,7 +49,8 @@ func init() {
 	restartIssueCmd.Flags().String("repo", "", "GitHub repository in OWNER/NAME form")
 	restartIssueCmd.Flags().Int("issue", 0, "Issue number to restart")
 	restartIssueCmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "SQLite database path")
-	restartIssueCmd.Flags().Bool("json", false, "Emit machine-readable JSON")
+	addOutputFormatFlag(restartIssueCmd)
+	addDeprecatedJSONAliasFlag(restartIssueCmd)
 	adminCmd.AddCommand(restartIssueCmd)
 }
 
@@ -59,14 +59,17 @@ func runRestartIssueCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runRestartIssueWithOpts(cmd.Context(), opts, os.Stdout)
+	return runRestartIssueWithOpts(cmd.Context(), opts, cmd.OutOrStdout())
 }
 
 func parseRestartIssueFlags(cmd *cobra.Command) (*restartIssueOpts, error) {
 	repo, _ := cmd.Flags().GetString("repo")
 	issue, _ := cmd.Flags().GetInt("issue")
 	dbPath, _ := cmd.Flags().GetString("db-path")
-	jsonOut, _ := cmd.Flags().GetBool("json")
+	format, err := resolveOutputFormat(cmd, "restart-issue")
+	if err != nil {
+		return nil, err
+	}
 
 	repo = strings.TrimSpace(repo)
 	if repo == "" {
@@ -84,7 +87,7 @@ func parseRestartIssueFlags(cmd *cobra.Command) (*restartIssueOpts, error) {
 		issue:   issue,
 		dbPath:  dbPath,
 		source:  "cli:admin:restart-issue",
-		jsonOut: jsonOut,
+		jsonOut: isJSONOutput(format),
 	}, nil
 }
 

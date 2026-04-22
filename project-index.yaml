@@ -2139,3 +2139,44 @@ requirements:
       - cmd/worker_test.go
       - cmd/status_test.go
     deps: [REQ-028, REQ-029, REQ-042, REQ-051]
+
+  - id: REQ-065
+    title: CLI structured output flag standardization
+    description: >
+      Standardize machine-readable CLI output on a canonical
+      `--format {text,json}` contract across operator-facing commands, while
+      preserving backwards compatibility for existing `--json` users. Commands
+      that emit structured confirmations or listings must support stable JSON
+      payloads so shell automation can depend on one consistent flag shape.
+    priority: P1
+    version: v0.4.0
+    status: tested
+    acceptance_criteria:
+      - "AC-065-1: `--format {text,json}` is the canonical flag on every command in this slice that emits structured output"
+      - "AC-065-2: Existing `--json` flags remain available as deprecated aliases for `--format json` on status/diagnose/cache-invalidate/admin restart-issue/repo list"
+      - "AC-065-3: `validate`, `version`, `deploy list`, `repo register`, `recover`, `worker repos list`, and `init` emit stable JSON payloads when `--format json` is selected"
+      - "AC-065-4: `logs` continues to use `--format {text,json}` as the canonical structured-output flag"
+      - "AC-065-5: Unit tests verify valid JSON output for representative commands in this slice, including newly-added JSON emitters"
+    code:
+      - cmd/output_format.go
+      - cmd/validate.go
+      - cmd/version.go
+      - cmd/deploy.go
+      - cmd/repo.go
+      - cmd/recover.go
+      - cmd/worker.go
+      - cmd/worker_repos.go
+      - cmd/init.go
+      - cmd/status.go
+      - cmd/diagnose.go
+      - cmd/cache_invalidate.go
+      - cmd/admin_restart_issue.go
+      - internal/recover/recover.go
+    tests:
+      - cmd/validate_test.go
+      - cmd/version_test.go
+      - cmd/init_test.go
+      - cmd/repo_test.go
+      - cmd/worker_repos_test.go
+      - cmd/deploy_test.go
+    deps: [REQ-019, REQ-028, REQ-051, REQ-060]

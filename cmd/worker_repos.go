@@ -547,6 +547,10 @@ var workerReposListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List repo bindings for a running worker",
 	RunE: func(cmd *cobra.Command, _ []string) error {
+		format, err := resolveOutputFormat(cmd, "worker repos list")
+		if err != nil {
+			return err
+		}
 		controlDir, err := os.Getwd()
 		if err != nil {
 			return err
@@ -558,6 +562,9 @@ var workerReposListCmd = &cobra.Command{
 		bindings, err := client.List(cmd.Context())
 		if err != nil {
 			return err
+		}
+		if isJSONOutput(format) {
+			return writeJSON(cmd.OutOrStdout(), bindings)
 		}
 		tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
 		_, _ = fmt.Fprintln(tw, "REPO\tPATH")

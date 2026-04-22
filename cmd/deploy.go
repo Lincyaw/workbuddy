@@ -201,7 +201,8 @@ func init() {
 	deployInstallCmd.Flags().Bool("start", true, "Start the systemd unit after writing it")
 
 	deployListCmd.Flags().String("scope", defaultDeployListScope, "Deployment scope: all, user, or system")
-	deployListCmd.Flags().String("format", "text", "Output format: text or json")
+	addOutputFormatFlag(deployListCmd)
+	addDeprecatedJSONAliasFlag(deployListCmd)
 
 	deployRedeployCmd.Flags().String("name", defaultDeployName, "Deployment name")
 	deployRedeployCmd.Flags().String("scope", defaultDeployScope, "Deployment scope: user or system")
@@ -291,6 +292,21 @@ func runDeployUpgradeCmd(cmd *cobra.Command, _ []string) error {
 	}, cmd.OutOrStdout())
 }
 
+func parseDeployListFlags(cmd *cobra.Command) (*deployListOpts, error) {
+	scope, _ := cmd.Flags().GetString("scope")
+	format, err := resolveOutputFormat(cmd, "deploy list")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := resolveDeployScopes(scope, defaultDeployListScope); err != nil {
+		return nil, fmt.Errorf("deploy list: %w", err)
+	}
+	return &deployListOpts{
+		scope:  strings.TrimSpace(scope),
+		format: format,
+	}, nil
+}
+
 func parseDeployInstallFlags(cmd *cobra.Command, args []string) (*deployInstallOpts, error) {
 	name, _ := cmd.Flags().GetString("name")
 	scope, _ := cmd.Flags().GetString("scope")
@@ -329,26 +345,6 @@ func parseDeployLookupFlags(cmd *cobra.Command) (*deployLookupOpts, error) {
 		name:  strings.TrimSpace(name),
 		scope: strings.TrimSpace(scope),
 		all:   all,
-	}, nil
-}
-
-func parseDeployListFlags(cmd *cobra.Command) (*deployListOpts, error) {
-	scope, _ := cmd.Flags().GetString("scope")
-	format, _ := cmd.Flags().GetString("format")
-	format = strings.ToLower(strings.TrimSpace(format))
-	switch format {
-	case "", "text":
-		format = "text"
-	case "json":
-	default:
-		return nil, fmt.Errorf("deploy list: --format must be one of text or json")
-	}
-	if _, err := resolveDeployScopes(scope, defaultDeployListScope); err != nil {
-		return nil, fmt.Errorf("deploy list: %w", err)
-	}
-	return &deployListOpts{
-		scope:  strings.TrimSpace(scope),
-		format: format,
 	}, nil
 }
 
