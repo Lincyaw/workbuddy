@@ -512,6 +512,9 @@ var workerReposAddCmd = &cobra.Command{
 	Short: "Add a repo binding to a running worker",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireWritable(cmd, "worker repos add"); err != nil {
+			return err
+		}
 		controlDir, err := os.Getwd()
 		if err != nil {
 			return err
@@ -533,6 +536,9 @@ var workerReposRemoveCmd = &cobra.Command{
 	Short: "Remove a repo binding from a running worker",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireWritable(cmd, "worker repos remove"); err != nil {
+			return err
+		}
 		controlDir, err := os.Getwd()
 		if err != nil {
 			return err
@@ -570,9 +576,9 @@ var workerReposListCmd = &cobra.Command{
 			return err
 		}
 		if isJSONOutput(format) {
-			return writeJSON(cmd.OutOrStdout(), bindings)
+			return writeJSON(cmdStdout(cmd), bindings)
 		}
-		tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+		tw := tabwriter.NewWriter(cmdStdout(cmd), 0, 4, 2, ' ', 0)
 		_, _ = fmt.Fprintln(tw, "REPO\tPATH")
 		for _, binding := range bindings {
 			_, _ = fmt.Fprintf(tw, "%s\t%s\n", binding.Repo, binding.Path)

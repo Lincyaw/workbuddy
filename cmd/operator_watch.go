@@ -74,6 +74,9 @@ func runOperatorWatchCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	if err := requireWritable(cmd, "operator-watch"); err != nil {
+		return err
+	}
 
 	st, err := store.NewStore(opts.dbPath)
 	if err != nil {
@@ -87,9 +90,9 @@ func runOperatorWatchCmd(cmd *cobra.Command, _ []string) error {
 		ConfigDir:  opts.configDir,
 		Timeout:    operatorwatch.DefaultTimeout,
 		DryRun:     opts.dryRun,
-		Stdout:     cmd.OutOrStdout(),
-		Stderr:     cmd.ErrOrStderr(),
-		Logger:     eventlog.NewEventLogger(st),
+		Stdout:     cmdStdout(cmd),
+		Stderr:     cmdStderr(cmd),
+		Logger:     eventlog.NewEventLoggerWithWriter(st, cmdStderr(cmd)),
 	})
 }
 

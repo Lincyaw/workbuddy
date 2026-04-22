@@ -104,6 +104,9 @@ func runWorker(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	if err := requireWritable(cmd, "worker"); err != nil {
+		return err
+	}
 	return runWorkerWithOpts(opts, nil, nil)
 }
 
@@ -117,12 +120,15 @@ func runWorkerUnregister(cmd *cobra.Command, _ []string) error {
 	if token == "" {
 		return fmt.Errorf("worker unregister: --token-file, deprecated --token, or WORKBUDDY_AUTH_TOKEN is required")
 	}
+	if err := requireWritable(cmd, "worker unregister"); err != nil {
+		return err
+	}
 
 	client := workerclient.New(strings.TrimSpace(coordinatorURL), strings.TrimSpace(token), nil)
 	if err := client.Unregister(cmd.Context(), strings.TrimSpace(workerID)); err != nil {
 		return fmt.Errorf("worker unregister: %w", err)
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "unregistered worker %s\n", workerID)
+	fmt.Fprintf(cmdStdout(cmd), "unregistered worker %s\n", workerID)
 	return nil
 }
 

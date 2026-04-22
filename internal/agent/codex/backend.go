@@ -30,6 +30,10 @@ import (
 const (
 	defaultClientName    = "workbuddy"
 	defaultClientVersion = "dev"
+	// Give the shared stderr scanner a brief chance to flush process-scoped
+	// lines that were emitted just before turn completion, so session
+	// consumers do not miss trailing stderr log events due to close timing.
+	sessionCloseGracePeriod = 25 * time.Millisecond
 )
 
 // Config holds optional configuration for the Codex app-server backend.
@@ -477,6 +481,7 @@ func (s *session) observeNotification(method string, params json.RawMessage) {
 			if s.threadID != "" {
 				s.server.unregisterSession(s.threadID)
 			}
+			time.Sleep(sessionCloseGracePeriod)
 			s.closeEvents()
 		}()
 	case "error":

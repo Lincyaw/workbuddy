@@ -5,18 +5,37 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 
 	"github.com/spf13/cobra"
 )
 
+const (
+	flagNoColor        = "no-color"
+	flagNonInteractive = "non-interactive"
+	flagReadOnly       = "read-only"
+)
+
 var rootCmd = &cobra.Command{
-	Use:           "workbuddy",
-	Short:         "GitHub Issue-driven agent orchestration platform",
-	Long:          "Hub-Spoke architecture: Coordinator polls GitHub Issues and manages label-based state machine; Workers execute agent instances.",
-	SilenceErrors: true,
-	SilenceUsage:  true,
-	RunE:          runRootCmd,
+	Use:               "workbuddy",
+	Short:             "GitHub Issue-driven agent orchestration platform",
+	Long:              "Hub-Spoke architecture: Coordinator polls GitHub Issues and manages label-based state machine; Workers execute agent instances.",
+	SilenceErrors:     true,
+	SilenceUsage:      true,
+	RunE:              runRootCmd,
+	PersistentPreRunE: configureRootCommand,
+}
+
+func init() {
+	rootCmd.PersistentFlags().Bool(flagNoColor, false, "Strip ANSI color codes from all command output")
+	rootCmd.PersistentFlags().Bool(flagNonInteractive, false, "Fail instead of prompting for interactive confirmation")
+	rootCmd.PersistentFlags().Bool(flagReadOnly, false, "Reject commands that would write or mutate state")
+}
+
+func configureRootCommand(cmd *cobra.Command, _ []string) error {
+	log.SetOutput(cmdStderr(cmd))
+	return nil
 }
 
 // Execute runs the root command.

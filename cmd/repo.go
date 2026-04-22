@@ -94,12 +94,15 @@ func runRepoRegisterCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	if err := requireWritable(cmd, "repo register"); err != nil {
+		return err
+	}
 	payload, err := runRepoRegister(cmd.Context(), opts)
 	if err != nil {
 		return err
 	}
 	if isJSONOutput(opts.format) {
-		return writeJSON(cmd.OutOrStdout(), repoRegisterResult{
+		return writeJSON(cmdStdout(cmd), repoRegisterResult{
 			Status:        "registered",
 			Repo:          payload.Repo,
 			Environment:   payload.Environment,
@@ -108,7 +111,7 @@ func runRepoRegisterCmd(cmd *cobra.Command, _ []string) error {
 			WorkflowCount: len(payload.Workflows),
 		})
 	}
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "registered %s\n", payload.Repo)
+	_, _ = fmt.Fprintf(cmdStdout(cmd), "registered %s\n", payload.Repo)
 	return nil
 }
 
@@ -117,7 +120,7 @@ func runRepoListCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runRepoList(cmd.Context(), opts, cmd.OutOrStdout())
+	return runRepoList(cmd.Context(), opts, cmdStdout(cmd))
 }
 
 func parseRepoListFlags(cmd *cobra.Command) (*repoListOpts, error) {

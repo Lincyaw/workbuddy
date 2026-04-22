@@ -69,7 +69,7 @@ var logsCmd = &cobra.Command{
 		"  workbuddy logs --issue 78 --repo owner/name --format json",
 		"  workbuddy logs --issue 78 --repo owner/name --view artifact --stream tool-calls",
 	}, "\n"),
-	RunE:  runLogsCmd,
+	RunE: runLogsCmd,
 }
 
 func init() {
@@ -89,7 +89,7 @@ func runLogsCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runLogsWithOpts(cmd.Context(), opts, os.Stdout)
+	return runLogsWithOpts(cmd.Context(), opts, cmdStdout(cmd))
 }
 
 func parseLogsFlags(cmd *cobra.Command) (*logsOpts, error) {

@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -108,7 +109,10 @@ func runServe(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runServeWithOpts(opts, nil, nil)
+	if err := requireWritable(cmd, "serve"); err != nil {
+		return err
+	}
+	return runServeWithOutput(opts, nil, nil, cmdStdout(cmd))
 }
 
 func parseServeFlags(cmd *cobra.Command) (*serveOpts, error) {
@@ -143,9 +147,16 @@ func parseServeFlags(cmd *cobra.Command) (*serveOpts, error) {
 // its signature and on the injection points (ghReader, launcherOverride,
 // parentCtx); the individual pieces it assembles live in internal/app.
 func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverride *runtimepkg.Registry, parentCtx ...context.Context) error {
+	return runServeWithOutput(opts, ghReader, launcherOverride, os.Stdout, parentCtx...)
+}
+
+func runServeWithOutput(opts *serveOpts, ghReader poller.GHReader, launcherOverride *runtimepkg.Registry, stdout io.Writer, parentCtx ...context.Context) error {
 	cfg, err := loadServeConfig(opts)
 	if err != nil {
 		return err
+	}
+	if stdout == nil {
+		stdout = io.Discard
 	}
 
 	st, err := store.NewStore(opts.dbPath)
@@ -161,7 +172,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 		log.Printf("[serve] warning: recovery failed: %v", err)
 	}
 
-	evlog := eventlog.NewEventLogger(st)
+	evlog := eventlog.NewEventLoggerWithWriter(st, log.Writer())
 	reg := registry.NewRegistry(st, cfg.Global.PollInterval)
 
 	repoDir, err := os.Getwd()
@@ -338,8 +349,7 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 		close(workerDone)
 	}
 
-	fmt.Printf("workbuddy serving (repo=%s, roles=[%s], poll=%s, port=%d, coordinator_api=%t)\n",
-		cfg.Global.Repo, strings.Join(opts.roles, ","), cfg.Global.PollInterval, cfg.Global.Port, opts.coordinatorAPI)
+	writeServeBanner(stdout, cfg, opts)
 
 	if sigCh != nil {
 		select {
@@ -379,6 +389,11 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 	wg.Wait()
 	log.Printf("[serve] shutdown complete")
 	return nil
+}
+
+func writeServeBanner(stdout io.Writer, cfg *config.FullConfig, opts *serveOpts) {
+	fmt.Fprintf(stdout, "workbuddy serving (repo=%s, roles=[%s], poll=%s, port=%d, coordinator_api=%t)\n",
+		cfg.Global.Repo, strings.Join(opts.roles, ","), cfg.Global.PollInterval, cfg.Global.Port, opts.coordinatorAPI)
 }
 
 // loadServeConfig loads, validates, and applies CLI overrides to the serve

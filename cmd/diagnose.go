@@ -67,7 +67,12 @@ func runDiagnoseCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return runDiagnoseWithOpts(cmd.Context(), opts, cmd.OutOrStdout())
+	if opts.fix {
+		if err := requireWritable(cmd, "diagnose --fix"); err != nil {
+			return err
+		}
+	}
+	return runDiagnoseWithOpts(cmd.Context(), opts, cmdStdout(cmd))
 }
 
 func parseDiagnoseFlags(cmd *cobra.Command) (*diagnoseOpts, error) {

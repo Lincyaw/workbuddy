@@ -165,7 +165,7 @@ func runStatusCmd(cmd *cobra.Command, _ []string) error {
 		token:   opts.token,
 		http:    &http.Client{Timeout: httpTimeout},
 	}
-	return runStatusWithOpts(cmd.Context(), opts, client, cmd.OutOrStdout())
+	return runStatusWithOpts(cmd.Context(), opts, client, cmdStdout(cmd))
 }
 
 func parseStatusFlags(cmd *cobra.Command) (*statusOpts, error) {
