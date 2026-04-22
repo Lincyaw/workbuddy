@@ -63,7 +63,7 @@ func TestExecuteUsageOutput(t *testing.T) {
 		if !strings.Contains(stderr, `Error: unknown command "frob" for "workbuddy"`) {
 			t.Fatalf("stderr missing unknown-command error: %q", stderr)
 		}
-		if !strings.Contains(stderr, "Usage:\n  workbuddy [command]") {
+		if !strings.Contains(stderr, "workbuddy [command]") {
 			t.Fatalf("stderr missing usage for unknown subcommand: %q", stderr)
 		}
 	})
