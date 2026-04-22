@@ -352,3 +352,80 @@ func TestCreate_ExistingGitRepoButNotRegisteredWorktreeRefuse(t *testing.T) {
 		t.Fatalf("expected registered worktree error, got: %v", err)
 	}
 }
+
+// TestRemove_RetainsWorktreeWhileSecondSessionActive reproduces the race
+// from issue #169: a dev-agent and review-agent share the same per-issue
+// worktree across a handoff; when the dev-agent's Execute defers Remove
+// after the review-agent has already re-acquired the worktree, the worktree
+// must survive so the review-agent's cwd is not pulled away.
+func TestRemove_RetainsWorktreeWhileSecondSessionActive(t *testing.T) {
+	repoDir := initTestRepo(t)
+	mgr := NewManager(repoDir)
+
+	// dev-agent acquires
+	wtPath, err := mgr.Create(42, "dev-task")
+	if err != nil {
+		t.Fatalf("Create (dev): %v", err)
+	}
+	if _, err := os.Stat(wtPath); err != nil {
+		t.Fatalf("worktree missing after first Create: %v", err)
+	}
+
+	// review-agent acquires the same worktree (reuse path)
+	wtPath2, err := mgr.Create(42, "review-task")
+	if err != nil {
+		t.Fatalf("Create (review): %v", err)
+	}
+	if wtPath2 != wtPath {
+		t.Fatalf("expected same worktree reused, got %s vs %s", wtPath2, wtPath)
+	}
+
+	// dev-agent's deferred Remove fires — must be a no-op on disk
+	if err := mgr.Remove(wtPath); err != nil {
+		t.Fatalf("Remove (dev, expected no-op): %v", err)
+	}
+	if _, err := os.Stat(wtPath); err != nil {
+		t.Fatalf("worktree was removed while review session still active: %v", err)
+	}
+
+	// review-agent finishes — now the actual removal must happen
+	if err := mgr.Remove(wtPath); err != nil {
+		t.Fatalf("Remove (review): %v", err)
+	}
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Fatalf("worktree still present after final Remove: stat err=%v", err)
+	}
+
+	// a subsequent Remove on an untracked path proceeds without crashing
+	// (backward compat: recovery/prune callers)
+	if err := mgr.Remove(wtPath); err != nil {
+		// remove of a gone worktree logs a warning but is not a hard error
+		// as long as prune succeeds; tolerate either nil or non-fatal err.
+		t.Logf("Remove on already-gone worktree returned: %v (tolerated)", err)
+	}
+}
+
+// TestRemove_UntrackedPathProceeds asserts that a Remove on a worktree the
+// manager never tracked (e.g. recovery tools, or Prune) still performs the
+// actual git removal instead of silently skipping because the refcount map
+// has no entry.
+func TestRemove_UntrackedPathProceeds(t *testing.T) {
+	repoDir := initTestRepo(t)
+
+	// First manager creates the worktree.
+	mgrA := NewManager(repoDir)
+	wtPath, err := mgrA.Create(7, "task-a")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Second manager instance — simulates a recovery/prune path that inherits
+	// worktrees without knowing their history. No refcount entry.
+	mgrB := NewManager(repoDir)
+	if err := mgrB.Remove(wtPath); err != nil {
+		t.Fatalf("Remove from recovery manager: %v", err)
+	}
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Fatalf("worktree not removed by recovery-path Remove: stat err=%v", err)
+	}
+}

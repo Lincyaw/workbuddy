@@ -1936,6 +1936,7 @@ requirements:
       - "AC-058-5: Remote worker (cmd/worker.go) reports worktree failures on the issue as a user-visible comment via Reporter and releases the claimed task back to the coordinator queue"
       - "AC-058-6: Embedded router (internal/router/router.go) reports worktree failures on the issue as a user-visible comment via Reporter and updates the task status to failed"
       - "AC-058-7: Unit tests cover stale metadata + prune rescue, existing-clean reuse, existing-dirty refuse, and stale-add failure"
+      - "AC-058-8: When multiple agents share the same per-issue worktree (dev→review handoff), Manager tracks active references; Remove decrements the count and only performs the actual git worktree remove + branch delete when the last reference releases, so a late defer from a finished agent does not invalidate cwd for a still-running agent"
     code:
       - internal/workspace/workspace.go
       - internal/worker/embedded.go
