@@ -150,7 +150,7 @@ var deployInstallCmd = &cobra.Command{
 
   # Dedicated worker service bound to a coordinator
   workbuddy deploy install --name workbuddy-worker-dev --scope system --systemd -- \
-    worker --coordinator http://127.0.0.1:8081 --token <token> --role dev --repo owner/repo
+    worker --coordinator http://127.0.0.1:8081 --token <token> --role dev --repos owner/repo=/srv/workbuddy-worker
 `),
 	Args: cobra.ArbitraryArgs,
 	RunE: runDeployInstallCmd,

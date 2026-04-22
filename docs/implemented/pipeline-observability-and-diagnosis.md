@@ -47,31 +47,33 @@ workbuddy status --watch [--repo R] [--issue N] [--timeout 30m]
 
 serve 进程内 `internal/tasknotify/hub.go` 实现 Publish/Subscribe，通过 `GET /tasks/watch` SSE 端点推送 task 完成事件。
 
-### cache-invalidate（REQ-034）
+### cache invalidate（REQ-034, REQ-061）
 
 手动清除 issue 缓存，强制 poller 重新评估：
 
 ```bash
-workbuddy cache-invalidate --repo OWNER/NAME --issue 47,48,49
+workbuddy cache invalidate --repo OWNER/NAME --issue 47,48,49
 ```
 
 - 删除 `issue_cache` 行
 - 重置 `issue_dependency_state`（清除 verdict，强制重评估）
 - 记录 `cache_invalidated` 事件
 - 直连 SQLite，不依赖 serve 进程
+- `workbuddy cache-invalidate ...` 仍可用，但会在 stderr 打印 deprecation warning
 
-### admin restart-issue（REQ-060）
+### issue restart（REQ-060, REQ-061）
 
 显式重启单个 issue 的调度状态，解决“标签没变但就是不再派发”的恢复场景：
 
 ```bash
-workbuddy admin restart-issue --repo OWNER/NAME --issue 173
+workbuddy issue restart --repo OWNER/NAME --issue 173
 ```
 
 - 删除该 issue 的 `issue_cache` 行，让下一次 poll 把它当成新 issue
 - 清除 `issue_dependency_state`，避免沿用旧 verdict
 - 如果存在残留 `issue_claim`，一并删除
 - 记录 `issue_restarted` 事件，方便事后审计
+- `workbuddy admin restart-issue ...` 仍可用，但会在 stderr 打印 deprecation warning
 
 相比直接操作 SQLite，这个命令把手工恢复流程固化成了可审计的 CLI。
 
@@ -104,8 +106,8 @@ workbuddy diagnose [--repo R] [--fix] [--json]
 ## 主要代码
 
 - `cmd/status.go` — status 命令及 --tasks/--events/--watch 子模式
-- `cmd/cache_invalidate.go` — cache-invalidate 命令
-- `cmd/admin_restart_issue.go` — 显式重启单个 issue 的 operator 命令
+- `cmd/cache_invalidate.go` — `cache invalidate` / `cache-invalidate` 命令
+- `cmd/admin_restart_issue.go` — `issue restart` / `admin restart-issue` 命令
 - `cmd/diagnose.go` — diagnose 命令
 - `internal/operator/detector.go` — 进程内自愈告警 detector
 - `internal/diagnose/diagnose.go` — 诊断逻辑（纯逻辑，无副作用）

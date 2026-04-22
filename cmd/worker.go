@@ -80,13 +80,7 @@ var workerUnregisterCmd = &cobra.Command{
 }
 
 func init() {
-	workerCmd.Flags().String("coordinator", "", "Coordinator base URL")
-	addCoordinatorAuthFlags(workerCmd.Flags(), "", "Bearer token for Coordinator authentication")
-	workerCmd.Flags().String("role", "", "Comma-separated worker roles (default: roles from local agent config)")
-	workerCmd.Flags().String("runtime", config.RuntimeClaudeCode, "Worker runtime capability: claude-code or codex")
-	workerCmd.Flags().String("config-dir", ".github/workbuddy", "Configuration directory (relative to each bound repo unless absolute)")
-	workerCmd.Flags().String("repo", "", "Repository in OWNER/NAME form (backward-compatible alias; path defaults to cwd)")
-	workerCmd.Flags().String("repos", "", "Comma-separated OWNER/NAME=/path repo bindings")
+	bindWorkerFlags(workerCmd)
 	workerCmd.Flags().String("id", "", "Stable worker ID (default: hostname)")
 	workerCmd.Flags().String("mgmt-addr", defaultWorkerMgmtAddr, "Local-only worker management listen address")
 	workerCmd.Flags().Int("concurrency", 1, "Maximum concurrent tasks per worker")
@@ -132,6 +126,16 @@ func runWorkerUnregister(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+func bindWorkerFlags(cmd *cobra.Command) {
+	cmd.Flags().String("coordinator", "", "Coordinator base URL")
+	addCoordinatorAuthFlags(cmd.Flags(), "", "Bearer token for Coordinator authentication")
+	cmd.Flags().String("role", "", "Comma-separated worker roles (default: roles from local agent config)")
+	cmd.Flags().String("runtime", config.RuntimeClaudeCode, "Worker runtime capability: claude-code or codex")
+	cmd.Flags().String("config-dir", ".github/workbuddy", "Configuration directory (relative to each bound repo unless absolute)")
+	cmd.Flags().String("repo", "", "Deprecated single binding alias; use --repos OWNER/NAME=/path (path defaults to cwd only for --repo)")
+	cmd.Flags().String("repos", "", "Canonical repo bindings: comma-separated OWNER/NAME=/path entries")
+}
+
 func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	coordinatorURL, _ := cmd.Flags().GetString("coordinator")
 	roleCSV, _ := cmd.Flags().GetString("role")
@@ -151,6 +155,9 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	}
 	if token == "" {
 		return nil, fmt.Errorf("worker: --token-file, deprecated --token, or WORKBUDDY_AUTH_TOKEN is required")
+	}
+	if strings.TrimSpace(repo) != "" && strings.TrimSpace(reposCSV) == "" {
+		writeDeprecationWarning(cmd.ErrOrStderr(), "`worker --repo`", "`worker --repos OWNER/NAME=/path`")
 	}
 	return &workerOpts{
 		coordinatorURL:    strings.TrimSpace(coordinatorURL),

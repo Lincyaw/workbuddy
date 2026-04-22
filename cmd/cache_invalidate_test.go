@@ -4,12 +4,72 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Lincyaw/workbuddy/internal/store"
+	"github.com/spf13/cobra"
 )
+
+func TestCacheInvalidateCommands(t *testing.T) {
+	t.Run("canonical cache invalidate has no deprecation warning", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "cache.db")
+		st, err := store.NewStore(dbPath)
+		if err != nil {
+			t.Fatalf("NewStore: %v", err)
+		}
+		if err := st.UpsertIssueCache(store.IssueCache{Repo: "owner/repo", IssueNum: 47, Labels: `["status:developing"]`, State: "open"}); err != nil {
+			t.Fatalf("UpsertIssueCache: %v", err)
+		}
+		_ = st.Close()
+
+		cmd := &cobra.Command{Use: "invalidate", RunE: runCacheInvalidateCmd}
+		bindCacheInvalidateFlags(cmd)
+		var stderr bytes.Buffer
+		cmd.SetErr(&stderr)
+		cmd.SetOut(io.Discard)
+		_ = cmd.Flags().Set("repo", "owner/repo")
+		_ = cmd.Flags().Set("issue", "47")
+		_ = cmd.Flags().Set("db-path", dbPath)
+
+		if err := cmd.RunE(cmd, nil); err != nil {
+			t.Fatalf("runCacheInvalidateCmd: %v", err)
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("unexpected stderr: %q", stderr.String())
+		}
+	})
+
+	t.Run("deprecated cache-invalidate warns on stderr", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "cache.db")
+		st, err := store.NewStore(dbPath)
+		if err != nil {
+			t.Fatalf("NewStore: %v", err)
+		}
+		if err := st.UpsertIssueCache(store.IssueCache{Repo: "owner/repo", IssueNum: 48, Labels: `["status:developing"]`, State: "open"}); err != nil {
+			t.Fatalf("UpsertIssueCache: %v", err)
+		}
+		_ = st.Close()
+
+		cmd := &cobra.Command{Use: "cache-invalidate", RunE: runCacheInvalidateAliasCmd}
+		bindCacheInvalidateFlags(cmd)
+		var stderr bytes.Buffer
+		cmd.SetErr(&stderr)
+		cmd.SetOut(io.Discard)
+		_ = cmd.Flags().Set("repo", "owner/repo")
+		_ = cmd.Flags().Set("issue", "48")
+		_ = cmd.Flags().Set("db-path", dbPath)
+
+		if err := cmd.RunE(cmd, nil); err != nil {
+			t.Fatalf("runCacheInvalidateAliasCmd: %v", err)
+		}
+		if !strings.Contains(stderr.String(), "`workbuddy cache-invalidate` is deprecated") {
+			t.Fatalf("expected deprecation warning, got %q", stderr.String())
+		}
+	})
+}
 
 func TestRunCacheInvalidateStore(t *testing.T) {
 	t.Run("deletes cache and dependency state", func(t *testing.T) {

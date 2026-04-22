@@ -33,7 +33,7 @@
 | `audit-http-server.md` | REQ-011 审计 HTTP 端点：/events、/issues/.../state、/sessions/:id | `cmd/serve.go`, `internal/auditapi/`, `internal/webui/` |
 | `distributed-topology-and-cli.md` | Coordinator/Worker 分布式拓扑、全部 CLI 命令列表、HTTP API | `cmd/coordinator.go`, `cmd/worker.go`, `internal/coordinator/http/` |
 | `runtime-migration-plan.md` | Runtime/Session 迁移完成状态、command deprecation 路线 | `internal/runtime/`, `internal/launcher/process.go` |
-| `pipeline-observability-and-diagnosis.md` | status --tasks/--events/--watch/--stuck、cache-invalidate、admin restart-issue、diagnose | `cmd/status.go`, `cmd/diagnose.go`, `cmd/cache_invalidate.go`, `cmd/admin_restart_issue.go` |
+| `pipeline-observability-and-diagnosis.md` | status --tasks/--events/--watch/--stuck、cache invalidate（alias: cache-invalidate）、issue restart（alias: admin restart-issue）、diagnose | `cmd/status.go`, `cmd/diagnose.go`, `cmd/cache_invalidate.go`, `cmd/admin_restart_issue.go` |
 | `worker-execution-boundary.md` | Worker 执行核心、`internal/worker/` 拆分、runtime 收口、GitHub/session boundary（#146~#151 已落地） | `internal/worker/`, `internal/runtime/`, `internal/ghadapter/`, `internal/launcher/` |
 
 ## 维护规则
