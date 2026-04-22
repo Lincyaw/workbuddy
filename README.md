@@ -176,7 +176,7 @@ sudo workbuddy deploy install \
      --coordinator http://127.0.0.1:8081 \
      --token <worker-token> \
      --role dev \
-     --repo owner/repo
+     --repos owner/repo=/srv/workbuddy-worker
 ```
 
 This makes the split explicit:

@@ -21,7 +21,7 @@ Coordinator 和 Worker 在同一进程内，通过 Go channel 通信。
 workbuddy coordinator --port 8080
 
 # 机器 B
-workbuddy worker --coordinator http://A:8080 --token <secret> --role dev --repo owner/repo
+workbuddy worker --coordinator http://A:8080 --token <secret> --role dev --repos owner/repo=/srv/workbuddy-worker
 ```
 
 - Coordinator 负责：GitHub Poller、状态机、任务路由、HTTP API、审计
@@ -43,8 +43,8 @@ workbuddy worker --coordinator http://A:8080 --token <secret> --role dev --repo 
 | `workbuddy run` | 直接启动 runtime session（跳过 poller/状态机） | REQ-020 | v0.2.0 |
 | `workbuddy validate` | 校验配置文件完整性和交叉引用 | REQ-021 | v0.2.0 |
 | `workbuddy logs` | 查看 session 归档日志和 artifact | REQ-022 | v0.2.0 |
-| `workbuddy cache-invalidate` | 清除 issue 缓存强制重新评估 | REQ-034 | v0.2.0 |
-| `workbuddy admin restart-issue` | 清除 issue cache / dependency state / issue claim，强制下一 poll 重新派发 | REQ-060 | v0.2.0 |
+| `workbuddy cache invalidate` | 清除 issue 缓存强制重新评估（`cache-invalidate` 为 deprecated alias） | REQ-034, 061 | v0.2.0 |
+| `workbuddy issue restart` | 清除 issue cache / dependency state / issue claim，强制下一 poll 重新派发（`admin restart-issue` 为 deprecated alias） | REQ-060, 061 | v0.2.0 |
 | `workbuddy diagnose` | 自动诊断 pipeline 问题（stuck/orphaned/repeated failure） | REQ-037 | v0.2.0 |
 | `workbuddy recover` | 重启恢复（清理僵尸进程、重置运行时状态） | REQ-032 | v0.2.0 |
 | `workbuddy deploy` | 安装当前 binary、写入 systemd unit，并支持后续 redeploy/upgrade/start/stop/delete | main | main |

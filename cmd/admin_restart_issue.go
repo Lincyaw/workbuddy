@@ -35,29 +35,35 @@ type restartIssueResult struct {
 	EventLogged            bool   `json:"event_logged"`
 }
 
-var restartIssueCmd = &cobra.Command{
-	Use:   "restart-issue",
+var issueRestartCmd = &cobra.Command{
+	Use:   "restart",
 	Short: "Force an issue back through the next poll cycle",
 	Long: `Clear the local recovery state for one issue so the next poll cycle
- treats it as fresh. This removes the issue's poller cache row, resets any
- cached dependency verdict, and clears a lingering issue-claim lease when one
- exists. Use this when an issue is stuck in status:developing/status:reviewing
- and simple label toggles are ignored because the poller cache already matches
- GitHub.`,
-	Example: `  workbuddy admin restart-issue --repo owner/name --issue 173
-  workbuddy admin restart-issue --repo owner/name --issue 173 --format json`,
+treats it as fresh. This removes the issue's poller cache row, resets any
+cached dependency verdict, and clears a lingering issue-claim lease when one
+exists. Use this when an issue is stuck in status:developing/status:reviewing
+and simple label toggles are ignored because the poller cache already matches
+GitHub.`,
+	Example: `  workbuddy issue restart --repo owner/name --issue 173
+  workbuddy issue restart --repo owner/name --issue 173 --format json`,
 	RunE: runRestartIssueCmd,
 }
 
+var adminRestartIssueCmd = &cobra.Command{
+	Use:   "restart-issue",
+	Short: "Force an issue back through the next poll cycle",
+	Long: `Deprecated alias for "workbuddy issue restart". Clear the local recovery
+state for one issue so the next poll cycle treats it as fresh.`,
+	Example: `  workbuddy admin restart-issue --repo owner/name --issue 173
+  workbuddy admin restart-issue --repo owner/name --issue 173 --format json`,
+	RunE: runAdminRestartIssueCmd,
+}
+
 func init() {
-	restartIssueCmd.Flags().String("repo", "", "GitHub repository in OWNER/NAME form")
-	restartIssueCmd.Flags().Int("issue", 0, "Issue number to restart")
-	restartIssueCmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "SQLite database path")
-	addOutputFormatFlag(restartIssueCmd)
-	addDeprecatedJSONAliasFlag(restartIssueCmd)
-	restartIssueCmd.Flags().Bool("force", false, "Skip confirmation prompts for destructive actions")
-	restartIssueCmd.Flags().Bool("dry-run", false, "Print the actions that would be taken without executing them")
-	adminCmd.AddCommand(restartIssueCmd)
+	bindRestartIssueFlags(issueRestartCmd)
+	bindRestartIssueFlags(adminRestartIssueCmd)
+	issueCmd.AddCommand(issueRestartCmd)
+	adminCmd.AddCommand(adminRestartIssueCmd)
 }
 
 func runRestartIssueCmd(cmd *cobra.Command, _ []string) error {
@@ -66,6 +72,21 @@ func runRestartIssueCmd(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	return runRestartIssueWithOpts(cmd.Context(), opts, cmd.OutOrStdout())
+}
+
+func runAdminRestartIssueCmd(cmd *cobra.Command, args []string) error {
+	writeDeprecationWarning(cmd.ErrOrStderr(), "`workbuddy admin restart-issue`", "`workbuddy issue restart`")
+	return runRestartIssueCmd(cmd, args)
+}
+
+func bindRestartIssueFlags(cmd *cobra.Command) {
+	cmd.Flags().String("repo", "", "GitHub repository in OWNER/NAME form")
+	cmd.Flags().Int("issue", 0, "Issue number to restart")
+	cmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "SQLite database path")
+	addOutputFormatFlag(cmd)
+	addDeprecatedJSONAliasFlag(cmd)
+	cmd.Flags().Bool("force", false, "Skip confirmation prompts for destructive actions")
+	cmd.Flags().Bool("dry-run", false, "Print the actions that would be taken without executing them")
 }
 
 func parseRestartIssueFlags(cmd *cobra.Command) (*restartIssueOpts, error) {

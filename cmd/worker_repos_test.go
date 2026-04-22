@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
 )
 
 func TestResolveWorkerRepoBindings(t *testing.T) {
@@ -40,6 +42,31 @@ func TestResolveWorkerRepoBindings(t *testing.T) {
 	}
 	if len(bindings) != 1 || bindings[0].Repo != "owner/d" {
 		t.Fatalf("unexpected config binding: %+v", bindings)
+	}
+}
+
+func TestParseWorkerFlagsWarnsForDeprecatedRepoFlag(t *testing.T) {
+	cmd := &cobra.Command{Use: "worker"}
+	bindWorkerFlags(cmd)
+	cmd.Flags().String("id", "", "")
+	cmd.Flags().String("mgmt-addr", defaultWorkerMgmtAddr, "")
+	cmd.Flags().Int("concurrency", 1, "")
+
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	_ = cmd.Flags().Set("coordinator", "http://127.0.0.1:8081")
+	_ = cmd.Flags().Set("token", "token")
+	_ = cmd.Flags().Set("repo", "owner/repo")
+
+	opts, err := parseWorkerFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseWorkerFlags: %v", err)
+	}
+	if opts.repo != "owner/repo" {
+		t.Fatalf("opts.repo = %q", opts.repo)
+	}
+	if !strings.Contains(stderr.String(), "`worker --repo` is deprecated") {
+		t.Fatalf("expected deprecation warning, got %q", stderr.String())
 	}
 }
 

@@ -2232,3 +2232,42 @@ requirements:
       - cmd/cache_invalidate_test.go
       - cmd/deploy_test.go
     deps: [REQ-034, REQ-060]
+
+  - id: REQ-068
+    title: CLI canonical noun-verb naming and repo-binding deprecations
+    description: >
+      Normalize recovery command names to noun-verb form without breaking
+      existing operator scripts: `workbuddy cache invalidate` and
+      `workbuddy issue restart` become the canonical paths, while the legacy
+      `cache-invalidate` and `admin restart-issue` entrypoints remain as
+      deprecated aliases that warn on stderr. For worker startup bindings,
+      `--repos` becomes the documented canonical flag and legacy `--repo`
+      remains supported with a deprecation warning.
+    priority: P1
+    version: v0.4.0
+    status: tested
+    acceptance_criteria:
+      - "AC-068-1: `workbuddy cache invalidate --repo OWNER/NAME --issue 47,48` is the documented canonical cache reset path"
+      - "AC-068-2: legacy `workbuddy cache-invalidate ...` remains functional and prints a stderr deprecation warning that points to `workbuddy cache invalidate`"
+      - "AC-068-3: `workbuddy issue restart --repo OWNER/NAME --issue N` is the documented canonical issue recovery path"
+      - "AC-068-4: legacy `workbuddy admin restart-issue ...` remains functional, prints a stderr deprecation warning, and delegates to the same restart implementation as `issue restart`"
+      - "AC-068-5: `workbuddy worker --repo OWNER/NAME` remains supported, defaults its path to cwd, and prints a stderr deprecation warning that points to `--repos OWNER/NAME=/path`"
+      - "AC-068-6: operator-facing docs and help text document `--repos` as canonical and describe the legacy command aliases as deprecated"
+      - "AC-068-7: automated tests cover canonical execution plus deprecated alias warning behavior for cache/issue recovery commands, and the worker flag deprecation warning"
+    code:
+      - cmd/cache.go
+      - cmd/cache_invalidate.go
+      - cmd/issue.go
+      - cmd/admin_restart_issue.go
+      - cmd/worker.go
+      - cmd/deploy.go
+      - cmd/deprecation.go
+      - README.md
+      - docs/implemented/distributed-topology-and-cli.md
+      - docs/implemented/pipeline-observability-and-diagnosis.md
+      - docs/implemented/index.md
+    tests:
+      - cmd/cache_invalidate_test.go
+      - cmd/admin_restart_issue_test.go
+      - cmd/worker_repos_test.go
+    deps: [REQ-034, REQ-049, REQ-060]
