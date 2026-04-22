@@ -2,10 +2,8 @@ package cmd
 
 import (
 	"bytes"
-	"os"
 
 	recovery "github.com/Lincyaw/workbuddy/internal/recover"
-	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 )
 
@@ -64,7 +62,7 @@ func runRecoverCmd(cmd *cobra.Command, _ []string) error {
 		PruneRemoteBranches: opts.pruneRemoteBranches,
 		Force:               opts.force,
 		DryRun:              opts.dryRun,
-		Interactive:         isInteractiveTerminal(),
+		Interactive:         commandIsInteractiveTerminal(),
 		Stdin:               cmd.InOrStdin(),
 		Stdout:              runStdout,
 		Stderr:              cmd.ErrOrStderr(),
@@ -114,8 +112,4 @@ func parseRecoverFlags(cmd *cobra.Command) (*recoverOpts, error) {
 		dryRun:              dryRun,
 		format:              format,
 	}, nil
-}
-
-func isInteractiveTerminal() bool {
-	return isatty.IsTerminal(os.Stdin.Fd()) && isatty.IsTerminal(os.Stdout.Fd())
 }

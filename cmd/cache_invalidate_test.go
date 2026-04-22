@@ -21,7 +21,7 @@ func TestRunCacheInvalidateStore(t *testing.T) {
 			t.Fatalf("UpsertIssueDependencyState: %v", err)
 		}
 
-		results, err := runCacheInvalidateStore(st, "owner/repo", []int{47}, "test")
+		results, err := runCacheInvalidateStore(st, "owner/repo", []int{47}, "test", false)
 		if err != nil {
 			t.Fatalf("runCacheInvalidateStore: %v", err)
 		}
@@ -46,7 +46,7 @@ func TestRunCacheInvalidateStore(t *testing.T) {
 
 	t.Run("graceful when issue not cached", func(t *testing.T) {
 		st := newStatusTestStore(t)
-		results, err := runCacheInvalidateStore(st, "owner/repo", []int{48}, "test")
+		results, err := runCacheInvalidateStore(st, "owner/repo", []int{48}, "test", false)
 		if err != nil {
 			t.Fatalf("runCacheInvalidateStore: %v", err)
 		}
@@ -60,7 +60,7 @@ func TestRunCacheInvalidateStore(t *testing.T) {
 		if err := st.UpsertIssueCache(store.IssueCache{Repo: "owner/repo", IssueNum: 49, Labels: `["status:developing"]`, State: "open"}); err != nil {
 			t.Fatalf("UpsertIssueCache: %v", err)
 		}
-		results, err := runCacheInvalidateStore(st, "owner/repo", []int{49}, "test")
+		results, err := runCacheInvalidateStore(st, "owner/repo", []int{49}, "test", false)
 		if err != nil {
 			t.Fatalf("runCacheInvalidateStore: %v", err)
 		}
@@ -74,7 +74,7 @@ func TestRunCacheInvalidateStore(t *testing.T) {
 		if err := st.UpsertIssueCache(store.IssueCache{Repo: "owner/repo", IssueNum: 50, Labels: `["status:developing"]`, State: "open"}); err != nil {
 			t.Fatalf("UpsertIssueCache: %v", err)
 		}
-		if _, err := runCacheInvalidateStore(st, "owner/repo", []int{50}, "test"); err != nil {
+		if _, err := runCacheInvalidateStore(st, "owner/repo", []int{50}, "test", false); err != nil {
 			t.Fatalf("runCacheInvalidateStore: %v", err)
 		}
 		events, err := st.QueryEvents("owner/repo")
@@ -85,6 +85,60 @@ func TestRunCacheInvalidateStore(t *testing.T) {
 			t.Fatalf("unexpected events: %+v", events)
 		}
 	})
+}
+
+func TestRunCacheInvalidateWithOpts_DryRunHasNoSideEffects(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "cache-dry-run.db")
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := st.UpsertIssueCache(store.IssueCache{Repo: "owner/repo", IssueNum: 47, Labels: `["status:developing"]`, State: "open"}); err != nil {
+		t.Fatalf("UpsertIssueCache: %v", err)
+	}
+	if err := st.UpsertIssueDependencyState(store.IssueDependencyState{Repo: "owner/repo", IssueNum: 47, Verdict: store.DependencyVerdictReady}); err != nil {
+		t.Fatalf("UpsertIssueDependencyState: %v", err)
+	}
+	_ = st.Close()
+
+	var out bytes.Buffer
+	err = runCacheInvalidateWithOpts(context.Background(), &cacheInvalidateOpts{
+		repo:   "owner/repo",
+		issues: []int{47},
+		dbPath: dbPath,
+		source: "test",
+		dryRun: true,
+	}, &out)
+	if err != nil {
+		t.Fatalf("runCacheInvalidateWithOpts: %v", err)
+	}
+	if !strings.Contains(out.String(), "owner/repo#47: would delete") {
+		t.Fatalf("dry-run output missing delete preview: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "dry-run: would log 1 cache_invalidated event(s)") {
+		t.Fatalf("dry-run output missing event preview: %q", out.String())
+	}
+
+	verify, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	t.Cleanup(func() { _ = verify.Close() })
+	cache, err := verify.QueryIssueCache("owner/repo", 47)
+	if err != nil || cache == nil {
+		t.Fatalf("QueryIssueCache after dry-run = %+v, err=%v", cache, err)
+	}
+	depState, err := verify.QueryIssueDependencyState("owner/repo", 47)
+	if err != nil || depState == nil {
+		t.Fatalf("QueryIssueDependencyState after dry-run = %+v, err=%v", depState, err)
+	}
+	events, err := verify.QueryEvents("owner/repo")
+	if err != nil {
+		t.Fatalf("QueryEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("events after dry-run = %+v, want none", events)
+	}
 }
 
 func TestRunCacheInvalidateWithOpts_JSON(t *testing.T) {

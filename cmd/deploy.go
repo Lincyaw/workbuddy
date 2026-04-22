@@ -59,9 +59,13 @@ type deployInstallOpts struct {
 }
 
 type deployLookupOpts struct {
-	name  string
-	scope string
-	all   bool
+	name        string
+	scope       string
+	all         bool
+	force       bool
+	dryRun      bool
+	interactive bool
+	stdin       io.Reader
 }
 
 type deployUpgradeOpts struct {
@@ -211,6 +215,8 @@ func init() {
 	deployStopCmd.Flags().String("name", defaultDeployName, "Deployment name")
 	deployStopCmd.Flags().String("scope", defaultDeployScope, "Deployment scope: user or system")
 	deployStopCmd.Flags().Bool("all", false, "Operate on every deployment in the requested scope")
+	deployStopCmd.Flags().Bool("force", false, "Skip confirmation prompts for destructive actions")
+	deployStopCmd.Flags().Bool("dry-run", false, "Print the actions that would be taken without executing them")
 
 	deployStartCmd.Flags().String("name", defaultDeployName, "Deployment name")
 	deployStartCmd.Flags().String("scope", defaultDeployScope, "Deployment scope: user or system")
@@ -219,12 +225,16 @@ func init() {
 	deployDeleteCmd.Flags().String("name", defaultDeployName, "Deployment name")
 	deployDeleteCmd.Flags().String("scope", defaultDeployScope, "Deployment scope: user or system")
 	deployDeleteCmd.Flags().Bool("all", false, "Operate on every deployment in the requested scope")
+	deployDeleteCmd.Flags().Bool("force", false, "Skip confirmation prompts for destructive actions")
+	deployDeleteCmd.Flags().Bool("dry-run", false, "Print the actions that would be taken without executing them")
 
 	deployUpgradeCmd.Flags().String("name", defaultDeployName, "Deployment name")
 	deployUpgradeCmd.Flags().String("scope", defaultDeployScope, "Deployment scope: user or system")
 	deployUpgradeCmd.Flags().String("version", "latest", "Release version to install (for example latest or v0.2.0)")
 	deployUpgradeCmd.Flags().String("repository", defaultUpgradeRepo, "GitHub repository used for release upgrades in OWNER/NAME form")
 	deployUpgradeCmd.Flags().Bool("all", false, "Operate on every deployment in the requested scope")
+	deployUpgradeCmd.Flags().Bool("force", false, "Skip confirmation prompts for destructive actions")
+	deployUpgradeCmd.Flags().Bool("dry-run", false, "Print the actions that would be taken without executing them")
 
 	deployCmd.AddCommand(deployInstallCmd, deployListCmd, deployRedeployCmd, deployStopCmd, deployStartCmd, deployDeleteCmd, deployUpgradeCmd)
 	rootCmd.AddCommand(deployCmd)
@@ -341,11 +351,25 @@ func parseDeployLookupFlags(cmd *cobra.Command) (*deployLookupOpts, error) {
 	if all && cmd.Flags().Changed("name") {
 		return nil, fmt.Errorf("deploy %s: --name and --all are mutually exclusive", cmd.Name())
 	}
+	force := getBoolFlagIfDefined(cmd, "force")
+	dryRun := getBoolFlagIfDefined(cmd, "dry-run")
 	return &deployLookupOpts{
-		name:  strings.TrimSpace(name),
-		scope: strings.TrimSpace(scope),
-		all:   all,
+		name:        strings.TrimSpace(name),
+		scope:       strings.TrimSpace(scope),
+		all:         all,
+		force:       force,
+		dryRun:      dryRun,
+		interactive: commandIsInteractiveTerminal(),
+		stdin:       cmd.InOrStdin(),
 	}, nil
+}
+
+func getBoolFlagIfDefined(cmd *cobra.Command, name string) bool {
+	if cmd.Flags().Lookup(name) == nil {
+		return false
+	}
+	v, _ := cmd.Flags().GetBool(name)
+	return v
 }
 
 func runDeployInstallWithOpts(ctx context.Context, opts *deployInstallOpts, stdout io.Writer) error {
@@ -565,21 +589,25 @@ func runDeployStopWithOpts(ctx context.Context, opts *deployLookupOpts, stdout i
 	if opts == nil {
 		return fmt.Errorf("deploy stop: options are required")
 	}
+	runOne := func(ctx context.Context, record *deploymentRecord, stdout io.Writer) error {
+		return runDeployStopRecord(ctx, record, opts, stdout)
+	}
 	if opts.all {
-		return runDeployAcrossScope(ctx, opts.scope, stdout, "deploy stop", runDeployStopRecord)
+		return runDeployAcrossScope(ctx, opts.scope, stdout, "deploy stop", runOne)
 	}
 	record, err := loadDeploymentRecordForScope(opts.name, opts.scope)
 	if err != nil {
 		return fmt.Errorf("deploy stop: %w", err)
 	}
-	return runDeployStopRecord(ctx, record, stdout)
+	return runOne(ctx, record, stdout)
 }
 
-func runDeployStopRecord(ctx context.Context, record *deploymentRecord, stdout io.Writer) error {
+func runDeployStopRecord(ctx context.Context, record *deploymentRecord, opts *deployLookupOpts, stdout io.Writer) error {
 	if record == nil || record.manifest == nil {
 		return fmt.Errorf("deploy stop: deployment record is required")
 	}
 	manifest := record.manifest
+	manifestPath := record.manifestPath
 	if manifest.Systemd == nil {
 		return fmt.Errorf("deploy stop: deployment %q is not managed by systemd", manifest.Name)
 	}
@@ -588,12 +616,36 @@ func runDeployStopRecord(ctx context.Context, record *deploymentRecord, stdout i
 	}
 
 	serviceName := manifest.Systemd.ServiceName + ".service"
+	if opts.dryRun {
+		_, _ = fmt.Fprintf(stdout, "dry-run: would stop %s\n", serviceName)
+		_, _ = fmt.Fprintf(stdout, "dry-run: would write deployment manifest %s\n", manifestPath)
+		return nil
+	}
+	ok, err := confirmDestructiveAction(
+		"deploy stop",
+		opts.stdin,
+		stdout,
+		opts.interactive,
+		opts.force,
+		opts.dryRun,
+		fmt.Sprintf("Stop deployment %q?", manifest.Name),
+		[]string{
+			fmt.Sprintf("stop systemd service %s", serviceName),
+			fmt.Sprintf("update deployment manifest %s", manifestPath),
+		},
+	)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
 	if err := deployRunSystemctl(ctx, manifest.Scope, "stop", serviceName); err != nil {
 		return fmt.Errorf("deploy stop: %w", err)
 	}
 	_ = deployRunSystemctl(ctx, manifest.Scope, "reset-failed", serviceName)
 	manifest.Systemd.Started = false
-	if err := writeDeploymentManifest(record.manifestPath, manifest); err != nil {
+	if err := writeDeploymentManifest(manifestPath, manifest); err != nil {
 		return fmt.Errorf("deploy stop: write manifest: %w", err)
 	}
 	if _, err := fmt.Fprintf(stdout, "stopped %s\n", serviceName); err != nil {
@@ -649,27 +701,74 @@ func runDeployDeleteWithOpts(ctx context.Context, opts *deployLookupOpts, stdout
 	if opts == nil {
 		return fmt.Errorf("deploy delete: options are required")
 	}
+	runOne := func(ctx context.Context, record *deploymentRecord, stdout io.Writer) error {
+		return runDeployDeleteRecord(ctx, record, opts, stdout)
+	}
 	if opts.all {
-		return runDeployAcrossScope(ctx, opts.scope, stdout, "deploy delete", runDeployDeleteRecord)
+		return runDeployAcrossScope(ctx, opts.scope, stdout, "deploy delete", runOne)
 	}
 	record, err := loadDeploymentRecordForScope(opts.name, opts.scope)
 	if err != nil {
 		return fmt.Errorf("deploy delete: %w", err)
 	}
-	return runDeployDeleteRecord(ctx, record, stdout)
+	return runOne(ctx, record, stdout)
 }
 
-func runDeployDeleteRecord(ctx context.Context, record *deploymentRecord, stdout io.Writer) error {
+func runDeployDeleteRecord(ctx context.Context, record *deploymentRecord, opts *deployLookupOpts, stdout io.Writer) error {
 	if record == nil || record.manifest == nil {
 		return fmt.Errorf("deploy delete: deployment record is required")
 	}
 	manifest := record.manifest
+	manifestPath := record.manifestPath
 	unitRemoved := false
+	serviceName := ""
 	if manifest.Systemd != nil {
 		if runtime.GOOS != "linux" {
 			return fmt.Errorf("deploy delete: systemd deployment is only supported on Linux")
 		}
-		serviceName := manifest.Systemd.ServiceName + ".service"
+		serviceName = manifest.Systemd.ServiceName + ".service"
+	}
+	if opts.dryRun {
+		if serviceName != "" {
+			_, _ = fmt.Fprintf(stdout, "dry-run: would disable and stop %s\n", serviceName)
+			_, _ = fmt.Fprintf(stdout, "dry-run: would remove systemd unit %s\n", manifest.Systemd.UnitPath)
+		}
+		_, _ = fmt.Fprintf(stdout, "dry-run: would delete deployment manifest %s\n", manifestPath)
+		_, _ = fmt.Fprintf(stdout, "dry-run: would leave binary in place at %s\n", manifest.BinaryPath)
+		return nil
+	}
+	ok, err := confirmDestructiveAction(
+		"deploy delete",
+		opts.stdin,
+		stdout,
+		opts.interactive,
+		opts.force,
+		opts.dryRun,
+		fmt.Sprintf("Delete deployment %q?", manifest.Name),
+		[]string{
+			fmt.Sprintf("delete deployment manifest %s", manifestPath),
+			fmt.Sprintf("leave binary in place at %s", manifest.BinaryPath),
+			func() string {
+				if serviceName == "" {
+					return ""
+				}
+				return fmt.Sprintf("disable and stop systemd service %s", serviceName)
+			}(),
+			func() string {
+				if manifest.Systemd == nil || manifest.Systemd.UnitPath == "" {
+					return ""
+				}
+				return fmt.Sprintf("remove systemd unit %s", manifest.Systemd.UnitPath)
+			}(),
+		},
+	)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	if manifest.Systemd != nil {
 		if err := deployRunSystemctl(ctx, manifest.Scope, "disable", "--now", serviceName); err != nil {
 			return fmt.Errorf("deploy delete: %w", err)
 		}

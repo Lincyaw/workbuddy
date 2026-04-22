@@ -19,6 +19,7 @@ type cacheInvalidateOpts struct {
 	dbPath  string
 	source  string
 	jsonOut bool
+	dryRun  bool
 }
 
 type cacheInvalidateResult struct {
@@ -55,6 +56,7 @@ func init() {
 	cacheInvalidateCmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "SQLite database path")
 	addOutputFormatFlag(cacheInvalidateCmd)
 	addDeprecatedJSONAliasFlag(cacheInvalidateCmd)
+	cacheInvalidateCmd.Flags().Bool("dry-run", false, "Print the actions that would be taken without executing them")
 	rootCmd.AddCommand(cacheInvalidateCmd)
 }
 
@@ -74,6 +76,7 @@ func parseCacheInvalidateFlags(cmd *cobra.Command) (*cacheInvalidateOpts, error)
 	if err != nil {
 		return nil, err
 	}
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
 
 	repo = strings.TrimSpace(repo)
 	if repo == "" {
@@ -97,6 +100,7 @@ func parseCacheInvalidateFlags(cmd *cobra.Command) (*cacheInvalidateOpts, error)
 		dbPath:  dbPath,
 		source:  "cli:cache-invalidate",
 		jsonOut: isJSONOutput(format),
+		dryRun:  dryRun,
 	}, nil
 }
 
@@ -111,7 +115,7 @@ func runCacheInvalidateWithOpts(_ context.Context, opts *cacheInvalidateOpts, st
 	}
 	defer func() { _ = st.Close() }()
 
-	results, err := runCacheInvalidateStore(st, opts.repo, opts.issues, opts.source)
+	results, err := runCacheInvalidateStore(st, opts.repo, opts.issues, opts.source, opts.dryRun)
 	if err != nil {
 		return err
 	}
@@ -123,49 +127,76 @@ func runCacheInvalidateWithOpts(_ context.Context, opts *cacheInvalidateOpts, st
 
 	for _, result := range results {
 		verb := result.Result
-		if verb == "skipped" {
+		switch verb {
+		case "skipped":
 			verb = "not in cache"
+		case "would_skip":
+			verb = "not in cache (dry-run)"
+		case "would_delete":
+			verb = "would delete"
 		}
 		_, _ = fmt.Fprintf(stdout, "%s#%d: %s\n", result.Repo, result.IssueNum, verb)
+	}
+	if opts.dryRun {
+		_, _ = fmt.Fprintf(stdout, "dry-run: would log %d cache_invalidated event(s)\n", len(results))
+		return nil
 	}
 	_, _ = fmt.Fprintf(stdout, "Events logged: %d\n", len(results))
 	return nil
 }
 
-func runCacheInvalidateStore(st *store.Store, repo string, issues []int, source string) ([]cacheInvalidateResult, error) {
+func runCacheInvalidateStore(st *store.Store, repo string, issues []int, source string, dryRun bool) ([]cacheInvalidateResult, error) {
 	results := make([]cacheInvalidateResult, 0, len(issues))
 	for _, issueNum := range issues {
 		cached, err := st.QueryIssueCache(repo, issueNum)
 		if err != nil {
 			return nil, fmt.Errorf("cache-invalidate: query issue cache #%d: %w", issueNum, err)
 		}
-		if cached != nil {
+		if cached != nil && !dryRun {
 			if err := st.DeleteIssueCache(repo, issueNum); err != nil {
 				return nil, fmt.Errorf("cache-invalidate: delete issue cache #%d: %w", issueNum, err)
 			}
 		}
-		deletedDepState, err := st.DeleteIssueDependencyState(repo, issueNum)
+		var deletedDepState bool
+		if dryRun {
+			depState, err := st.QueryIssueDependencyState(repo, issueNum)
+			if err != nil {
+				return nil, fmt.Errorf("cache-invalidate: query dependency state #%d: %w", issueNum, err)
+			}
+			deletedDepState = depState != nil
+		} else {
+			deletedDepState, err = st.DeleteIssueDependencyState(repo, issueNum)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("cache-invalidate: reset dependency state #%d: %w", issueNum, err)
 		}
-		payload := fmt.Sprintf(`{"repo":%q,"issue_num":%d,"source":%q}`, repo, issueNum, source)
-		if _, err := st.InsertEvent(store.Event{
-			Type:     "cache_invalidated",
-			Repo:     repo,
-			IssueNum: issueNum,
-			Payload:  payload,
-		}); err != nil {
-			return nil, fmt.Errorf("cache-invalidate: log event #%d: %w", issueNum, err)
+		if !dryRun {
+			payload := fmt.Sprintf(`{"repo":%q,"issue_num":%d,"source":%q}`, repo, issueNum, source)
+			if _, err := st.InsertEvent(store.Event{
+				Type:     "cache_invalidated",
+				Repo:     repo,
+				IssueNum: issueNum,
+				Payload:  payload,
+			}); err != nil {
+				return nil, fmt.Errorf("cache-invalidate: log event #%d: %w", issueNum, err)
+			}
 		}
 		result := cacheInvalidateResult{
 			Repo:                   repo,
 			IssueNum:               issueNum,
 			Result:                 "skipped",
 			DependencyStateCleared: deletedDepState,
-			EventLogged:            true,
+			EventLogged:            !dryRun,
 		}
 		if cached != nil {
 			result.Result = "deleted"
+		}
+		if dryRun {
+			if cached != nil {
+				result.Result = "would_delete"
+			} else {
+				result.Result = "would_skip"
+			}
 		}
 		results = append(results, result)
 	}
