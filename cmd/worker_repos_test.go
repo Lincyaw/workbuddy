@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -69,10 +70,16 @@ func TestWorkerMgmtServerAddListRemoveAndCleanup(t *testing.T) {
 	bindings := newWorkerRepoBindingStore([]workerRepoBinding{{Repo: "owner/a", Path: repoAPath}})
 
 	changeCh := make(chan []string, 2)
-	server, err := startWorkerMgmtServer("127.0.0.1:0", addrFile, bindings, func(_ context.Context, repos []string) error {
-		changeCh <- append([]string(nil), repos...)
-		return nil
-	})
+	server, err := startWorkerMgmtServer(
+		"127.0.0.1:0",
+		addrFile,
+		bindings,
+		func(_ context.Context, repos []string) error {
+			changeCh <- append([]string(nil), repos...)
+			return nil
+		},
+		nil,
+	)
 	if err != nil {
 		t.Fatalf("startWorkerMgmtServer: %v", err)
 	}
@@ -176,7 +183,7 @@ func TestWorkerMgmtServerRejectsInvalidBinding(t *testing.T) {
 	controlDir := t.TempDir()
 	server, err := startWorkerMgmtServer("127.0.0.1:0", workerAddrFile(controlDir), newWorkerRepoBindingStore(nil), func(_ context.Context, repos []string) error {
 		return nil
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("startWorkerMgmtServer: %v", err)
 	}
@@ -210,5 +217,90 @@ func TestValidateWorkerMgmtAddrRejectsNonLoopback(t *testing.T) {
 	}
 	if err := validateWorkerMgmtAddr("127.0.0.1:0"); err != nil {
 		t.Fatalf("loopback addr rejected: %v", err)
+	}
+}
+
+func TestWorkerRepoConfigStoreReloadsPerRepoAndLogsWarnings(t *testing.T) {
+	repoAPath := setupWorkerRepoConfig(t, "owner/a", `echo repo-a`, "status:developing")
+	repoBPath := setupWorkerRepoConfig(t, "owner/b", `echo repo-b`, "status:missing")
+	store := newWorkerRepoConfigStore(".github/workbuddy")
+
+	var logs bytes.Buffer
+	prevWriter := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(prevWriter)
+
+	summary, err := store.reload([]workerRepoBinding{
+		{Repo: "owner/a", Path: repoAPath},
+		{Repo: "owner/b", Path: repoBPath},
+	})
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if len(summary.Repos) != 2 {
+		t.Fatalf("summary repos = %d, want 2", len(summary.Repos))
+	}
+	cfgB, ok := store.get("owner/b")
+	if !ok || cfgB.Agents["dev-agent"].Command != "echo repo-b" {
+		t.Fatalf("repo B config not loaded correctly: ok=%v cfg=%+v", ok, cfgB)
+	}
+	if !strings.Contains(logs.String(), "repo=owner/b") {
+		t.Fatalf("warning log missing repo slug: %q", logs.String())
+	}
+
+	setupWorkerRepoConfigAtPath(t, repoBPath, "owner/b", `echo repo-b-reloaded`, "status:missing")
+	if _, err := store.reload([]workerRepoBinding{
+		{Repo: "owner/a", Path: repoAPath},
+		{Repo: "owner/b", Path: repoBPath},
+	}); err != nil {
+		t.Fatalf("reload second pass: %v", err)
+	}
+	cfgB, ok = store.get("owner/b")
+	if !ok || cfgB.Agents["dev-agent"].Command != "echo repo-b-reloaded" {
+		t.Fatalf("repo B config after reload = %+v, want reloaded command", cfgB)
+	}
+}
+
+func TestWorkerMgmtServerConfigReloadEndpointReloadsAllRepoConfigs(t *testing.T) {
+	controlDir := t.TempDir()
+	repoAPath := setupWorkerRepoConfig(t, "owner/a", `echo repo-a`, "")
+	repoBPath := setupWorkerRepoConfig(t, "owner/b", `echo repo-b`, "")
+	bindings := newWorkerRepoBindingStore([]workerRepoBinding{
+		{Repo: "owner/a", Path: repoAPath},
+		{Repo: "owner/b", Path: repoBPath},
+	})
+	store := newWorkerRepoConfigStore(".github/workbuddy")
+	if _, err := store.reload(bindings.list()); err != nil {
+		t.Fatalf("initial reload: %v", err)
+	}
+
+	server, err := startWorkerMgmtServer(
+		"127.0.0.1:0",
+		workerAddrFile(controlDir),
+		bindings,
+		func(_ context.Context, _ []string) error { return nil },
+		func(_ context.Context) (any, error) { return store.reload(bindings.list()) },
+	)
+	if err != nil {
+		t.Fatalf("startWorkerMgmtServer: %v", err)
+	}
+	defer func() { _ = server.Close(context.Background()) }()
+
+	setupWorkerRepoConfigAtPath(t, repoBPath, "owner/b", `echo repo-b-reloaded`, "")
+
+	client, err := workerMgmtClientFromControlDir(controlDir)
+	if err != nil {
+		t.Fatalf("workerMgmtClientFromControlDir: %v", err)
+	}
+	summary, err := client.Reload(context.Background())
+	if err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if len(summary.Repos) != 2 {
+		t.Fatalf("summary repos = %d, want 2", len(summary.Repos))
+	}
+	cfgB, ok := store.get("owner/b")
+	if !ok || cfgB.Agents["dev-agent"].Command != "echo repo-b-reloaded" {
+		t.Fatalf("repo B config after management reload = %+v, want reloaded command", cfgB)
 	}
 }

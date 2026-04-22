@@ -120,7 +120,7 @@ type workerMgmtServer struct {
 	addrFile string
 }
 
-func startWorkerMgmtServer(mgmtAddr, addrFile string, bindings *workerRepoBindingStore, onChange func(context.Context, []string) error) (*workerMgmtServer, error) {
+func startWorkerMgmtServer(mgmtAddr, addrFile string, bindings *workerRepoBindingStore, onChange func(context.Context, []string) error, onConfigReload func(context.Context) (any, error)) (*workerMgmtServer, error) {
 	if strings.TrimSpace(mgmtAddr) == "" {
 		mgmtAddr = defaultWorkerMgmtAddr
 	}
@@ -167,6 +167,24 @@ func startWorkerMgmtServer(mgmtAddr, addrFile string, bindings *workerRepoBindin
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
+	})
+	mux.HandleFunc("/mgmt/config/reload", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if onConfigReload == nil {
+			writeWorkerMgmtJSON(w, http.StatusNotImplemented, map[string]string{"error": "config reload is unavailable"})
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		summary, err := onConfigReload(ctx)
+		if err != nil {
+			writeWorkerMgmtJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		writeWorkerMgmtJSON(w, http.StatusOK, summary)
 	})
 	mux.HandleFunc("/mgmt/repos/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
@@ -439,6 +457,18 @@ func (c *workerMgmtClient) Remove(ctx context.Context, repo string) error {
 		return err
 	}
 	return c.do(req, http.StatusNoContent, nil)
+}
+
+func (c *workerMgmtClient) Reload(ctx context.Context) (*workerConfigReloadSummary, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/mgmt/config/reload", nil)
+	if err != nil {
+		return nil, err
+	}
+	var summary workerConfigReloadSummary
+	if err := c.do(req, http.StatusOK, &summary); err != nil {
+		return nil, err
+	}
+	return &summary, nil
 }
 
 func (c *workerMgmtClient) do(req *http.Request, wantStatus int, out any) error {

@@ -84,6 +84,7 @@ func init() {
 	workerCmd.Flags().String("token", "", "Bearer token for Coordinator authentication (defaults to WORKBUDDY_AUTH_TOKEN)")
 	workerCmd.Flags().String("role", "", "Comma-separated worker roles (default: roles from local agent config)")
 	workerCmd.Flags().String("runtime", config.RuntimeClaudeCode, "Worker runtime capability: claude-code or codex")
+	workerCmd.Flags().String("config-dir", ".github/workbuddy", "Configuration directory (relative to each bound repo unless absolute)")
 	workerCmd.Flags().String("repo", "", "Repository in OWNER/NAME form (backward-compatible alias; path defaults to cwd)")
 	workerCmd.Flags().String("repos", "", "Comma-separated OWNER/NAME=/path repo bindings")
 	workerCmd.Flags().String("id", "", "Stable worker ID (default: hostname)")
@@ -133,6 +134,7 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	token, _ := cmd.Flags().GetString("token")
 	roleCSV, _ := cmd.Flags().GetString("role")
 	runtimeName, _ := cmd.Flags().GetString("runtime")
+	configDir, _ := cmd.Flags().GetString("config-dir")
 	repo, _ := cmd.Flags().GetString("repo")
 	reposCSV, _ := cmd.Flags().GetString("repos")
 	workerID, _ := cmd.Flags().GetString("id")
@@ -154,7 +156,7 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 		reposCSV:          strings.TrimSpace(reposCSV),
 		workerID:          strings.TrimSpace(workerID),
 		mgmtAddr:          strings.TrimSpace(mgmtAddr),
-		configDir:         ".github/workbuddy",
+		configDir:         strings.TrimSpace(configDir),
 		pollTimeout:       defaultWorkerPollTimeout,
 		heartbeatInterval: defaultWorkerHeartbeat,
 		shutdownTimeout:   defaultWorkerShutdownDeadline,
@@ -174,14 +176,8 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	if opts == nil {
 		return fmt.Errorf("worker: options are required")
 	}
-	cfg, warnings, err := config.LoadConfig(opts.configDir)
-	if err != nil {
-		return fmt.Errorf("worker: load config: %w", err)
-	}
-	for _, w := range warnings {
-		log.Printf("[worker] warning: %s", w)
-	}
 
+	var err error
 	workDir := opts.workDir
 	if workDir == "" {
 		workDir, err = os.Getwd()
@@ -193,7 +189,18 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	if err != nil {
 		return fmt.Errorf("worker: resolve working directory: %w", err)
 	}
-	repoBindings, err := resolveWorkerRepoBindings(opts, strings.TrimSpace(cfg.Global.Repo), workDir)
+
+	configRepo := ""
+	if strings.TrimSpace(opts.reposCSV) == "" && strings.TrimSpace(opts.repo) == "" {
+		bootstrapDir := resolveWorkerConfigDir(workDir, opts.configDir)
+		bootstrapCfg, _, err := config.LoadConfig(bootstrapDir)
+		if err != nil {
+			return fmt.Errorf("worker: load bootstrap config: %w", err)
+		}
+		configRepo = strings.TrimSpace(bootstrapCfg.Global.Repo)
+	}
+
+	repoBindings, err := resolveWorkerRepoBindings(opts, configRepo, workDir)
 	if err != nil {
 		return err
 	}
@@ -208,10 +215,6 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	publicRuntime, runtimeAlias, err := normalizeWorkerRuntime(opts.runtime)
 	if err != nil {
 		return err
-	}
-	roles := parseWorkerRoles(opts.roleCSV, cfg.Agents)
-	if len(roles) == 0 {
-		return fmt.Errorf("worker: at least one role is required")
 	}
 
 	workerID := strings.TrimSpace(opts.workerID)
@@ -242,8 +245,17 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	rep.SetEventRecorder(recorder)
 	rep.SetVerifier(reporter.NewGHClaimVerifier())
 	bindings := newWorkerRepoBindingStore(repoBindings)
+	configs := newWorkerRepoConfigStore(opts.configDir)
 	workspaces := newWorkerWorkspaceSet()
 	executor := workerexec.NewExecutor(lnch, reader)
+
+	if _, err := configs.reload(bindings.list()); err != nil {
+		return err
+	}
+	roles := parseWorkerRoles(opts.roleCSV, configs.list())
+	if len(roles) == 0 {
+		return fmt.Errorf("worker: at least one role is required")
+	}
 
 	var ctx context.Context
 	var cancel context.CancelFunc
@@ -269,9 +281,33 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	}
 
 	addrFile := workerAddrFile(workDir)
-	mgmtServer, err := startWorkerMgmtServer(opts.mgmtAddr, addrFile, bindings, func(changeCtx context.Context, _ []string) error {
-		return registerWorkerRepos(changeCtx, client, workerID, roles, publicRuntime, bindings.list())
-	})
+	reloadAndRegister := func(changeCtx context.Context) (*workerConfigReloadSummary, error) {
+		summary, err := configs.reload(bindings.list())
+		if err != nil {
+			return nil, err
+		}
+		currentRoles := parseWorkerRoles(opts.roleCSV, configs.list())
+		if len(currentRoles) == 0 {
+			return nil, fmt.Errorf("worker: at least one role is required")
+		}
+		if err := registerWorkerRepos(changeCtx, client, workerID, currentRoles, publicRuntime, bindings.list()); err != nil {
+			return nil, err
+		}
+		return summary, nil
+	}
+
+	mgmtServer, err := startWorkerMgmtServer(
+		opts.mgmtAddr,
+		addrFile,
+		bindings,
+		func(changeCtx context.Context, _ []string) error {
+			_, err := reloadAndRegister(changeCtx)
+			return err
+		},
+		func(reloadCtx context.Context) (any, error) {
+			return reloadAndRegister(reloadCtx)
+		},
+	)
 	if err != nil {
 		return err
 	}
@@ -316,13 +352,18 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 		if task == nil {
 			continue
 		}
-		repoPath, ok := bindings.get(task.Repo)
-		if !ok {
+		repoPath, pathOK := bindings.get(task.Repo)
+		repoCfg, cfgOK := configs.get(task.Repo)
+		if !pathOK || !cfgOK {
 			releaseCtx, releaseCancel := context.WithTimeout(context.Background(), opts.shutdownTimeout)
-			err := client.ReleaseTask(releaseCtx, task.TaskID, workerclient.ReleaseRequest{WorkerID: workerID, Reason: "repo not bound on worker"})
+			reason := "repo not bound on worker"
+			if pathOK && !cfgOK {
+				reason = "repo config not loaded on worker"
+			}
+			err := client.ReleaseTask(releaseCtx, task.TaskID, workerclient.ReleaseRequest{WorkerID: workerID, Reason: reason})
 			releaseCancel()
 			if err != nil && !errors.Is(err, context.Canceled) {
-				log.Printf("[worker] failed to release unmapped task %s for repo %s: %v", task.TaskID, task.Repo, err)
+				log.Printf("[worker] failed to release task %s for repo %s: %v", task.TaskID, task.Repo, err)
 			}
 			continue
 		}
@@ -344,7 +385,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 				return workspace.NewManager(path)
 			})
 			distributed := workerexec.NewDistributedWorker(workerexec.DistributedDeps{
-				Config:            cfg,
+				Config:            repoCfg,
 				Executor:          executor,
 				Recorder:          recorder,
 				Reporter:          rep,
@@ -406,7 +447,7 @@ func buildRemoteTaskContext(task *workerclient.Task, reader workerIssueReader, w
 	return workerexec.BuildRemoteTaskContext(task, reader, workDir)
 }
 
-func parseWorkerRoles(raw string, agents map[string]*config.AgentConfig) []string {
+func parseWorkerRoles(raw string, configs []*config.FullConfig) []string {
 	if strings.TrimSpace(raw) != "" {
 		parts := strings.Split(raw, ",")
 		out := make([]string, 0, len(parts))
@@ -420,11 +461,16 @@ func parseWorkerRoles(raw string, agents map[string]*config.AgentConfig) []strin
 		return out
 	}
 	var out []string
-	for _, agent := range agents {
-		if agent == nil || agent.Role == "" || slices.Contains(out, agent.Role) {
+	for _, cfg := range configs {
+		if cfg == nil {
 			continue
 		}
-		out = append(out, agent.Role)
+		for _, agent := range cfg.Agents {
+			if agent == nil || agent.Role == "" || slices.Contains(out, agent.Role) {
+				continue
+			}
+			out = append(out, agent.Role)
+		}
 	}
 	slices.Sort(out)
 	return out

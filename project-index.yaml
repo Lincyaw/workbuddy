@@ -1044,6 +1044,7 @@ requirements:
       - "AC-028-10: invalid token 时退出非零并给出明确诊断"
     code:
       - cmd/worker.go
+      - cmd/worker_config.go
       - cmd/coordinator.go
       - internal/workerclient/client.go
       - internal/store/store.go
@@ -1674,6 +1675,7 @@ requirements:
       - "AC-049-10: integration test covers coordinator + worker + dynamic repo add dispatch"
     code:
       - cmd/worker.go
+      - cmd/worker_config.go
       - cmd/worker_repos.go
     tests:
       - cmd/worker_test.go
