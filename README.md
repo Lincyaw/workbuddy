@@ -174,10 +174,14 @@ sudo workbuddy deploy install \
   --working-directory /srv/workbuddy-worker \
   -- worker \
      --coordinator http://127.0.0.1:8081 \
-     --token <worker-token> \
+     --token-file /etc/workbuddy/auth-token \
      --role dev \
      --repos owner/repo=/srv/workbuddy-worker
 ```
+
+Prefer `--token-file` (or `WORKBUDDY_AUTH_TOKEN` in the service env) over the
+plain `--token` flag — the plain form leaks into `ps` and shell history and
+now prints a deprecation warning.
 
 This makes the split explicit:
 

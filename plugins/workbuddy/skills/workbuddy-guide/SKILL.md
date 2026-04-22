@@ -70,9 +70,12 @@ Run `workbuddy --help` for the full list. Grouped by intent:
 - `workbuddy diagnose` — surfaces stuck issues, 3-retry caps, stale claims; `--fix` for safe auto-remediation
 
 **Recover**
-- `workbuddy cache-invalidate` — force re-poll after manual label edits
+- `workbuddy cache invalidate` — force re-poll after manual label edits (legacy `cache-invalidate` still works with a deprecation warning)
+- `workbuddy issue restart` — re-run one stuck issue end-to-end (legacy `admin restart-issue` still works with a deprecation warning)
 - `workbuddy recover` — clean stale processes/worktrees/claims after a crash
 - `workbuddy operator-watch` — auto-dispatch Claude on coordinator incident files
+
+Destructive commands (`issue restart`, `cache invalidate`, `deploy stop/delete`, `recover --prune-remote-branches`) accept `--dry-run` to preview actions and `--force` to skip the TTY confirmation. Output-producing commands accept `--format {text,json}`.
 
 **Worker runtime ops**
 - `workbuddy worker repos add|list|remove` — change a running worker's repo bindings without restart
@@ -98,7 +101,7 @@ read the relevant decision docs for depth; the short version:
 Impact for operators: if `diagnose` says "failed 3 times in a row", check
 the issue's comments — if they're "Infra Error", the bug is infrastructure
 (usually runtime/launcher), not the acceptance criteria. Fix infra and
-`cache-invalidate` to restart; don't rewrite the issue.
+`workbuddy cache invalidate` to restart; don't rewrite the issue.
 
 ## Common workflows
 
@@ -123,7 +126,7 @@ workbuddy diagnose --repo owner/name
 
 # Manually nudge state and force re-poll
 gh issue edit N -R owner/name --remove-label status:blocked --add-label status:developing
-workbuddy cache-invalidate --repo owner/name --issue N
+workbuddy cache invalidate --repo owner/name --issue N
 ```
 
 **Add a repo to a running deployment** (no restart)

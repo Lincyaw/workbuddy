@@ -65,11 +65,18 @@ feat, fix, test, docs, chore, refactor, perf, ci, build, style, revert
 
 **Cause**: The worker was started from a directory that doesn't have `.github/workbuddy/agents/`. The coordinator only sends `{task_id, repo, issue_num, agent_name}` — the worker loads the full agent prompt template from its local filesystem.
 
-**Fix**: Always `cd` to the target repo's root before starting the worker:
+**Fix**: Always `cd` to the target repo's root before starting the worker, and bind the repo path explicitly with `--repos`:
 ```bash
 cd /path/to/target-repo
-/path/to/workbuddy worker --coordinator http://... --token "..." --repo Owner/Repo
+/path/to/workbuddy worker \
+  --coordinator http://... \
+  --token-file /etc/workbuddy/auth-token \
+  --repos Owner/Repo=/path/to/target-repo
 ```
+
+Notes on the flags:
+- `--token-file` is preferred over plain `--token` (the deprecated `--token` still works but leaks the value into `ps`/shell history and prints a stderr deprecation warning).
+- `--repos OWNER/NAME=/path` is the canonical repo-binding flag. The deprecated `--repo OWNER/NAME` alias defaults the path to cwd and prints a deprecation warning.
 
 ## Pitfall 7: Package-level vs function-level test coverage
 
@@ -202,8 +209,10 @@ curl -s -H "Authorization: Bearer $TOKEN" http://coordinator:8081/api/v1/repos |
 # Check issue labels
 gh issue view <N> -R Owner/Repo --json labels --jq '[.labels[].name]'
 
-# Force re-poll an issue
-/path/to/workbuddy cache-invalidate --repo Owner/Repo --issue <N>
+# Force re-poll an issue (canonical form; add --force to skip the TTY prompt)
+/path/to/workbuddy cache invalidate --repo Owner/Repo --issue <N>
+# Full restart (clears poller cache + claim + dependency state)
+/path/to/workbuddy issue restart --repo Owner/Repo --issue <N> --force
 
 # View coordinator logs (if running via workbuddy binary)
 # Logs go to stderr, check your process manager or terminal output

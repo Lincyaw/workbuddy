@@ -189,7 +189,8 @@ ps aux | grep "workbuddy worker" | grep -v grep
 - **Cause:** Poller hasn't run yet (poll_interval), or issue cache is stale.
 - **Fix:** Wait for next poll cycle, or invalidate cache:
   ```bash
-  ./workbuddy cache-invalidate --repo Owner/Repo --issue N
+  ./workbuddy cache invalidate --repo Owner/Repo --issue N
+  # or, for machine-readable output: --format json
   ```
 
 ### H. Codex stuck in API inference (most common failure mode)
@@ -213,7 +214,7 @@ ps aux | grep "workbuddy worker" | grep -v grep
 - **Fix:** Kill the worker process (`kill -9`), clean up stale running tasks in DB, start new worker.
 
 ### J. Issue claim stuck after coordinator crash
-- **Symptom:** No dispatch after cache-invalidate; `diagnose` shows a claim still held by a dead coordinator/worker.
+- **Symptom:** No dispatch after `cache invalidate`; `diagnose` shows a claim still held by a dead coordinator/worker.
 - **Cause:** Per-issue claim (REQ-057/059) wasn't released cleanly.
 - **Self-heal:** Claims have a TTL — wait for expiry and the next poll overwrites with a `claim_expired` event.
 - **Force:** `workbuddy recover` clears stale runtime state (processes, worktrees, claims).
@@ -221,9 +222,9 @@ ps aux | grep "workbuddy worker" | grep -v grep
 ### K. Consecutive-failure cap reached (REQ-055)
 - **Symptom:** `workbuddy diagnose` reports "dev-agent has failed 3 times in a row"; dispatch stops.
 - **First check:** is it infra or verdict? Read the latest few comments on the issue:
-  - "Infra Error" header → launcher/runtime crash (REQ-056). Fix infra, `cache-invalidate`, retry.
+  - "Infra Error" header → launcher/runtime crash (REQ-056). Fix infra, `workbuddy cache invalidate`, retry.
   - "Failure" header → agent disagrees with the AC. Tighten AC or intervene manually.
-- **Reset:** fix the root cause, flip label back to `status:developing`, `cache-invalidate`.
+- **Reset:** fix the root cause, flip label back to `status:developing`, `workbuddy cache invalidate`. To force a full replay (clear poller cache + claim + dependency state in one shot) use `workbuddy issue restart --repo Owner/Repo --issue N --force`.
 
 ### L. Worktree setup failed — worker refuses to run
 - **Symptom:** Issue comment: "worktree setup failed"; task marked failed.
