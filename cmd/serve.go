@@ -367,6 +367,12 @@ func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverrid
 		log.Printf("[serve] HTTP server shutdown error: %v", err)
 	}
 
+	// Stop any shared agent-backend resources (codex app-server, etc.) held
+	// by the runtime registry. No-op for runtimes without persistent state.
+	if err := lnch.Shutdown(shutdownCtx); err != nil {
+		log.Printf("[serve] runtime shutdown error: %v", err)
+	}
+
 	wg.Wait()
 	log.Printf("[serve] shutdown complete")
 	return nil

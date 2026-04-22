@@ -370,6 +370,13 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 
 	// Wait for all in-flight tasks to finish before exiting.
 	wg.Wait()
+
+	// Stop any shared agent-backend resources (codex app-server, etc.).
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), opts.shutdownTimeout)
+	defer shutdownCancel()
+	if err := lnch.Shutdown(shutdownCtx); err != nil {
+		log.Printf("[worker] runtime shutdown error: %v", err)
+	}
 	return nil
 }
 

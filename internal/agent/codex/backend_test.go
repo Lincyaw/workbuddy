@@ -21,10 +21,17 @@ func TestCodexNewBackendMissingBinary(t *testing.T) {
 
 func TestCodexSessionLifecycleViaAppServer(t *testing.T) {
 	bin, logPath := writeFakeCodexBinary(t, "complete")
+	// The fake codex reads FAKE_CODEX_LOG / WB_TEST_ENV from its own process
+	// environment. In the shared-app-server model the child is spawned once
+	// at worker boot and inherits the parent's env, so set these on the
+	// test process.
+	t.Setenv("FAKE_CODEX_LOG", logPath)
+	t.Setenv("WB_TEST_ENV", "scoped-token")
 	backend, err := NewBackend(Config{Binary: bin, ClientName: "workbuddy-test", ClientVersion: "1.2.3"})
 	if err != nil {
 		t.Fatalf("NewBackend: %v", err)
 	}
+	defer func() { _ = backend.Shutdown(context.Background()) }()
 
 	spec := agent.Spec{
 		Workdir:  t.TempDir(),
@@ -117,10 +124,12 @@ func TestCodexSessionLifecycleViaAppServer(t *testing.T) {
 
 func TestCodexDangerouslyBypassSandboxUsesCLIFlag(t *testing.T) {
 	bin, logPath := writeFakeCodexBinary(t, "complete")
+	t.Setenv("FAKE_CODEX_LOG", logPath)
 	backend, err := NewBackend(Config{Binary: bin})
 	if err != nil {
 		t.Fatalf("NewBackend: %v", err)
 	}
+	defer func() { _ = backend.Shutdown(context.Background()) }()
 
 	sess, err := backend.NewSession(t.Context(), agent.Spec{
 		Workdir:  t.TempDir(),
@@ -189,10 +198,12 @@ func TestCodexDangerouslyBypassSandboxUsesCLIFlag(t *testing.T) {
 
 func TestCodexSessionInterruptUsesTurnID(t *testing.T) {
 	bin, logPath := writeFakeCodexBinary(t, "interrupt")
+	t.Setenv("FAKE_CODEX_LOG", logPath)
 	backend, err := NewBackend(Config{Binary: bin})
 	if err != nil {
 		t.Fatalf("NewBackend: %v", err)
 	}
+	defer func() { _ = backend.Shutdown(context.Background()) }()
 
 	sess, err := backend.NewSession(t.Context(), agent.Spec{
 		Workdir:  t.TempDir(),
@@ -240,10 +251,12 @@ func TestCodexSessionInterruptUsesTurnID(t *testing.T) {
 
 func TestCodexSessionCapturesStderrAsLogEvent(t *testing.T) {
 	bin, logPath := writeFakeCodexBinary(t, "stderr")
+	t.Setenv("FAKE_CODEX_LOG", logPath)
 	backend, err := NewBackend(Config{Binary: bin})
 	if err != nil {
 		t.Fatalf("NewBackend: %v", err)
 	}
+	defer func() { _ = backend.Shutdown(context.Background()) }()
 
 	sess, err := backend.NewSession(t.Context(), agent.Spec{
 		Workdir:  t.TempDir(),
@@ -286,6 +299,87 @@ func TestCodexSessionCapturesStderrAsLogEvent(t *testing.T) {
 	}
 }
 
+func TestCodexConcurrentSessionsShareOneProcess(t *testing.T) {
+	bin, logPath := writeFakeCodexBinary(t, "complete")
+	t.Setenv("FAKE_CODEX_LOG", logPath)
+	backend, err := NewBackend(Config{Binary: bin})
+	if err != nil {
+		t.Fatalf("NewBackend: %v", err)
+	}
+	defer func() { _ = backend.Shutdown(context.Background()) }()
+
+	ctx := context.Background()
+	sess1, err := backend.NewSession(ctx, agent.Spec{Workdir: t.TempDir(), Prompt: "first"})
+	if err != nil {
+		t.Fatalf("NewSession 1: %v", err)
+	}
+	sess2, err := backend.NewSession(ctx, agent.Spec{Workdir: t.TempDir(), Prompt: "second"})
+	if err != nil {
+		t.Fatalf("NewSession 2: %v", err)
+	}
+
+	// Drain events concurrently so the sessions don't block on full channels.
+	for _, s := range []agent.Session{sess1, sess2} {
+		s := s
+		go func() {
+			for range s.Events() {
+			}
+		}()
+	}
+
+	if _, err := sess1.Wait(ctx); err != nil {
+		t.Fatalf("Wait 1: %v", err)
+	}
+	if _, err := sess2.Wait(ctx); err != nil {
+		t.Fatalf("Wait 2: %v", err)
+	}
+
+	// Distinct thread ids prove the shared process multiplexed two sessions.
+	if sess1.ID() == sess2.ID() {
+		t.Fatalf("expected distinct thread ids, got %q and %q", sess1.ID(), sess2.ID())
+	}
+	if sess1.ID() == "" || sess2.ID() == "" {
+		t.Fatalf("empty thread ids: %q %q", sess1.ID(), sess2.ID())
+	}
+
+	// Exactly one argv line should appear in the fake log: the shared
+	// process started once and was reused for both sessions.
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read fake log: %v", err)
+	}
+	argvCount := 0
+	initializeCount := 0
+	threadStartCount := 0
+	for _, line := range splitNonEmptyLines(string(data)) {
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(line), &obj); err != nil {
+			continue
+		}
+		if _, ok := obj["argv"]; ok {
+			argvCount++
+		}
+		if m, _ := obj["method"].(string); m == "initialize" {
+			initializeCount++
+		}
+		if m, _ := obj["method"].(string); m == "thread/start" {
+			threadStartCount++
+		}
+	}
+	if argvCount != 1 {
+		t.Fatalf("argv lines = %d, want 1 (one shared process)", argvCount)
+	}
+	if initializeCount != 1 {
+		t.Fatalf("initialize calls = %d, want 1 (one handshake for shared process)", initializeCount)
+	}
+	if threadStartCount != 2 {
+		t.Fatalf("thread/start calls = %d, want 2 (one per session)", threadStartCount)
+	}
+
+	_ = sess1.Close()
+	_ = sess2.Close()
+}
+
 func TestCodexBackendInterfaceCompliance(t *testing.T) {
 	var _ agent.Backend = (*Backend)(nil)
 }
@@ -316,6 +410,10 @@ def log(obj):
 log({"env": os.environ.get("WB_TEST_ENV", "")})
 log({"argv": sys.argv[1:]})
 
+thread_counter = 0
+# Shared app-server model: the process stays alive across multiple threads
+# until stdin closes or we're told to interrupt. Thread ids are per-request.
+
 for line in sys.stdin:
     msg = json.loads(line)
     log(msg)
@@ -325,24 +423,39 @@ for line in sys.stdin:
     elif method == "initialized":
         continue
     elif method == "thread/start":
-        print(json.dumps({"id": msg["id"], "result": {"thread": {"id": "thread-test"}, "model": "gpt-5.4-mini", "modelProvider": "openai", "cwd": msg.get("params", {}).get("cwd", ""), "approvalPolicy": msg.get("params", {}).get("approvalPolicy", "never"), "approvalsReviewer": "user", "sandbox": {"type": "workspaceWrite"}}}), flush=True)
+        thread_counter += 1
+        # First thread keeps the legacy id "thread-test" to satisfy existing
+        # assertions; extra threads get distinct ids.
+        tid = "thread-test" if thread_counter == 1 else "thread-test-" + str(thread_counter)
+        print(json.dumps({"id": msg["id"], "result": {"thread": {"id": tid}, "model": "gpt-5.4-mini", "modelProvider": "openai", "cwd": msg.get("params", {}).get("cwd", ""), "approvalPolicy": msg.get("params", {}).get("approvalPolicy", "never"), "approvalsReviewer": "user", "sandbox": {"type": "workspaceWrite"}}}), flush=True)
     elif method == "turn/start":
+        tid = msg.get("params", {}).get("threadId", "thread-test")
         print(json.dumps({"id": msg["id"], "result": {"turn": {"id": "turn-test", "items": [], "status": "inProgress"}}}), flush=True)
-        print(json.dumps({"method": "turn/started", "params": {"threadId": "thread-test", "turn": {"id": "turn-test", "items": [], "status": "inProgress"}}}), flush=True)
+        print(json.dumps({"method": "turn/started", "params": {"threadId": tid, "turn": {"id": "turn-test", "items": [], "status": "inProgress"}}}), flush=True)
         if mode == "stderr":
             print("rpc warning on stderr", file=sys.stderr, flush=True)
         if mode == "complete" or mode == "stderr":
-            print(json.dumps({"method": "item/started", "params": {"threadId": "thread-test", "turnId": "turn-test", "item": {"type": "agentMessage", "id": "msg-1", "text": "", "phase": "final_answer"}}}), flush=True)
-            print(json.dumps({"method": "item/agentMessage/delta", "params": {"threadId": "thread-test", "turnId": "turn-test", "itemId": "msg-1", "delta": "OK"}}), flush=True)
-            print(json.dumps({"method": "item/completed", "params": {"threadId": "thread-test", "turnId": "turn-test", "item": {"type": "agentMessage", "id": "msg-1", "text": "OK", "phase": "final_answer"}}}), flush=True)
-            print(json.dumps({"method": "thread/tokenUsage/updated", "params": {"threadId": "thread-test", "turnId": "turn-test", "tokenUsage": {"total": {"inputTokens": 10, "outputTokens": 2, "cachedInputTokens": 1, "totalTokens": 12, "reasoningOutputTokens": 0}, "last": {"inputTokens": 10, "outputTokens": 2, "cachedInputTokens": 1, "totalTokens": 12, "reasoningOutputTokens": 0}}}}), flush=True)
-            print(json.dumps({"method": "turn/completed", "params": {"threadId": "thread-test", "turn": {"id": "turn-test", "items": [], "status": "completed", "durationMs": 15}}}), flush=True)
-        else:
-            continue
+            print(json.dumps({"method": "item/started", "params": {"threadId": tid, "turnId": "turn-test", "item": {"type": "agentMessage", "id": "msg-1", "text": "", "phase": "final_answer"}}}), flush=True)
+            print(json.dumps({"method": "item/agentMessage/delta", "params": {"threadId": tid, "turnId": "turn-test", "itemId": "msg-1", "delta": "OK"}}), flush=True)
+            print(json.dumps({"method": "item/completed", "params": {"threadId": tid, "turnId": "turn-test", "item": {"type": "agentMessage", "id": "msg-1", "text": "OK", "phase": "final_answer"}}}), flush=True)
+            print(json.dumps({"method": "thread/tokenUsage/updated", "params": {"threadId": tid, "turnId": "turn-test", "tokenUsage": {"total": {"inputTokens": 10, "outputTokens": 2, "cachedInputTokens": 1, "totalTokens": 12, "reasoningOutputTokens": 0}, "last": {"inputTokens": 10, "outputTokens": 2, "cachedInputTokens": 1, "totalTokens": 12, "reasoningOutputTokens": 0}}}}), flush=True)
+            print(json.dumps({"method": "turn/completed", "params": {"threadId": tid, "turn": {"id": "turn-test", "items": [], "status": "completed", "durationMs": 15}}}), flush=True)
+        # In "interrupt" mode we deliberately stall so the client has time
+        # to send turn/interrupt; we emit no further output until that
+        # arrives.
     elif method == "turn/interrupt":
+        tid = msg.get("params", {}).get("threadId", "thread-test")
         print(json.dumps({"id": msg["id"], "result": {}}), flush=True)
-        print(json.dumps({"method": "turn/completed", "params": {"threadId": "thread-test", "turn": {"id": "turn-test", "items": [], "status": "interrupted", "durationMs": 7}}}), flush=True)
-        sys.exit(0)
+        print(json.dumps({"method": "turn/completed", "params": {"threadId": tid, "turn": {"id": "turn-test", "items": [], "status": "interrupted", "durationMs": 7}}}), flush=True)
+    elif method == "thread/archive":
+        print(json.dumps({"id": msg["id"], "result": {}}), flush=True)
+    else:
+        # Unknown method: respond if it has an id.
+        if "id" in msg:
+            print(json.dumps({"id": msg["id"], "result": {}}), flush=True)
+
+# stdin closed: exit cleanly.
+sys.exit(0)
 `
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake codex binary: %v", err)

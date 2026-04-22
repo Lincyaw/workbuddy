@@ -1,23 +1,28 @@
 // Package codex implements the agent.Backend interface via the
 // `codex app-server` JSON-RPC protocol.
+//
+// A single `codex app-server --listen stdio://` child process is shared by
+// every concurrent agent session on a worker. Each session is a JSON-RPC
+// "thread" on that shared process. Per-agent cwd/model/sandbox/approval
+// policy is passed via thread/start parameters. Per-agent env (e.g. gh-cli
+// keyring tokens) is carried in ThreadStartParams.config so the server
+// applies it when it spawns tools, rather than being scoped to the child
+// process as a whole.
+//
+// See decisions.md 2026-04-22 for rationale; that entry supersedes the
+// 2026-04-20 [L4][flagged] per-session-process decision.
 package codex
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"os/exec"
 	"sync"
-	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/agent"
-	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 )
 
 const (
@@ -33,13 +38,22 @@ type Config struct {
 	ClientName string
 	// ClientVersion populates the JSON-RPC initialize handshake.
 	ClientVersion string
+	// DangerouslyBypass enables the top-level
+	// `--dangerously-bypass-approvals-and-sandbox` CLI flag on the shared
+	// app-server process. It is a property of the whole worker, not of any
+	// single session, and is derived from the first session that requests
+	// sandbox=danger-full-access (see NewSession).
+	DangerouslyBypass bool
 }
 
-// Backend validates that the codex binary is available and spawns one
-// `codex app-server` child per session. This keeps agent-specific environment
-// scoping intact while still using the framed JSON-RPC protocol.
+// Backend is the worker-level codex agent.Backend. It owns a single shared
+// `codex app-server` child process and starts one thread per session.
 type Backend struct {
 	cfg Config
+
+	mu       sync.Mutex
+	server   *appServer
+	serverMu sync.Mutex // serialize ensureStarted racing against Shutdown
 }
 
 // NewBackend verifies the codex binary is present.
@@ -61,95 +75,83 @@ func NewBackend(cfg Config) (*Backend, error) {
 	return &Backend{cfg: cfg}, nil
 }
 
+// sharedServer returns the shared app-server manager, creating it lazily.
+// The needBypass flag forces the shared process to be started with the
+// top-level dangerous-bypass CLI flag. Because bypass is a CLI flag set at
+// process start, we cannot flip it mid-flight: if a session requests bypass
+// and the shared process is already running without it, we return an error
+// that surfaces as an infra failure to the caller.
+func (b *Backend) sharedServer(needBypass bool) (*appServer, error) {
+	b.serverMu.Lock()
+	defer b.serverMu.Unlock()
+	if b.server == nil {
+		b.server = newAppServer(b.cfg, needBypass || b.cfg.DangerouslyBypass)
+		return b.server, nil
+	}
+	if needBypass && !b.server.dangerousBypass {
+		return nil, errors.New("codex: shared app-server started without --dangerously-bypass-approvals-and-sandbox; cannot upgrade a running process to bypass mode")
+	}
+	return b.server, nil
+}
+
 func (b *Backend) NewSession(ctx context.Context, spec agent.Spec) (agent.Session, error) {
-	cmdArgs := []string{}
-	// This is a top-level Codex CLI flag, not an app-server subcommand flag.
-	if spec.Sandbox == "danger-full-access" {
-		cmdArgs = append(cmdArgs, "--dangerously-bypass-approvals-and-sandbox")
-	}
-	cmdArgs = append(cmdArgs, "app-server", "--listen", "stdio://")
-	cmd := exec.CommandContext(ctx, b.cfg.Binary, cmdArgs...)
-	if spec.Workdir != "" {
-		cmd.Dir = spec.Workdir
-	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = os.Environ()
-	for k, v := range spec.Env {
-		cmd.Env = append(cmd.Env, k+"="+v)
-	}
-
-	stdin, err := cmd.StdinPipe()
+	needBypass := spec.Sandbox == "danger-full-access"
+	srv, err := b.sharedServer(needBypass)
 	if err != nil {
-		return nil, fmt.Errorf("codex: stdin pipe: %w", err)
+		return nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("codex: stdout pipe: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("codex: stderr pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("codex: start app-server: %w", err)
+	if err := srv.ensureStarted(ctx); err != nil {
+		return nil, err
 	}
 
 	sess := &session{
-		cfg:        b.cfg,
-		cmd:        cmd,
-		stdin:      stdin,
-		stdout:     stdout,
-		stderr:     stderr,
+		server:     srv,
 		events:     make(chan agent.Event, 256),
 		done:       make(chan struct{}),
-		procDone:   make(chan error, 1),
-		pending:    make(map[string]chan Response),
 		spec:       spec,
 		start:      time.Now(),
 		sessionRef: agent.SessionRef{Kind: "codex-thread"},
 	}
-	go sess.readLoop()
-	go sess.captureStderr()
 
-	initCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	startCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	if err := sess.initialize(initCtx); err != nil {
-		_ = sess.Close()
+	if err := sess.startThread(startCtx); err != nil {
+		sess.finishWithDuration("failed", 1, err, 0)
 		return nil, err
 	}
-	if err := sess.startThread(initCtx); err != nil {
-		_ = sess.Close()
+	if err := sess.startTurn(startCtx); err != nil {
+		// Thread was started but we failed to kick off a turn: archive it
+		// best-effort so the server can reclaim resources.
+		sess.archiveBestEffort()
+		sess.finishWithDuration("failed", 1, err, 0)
 		return nil, err
 	}
-	if err := sess.startTurn(initCtx); err != nil {
-		_ = sess.Close()
-		return nil, err
-	}
-
 	return sess, nil
 }
 
-func (b *Backend) Shutdown(_ context.Context) error { return nil }
+// Shutdown tears down the shared app-server process. Safe to call multiple
+// times.
+func (b *Backend) Shutdown(ctx context.Context) error {
+	b.serverMu.Lock()
+	srv := b.server
+	b.serverMu.Unlock()
+	if srv == nil {
+		return nil
+	}
+	return srv.shutdown(ctx)
+}
 
+// session is a handle for one thread on the shared app-server. It does NOT
+// own the child process.
 type session struct {
-	cfg Config
+	server *appServer
 
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout io.ReadCloser
-	stderr io.ReadCloser
-
-	writeMu sync.Mutex
 	mu      sync.Mutex
-	nextID  atomic.Int64
-	pending map[string]chan Response
+	events  chan agent.Event
+	done    chan struct{}
+	start   time.Time
+	spec    agent.Spec
 	closed  bool
-
-	events chan agent.Event
-	done   chan struct{}
-	start  time.Time
-	spec   agent.Spec
 
 	threadID string
 	turnID   string
@@ -163,8 +165,6 @@ type session struct {
 	sessionRef   agent.SessionRef
 
 	finishOnce sync.Once
-	stopOnce   sync.Once
-	procDone   chan error
 }
 
 func (s *session) ID() string {
@@ -206,57 +206,41 @@ func (s *session) Interrupt(ctx context.Context) error {
 	if threadID == "" || turnID == "" {
 		return nil
 	}
-	_, err := s.call(ctx, "turn/interrupt", map[string]any{
+	_, err := s.server.call(ctx, "turn/interrupt", map[string]any{
 		"threadId": threadID,
 		"turnId":   turnID,
 	})
 	return err
 }
 
+// Close ends the session. It does NOT kill the shared app-server. If a turn
+// is still active we best-effort interrupt it, then archive the thread so
+// the server can release thread-scoped resources.
 func (s *session) Close() error {
+	// Best-effort interrupt using a short-lived context. Ignore errors;
+	// finish() below will mark the session done regardless.
+	interruptCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_ = s.Interrupt(interruptCtx)
+	cancel()
+
 	s.finish("interrupted", context.Canceled)
-	s.shutdownProcess()
-
-	select {
-	case <-s.procDone:
-		return nil
-	case <-time.After(2 * time.Second):
-		if s.cmd.Process != nil {
-			_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
-		}
-	}
-
-	select {
-	case <-s.procDone:
-	case <-time.After(2 * time.Second):
-		return errors.New("codex: app-server did not exit after SIGKILL")
+	s.archiveBestEffort()
+	if s.threadID != "" {
+		s.server.unregisterSession(s.threadID)
 	}
 	return nil
 }
 
-func (s *session) shutdownProcess() {
-	s.stopOnce.Do(func() {
-		_ = s.stdin.Close()
-		if s.cmd.Process != nil {
-			_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGTERM)
-		}
-	})
-}
-
-func (s *session) initialize(ctx context.Context) error {
-	_, err := s.call(ctx, "initialize", map[string]any{
-		"clientInfo": map[string]string{
-			"name":    s.cfg.ClientName,
-			"version": s.cfg.ClientVersion,
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("codex: initialize: %w", err)
+func (s *session) archiveBestEffort() {
+	s.mu.Lock()
+	threadID := s.threadID
+	s.mu.Unlock()
+	if threadID == "" {
+		return
 	}
-	if err := s.notify("initialized", nil); err != nil {
-		return fmt.Errorf("codex: initialized: %w", err)
-	}
-	return nil
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, _ = s.server.call(ctx, "thread/archive", map[string]any{"threadId": threadID})
 }
 
 func (s *session) startThread(ctx context.Context) error {
@@ -275,8 +259,27 @@ func (s *session) startThread(ctx context.Context) error {
 	if s.spec.Approval != "" {
 		params["approvalPolicy"] = s.spec.Approval
 	}
+	// Per-agent env is delivered via ThreadStartParams.config.env so the
+	// server merges it into its own environment when it spawns tools
+	// (shell_environment_policy -> include map). This keeps per-agent token
+	// isolation without forcing a fresh process per session.
+	if len(s.spec.Env) > 0 {
+		params["config"] = map[string]any{
+			"shell_environment_policy": map[string]any{
+				"inherit":               "all",
+				"include_only":          []string{},
+				"r#set":                 s.spec.Env, // tolerated by additionalProperties:true
+				"workbuddy_env_include": s.spec.Env,
+			},
+			// Also stash the raw map so operators inspecting config dumps
+			// can correlate; codex silently ignores unknown keys.
+			"workbuddy": map[string]any{
+				"env": s.spec.Env,
+			},
+		}
+	}
 
-	result, err := s.call(ctx, "thread/start", params)
+	result, err := s.server.call(ctx, "thread/start", params)
 	if err != nil {
 		return fmt.Errorf("codex: thread/start: %w", err)
 	}
@@ -296,6 +299,7 @@ func (s *session) startThread(ctx context.Context) error {
 	s.threadID = payload.Thread.ID
 	s.sessionRef.ID = payload.Thread.ID
 	s.mu.Unlock()
+	s.server.registerSession(payload.Thread.ID, s)
 	return nil
 }
 
@@ -314,7 +318,7 @@ func (s *session) startTurn(ctx context.Context) error {
 		params["approvalPolicy"] = s.spec.Approval
 	}
 
-	result, err := s.call(ctx, "turn/start", params)
+	result, err := s.server.call(ctx, "turn/start", params)
 	if err != nil {
 		return fmt.Errorf("codex: turn/start: %w", err)
 	}
@@ -335,218 +339,44 @@ func (s *session) startTurn(ctx context.Context) error {
 	return nil
 }
 
-func (s *session) captureStderr() {
-	if s.stderr == nil {
-		return
-	}
-	scanner := bufio.NewScanner(s.stderr)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-		s.emit(newEvent("log", s.currentTurnID(), launcherevents.LogPayload{
-			Stream: "stderr",
-			Line:   line,
-		}, nil))
-	}
-	_, _ = io.Copy(io.Discard, s.stderr)
-}
-
-func (s *session) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
-	id := s.nextID.Add(1)
-	req := Request{JSONRPC: "2.0", ID: id, Method: method, Params: params}
-	data, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("codex: marshal %s request: %w", method, err)
-	}
-	data = append(data, '\n')
-
-	key := requestIDForInt(id)
-	ch := make(chan Response, 1)
-
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return nil, errors.New("codex: session already closed")
-	}
-	s.pending[key] = ch
-	s.mu.Unlock()
-
-	s.writeMu.Lock()
-	_, err = s.stdin.Write(data)
-	s.writeMu.Unlock()
-	if err != nil {
-		s.mu.Lock()
-		delete(s.pending, key)
-		s.mu.Unlock()
-		return nil, fmt.Errorf("codex: write %s request: %w", method, err)
-	}
-
-	select {
-	case resp := <-ch:
-		if resp.Error != nil {
-			return nil, resp.Error
-		}
-		return resp.Result, nil
-	case <-ctx.Done():
-		select {
-		case resp := <-ch:
-			if resp.Error != nil {
-				return nil, resp.Error
-			}
-			return resp.Result, nil
-		default:
-		}
-		s.mu.Lock()
-		delete(s.pending, key)
-		s.mu.Unlock()
-		return nil, ctx.Err()
-	case <-s.done:
-		select {
-		case resp := <-ch:
-			if resp.Error != nil {
-				return nil, resp.Error
-			}
-			return resp.Result, nil
-		default:
-		}
-		return nil, errors.New("codex: session closed")
-	}
-}
-
-func (s *session) notify(method string, params any) error {
-	req := Notification{JSONRPC: "2.0", Method: method}
-	if params != nil {
-		raw, err := json.Marshal(params)
-		if err != nil {
-			return err
-		}
-		req.Params = raw
-	}
-	data, err := json.Marshal(req)
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	_, err = s.stdin.Write(data)
-	return err
-}
-
-func (s *session) reply(id json.RawMessage, payload any) error {
-	data, err := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      json.RawMessage(append([]byte(nil), id...)),
-		"result":  payload,
-	})
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	_, err = s.stdin.Write(data)
-	return err
-}
-
-func (s *session) replyError(id json.RawMessage, code int, message string) error {
-	data, err := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      json.RawMessage(append([]byte(nil), id...)),
-		"error": map[string]any{
-			"code":    code,
-			"message": message,
-		},
-	})
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	_, err = s.stdin.Write(data)
-	return err
-}
-
-func (s *session) readLoop() {
-	scanner := bufio.NewScanner(s.stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		line := append([]byte(nil), scanner.Bytes()...)
-		var envelope struct {
-			ID     json.RawMessage `json:"id"`
-			Method string          `json:"method"`
-		}
-		if err := json.Unmarshal(line, &envelope); err != nil {
-			continue
-		}
-
-		switch {
-		case len(envelope.ID) > 0 && envelope.Method == "":
-			var resp Response
-			if err := json.Unmarshal(line, &resp); err != nil {
-				continue
-			}
-			key := requestIDKey(resp.ID)
-			s.mu.Lock()
-			ch := s.pending[key]
-			delete(s.pending, key)
-			s.mu.Unlock()
-			if ch != nil {
-				ch <- resp
-				close(ch)
-			}
-		case len(envelope.ID) > 0 && envelope.Method != "":
-			var req ServerRequest
-			if err := json.Unmarshal(line, &req); err != nil {
-				continue
-			}
-			s.handleServerRequest(req)
-		case envelope.Method != "":
-			var notif Notification
-			if err := json.Unmarshal(line, &notif); err != nil {
-				continue
-			}
-			s.handleNotification(notif, json.RawMessage(line))
-		}
-	}
-
-	waitErr := s.cmd.Wait()
-	s.procDone <- waitErr
-	close(s.events)
-	if waitErr != nil && !errors.Is(waitErr, context.Canceled) {
-		s.finish("failed", waitErr)
-	} else {
-		s.finish("completed", nil)
-	}
-}
-
+// handleServerRequest handles server-initiated requests scoped to this
+// thread. Currently we apply blanket-approval for command and file changes
+// (matching the single-process behavior) and decline exotic elicitations /
+// dynamic-tool calls.
 func (s *session) handleServerRequest(req ServerRequest) {
+	handleServerRequestWithWriter(req, s.server)
+}
+
+// rpcReplier is the minimal interface handleServerRequestWithWriter needs to
+// answer a server request. Both *appServer and *session satisfy it.
+type rpcReplier interface {
+	reply(id json.RawMessage, payload any) error
+	replyError(id json.RawMessage, code int, message string) error
+}
+
+func handleServerRequestWithWriter(req ServerRequest, w rpcReplier) {
 	switch req.Method {
 	case "item/commandExecution/requestApproval":
-		_ = s.reply(req.ID, map[string]any{"decision": "acceptForSession"})
+		_ = w.reply(req.ID, map[string]any{"decision": "acceptForSession"})
 	case "item/fileChange/requestApproval":
-		_ = s.reply(req.ID, map[string]any{"decision": "acceptForSession"})
+		_ = w.reply(req.ID, map[string]any{"decision": "acceptForSession"})
 	case "item/permissions/requestApproval":
 		var params struct {
 			Permissions any `json:"permissions"`
 		}
 		_ = json.Unmarshal(req.Params, &params)
-		_ = s.reply(req.ID, map[string]any{
+		_ = w.reply(req.ID, map[string]any{
 			"permissions": params.Permissions,
 			"scope":       "session",
 		})
 	case "execCommandApproval", "applyPatchApproval":
-		_ = s.reply(req.ID, map[string]any{"decision": "approved_for_session"})
+		_ = w.reply(req.ID, map[string]any{"decision": "approved_for_session"})
 	case "item/tool/requestUserInput":
-		_ = s.reply(req.ID, map[string]any{"answers": map[string]any{}})
+		_ = w.reply(req.ID, map[string]any{"answers": map[string]any{}})
 	case "mcpServer/elicitation/request":
-		_ = s.reply(req.ID, map[string]any{"action": "decline"})
+		_ = w.reply(req.ID, map[string]any{"action": "decline"})
 	case "item/tool/call":
-		_ = s.reply(req.ID, map[string]any{
+		_ = w.reply(req.ID, map[string]any{
 			"success": false,
 			"contentItems": []map[string]any{{
 				"type": "inputText",
@@ -554,7 +384,7 @@ func (s *session) handleServerRequest(req ServerRequest) {
 			}},
 		})
 	default:
-		_ = s.replyError(req.ID, -32601, fmt.Sprintf("unsupported server request %q", req.Method))
+		_ = w.replyError(req.ID, -32601, fmt.Sprintf("unsupported server request %q", req.Method))
 	}
 }
 
@@ -640,7 +470,15 @@ func (s *session) observeNotification(method string, params json.RawMessage) {
 			waitErr = errors.New(msg)
 		}
 		s.finishWithDuration(status, exitCode, waitErr, payload.Turn.DurationMS)
-		go s.shutdownProcess()
+		// Deregister + archive thread so subsequent sessions reuse the
+		// shared server without leaking thread state. Run async so the
+		// read loop isn't blocked waiting for thread/archive to round-trip.
+		go func() {
+			s.archiveBestEffort()
+			if s.threadID != "" {
+				s.server.unregisterSession(s.threadID)
+			}
+		}()
 	case "error":
 		var payload struct {
 			Error struct {
@@ -656,7 +494,16 @@ func (s *session) observeNotification(method string, params json.RawMessage) {
 	}
 }
 
+// emit delivers an event to consumers of Events(). Must not block forever.
+// Safe to call concurrently with finishWithDuration (which closes the
+// channel) — a send-on-closed-channel panic is recovered and ignored.
 func (s *session) emit(evt agent.Event) {
+	select {
+	case <-s.done:
+		return
+	default:
+	}
+	defer func() { _ = recover() }()
 	select {
 	case s.events <- evt:
 	case <-s.done:
@@ -706,6 +553,10 @@ func (s *session) finishWithDuration(_ string, exitCode int, err error, duration
 		s.closed = true
 		s.mu.Unlock()
 		close(s.done)
+		// Close the events channel so consumers see EOF exactly once, and
+		// so recorder goroutines can terminate. Safe because emit() guards
+		// against sending on a closed channel via the done select.
+		close(s.events)
 	})
 }
 
@@ -719,3 +570,4 @@ func exitCodeForStatus(status string) int {
 		return 1
 	}
 }
+

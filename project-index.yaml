@@ -458,6 +458,7 @@ requirements:
       - internal/agent/agent.go
       - internal/agent/claude/backend.go
       - internal/agent/codex/backend.go
+      - internal/agent/codex/appserver.go
       - internal/agent/codex/events.go
       - internal/agent/codex/jsonrpc.go
       - internal/runtime/types.go

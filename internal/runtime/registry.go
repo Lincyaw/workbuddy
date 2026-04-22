@@ -89,6 +89,30 @@ func (l *Registry) Launch(ctx context.Context, agent *config.AgentConfig, task *
 	return result, runErr
 }
 
+// Shutdown tears down any long-lived resources held by registered runtimes
+// (for example, shared agent-backend processes such as the codex
+// `app-server`). Runtimes that don't hold such state are no-ops.
+func (l *Registry) Shutdown(ctx context.Context) error {
+	var firstErr error
+	seen := map[Runtime]struct{}{}
+	for _, rt := range l.runtimes {
+		if _, ok := seen[rt]; ok {
+			continue
+		}
+		seen[rt] = struct{}{}
+		closer, ok := rt.(interface {
+			Shutdown(ctx context.Context) error
+		})
+		if !ok {
+			continue
+		}
+		if err := closer.Shutdown(ctx); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 func (l *Registry) supportedRuntimes() string {
 	seen := map[string]bool{}
 	var names []string

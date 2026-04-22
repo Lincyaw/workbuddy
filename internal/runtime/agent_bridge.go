@@ -39,6 +39,21 @@ func NewAgentBridgeRuntime(runtimeName string, factory func() (agent.Backend, er
 
 func (r *AgentBridgeRuntime) Name() string { return r.RuntimeName }
 
+// Shutdown stops the lazily-cached agent backend (and, for codex, its shared
+// app-server child process). Safe to call multiple times and from the
+// worker/coordinator shutdown path regardless of whether any session was
+// ever created.
+func (r *AgentBridgeRuntime) Shutdown(ctx context.Context) error {
+	r.BackendMu.Lock()
+	backend := r.Backend
+	r.Backend = nil
+	r.BackendMu.Unlock()
+	if backend == nil {
+		return nil
+	}
+	return backend.Shutdown(ctx)
+}
+
 func (r *AgentBridgeRuntime) backendInstance() (agent.Backend, error) {
 	r.BackendMu.Lock()
 	defer r.BackendMu.Unlock()
