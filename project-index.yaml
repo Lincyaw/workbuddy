@@ -2976,3 +2976,56 @@ requirements:
       - internal/webui/handler_test.go
       - cmd/coordinator_audit_test.go
     deps: [REQ-013, REQ-018, REQ-019, REQ-029]
+
+  - id: REQ-089
+    title: Web UI scaffold - Preact + Vite SPA embedded into the Go binary
+    description: >
+      Stand up the front-end build pipeline that future dashboard, sessions,
+      and issue-detail pages will live inside. A fresh `web/` workspace
+      builds a Preact + Vite single-page app; `make web` copies the bundle
+      into `internal/webui/dist/` and the Go binary embeds that directory
+      via go:embed. A new HTTP handler (`internal/webui.SPAHandler`) serves
+      the bundle and falls back to `index.html` for client-side routes,
+      while the legacy session list/detail HTML pages are retired in favour
+      of the SPA. The `events.json` and SSE `stream` endpoints stay in
+      place because the SPA still consumes them. The dist directory ships
+      with a placeholder `index.html` so a bare `go build` keeps working;
+      `make web` overwrites it with the real bundle. CI runs the SPA build
+      before `go build`/`go test`.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-089-1: `pnpm -C web install --frozen-lockfile && pnpm -C web build` succeeds on a clean checkout"
+      - "AC-089-2: `make build` produces `bin/workbuddy` in one shot, embedding the SPA bundle"
+      - "AC-089-3: `internal/webui.SPAHandler` returns the embedded `index.html` for `/` and unmatched paths, serves real files under `/assets/...` directly, and rejects non-GET/HEAD methods with 405"
+      - "AC-089-4: When the SPA handler is registered at `/`, sibling API routes (`/api/v1/...`) keep their original handler — the SPA does not intercept them"
+      - "AC-089-5: Coordinator mux registers the SPA at `/` after every other pattern; `/sessions/{id}/events.json` and `/sessions/{id}/stream` still hit the webui handler, while `/sessions` and `/sessions/{id}` deep-link into the SPA via the fallback"
+      - "AC-089-6: `web/dist/`, `web/node_modules/`, and `internal/webui/dist/*` are gitignored except for the `.keep` marker and the placeholder `index.html`"
+      - "AC-089-7: A CI workflow runs `corepack enable`, caches `web/node_modules` keyed off `web/pnpm-lock.yaml`, builds the SPA, then runs `go build`/`go vet`/`go test`"
+      - "AC-089-8: `internal/webui/spa_test.go` covers the asset-served, API-not-intercepted, and unmatched-path-falls-back-to-index branches"
+    code:
+      - web/package.json
+      - web/pnpm-lock.yaml
+      - web/tsconfig.json
+      - web/vite.config.ts
+      - web/index.html
+      - web/src/main.tsx
+      - web/src/App.tsx
+      - web/src/api/client.ts
+      - web/src/pages/Placeholder.tsx
+      - internal/webui/embed.go
+      - internal/webui/spa.go
+      - internal/webui/dist/index.html
+      - internal/webui/handler.go
+      - cmd/coordinator.go
+      - cmd/worker_repos.go
+      - Makefile
+      - .github/workflows/ci.yml
+      - .github/workflows/release.yml
+      - .gitignore
+    tests:
+      - internal/webui/spa_test.go
+    related_docs:
+      - web/README.md
+    deps: []

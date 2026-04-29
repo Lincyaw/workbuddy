@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>workbuddy</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 36rem; margin: 4rem auto; padding: 0 1rem; color: #24292f; }
+      code { background: #f0f3f6; padding: 0.1rem 0.4rem; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <h1>workbuddy webui not built</h1>
+    <p>
+      You are running a binary that was built without the front-end bundle.
+      Run <code>make web</code> (or <code>make build</code>) from the repo root
+      to produce <code>internal/webui/dist/</code> and rebuild
+      <code>workbuddy</code>.
+    </p>
+    <p>
+      API endpoints (<code>/api/v1/...</code>, <code>/health</code>, etc.)
+      continue to work; only the dashboard UI is unavailable.
+    </p>
+  </body>
+</html>

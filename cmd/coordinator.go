@@ -593,6 +593,10 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 	mux.Handle("/api/v1/workers", api.WrapAuth(dashboardMux))
 	mux.Handle("/api/v1/issues/in-flight", api.WrapAuth(dashboardMux))
 	mux.Handle("/api/v1/issues/", api.WrapAuth(dashboardMux))
+
+	spa := webui.SPAHandler()
+	sessionUI.SetFallback(spa)
+
 	mux.Handle("/sessions", api.WrapAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sessionMux.ServeHTTP(w, r)
 	})))
@@ -613,6 +617,10 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 	mux.Handle("/api/v1/config/reload", api.WrapAuth(http.HandlerFunc(api.HandleConfigReload)))
 	mux.Handle("/api/v1/tasks/poll", api.WrapAuth(http.HandlerFunc(api.HandlePollTask)))
 	mux.Handle("/api/v1/tasks/", api.WrapAuth(http.HandlerFunc(api.HandleTaskAction)))
+
+	// SPA catch-all is registered last so any earlier exact/subtree pattern
+	// (login, /api/, /sessions/, etc.) wins over the embedded bundle.
+	mux.Handle("/", api.WrapAuth(spa))
 	return mux
 }
 

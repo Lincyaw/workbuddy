@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"io"
 	"log"
 	"net/http"
@@ -16,36 +15,23 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Lincyaw/workbuddy/internal/auditapi"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
-// Handler serves the session viewer web UI.
+// Handler serves the session event API (events.json + SSE stream) consumed
+// by the SPA. The legacy HTML list/detail pages have been retired in favour
+// of the embedded SPA bundle; see SetFallback for the bridge to it.
 type Handler struct {
-	store        *store.Store
-	sessionsDir  string
-	basePath     string
-	listTmpl     *template.Template
-	detailTmpl   *template.Template
-	notFoundTmpl *template.Template
+	sessionsDir string
+	basePath    string
+	fallback    http.Handler
 }
 
-// NewHandler creates a Handler backed by the given store.
-func NewHandler(st *store.Store) *Handler {
-	funcMap := template.FuncMap{
-		"truncate": func(s string, n int) string {
-			if len(s) <= n {
-				return s
-			}
-			return s[:n] + "..."
-		},
-	}
-
-	h := &Handler{store: st, basePath: "/sessions"}
-	h.listTmpl = template.Must(template.New("list").Funcs(funcMap).Parse(listHTML))
-	h.detailTmpl = template.Must(template.New("detail").Funcs(funcMap).Parse(detailHTML))
-	h.notFoundTmpl = template.Must(template.New("notfound").Parse(notFoundHTML))
-	return h
+// NewHandler creates a Handler. The store argument is retained for API
+// stability; the events.json and stream endpoints read directly from the
+// per-session events-v1.jsonl files configured via SetSessionsDir.
+func NewHandler(_ *store.Store) *Handler {
+	return &Handler{basePath: "/sessions"}
 }
 
 // SetSessionsDir configures the directory where per-session event logs live,
@@ -55,64 +41,47 @@ func (h *Handler) SetSessionsDir(dir string) {
 	h.sessionsDir = dir
 }
 
-// Register adds the session viewer routes to the given mux.
+// SetFallback installs a handler used when a request under the session base
+// path does not target the events.json or stream endpoint. The SPA scaffold
+// uses this to take over the legacy HTML list/detail routes — clients that
+// land on /sessions or /sessions/{id} get the SPA shell instead of the
+// retired Go-side templates.
+//
+// When fallback is nil, unrecognised subpaths return 404 (the original
+// behaviour minus the deleted list/detail handlers).
+func (h *Handler) SetFallback(fallback http.Handler) {
+	h.fallback = fallback
+}
+
+// Register adds the session API routes (events.json and stream) to the given
+// mux. The legacy HTML list and detail pages are no longer registered — the
+// SPA handler at "/" owns them.
 func (h *Handler) Register(mux *http.ServeMux) {
 	h.RegisterAt(mux, h.basePath)
 }
 
-// RegisterAt mounts the session viewer routes under the given base path.
+// RegisterAt mounts the session API routes under the given base path.
 func (h *Handler) RegisterAt(mux *http.ServeMux, basePath string) {
 	basePath = strings.TrimRight(basePath, "/")
 	if basePath == "" {
 		basePath = "/sessions"
 	}
 	h.basePath = basePath
-	mux.HandleFunc(basePath, h.handleList)
 	mux.HandleFunc(basePath+"/", h.handleSessionSubpath)
-}
-
-// handleList renders the session list page with optional filtering.
-func (h *Handler) handleList(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	filter := store.SessionFilter{
-		Repo:      q.Get("repo"),
-		AgentName: q.Get("agent"),
-	}
-	if issueStr := q.Get("issue"); issueStr != "" {
-		if n, err := strconv.Atoi(issueStr); err == nil {
-			filter.IssueNum = n
-		}
-	}
-
-	sessions, err := h.store.ListAgentSessions(filter)
-	if err != nil {
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	data := listData{Sessions: sessions, Filter: filter}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := h.listTmpl.Execute(w, data); err != nil {
-		http.Error(w, "Template error", http.StatusInternalServerError)
-	}
 }
 
 // handleSessionSubpath dispatches requests under /sessions/ based on suffix:
 //
-//	/sessions/{id}                → detail HTML
 //	/sessions/{id}/events.json    → paginated JSON events
 //	/sessions/{id}/stream         → SSE tail
+//
+// Anything else (including the empty suffix that used to render the HTML
+// detail page) is delegated to the SPA fallback when one is configured, or
+// returns 404 otherwise.
 func (h *Handler) handleSessionSubpath(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, h.basePath+"/")
-	if rest == "" {
-		http.Redirect(w, r, h.basePath, http.StatusFound)
-		return
-	}
-
 	sessionID, suffix, _ := strings.Cut(rest, "/")
 	switch suffix {
-	case "":
-		h.handleDetail(w, r, sessionID)
 	case "events.json":
 		markDeprecated(w, r,
 			"/sessions/{id}/events.json",
@@ -124,6 +93,12 @@ func (h *Handler) handleSessionSubpath(w http.ResponseWriter, r *http.Request) {
 			"/api/v1/sessions/{id}/stream")
 		h.handleStream(w, r, sessionID)
 	default:
+		// Empty suffix (the legacy detail page) and any other path now
+		// belong to the SPA when a fallback is configured.
+		if h.fallback != nil {
+			h.fallback.ServeHTTP(w, r)
+			return
+		}
 		http.NotFound(w, r)
 	}
 }
@@ -169,61 +144,6 @@ func markDeprecated(w http.ResponseWriter, r *http.Request, oldPath, newPath str
 	w.Header().Set("Sunset", "30 days")
 	w.Header().Set("Link", `<`+newPath+`>; rel="successor-version"`)
 	log.Printf("[deprecated] old path %s accessed (request %s), prefer %s", oldPath, r.URL.Path, newPath)
-}
-
-// handleDetail renders a single session detail page.
-func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request, sessionID string) {
-	sess, err := h.store.GetAgentSession(sessionID)
-	if err != nil {
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-	if sess == nil {
-		if prefersJSON(r) {
-			writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "session not found"})
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusNotFound)
-		_ = h.notFoundTmpl.Execute(w, sessionID)
-		return
-	}
-
-	if prefersJSON(r) {
-		writeJSONStatus(w, http.StatusOK, auditapi.BuildSessionResponse(sess, h.sessionsDir))
-		return
-	}
-
-	var taskStatus string
-	if sess.TaskID != "" {
-		tasks, err := h.store.QueryTasks("")
-		if err == nil {
-			for _, t := range tasks {
-				if t.ID == sess.TaskID {
-					taskStatus = t.Status
-					break
-				}
-			}
-		}
-	}
-
-	hasEvents := false
-	if p := h.eventsPath(sessionID); p != "" {
-		if _, err := os.Stat(p); err == nil {
-			hasEvents = true
-		}
-	}
-
-	data := detailData{
-		Session:    *sess,
-		TaskStatus: taskStatus,
-		HasEvents:  hasEvents,
-	}
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := h.detailTmpl.Execute(w, data); err != nil {
-		http.Error(w, "Template error", http.StatusInternalServerError)
-	}
 }
 
 // handleEventsJSON returns a paginated slice of events from events-v1.jsonl.
@@ -486,20 +406,9 @@ func isValidSessionID(sessionID string) bool {
 	return true
 }
 
-func prefersJSON(r *http.Request) bool {
-	if r.URL.Query().Get("format") == "json" {
-		return true
-	}
-	return strings.Contains(r.Header.Get("Accept"), "application/json")
-}
-
 func writeJSON(w http.ResponseWriter, v any) {
-	writeJSONStatus(w, http.StatusOK, v)
-}
-
-func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
+	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
@@ -613,20 +522,7 @@ func truncString(s string, n int) string {
 	return s[:n] + "… [truncated]"
 }
 
-// listData is the template data for the session list page.
-type listData struct {
-	Sessions []store.AgentSession
-	Filter   store.SessionFilter
-}
-
-// detailData is the template data for the session detail page.
-type detailData struct {
-	Session    store.AgentSession
-	TaskStatus string
-	HasEvents  bool
-}
-
-// SessionURL returns the URL path for a session detail page.
+// SessionURL returns the URL path for a session detail page in the SPA.
 func SessionURL(sessionID string) string {
 	return fmt.Sprintf("/sessions/%s", sessionID)
 }
