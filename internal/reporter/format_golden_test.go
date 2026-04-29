@@ -12,7 +12,7 @@ func TestFormatStartedReport_Golden(t *testing.T) {
 		AgentName:  "dev-agent",
 		SessionID:  "session-123",
 		WorkerID:   "worker-a",
-		SessionURL: "http://127.0.0.1:8090/sessions/session-123",
+		SessionURL: "http://127.0.0.1:8090/workers/worker-a/sessions/session-123",
 		StartedAt:  time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC),
 	})
 	assertGolden(t, "started.md", got)
@@ -38,7 +38,7 @@ func TestFormatReportAt_Golden(t *testing.T) {
 		Output:      "line 1\nline 2",
 		PRLink:      "https://github.com/Lincyaw/workbuddy/pull/210",
 		ErrorDetail: "Claim verification failed:\n- pr_created: claimed \"210\", actual \"none\"",
-		SessionURL:  "http://127.0.0.1:8090/sessions/session-123",
+		SessionURL:  "http://127.0.0.1:8090/workers/worker-a/sessions/session-123",
 		LabelLine:   "Label validation: no workflow label transition detected.",
 		Verification: &VerificationResult{Checks: []ClaimCheck{{
 			Type:   ClaimPRCreated,
@@ -62,7 +62,7 @@ func TestFormatReportAtSuccess_Golden(t *testing.T) {
 		MaxRetries: 3,
 		Output:     "implemented feature\nadded tests",
 		PRLink:     "https://github.com/Lincyaw/workbuddy/pull/210",
-		SessionURL: "http://127.0.0.1:8090/sessions/session-123",
+		SessionURL: "http://127.0.0.1:8090/workers/worker-a/sessions/session-123",
 		LabelLine:  "Label validation: transitioned from `status:developing` to `status:reviewing`.",
 		Verification: &VerificationResult{Checks: []ClaimCheck{{
 			Type:   ClaimPRCreated,
@@ -85,7 +85,7 @@ func TestFormatReportAtFailure_Golden(t *testing.T) {
 		MaxRetries:  3,
 		Output:      "running tests\nfailure: panic in worker",
 		ErrorDetail: "exit status 1",
-		SessionURL:  "http://127.0.0.1:8090/sessions/session-123",
+		SessionURL:  "http://127.0.0.1:8090/workers/worker-a/sessions/session-123",
 		LabelLine:   "Label validation: workflow label stayed at `status:developing`.",
 	}, time.Date(2026, 4, 29, 12, 4, 0, 0, time.UTC))
 	assertGolden(t, "report-failure.md", got)
@@ -101,7 +101,7 @@ func TestFormatReportAtTimeout_Golden(t *testing.T) {
 		RetryCount:  1,
 		MaxRetries:  3,
 		ErrorDetail: "agent exceeded 30m timeout",
-		SessionURL:  "http://127.0.0.1:8090/sessions/session-123",
+		SessionURL:  "http://127.0.0.1:8090/workers/worker-a/sessions/session-123",
 	}, time.Date(2026, 4, 29, 12, 5, 0, 0, time.UTC))
 	assertGolden(t, "report-timeout.md", got)
 }
@@ -116,7 +116,7 @@ func TestFormatReportAtRetryLimit_Golden(t *testing.T) {
 		RetryCount:  3,
 		MaxRetries:  3,
 		ErrorDetail: "three attempts exhausted",
-		SessionURL:  "http://127.0.0.1:8090/sessions/session-123",
+		SessionURL:  "http://127.0.0.1:8090/workers/worker-a/sessions/session-123",
 	}, time.Date(2026, 4, 29, 12, 6, 0, 0, time.UTC))
 	assertGolden(t, "report-retry-limit.md", got)
 }

@@ -64,5 +64,5 @@ split deployment
 - Coordinator 默认监听 loopback 地址。
 - 非 `/health` 路由在开启 `--auth` 时都经过同一个 `WrapAuth` Bearer middleware。
 - `serve` 复用 Coordinator 的 HTTP surface，而不是维护第二套无认证 mux。
-- Worker management server 仍默认 loopback-only；split deployment 的完整 session viewer 继续挂在 worker management surface，可选 Bearer token 保护。
-- GitHub issue comments 只在 `serve`（Coordinator 与 Worker 共用本地 sessions 目录）里直接链接 `/sessions/{id}`；split deployment 下由 Coordinator 暴露统一 audit/status surface，必要时再通过 worker-local session viewer 排查。
+- Worker management server 仍默认 loopback-only，并支持可选共享 Bearer token。
+- GitHub issue comments 现在统一链接 Coordinator `/workers/{worker_id}/sessions/{session_id}`；Coordinator 在同一个 auth surface 下代理到 Worker session viewer，因此 `serve` 和 split deployment 的 comment payload 保持一致。

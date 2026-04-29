@@ -10,7 +10,7 @@
 | Worker | `worker-a` |
 | Retry | 2 / 3 |
 
-:mag: **[View Session Details](http://127.0.0.1:8090/sessions/session-123)**
+:mag: **[View Session Details](http://127.0.0.1:8090/workers/worker-a/sessions/session-123)**
 
 Label validation: workflow label stayed at `status:developing`.
 

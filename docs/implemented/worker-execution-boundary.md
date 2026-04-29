@@ -33,8 +33,9 @@
 
 ## Session viewer / audit
 
-- `serve`：Coordinator 直接挂载 `/sessions`，因为 Coordinator 与 Worker 共用同一个 DB / sessions 目录；Reporter comment 里的 session 链接也指向这个 surface。
-- split deployment：Worker management surface 提供 loopback-only 的 session viewer，可选 Bearer token 保护；Coordinator 继续提供统一的 audit / task / metrics surface。为了避免把 GitHub comments 绑到 worker-local 监听地址，split deployment 的 Reporter comment 不直接输出 session viewer URL。
+- `serve`：Coordinator 继续直接挂载 `/sessions`，用于同进程部署下的本地 session 列表/详情。
+- 所有拓扑的 Reporter comment 都统一输出 Coordinator `/workers/{worker_id}/sessions/{session_id}`。该入口与 Coordinator 其他 audit/task/metrics 路由共用同一个 Bearer auth surface，再由 Coordinator 代理到对应 Worker 的 management session viewer。
+- Worker management surface 仍默认 loopback-only，可选共享 Bearer token；这保证了 split deployment 里也只有一套对外暴露的会话访问入口。
 
 ## 关键代码
 

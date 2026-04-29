@@ -12,7 +12,7 @@
 
 :link: **Pull Request**: https://github.com/Lincyaw/workbuddy/pull/210
 
-:mag: **[View Session Details](http://127.0.0.1:8090/sessions/session-123)**
+:mag: **[View Session Details](http://127.0.0.1:8090/workers/worker-a/sessions/session-123)**
 
 Label validation: no workflow label transition detected.
 

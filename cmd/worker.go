@@ -172,19 +172,27 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	return &workerOpts{
 		coordinatorURL:    strings.TrimSpace(coordinatorURL),
 		token:             strings.TrimSpace(token),
+		reportBaseURL:     strings.TrimRight(strings.TrimSpace(coordinatorURL), "/"),
 		roleCSV:           roleCSV,
 		runtime:           runtimeName,
 		repo:              strings.TrimSpace(repo),
 		reposCSV:          strings.TrimSpace(reposCSV),
 		workerID:          strings.TrimSpace(workerID),
 		mgmtAddr:          strings.TrimSpace(mgmtAddr),
-		mgmtAuthToken:     strings.TrimSpace(mgmtAuthToken),
+		mgmtAuthToken:     defaultWorkerMgmtAuthToken(strings.TrimSpace(mgmtAuthToken)),
 		configDir:         strings.TrimSpace(configDir),
 		pollTimeout:       defaultWorkerPollTimeout,
 		heartbeatInterval: defaultWorkerHeartbeat,
 		shutdownTimeout:   defaultWorkerShutdownDeadline,
 		concurrency:       concurrency,
 	}, nil
+}
+
+func defaultWorkerMgmtAuthToken(explicit string) string {
+	if token := strings.TrimSpace(explicit); token != "" {
+		return token
+	}
+	return strings.TrimSpace(os.Getenv("WORKBUDDY_AUTH_TOKEN"))
 }
 
 func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader workerIssueReader, parentCtx ...context.Context) error {
@@ -303,6 +311,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	}
 
 	addrFile := workerAddrFile(workDir)
+	var mgmtServer *workerMgmtServer
 	reloadAndRegister := func(changeCtx context.Context) (*workerConfigReloadSummary, error) {
 		summary, err := configs.reload(bindings.list())
 		if err != nil {
@@ -312,13 +321,13 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 		if len(currentRoles) == 0 {
 			return nil, fmt.Errorf("worker: at least one role is required")
 		}
-		if err := registerWorkerRepos(changeCtx, client, workerID, currentRoles, publicRuntime, bindings.list()); err != nil {
+		if err := registerWorkerRepos(changeCtx, client, workerID, currentRoles, publicRuntime, mgmtServer.baseURL, bindings.list()); err != nil {
 			return nil, err
 		}
 		return summary, nil
 	}
 
-	mgmtServer, err := startWorkerMgmtServer(
+	mgmtServer, err = startWorkerMgmtServer(
 		opts.mgmtAddr,
 		addrFile,
 		opts.mgmtAuthToken,
@@ -345,7 +354,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 		}
 	}()
 
-	if err := registerWorkerRepos(ctx, client, workerID, roles, publicRuntime, bindings.list()); err != nil {
+	if err := registerWorkerRepos(ctx, client, workerID, roles, publicRuntime, mgmtServer.baseURL, bindings.list()); err != nil {
 		if errors.Is(err, workerclient.ErrUnauthorized) {
 			return &cliExitError{
 				msg:  "worker: coordinator rejected the provided token",

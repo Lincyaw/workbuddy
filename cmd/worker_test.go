@@ -144,6 +144,7 @@ func newWorkerFlagCommand() *cobra.Command {
 	cmd.Flags().String("repos", "", "")
 	cmd.Flags().String("id", "", "")
 	cmd.Flags().String("mgmt-addr", defaultWorkerMgmtAddr, "")
+	cmd.Flags().String("mgmt-auth-token", "", "")
 	cmd.Flags().Int("concurrency", 1, "")
 	return cmd
 }
@@ -314,6 +315,26 @@ func TestParseWorkerFlags_DeprecatedTokenWarns(t *testing.T) {
 	}
 	if got := stderr.String(); !strings.Contains(got, "--token is deprecated") {
 		t.Fatalf("stderr = %q, want deprecation warning", got)
+	}
+}
+
+func TestParseWorkerFlags_DefaultReportBaseURLAndMgmtAuthToken(t *testing.T) {
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", "shared-token")
+
+	cmd := newWorkerFlagCommand()
+	if err := cmd.Flags().Set("coordinator", "http://coord:8081/"); err != nil {
+		t.Fatalf("set coordinator: %v", err)
+	}
+
+	opts, err := parseWorkerFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseWorkerFlags: %v", err)
+	}
+	if got, want := opts.reportBaseURL, "http://coord:8081"; got != want {
+		t.Fatalf("reportBaseURL = %q, want %q", got, want)
+	}
+	if got, want := opts.mgmtAuthToken, "shared-token"; got != want {
+		t.Fatalf("mgmtAuthToken = %q, want %q", got, want)
 	}
 }
 
@@ -737,6 +758,9 @@ func TestWorkerUsesMappedRepoPathAndCleansAddrFile(t *testing.T) {
 	}
 	if len(registerReq.Repos) != 1 || registerReq.Repos[0] != repo {
 		t.Fatalf("unexpected registered repos: %+v", registerReq.Repos)
+	}
+	if got := registerReq.MgmtBaseURL; !strings.HasPrefix(got, "http://127.0.0.1:") {
+		t.Fatalf("registerReq.MgmtBaseURL = %q, want loopback worker management URL", got)
 	}
 	if _, err := os.Stat(addrFile); !os.IsNotExist(err) {
 		t.Fatalf("expected worker addr cleanup, stat err = %v", err)

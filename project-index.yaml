@@ -842,9 +842,11 @@ requirements:
       - "AC-017-13: 同一 repo#issue 的任务必须串行执行；Issue 关闭时仅取消该 issue 当前运行中的任务，不影响其他 issue"
     code:
       - cmd/serve.go
+      - cmd/coordinator_session_proxy.go
       - internal/router/router.go
     tests:
       - cmd/serve_test.go
+      - cmd/coordinator_audit_test.go
     deps: [REQ-002, REQ-004, REQ-006, REQ-009, REQ-024]
 
   - id: REQ-018
@@ -1085,12 +1087,14 @@ requirements:
     code:
       - cmd/coordinator.go
       - cmd/worker.go
+      - cmd/coordinator_session_proxy.go
       - internal/app/coordinator.go
       - internal/store/store.go
       - internal/store/worker_tokens.go
       - internal/workerclient/client.go
     tests:
       - cmd/coordinator_test.go
+      - cmd/coordinator_audit_test.go
       - cmd/worker_test.go
       - internal/app/coordinator_test.go
       - internal/store/store_test.go

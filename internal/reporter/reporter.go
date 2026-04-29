@@ -3,6 +3,7 @@ package reporter
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -176,6 +177,13 @@ func (r *Reporter) SetBaseURL(baseURL string) {
 	r.baseURL = baseURL
 }
 
+func (r *Reporter) sessionURL(sessionID, workerID string) string {
+	if r.baseURL == "" || sessionID == "" || workerID == "" {
+		return ""
+	}
+	return r.baseURL + "/workers/" + url.PathEscape(workerID) + "/sessions/" + url.PathEscape(sessionID)
+}
+
 // SetVerifier sets the claim verifier used to check agent side-effects.
 func (r *Reporter) SetVerifier(v ClaimVerifier) {
 	r.verifier = v
@@ -197,15 +205,11 @@ func (r *Reporter) Verify(ctx context.Context, repo string, issueNum int, result
 
 // ReportStarted posts an "Agent Started" comment with a session link before execution begins.
 func (r *Reporter) ReportStarted(ctx context.Context, repo string, issueNum int, agentName, sessionID, workerID string) error {
-	var sessionURL string
-	if r.baseURL != "" {
-		sessionURL = r.baseURL + "/sessions/" + sessionID
-	}
 	body := FormatStartedReport(StartedData{
 		AgentName:  agentName,
 		SessionID:  sessionID,
 		WorkerID:   workerID,
-		SessionURL: sessionURL,
+		SessionURL: r.sessionURL(sessionID, workerID),
 		StartedAt:  time.Now(),
 	})
 	return r.writeWithRateLimitRetry(ctx, repo, issueNum, "report_started", func() error {
@@ -376,11 +380,6 @@ func (r *Reporter) report(
 		output = result.Stderr
 	}
 
-	var sessionURL string
-	if r.baseURL != "" {
-		sessionURL = r.baseURL + "/sessions/" + sessionID
-	}
-
 	data := ReportData{
 		AgentName:    agentName,
 		Status:       status,
@@ -392,7 +391,7 @@ func (r *Reporter) report(
 		Output:       output,
 		PRLink:       prLink,
 		ErrorDetail:  errorDetail,
-		SessionURL:   sessionURL,
+		SessionURL:   r.sessionURL(sessionID, workerID),
 		LabelLine:    labelLine,
 		Verification: verification,
 		InfraReason:  infraReason,
