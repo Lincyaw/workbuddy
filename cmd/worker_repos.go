@@ -320,6 +320,27 @@ func validateWorkerMgmtAddr(raw string) error {
 	return nil
 }
 
+func validateWorkerMgmtPublicURL(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("worker: invalid --mgmt-public-url %q: %w", raw, err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("worker: --mgmt-public-url must use http or https")
+	}
+	if strings.TrimSpace(parsed.Host) == "" {
+		return fmt.Errorf("worker: --mgmt-public-url must include a host")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("worker: --mgmt-public-url must not include query or fragment")
+	}
+	return nil
+}
+
 func validateWorkerRepoBinding(binding *workerRepoBinding) error {
 	if binding == nil {
 		return fmt.Errorf("repo binding is required")
@@ -452,12 +473,14 @@ func workerAddrFile(controlDir string) string {
 
 type workerMgmtClient struct {
 	baseURL    string
+	authToken  string
 	httpClient *http.Client
 }
 
 func newWorkerMgmtClient(baseURL string) *workerMgmtClient {
 	return &workerMgmtClient{
 		baseURL:    strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		authToken:  defaultWorkerMgmtAuthToken(""),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 }
@@ -524,6 +547,9 @@ func (c *workerMgmtClient) Reload(ctx context.Context) (*workerConfigReloadSumma
 }
 
 func (c *workerMgmtClient) do(req *http.Request, wantStatus int, out any) error {
+	if strings.TrimSpace(c.authToken) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(c.authToken))
+	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err

@@ -309,6 +309,21 @@ func TestValidateWorkerMgmtAddrRejectsNonLoopback(t *testing.T) {
 	}
 }
 
+func TestValidateWorkerMgmtPublicURL(t *testing.T) {
+	if err := validateWorkerMgmtPublicURL(""); err != nil {
+		t.Fatalf("empty URL rejected: %v", err)
+	}
+	if err := validateWorkerMgmtPublicURL("https://worker.example.com/mgmt"); err != nil {
+		t.Fatalf("valid URL rejected: %v", err)
+	}
+	if err := validateWorkerMgmtPublicURL("ftp://worker.example.com"); err == nil {
+		t.Fatal("expected non-http scheme rejection")
+	}
+	if err := validateWorkerMgmtPublicURL("https://worker.example.com/path?token=secret"); err == nil {
+		t.Fatal("expected query rejection")
+	}
+}
+
 func TestWorkerRepoConfigStoreReloadsPerRepoAndLogsWarnings(t *testing.T) {
 	repoAPath := setupWorkerRepoConfig(t, "owner/a", `echo repo-a`, "status:developing")
 	repoBPath := setupWorkerRepoConfig(t, "owner/b", `echo repo-b`, "status:missing")

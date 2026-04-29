@@ -22,14 +22,20 @@ Coordinator 和 Worker 在同一进程内启动，但仍然通过同一套 HTTP 
 workbuddy coordinator --port 8080
 
 # 机器 B
-workbuddy worker --coordinator http://A:8080 --token <secret> --role dev --repos owner/repo=/srv/workbuddy-worker
+workbuddy worker \
+  --coordinator http://A:8080 \
+  --token <secret> \
+  --role dev \
+  --repos owner/repo=/srv/workbuddy-worker \
+  --mgmt-auth-token <secret> \
+  --mgmt-public-url https://worker-b.example.com/workbuddy
 ```
 
 - Coordinator 负责：GitHub Poller、状态机、任务路由、HTTP API、审计
 - Worker 负责：向 Coordinator 注册、长轮询领取任务、执行 agent 子进程、提交结果
 - 通信方式：HTTP 长轮询（`GET /api/v1/tasks/poll`，无任务时挂起最多 timeout 秒）
 - 认证：共享密钥，`Authorization: Bearer <token>`（REQ-029）
-- Session viewer：两种拓扑的 GitHub comment 都统一链接到 Coordinator `/workers/{worker_id}/sessions/{session_id}`。Coordinator 在同一个 Bearer auth surface 下代理到对应 Worker 的 management session viewer；Worker management listener 仍默认 loopback-only，并支持可选共享 token。
+- Session viewer：两种拓扑的 GitHub comment 都统一链接到 Coordinator `/workers/{worker_id}/sessions/{session_id}`。Coordinator 在同一个 Bearer auth surface 下代理到对应 Worker 的 management session viewer；同机部署直接使用 loopback 管理地址，split-host 部署则通过 `--mgmt-public-url` 注册一个 Coordinator 可达的 Worker management base URL。Worker management listener 仍默认 loopback-only，并支持可选共享 token。
 
 ## CLI 命令列表
 

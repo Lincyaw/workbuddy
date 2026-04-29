@@ -46,6 +46,7 @@ type workerOpts struct {
 	coordinatorURL    string
 	token             string
 	reportBaseURL     string
+	mgmtPublicURL     string
 	roleCSV           string
 	runtime           string
 	repo              string
@@ -85,6 +86,7 @@ func init() {
 	bindWorkerFlags(workerCmd)
 	workerCmd.Flags().String("id", "", "Stable worker ID (default: hostname)")
 	workerCmd.Flags().String("mgmt-addr", defaultWorkerMgmtAddr, "Local-only worker management listen address")
+	workerCmd.Flags().String("mgmt-public-url", "", "Coordinator-reachable base URL for the worker management/session viewer surface")
 	workerCmd.Flags().String("mgmt-auth-token", "", "Optional bearer token for worker management and session-viewer endpoints")
 	workerCmd.Flags().Int("concurrency", 1, "Maximum concurrent tasks per worker")
 	_ = workerCmd.MarkFlagRequired("coordinator")
@@ -154,6 +156,7 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	reposCSV, _ := cmd.Flags().GetString("repos")
 	workerID, _ := cmd.Flags().GetString("id")
 	mgmtAddr, _ := cmd.Flags().GetString("mgmt-addr")
+	mgmtPublicURL, _ := cmd.Flags().GetString("mgmt-public-url")
 	mgmtAuthToken, _ := cmd.Flags().GetString("mgmt-auth-token")
 	concurrency, _ := cmd.Flags().GetInt("concurrency")
 	if concurrency < 1 {
@@ -166,6 +169,13 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	if token == "" {
 		return nil, fmt.Errorf("worker: --token-file, deprecated --token, or WORKBUDDY_AUTH_TOKEN is required")
 	}
+	if err := validateWorkerMgmtPublicURL(mgmtPublicURL); err != nil {
+		return nil, err
+	}
+	resolvedMgmtAuthToken := defaultWorkerMgmtAuthToken(strings.TrimSpace(mgmtAuthToken))
+	if strings.TrimSpace(mgmtPublicURL) != "" && resolvedMgmtAuthToken == "" {
+		return nil, fmt.Errorf("worker: --mgmt-public-url requires --mgmt-auth-token or WORKBUDDY_AUTH_TOKEN")
+	}
 	if strings.TrimSpace(repo) != "" && strings.TrimSpace(reposCSV) == "" {
 		writeDeprecationWarning(cmd.ErrOrStderr(), "`worker --repo`", "`worker --repos OWNER/NAME=/path`")
 	}
@@ -173,13 +183,14 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 		coordinatorURL:    strings.TrimSpace(coordinatorURL),
 		token:             strings.TrimSpace(token),
 		reportBaseURL:     strings.TrimRight(strings.TrimSpace(coordinatorURL), "/"),
+		mgmtPublicURL:     strings.TrimRight(strings.TrimSpace(mgmtPublicURL), "/"),
 		roleCSV:           roleCSV,
 		runtime:           runtimeName,
 		repo:              strings.TrimSpace(repo),
 		reposCSV:          strings.TrimSpace(reposCSV),
 		workerID:          strings.TrimSpace(workerID),
 		mgmtAddr:          strings.TrimSpace(mgmtAddr),
-		mgmtAuthToken:     defaultWorkerMgmtAuthToken(strings.TrimSpace(mgmtAuthToken)),
+		mgmtAuthToken:     resolvedMgmtAuthToken,
 		configDir:         strings.TrimSpace(configDir),
 		pollTimeout:       defaultWorkerPollTimeout,
 		heartbeatInterval: defaultWorkerHeartbeat,
@@ -195,9 +206,22 @@ func defaultWorkerMgmtAuthToken(explicit string) string {
 	return strings.TrimSpace(os.Getenv("WORKBUDDY_AUTH_TOKEN"))
 }
 
+func advertisedWorkerMgmtBaseURL(opts *workerOpts, localBaseURL string) string {
+	if opts != nil && strings.TrimSpace(opts.mgmtPublicURL) != "" {
+		return strings.TrimRight(strings.TrimSpace(opts.mgmtPublicURL), "/")
+	}
+	return strings.TrimRight(strings.TrimSpace(localBaseURL), "/")
+}
+
 func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader workerIssueReader, parentCtx ...context.Context) error {
 	if opts == nil {
 		return fmt.Errorf("worker: options are required")
+	}
+	if err := validateWorkerMgmtPublicURL(opts.mgmtPublicURL); err != nil {
+		return err
+	}
+	if strings.TrimSpace(opts.mgmtPublicURL) != "" && strings.TrimSpace(opts.mgmtAuthToken) == "" {
+		return fmt.Errorf("worker: --mgmt-public-url requires --mgmt-auth-token or WORKBUDDY_AUTH_TOKEN")
 	}
 
 	var err error
@@ -321,7 +345,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 		if len(currentRoles) == 0 {
 			return nil, fmt.Errorf("worker: at least one role is required")
 		}
-		if err := registerWorkerRepos(changeCtx, client, workerID, currentRoles, publicRuntime, mgmtServer.baseURL, bindings.list()); err != nil {
+		if err := registerWorkerRepos(changeCtx, client, workerID, currentRoles, publicRuntime, advertisedWorkerMgmtBaseURL(opts, mgmtServer.baseURL), bindings.list()); err != nil {
 			return nil, err
 		}
 		return summary, nil
@@ -354,7 +378,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 		}
 	}()
 
-	if err := registerWorkerRepos(ctx, client, workerID, roles, publicRuntime, mgmtServer.baseURL, bindings.list()); err != nil {
+	if err := registerWorkerRepos(ctx, client, workerID, roles, publicRuntime, advertisedWorkerMgmtBaseURL(opts, mgmtServer.baseURL), bindings.list()); err != nil {
 		if errors.Is(err, workerclient.ErrUnauthorized) {
 			return &cliExitError{
 				msg:  "worker: coordinator rejected the provided token",

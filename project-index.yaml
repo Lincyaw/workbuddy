@@ -1669,9 +1669,11 @@ requirements:
     description: >
       Allow a running worker to add or remove repo-to-local-path bindings
       without restart. Workers expose a loopback-only management API,
-      persist a discoverable `.workbuddy/worker.addr`, re-register with the
-      coordinator when bindings change, and route each claimed task through
-      the repo-specific local checkout/worktree root.
+      persist a discoverable `.workbuddy/worker.addr`, can optionally
+      advertise a coordinator-reachable management base URL for split-host
+      session proxying, re-register with the coordinator when bindings
+      change, and route each claimed task through the repo-specific local
+      checkout/worktree root.
     priority: P1
     version: v0.2.0
     status: tested
@@ -1679,6 +1681,7 @@ requirements:
       - "AC-049-1: `workbuddy worker` supports stable `--id` with hostname default and `--repos owner/repo=/path,...` startup bindings"
       - "AC-049-2: legacy `--repo owner/repo` remains supported and defaults its path to cwd"
       - "AC-049-3: worker starts a loopback-only management API at `--mgmt-addr` (default 127.0.0.1:0) and writes the resolved address to `.workbuddy/worker.addr`"
+      - "AC-049-3a: split-host deployments can register a coordinator-reachable management base URL via `--mgmt-public-url`, and that URL requires shared bearer auth when used"
       - "AC-049-4: GET/POST/DELETE `/mgmt/repos` list, add, and remove repo bindings; worker re-registers with coordinator after successful changes"
       - "AC-049-5: `workbuddy worker repos add|remove|list` discover the management API via `.workbuddy/worker.addr`"
       - "AC-049-6: claimed tasks use repo-specific path mapping for RepoRoot/WorkDir/worktree isolation"
