@@ -16,8 +16,14 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/operator"
 	"github.com/Lincyaw/workbuddy/internal/poller"
+	"github.com/Lincyaw/workbuddy/internal/sessionref"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
+
+// stuckThresholdSeconds is the elapsed-since-last-transition threshold beyond
+// which an issue is reported as `stuck` on /api/v1/status. Mirrors the audit
+// HTTP handler's 1-hour rule.
+const stuckThresholdSeconds = int64(3600)
 
 // badRequestError wraps parameter-validation errors so callers can distinguish
 // them from backend/DB errors returned by queryEvents.
@@ -29,9 +35,13 @@ func (e *badRequestError) Error() string { return e.msg }
 
 // Handler serves the JSON audit API.
 type Handler struct {
-	store       *store.Store
-	events      *eventlog.EventLogger
-	sessionsDir string
+	store           *store.Store
+	events          *eventlog.EventLogger
+	sessionsDir     string
+	reportBaseURL   string
+	now             func() time.Time
+	sessionEventsFn http.HandlerFunc
+	sessionStreamFn http.HandlerFunc
 }
 
 // NewHandler constructs a Handler backed by the given store.
@@ -39,12 +49,42 @@ func NewHandler(st *store.Store) *Handler {
 	return &Handler{
 		store:  st,
 		events: eventlog.NewEventLogger(st),
+		now:    time.Now,
 	}
 }
 
 // SetSessionsDir configures the directory where per-session artifacts live.
 func (h *Handler) SetSessionsDir(dir string) {
 	h.sessionsDir = dir
+}
+
+// SetReportBaseURL configures the base URL used to format last_session_url on
+// dashboard responses. Should match the reporter's --report-base-url flag.
+func (h *Handler) SetReportBaseURL(baseURL string) {
+	h.reportBaseURL = strings.TrimRight(baseURL, "/")
+}
+
+// SetNowFunc overrides the clock used for stuck-detection arithmetic. Tests
+// inject a deterministic clock; passing nil restores time.Now.
+func (h *Handler) SetNowFunc(now func() time.Time) {
+	if now == nil {
+		h.now = time.Now
+		return
+	}
+	h.now = now
+}
+
+// SetSessionEventsHandler installs the handler invoked for
+// /api/v1/sessions/{id}/events. The webui package owns the implementation
+// (it reads events-v1.jsonl from disk); auditapi just routes the suffix to it.
+func (h *Handler) SetSessionEventsHandler(fn http.HandlerFunc) {
+	h.sessionEventsFn = fn
+}
+
+// SetSessionStreamHandler installs the handler invoked for
+// /api/v1/sessions/{id}/stream (SSE).
+func (h *Handler) SetSessionStreamHandler(fn http.HandlerFunc) {
+	h.sessionStreamFn = fn
 }
 
 // Register mounts the audit API routes.
@@ -70,6 +110,8 @@ func (h *Handler) RegisterDashboard(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/alerts", h.handleAPIAlerts)
 	mux.HandleFunc("/api/v1/metrics", h.handleAPIMetrics)
 	mux.HandleFunc("/api/v1/workers", h.handleAPIWorkers)
+	mux.HandleFunc("/api/v1/issues/in-flight", h.handleAPIIssuesInFlight)
+	mux.HandleFunc("/api/v1/issues/", h.handleAPIIssueDetail)
 }
 
 // RegisterSessionsOnly mounts only the /sessions/ JSON endpoint without the
@@ -149,26 +191,33 @@ type SessionArtifactPaths struct {
 }
 
 type statusResponse struct {
-	ActiveSessions int        `json:"active_sessions"`
-	Workers        int        `json:"workers"`
-	LastPoll       *time.Time `json:"last_poll"`
+	ActiveSessions    int        `json:"active_sessions"`
+	Workers           int        `json:"workers"`
+	LastPoll          *time.Time `json:"last_poll"`
+	InFlightIssues    int        `json:"in_flight_issues"`
+	StuckIssuesOver1H int        `json:"stuck_issues_over_1h"`
+	Done24H           int        `json:"done_24h"`
+	Failed24H         int        `json:"failed_24h"`
 }
 
 type sessionListResponse struct {
-	SessionID  string     `json:"session_id"`
-	TaskID     string     `json:"task_id,omitempty"`
-	Repo       string     `json:"repo"`
-	IssueNum   int        `json:"issue_num"`
-	AgentName  string     `json:"agent_name"`
-	Runtime    string     `json:"runtime,omitempty"`
-	WorkerID   string     `json:"worker_id,omitempty"`
-	Attempt    int        `json:"attempt"`
-	Status     string     `json:"status"`
-	ExitCode   int        `json:"exit_code"`
-	Duration   int64      `json:"duration"`
-	CreatedAt  time.Time  `json:"created_at"`
-	FinishedAt *time.Time `json:"finished_at"`
-	Summary    string     `json:"summary,omitempty"`
+	SessionID    string     `json:"session_id"`
+	TaskID       string     `json:"task_id,omitempty"`
+	Repo         string     `json:"repo"`
+	IssueNum     int        `json:"issue_num"`
+	AgentName    string     `json:"agent_name"`
+	Runtime      string     `json:"runtime,omitempty"`
+	WorkerID     string     `json:"worker_id,omitempty"`
+	Attempt      int        `json:"attempt"`
+	Status       string     `json:"status"`
+	TaskStatus   string     `json:"task_status,omitempty"`
+	Workflow     string     `json:"workflow,omitempty"`
+	CurrentState string     `json:"current_state,omitempty"`
+	ExitCode     int        `json:"exit_code"`
+	Duration     int64      `json:"duration"`
+	CreatedAt    time.Time  `json:"created_at"`
+	FinishedAt   *time.Time `json:"finished_at"`
+	Summary      string     `json:"summary,omitempty"`
 }
 
 type sessionDetailResponse struct {
@@ -199,13 +248,62 @@ type metricsResponse struct {
 }
 
 type workerResponse struct {
-	ID            string    `json:"id"`
-	Repo          string    `json:"repo"`
-	Roles         []string  `json:"roles"`
-	Hostname      string    `json:"hostname,omitempty"`
-	Status        string    `json:"status"`
-	LastHeartbeat time.Time `json:"last_heartbeat"`
-	RegisteredAt  time.Time `json:"registered_at"`
+	ID              string    `json:"id"`
+	Repo            string    `json:"repo"`
+	Roles           []string  `json:"roles"`
+	Hostname        string    `json:"hostname,omitempty"`
+	Status          string    `json:"status"`
+	LastHeartbeat   time.Time `json:"last_heartbeat"`
+	LastHeartbeatAt time.Time `json:"last_heartbeat_at"`
+	RegisteredAt    time.Time `json:"registered_at"`
+	CurrentTaskID   string    `json:"current_task_id,omitempty"`
+	MgmtBaseURL     string    `json:"mgmt_base_url,omitempty"`
+}
+
+// inFlightIssueResponse is one row of /api/v1/issues/in-flight.
+type inFlightIssueResponse struct {
+	Repo             string         `json:"repo"`
+	IssueNum         int            `json:"issue_num"`
+	Title            string         `json:"title"`
+	CurrentState     string         `json:"current_state"`
+	CurrentLabel     string         `json:"current_label"`
+	Labels           []string       `json:"labels"`
+	CycleCounts      map[string]int `json:"cycle_counts"`
+	LastTransitionAt *time.Time     `json:"last_transition_at,omitempty"`
+	StuckForSeconds  int64          `json:"stuck_for_seconds"`
+	ClaimedWorkerID  string         `json:"claimed_worker_id,omitempty"`
+	LastSessionID    string         `json:"last_session_id,omitempty"`
+	LastSessionURL   string         `json:"last_session_url,omitempty"`
+}
+
+// issueTransitionResponse is one transition row in the issue-detail endpoint.
+type issueTransitionResponse struct {
+	From string    `json:"from"`
+	To   string    `json:"to"`
+	At   time.Time `json:"at"`
+	By   string    `json:"by,omitempty"`
+}
+
+// issueSessionRefResponse is one session row in the issue-detail endpoint.
+type issueSessionRefResponse struct {
+	SessionID  string     `json:"session_id"`
+	Agent      string     `json:"agent"`
+	StartedAt  time.Time  `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	Status     string     `json:"status,omitempty"`
+	ExitCode   int        `json:"exit_code"`
+}
+
+// issueDetailResponse is the body of /api/v1/issues/{repo}/{num}.
+type issueDetailResponse struct {
+	Repo             string                    `json:"repo"`
+	IssueNum         int                       `json:"issue_num"`
+	Title            string                    `json:"title"`
+	CurrentState     string                    `json:"current_state"`
+	Labels           []string                  `json:"labels"`
+	Transitions      []issueTransitionResponse `json:"transitions"`
+	TransitionCounts []transitionCountResponse `json:"transition_counts"`
+	Sessions         []issueSessionRefResponse `json:"sessions"`
 }
 
 func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -278,11 +376,33 @@ func (h *Handler) handleAPISession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	sessionID := strings.TrimPrefix(r.URL.Path, "/api/v1/sessions/")
-	if !isValidSessionID(sessionID) || strings.Contains(sessionID, "/") {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/sessions/")
+	sessionID, suffix, _ := strings.Cut(rest, "/")
+	if !isValidSessionID(sessionID) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	switch suffix {
+	case "":
+		h.serveSessionDetail(w, sessionID)
+	case "events":
+		if h.sessionEventsFn == nil {
+			writeError(w, http.StatusNotFound, "session events not configured")
+			return
+		}
+		h.sessionEventsFn(w, r)
+	case "stream":
+		if h.sessionStreamFn == nil {
+			writeError(w, http.StatusNotFound, "session stream not configured")
+			return
+		}
+		h.sessionStreamFn(w, r)
+	default:
+		writeError(w, http.StatusNotFound, "not found")
+	}
+}
+
+func (h *Handler) serveSessionDetail(w http.ResponseWriter, sessionID string) {
 	record, err := h.store.GetSession(sessionID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to query session")
@@ -298,6 +418,180 @@ func (h *Handler) handleAPISession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) handleAPIIssuesInFlight(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	caches, err := h.collectInFlightIssues()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to collect in-flight issues")
+		return
+	}
+	now := h.now().UTC()
+	out := make([]inFlightIssueResponse, 0, len(caches))
+	for _, ic := range caches {
+		row, err := h.buildInFlightRow(ic, now)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to build in-flight row")
+			return
+		}
+		out = append(out, row)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (h *Handler) buildInFlightRow(ic store.IssueCache, now time.Time) (inFlightIssueResponse, error) {
+	labels := decodeLabels(ic.Labels)
+	cur := currentLabel(labels)
+	row := inFlightIssueResponse{
+		Repo:         ic.Repo,
+		IssueNum:     ic.IssueNum,
+		Title:        firstLine(ic.Body),
+		CurrentState: labelToState(cur),
+		CurrentLabel: cur,
+		Labels:       labels,
+		CycleCounts:  map[string]int{},
+	}
+	counts, err := h.store.QueryTransitionCounts(ic.Repo, ic.IssueNum)
+	if err != nil {
+		return row, fmt.Errorf("transition counts: %w", err)
+	}
+	for _, tc := range counts {
+		row.CycleCounts[tc.FromState+"->"+tc.ToState] = tc.Count
+	}
+	last, err := h.store.LatestIssueTransition(ic.Repo, ic.IssueNum)
+	if err != nil {
+		return row, fmt.Errorf("latest transition: %w", err)
+	}
+	if last != nil {
+		ts := last.At
+		row.LastTransitionAt = &ts
+		if !ts.IsZero() {
+			seconds := int64(now.Sub(ts).Seconds())
+			if seconds < 0 {
+				seconds = 0
+			}
+			row.StuckForSeconds = seconds
+		}
+	}
+	if claim, err := h.store.QueryIssueClaim(ic.Repo, ic.IssueNum); err == nil && claim != nil {
+		row.ClaimedWorkerID = claim.WorkerID
+	}
+	if session, err := h.store.LatestSessionForIssue(ic.Repo, ic.IssueNum); err == nil && session != nil {
+		row.LastSessionID = session.SessionID
+		row.LastSessionURL = sessionref.BuildURL(h.reportBaseURL, session.WorkerID, session.SessionID)
+	}
+	return row, nil
+}
+
+func (h *Handler) handleAPIIssueDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/issues/")
+	if rest == "" || rest == "in-flight" {
+		// The in-flight handler is registered at the more-specific path, so
+		// reaching here means a malformed request.
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	repo, issueNum, ok := splitRepoIssue(rest)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid issue path; expect /api/v1/issues/<owner>/<repo>/<num>")
+		return
+	}
+	cache, err := h.store.QueryIssueCache(repo, issueNum)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query issue cache")
+		return
+	}
+	if cache == nil {
+		writeError(w, http.StatusNotFound, "issue not found")
+		return
+	}
+	labels := decodeLabels(cache.Labels)
+	resp := issueDetailResponse{
+		Repo:         cache.Repo,
+		IssueNum:     cache.IssueNum,
+		Title:        firstLine(cache.Body),
+		CurrentState: labelToState(currentLabel(labels)),
+		Labels:       labels,
+		Transitions:  []issueTransitionResponse{},
+		Sessions:     []issueSessionRefResponse{},
+	}
+	transitions, err := h.store.QueryIssueTransitions(repo, issueNum)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query transitions")
+		return
+	}
+	for _, t := range transitions {
+		resp.Transitions = append(resp.Transitions, issueTransitionResponse{
+			From: t.From,
+			To:   t.To,
+			At:   t.At,
+			By:   t.By,
+		})
+	}
+	counts, err := h.store.QueryTransitionCounts(repo, issueNum)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query transition counts")
+		return
+	}
+	for _, c := range counts {
+		resp.TransitionCounts = append(resp.TransitionCounts, transitionCountResponse{
+			FromState: c.FromState,
+			ToState:   c.ToState,
+			Count:     c.Count,
+		})
+	}
+	sessions, err := h.store.ListSessions(store.SessionFilter{Repo: repo, IssueNum: issueNum})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list sessions")
+		return
+	}
+	for _, sess := range sessions {
+		exitCode, _, finishedAt, _ := h.sessionTaskStats(sess)
+		resp.Sessions = append(resp.Sessions, issueSessionRefResponse{
+			SessionID:  sess.SessionID,
+			Agent:      sess.AgentName,
+			StartedAt:  sess.CreatedAt,
+			FinishedAt: finishedAt,
+			Status:     sess.Status,
+			ExitCode:   exitCode,
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func splitRepoIssue(trimmed string) (string, int, bool) {
+	parts := strings.Split(trimmed, "/")
+	if len(parts) < 2 {
+		return "", 0, false
+	}
+	tail := parts[len(parts)-1]
+	issueNum, err := strconv.Atoi(tail)
+	if err != nil || issueNum <= 0 {
+		return "", 0, false
+	}
+	repo := strings.Join(parts[:len(parts)-1], "/")
+	if repo == "" {
+		return "", 0, false
+	}
+	return repo, issueNum, true
+}
+
+func firstLine(s string) string {
+	if s == "" {
+		return ""
+	}
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return strings.TrimSpace(s)
 }
 
 func (h *Handler) handleAPIEvents(w http.ResponseWriter, r *http.Request) {
@@ -372,14 +666,18 @@ func (h *Handler) handleAPIWorkers(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := make([]workerResponse, 0, len(workers))
 	for _, worker := range workers {
+		currentTask, _ := h.store.WorkerCurrentTaskID(worker.ID)
 		resp = append(resp, workerResponse{
-			ID:            worker.ID,
-			Repo:          worker.Repo,
-			Roles:         decodeRoles(worker.Roles),
-			Hostname:      worker.Hostname,
-			Status:        worker.Status,
-			LastHeartbeat: worker.LastHeartbeat,
-			RegisteredAt:  worker.RegisteredAt,
+			ID:              worker.ID,
+			Repo:            worker.Repo,
+			Roles:           decodeRoles(worker.Roles),
+			Hostname:        worker.Hostname,
+			Status:          worker.Status,
+			LastHeartbeat:   worker.LastHeartbeat,
+			LastHeartbeatAt: worker.LastHeartbeat,
+			RegisteredAt:    worker.RegisteredAt,
+			CurrentTaskID:   currentTask,
+			MgmtBaseURL:     worker.MgmtBaseURL,
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -586,7 +884,97 @@ func (h *Handler) queryStatus() (statusResponse, error) {
 		return resp, fmt.Errorf("query last poll: %w", err)
 	}
 	resp.LastPoll = lastPoll
+
+	now := h.now().UTC()
+	inFlight, stuck, err := h.summariseInFlight(now)
+	if err != nil {
+		return resp, fmt.Errorf("summarise in-flight: %w", err)
+	}
+	resp.InFlightIssues = inFlight
+	resp.StuckIssuesOver1H = stuck
+
+	since := now.Add(-24 * time.Hour)
+	if done, err := h.store.CountTerminalSessionsSince(store.TaskStatusCompleted, since); err == nil {
+		resp.Done24H = done
+	}
+	if failed, err := h.store.CountTerminalSessionsSince(store.TaskStatusFailed, since); err == nil {
+		resp.Failed24H = failed
+	}
 	return resp, nil
+}
+
+// summariseInFlight returns the in-flight issue count and how many of those
+// have been stuck longer than the 1-hour threshold (no transition since).
+func (h *Handler) summariseInFlight(now time.Time) (int, int, error) {
+	caches, err := h.collectInFlightIssues()
+	if err != nil {
+		return 0, 0, err
+	}
+	stuck := 0
+	for _, ic := range caches {
+		last, err := h.store.LatestIssueTransition(ic.Repo, ic.IssueNum)
+		if err != nil {
+			return 0, 0, err
+		}
+		if last == nil {
+			continue
+		}
+		if int64(now.Sub(last.At).Seconds()) > stuckThresholdSeconds {
+			stuck++
+		}
+	}
+	return len(caches), stuck, nil
+}
+
+// collectInFlightIssues returns all open issue caches that are not in a
+// terminal status (status:done / status:failed / status:blocked dependent on
+// dep state). Used by both the in-flight endpoint and the status summary.
+func (h *Handler) collectInFlightIssues() ([]store.IssueCache, error) {
+	all, err := h.store.ListIssueCaches("")
+	if err != nil {
+		return nil, fmt.Errorf("list issue caches: %w", err)
+	}
+	out := make([]store.IssueCache, 0, len(all))
+	for _, ic := range all {
+		if !isInFlight(ic) {
+			continue
+		}
+		out = append(out, ic)
+	}
+	return out, nil
+}
+
+func isInFlight(ic store.IssueCache) bool {
+	state := strings.ToLower(strings.TrimSpace(ic.State))
+	if state == "closed" {
+		return false
+	}
+	labels := decodeLabels(ic.Labels)
+	for _, label := range labels {
+		switch label {
+		case "status:done", "status:failed":
+			return false
+		}
+	}
+	return true
+}
+
+func currentLabel(labels []string) string {
+	for _, label := range labels {
+		if strings.HasPrefix(label, "status:") {
+			return label
+		}
+	}
+	return ""
+}
+
+// labelToState maps "status:developing" -> "developing"; returns "" when the
+// label is not a workbuddy state label.
+func labelToState(label string) string {
+	if strings.HasPrefix(label, "status:") {
+		return strings.TrimPrefix(label, "status:")
+	}
+	return label
 }
 
 func (h *Handler) listSessions(repo string, limit, offset int) ([]sessionListResponse, error) {
@@ -606,7 +994,7 @@ func (h *Handler) listSessions(repo string, limit, offset int) ([]sessionListRes
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, sessionListResponse{
+		row := sessionListResponse{
 			SessionID:  record.SessionID,
 			TaskID:     record.TaskID,
 			Repo:       record.Repo,
@@ -621,7 +1009,20 @@ func (h *Handler) listSessions(repo string, limit, offset int) ([]sessionListRes
 			CreatedAt:  record.CreatedAt,
 			FinishedAt: finishedAt,
 			Summary:    record.Summary,
-		})
+		}
+		if record.TaskID != "" {
+			if task, err := h.store.GetTask(record.TaskID); err == nil && task != nil {
+				row.TaskStatus = task.Status
+				row.Workflow = task.Workflow
+				row.CurrentState = task.State
+			}
+		}
+		if row.CurrentState == "" {
+			if cache, err := h.store.QueryIssueCache(record.Repo, record.IssueNum); err == nil && cache != nil {
+				row.CurrentState = labelToState(currentLabel(decodeLabels(cache.Labels)))
+			}
+		}
+		out = append(out, row)
 	}
 	return out, nil
 }

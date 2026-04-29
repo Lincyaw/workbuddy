@@ -7,6 +7,7 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -124,6 +125,152 @@ func (s *Store) LatestIssueEvent(repo string, issueNum int) (*IssueEventMeta, er
 		return nil, nil
 	}
 	return &IssueEventMeta{Type: eventType, TS: ts.UTC()}, nil
+}
+
+// IssueTransitionEvent captures the {from,to,at,by} fields stored on a
+// `transition` event payload. Used by the dashboard issue-detail endpoint.
+type IssueTransitionEvent struct {
+	From string
+	To   string
+	At   time.Time
+	By   string
+}
+
+// LatestIssueTransition returns the most recent `transition` event for the
+// given issue, or nil if none exists. Used for last_transition_at on the
+// in-flight dashboard.
+func (s *Store) LatestIssueTransition(repo string, issueNum int) (*IssueTransitionEvent, error) {
+	var rawTS, payload string
+	err := s.db.QueryRow(
+		`SELECT ts, payload FROM events
+		 WHERE repo = ? AND issue_num = ? AND type = 'transition'
+		 ORDER BY ts DESC, id DESC LIMIT 1`,
+		repo, issueNum,
+	).Scan(&rawTS, &payload)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: latest issue transition: %w", err)
+	}
+	ts, ok := ParseTimestamp(rawTS, "event.ts")
+	if !ok {
+		return nil, nil
+	}
+	out := &IssueTransitionEvent{At: ts.UTC()}
+	parseTransitionPayload(payload, out)
+	return out, nil
+}
+
+// QueryIssueTransitions returns every `transition` event for the issue in
+// chronological order. Used by the issue-detail endpoint.
+func (s *Store) QueryIssueTransitions(repo string, issueNum int) ([]IssueTransitionEvent, error) {
+	rows, err := s.db.Query(
+		`SELECT ts, payload FROM events
+		 WHERE repo = ? AND issue_num = ? AND type = 'transition'
+		 ORDER BY ts ASC, id ASC`,
+		repo, issueNum,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: query issue transitions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []IssueTransitionEvent
+	for rows.Next() {
+		var rawTS, payload string
+		if err := rows.Scan(&rawTS, &payload); err != nil {
+			return nil, fmt.Errorf("store: scan issue transition: %w", err)
+		}
+		ts, ok := ParseTimestamp(rawTS, "event.ts")
+		if !ok {
+			continue
+		}
+		ev := IssueTransitionEvent{At: ts.UTC()}
+		parseTransitionPayload(payload, &ev)
+		out = append(out, ev)
+	}
+	return out, rows.Err()
+}
+
+// LatestSessionForIssue returns the newest session row for the (repo,issue)
+// pair, or nil when no session has been created. Used to populate
+// last_session_id / last_session_url on the in-flight dashboard.
+func (s *Store) LatestSessionForIssue(repo string, issueNum int) (*SessionRecord, error) {
+	row := s.db.QueryRow(
+		`SELECT s.id, s.session_id, s.task_id, s.repo, s.issue_num, s.agent_name, s.runtime, s.worker_id, s.attempt,
+		        COALESCE(t.status, s.status),
+		        s.dir, s.stdout_path, s.stderr_path, s.tool_calls_path, s.metadata_path, s.summary, s.raw_path, s.created_at, s.closed_at
+		 FROM sessions s
+		 LEFT JOIN task_queue t ON t.id = s.task_id
+		 WHERE s.repo = ? AND s.issue_num = ?
+		 ORDER BY s.id DESC LIMIT 1`,
+		repo, issueNum,
+	)
+	record, err := scanSessionRecordForAPI(row.Scan)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: latest session for issue: %w", err)
+	}
+	return record, nil
+}
+
+// CountTerminalSessionsSince counts sessions that have transitioned into the
+// given terminal status since the cutoff time. Used for done_24h / failed_24h
+// summary fields on /api/v1/status.
+func (s *Store) CountTerminalSessionsSince(status string, since time.Time) (int, error) {
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM sessions s
+		 LEFT JOIN task_queue t ON t.id = s.task_id
+		 WHERE COALESCE(t.status, s.status) = ?
+		   AND s.closed_at IS NOT NULL
+		   AND s.closed_at >= ?`,
+		status, since.UTC().Format("2006-01-02 15:04:05"),
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: count terminal sessions: %w", err)
+	}
+	return n, nil
+}
+
+// WorkerCurrentTaskID returns the running task ID currently owned by the
+// worker, or "" when the worker has nothing in flight.
+func (s *Store) WorkerCurrentTaskID(workerID string) (string, error) {
+	var taskID sql.NullString
+	err := s.db.QueryRow(
+		`SELECT id FROM task_queue WHERE worker_id = ? AND status = ? ORDER BY updated_at DESC LIMIT 1`,
+		workerID, TaskStatusRunning,
+	).Scan(&taskID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: worker current task: %w", err)
+	}
+	if !taskID.Valid {
+		return "", nil
+	}
+	return taskID.String, nil
+}
+
+func parseTransitionPayload(payload string, ev *IssueTransitionEvent) {
+	type rawTransition struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+		By   string `json:"by"`
+	}
+	if payload == "" {
+		return
+	}
+	var raw rawTransition
+	if err := json.Unmarshal([]byte(payload), &raw); err != nil {
+		return
+	}
+	ev.From = raw.From
+	ev.To = raw.To
+	ev.By = raw.By
 }
 
 // ---------------------------------------------------------------------------

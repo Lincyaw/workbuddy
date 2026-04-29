@@ -3,7 +3,6 @@ package reporter
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +16,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/ghadapter"
 	"github.com/Lincyaw/workbuddy/internal/ghutil"
 	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
+	"github.com/Lincyaw/workbuddy/internal/sessionref"
 )
 
 // ReactionConfused is the GitHub reaction content used to signal that an
@@ -179,10 +179,7 @@ func (r *Reporter) SetBaseURL(baseURL string) {
 }
 
 func (r *Reporter) sessionURL(sessionID, workerID string) string {
-	if r.baseURL == "" || sessionID == "" || workerID == "" {
-		return ""
-	}
-	return r.baseURL + "/workers/" + url.PathEscape(workerID) + "/sessions/" + url.PathEscape(sessionID)
+	return sessionref.BuildURL(r.baseURL, workerID, sessionID)
 }
 
 // SetVerifier sets the claim verifier used to check agent side-effects.

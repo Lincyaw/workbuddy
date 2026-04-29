@@ -404,3 +404,84 @@ func TestCoordinatorWorkerSessionProxyUsesCoordinatorAuthSurface(t *testing.T) {
 		t.Fatalf("forwarded auth = %v, want Bearer secret-token", forwardedAuth)
 	}
 }
+
+// TestCoordinatorExposesInFlightEndpoint covers the end-to-end /api/v1/issues
+// surface introduced in issue #218: dispatch an issue, then query the dashboard
+// API to assert the in-flight row carries repo/issue_num/current_state and the
+// detail endpoint surfaces transitions.
+func TestCoordinatorExposesInFlightEndpoint(t *testing.T) {
+	port := getFreePort(t)
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	seedCoordinatorAuditDB(t, dbPath)
+
+	// Add a transition event so the in-flight row has a last_transition_at.
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if _, err := st.InsertEvent(store.Event{
+		Type:     "transition",
+		Repo:     "owner/repo-a",
+		IssueNum: 11,
+		Payload:  `{"from":"queued","to":"developing","by":"coordinator"}`,
+	}); err != nil {
+		_ = st.Close()
+		t.Fatalf("InsertEvent: %v", err)
+	}
+	_ = st.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runCoordinatorWithOpts(&coordinatorOpts{
+			port:         port,
+			pollInterval: time.Second,
+			dbPath:       dbPath,
+		}, nil, ctx)
+	}()
+	waitForHealth(t, port)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	// Empty repo returns []  — verified separately, but we also assert the
+	// real wiring returns a populated array on the dispatched issue.
+	resp := getCoordinator(t, client, fmt.Sprintf("http://localhost:%d/api/v1/issues/in-flight", port), "")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/v1/issues/in-flight status = %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !strings.Contains(string(body), `"issue_num":11`) {
+		t.Fatalf("in-flight body missing issue 11: %s", string(body))
+	}
+	if !strings.Contains(string(body), `"current_state":"developing"`) {
+		t.Fatalf("in-flight body missing current_state: %s", string(body))
+	}
+
+	detailResp := getCoordinator(t, client, fmt.Sprintf("http://localhost:%d/api/v1/issues/owner/repo-a/11", port), "")
+	defer func() { _ = detailResp.Body.Close() }()
+	if detailResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/v1/issues/.../11 status = %d", detailResp.StatusCode)
+	}
+	detailBody, err := io.ReadAll(detailResp.Body)
+	if err != nil {
+		t.Fatalf("read detail: %v", err)
+	}
+	if !strings.Contains(string(detailBody), `"transitions"`) {
+		t.Fatalf("detail body missing transitions: %s", string(detailBody))
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("coordinator: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("coordinator did not exit")
+	}
+}

@@ -574,6 +574,14 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 	dashboardAPI := auditapi.NewHandler(st)
 	sessionsDir := filepath.Join(filepath.Dir(dbPath), "sessions")
 	dashboardAPI.SetSessionsDir(sessionsDir)
+
+	sessionUI := webui.NewHandler(st)
+	sessionUI.SetSessionsDir(sessionsDir)
+	sessionMux := http.NewServeMux()
+	sessionUI.Register(sessionMux)
+	dashboardAPI.SetSessionEventsHandler(sessionUI.HandleAPISessionEvents)
+	dashboardAPI.SetSessionStreamHandler(sessionUI.HandleAPISessionStream)
+
 	dashboardMux := http.NewServeMux()
 	dashboardAPI.RegisterDashboard(dashboardMux)
 	mux.Handle("/api/v1/status", api.WrapAuth(dashboardMux))
@@ -583,11 +591,8 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 	mux.Handle("/api/v1/alerts", api.WrapAuth(dashboardMux))
 	mux.Handle("/api/v1/metrics", api.WrapAuth(dashboardMux))
 	mux.Handle("/api/v1/workers", api.WrapAuth(dashboardMux))
-
-	sessionUI := webui.NewHandler(st)
-	sessionUI.SetSessionsDir(sessionsDir)
-	sessionMux := http.NewServeMux()
-	sessionUI.Register(sessionMux)
+	mux.Handle("/api/v1/issues/in-flight", api.WrapAuth(dashboardMux))
+	mux.Handle("/api/v1/issues/", api.WrapAuth(dashboardMux))
 	mux.Handle("/sessions", api.WrapAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sessionMux.ServeHTTP(w, r)
 	})))

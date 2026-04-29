@@ -1,7 +1,9 @@
 package auditapi
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -664,4 +666,471 @@ func TestDashboardWorkersEndpoint(t *testing.T) {
 	if len(body[0].Roles) != 2 {
 		t.Fatalf("worker[0].roles = %#v", body[0].Roles)
 	}
+	// New fields added in #218.
+	if body[0].LastHeartbeatAt.IsZero() {
+		t.Fatalf("worker[0].last_heartbeat_at = zero, want timestamp")
+	}
+	// CurrentTaskID is "" for both seeded workers (active session for worker-1
+	// is task-active but its status is "running", so it should populate).
+	foundCurrent := false
+	for _, w := range body {
+		if w.CurrentTaskID != "" {
+			foundCurrent = true
+			break
+		}
+	}
+	if !foundCurrent {
+		t.Fatalf("expected at least one worker.current_task_id to be populated, got %#v", body)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Issue #218: in-flight, issue detail, sessions subpath, status field tests.
+// ---------------------------------------------------------------------------
+
+func newInFlightFixture(t *testing.T) *dashboardFixture {
+	t.Helper()
+	st := newTestStore(t)
+	sessionsDir := filepath.Join(t.TempDir(), "sessions")
+	seedDashboardData(t, st, sessionsDir)
+	seedInFlightExtras(t, st)
+
+	h := NewHandler(st)
+	h.SetSessionsDir(sessionsDir)
+	h.SetReportBaseURL("http://coord.example.com")
+	// Pin "now" so stuck_for_seconds is deterministic. Issue 40's last
+	// transition is 30 minutes before this; issue 41 is 2h before.
+	fixed := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	h.SetNowFunc(func() time.Time { return fixed })
+
+	mux := http.NewServeMux()
+	h.RegisterDashboard(mux)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	return &dashboardFixture{server: server, sessionsDir: sessionsDir}
+}
+
+func seedInFlightExtras(t *testing.T, st *store.Store) {
+	t.Helper()
+	// Issue 40 is already seeded as "open" with status:reviewing label.
+	// Issue 41 needs an open in-flight cache too.
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     "owner/repo",
+		IssueNum: 41,
+		Labels:   `["status:developing"]`,
+		Body:     "Add cycle cap to dev/review loop\n\nFull body here",
+		State:    "open",
+	}); err != nil {
+		t.Fatalf("UpsertIssueCache 41: %v", err)
+	}
+	// Closed issue (must NOT appear in in-flight).
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     "owner/repo",
+		IssueNum: 99,
+		Labels:   `["status:done"]`,
+		Body:     "Already done",
+		State:    "open",
+	}); err != nil {
+		t.Fatalf("UpsertIssueCache 99: %v", err)
+	}
+	// Set issue 40's body to give the title field something to render.
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     "owner/repo",
+		IssueNum: 40,
+		Labels:   `["status:reviewing","type:feature"]`,
+		Body:     "API endpoints for dashboard\n\ndetails",
+		State:    "open",
+	}); err != nil {
+		t.Fatalf("UpsertIssueCache 40 reseed: %v", err)
+	}
+	// Insert the two transitions with explicit, ordered timestamps so the
+	// dashboard's ORDER BY ts ASC matches the insertion sequence and
+	// stuck_for_seconds can be asserted deterministically.
+	if _, err := st.DB().Exec(
+		`INSERT INTO events (ts, type, repo, issue_num, payload) VALUES
+		 ('2026-04-17 10:00:00','transition','owner/repo',40,'{"from":"developing","to":"reviewing","by":"dev-agent"}'),
+		 ('2026-04-17 11:30:00','transition','owner/repo',40,'{"from":"reviewing","to":"developing","by":"review-agent"}')`,
+	); err != nil {
+		t.Fatalf("insert transitions: %v", err)
+	}
+	// Add an issue-claim row so claimed_worker_id is populated.
+	if _, err := st.AcquireIssueClaim("owner/repo", 40, "worker-1", time.Hour); err != nil {
+		t.Fatalf("AcquireIssueClaim: %v", err)
+	}
+}
+
+func TestHandleIssuesInFlight_Happy(t *testing.T) {
+	fixture := newInFlightFixture(t)
+
+	resp, err := http.Get(fixture.server.URL + "/api/v1/issues/in-flight")
+	if err != nil {
+		t.Fatalf("GET /api/v1/issues/in-flight: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+		t.Fatalf("content-type = %q", got)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	// Structurally-empty data must serialize as `[]` (not `null`).
+	if strings.TrimSpace(string(body)) == "null" {
+		t.Fatal("body decoded as JSON null, want array")
+	}
+	var rows []inFlightIssueResponse
+	if err := json.Unmarshal(body, &rows); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2 (issues 40 and 41); body=%s", len(rows), string(body))
+	}
+	byNum := map[int]inFlightIssueResponse{}
+	for _, r := range rows {
+		byNum[r.IssueNum] = r
+	}
+	row40, ok := byNum[40]
+	if !ok {
+		t.Fatalf("missing issue 40: %+v", byNum)
+	}
+	if row40.CurrentLabel != "status:reviewing" || row40.CurrentState != "reviewing" {
+		t.Fatalf("issue 40 state = %q/%q", row40.CurrentLabel, row40.CurrentState)
+	}
+	if row40.Title != "API endpoints for dashboard" {
+		t.Fatalf("issue 40 title = %q", row40.Title)
+	}
+	if row40.CycleCounts["developing->reviewing"] != 1 {
+		t.Fatalf("issue 40 cycle counts = %#v", row40.CycleCounts)
+	}
+	if row40.LastTransitionAt == nil || row40.LastTransitionAt.IsZero() {
+		t.Fatalf("issue 40 last_transition_at = %v", row40.LastTransitionAt)
+	}
+	if row40.StuckForSeconds < 1500 || row40.StuckForSeconds > 1900 {
+		t.Fatalf("issue 40 stuck_for_seconds = %d, want ≈1800", row40.StuckForSeconds)
+	}
+	if row40.ClaimedWorkerID != "worker-1" {
+		t.Fatalf("issue 40 claimed_worker_id = %q", row40.ClaimedWorkerID)
+	}
+	if row40.LastSessionID != "session-40" {
+		t.Fatalf("issue 40 last_session_id = %q", row40.LastSessionID)
+	}
+	wantURL := "http://coord.example.com/workers/worker-1/sessions/session-40"
+	if row40.LastSessionURL != wantURL {
+		t.Fatalf("issue 40 last_session_url = %q, want %q", row40.LastSessionURL, wantURL)
+	}
+}
+
+func TestHandleIssuesInFlight_EmptyReturnsArray(t *testing.T) {
+	st := newTestStore(t)
+	h := NewHandler(st)
+	mux := http.NewServeMux()
+	h.RegisterDashboard(mux)
+
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	resp, err := http.Get(server.URL + "/api/v1/issues/in-flight")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if strings.TrimSpace(string(body)) != "[]" {
+		t.Fatalf("body = %q, want \"[]\"", string(body))
+	}
+}
+
+func TestHandleIssueDetail_Happy(t *testing.T) {
+	fixture := newInFlightFixture(t)
+
+	resp, err := http.Get(fixture.server.URL + "/api/v1/issues/owner/repo/40")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var body issueDetailResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Repo != "owner/repo" || body.IssueNum != 40 {
+		t.Fatalf("repo/issue = %q/%d", body.Repo, body.IssueNum)
+	}
+	if body.CurrentState != "reviewing" {
+		t.Fatalf("current_state = %q", body.CurrentState)
+	}
+	if len(body.Transitions) < 2 {
+		t.Fatalf("transitions = %d, want ≥2", len(body.Transitions))
+	}
+	first := body.Transitions[0]
+	last := body.Transitions[len(body.Transitions)-1]
+	if first.From != "developing" || first.To != "reviewing" {
+		t.Fatalf("transitions[0] = %+v", first)
+	}
+	if first.By != "dev-agent" {
+		t.Fatalf("transitions[0].by = %q", first.By)
+	}
+	if last.From != "reviewing" || last.To != "developing" {
+		t.Fatalf("transitions[last] = %+v", last)
+	}
+	if len(body.TransitionCounts) < 2 {
+		t.Fatalf("transition_counts = %d, want ≥2", len(body.TransitionCounts))
+	}
+	if len(body.Sessions) == 0 {
+		t.Fatal("sessions empty, expected at least session-40")
+	}
+}
+
+func TestHandleIssueDetail_NotFound(t *testing.T) {
+	fixture := newInFlightFixture(t)
+
+	resp, err := http.Get(fixture.server.URL + "/api/v1/issues/owner/repo/9999")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestHandleIssueDetail_Malformed(t *testing.T) {
+	fixture := newInFlightFixture(t)
+
+	resp, err := http.Get(fixture.server.URL + "/api/v1/issues/not-a-path")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestDashboardSessionEvents_Delegates(t *testing.T) {
+	st := newTestStore(t)
+	h := NewHandler(st)
+
+	// Stub the events handler.
+	called := false
+	h.SetSessionEventsHandler(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		if !strings.HasPrefix(r.URL.Path, "/api/v1/sessions/") {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"events":[]}`))
+	})
+
+	mux := http.NewServeMux()
+	h.RegisterDashboard(mux)
+
+	req := httptest.NewRequest("GET", "/api/v1/sessions/session-x/events", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if !called {
+		t.Fatal("events handler not invoked")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d", rec.Code)
+	}
+}
+
+func TestDashboardSessionEvents_NoHandler404(t *testing.T) {
+	st := newTestStore(t)
+	h := NewHandler(st)
+	mux := http.NewServeMux()
+	h.RegisterDashboard(mux)
+
+	req := httptest.NewRequest("GET", "/api/v1/sessions/session-x/events", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("code = %d, want 404", rec.Code)
+	}
+}
+
+func TestDashboardSessionsEndpoint_AddedFields(t *testing.T) {
+	st := newTestStore(t)
+	sessionsDir := filepath.Join(t.TempDir(), "sessions")
+	seedDashboardData(t, st, sessionsDir)
+	// Add task workflow + state so the new session-list fields populate.
+	if _, err := st.DB().Exec(`UPDATE task_queue SET workflow = 'default', state = 'reviewing' WHERE id = ?`, "task-40"); err != nil {
+		t.Fatalf("update task workflow: %v", err)
+	}
+
+	h := NewHandler(st)
+	h.SetSessionsDir(sessionsDir)
+	mux := http.NewServeMux()
+	h.RegisterDashboard(mux)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	resp, err := http.Get(server.URL + "/api/v1/sessions?repo=owner/repo&limit=10")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var rows []sessionListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var s40 *sessionListResponse
+	for i := range rows {
+		if rows[i].SessionID == "session-40" {
+			s40 = &rows[i]
+		}
+	}
+	if s40 == nil {
+		t.Fatal("missing session-40")
+	}
+	if s40.Workflow != "default" {
+		t.Fatalf("workflow = %q", s40.Workflow)
+	}
+	if s40.CurrentState != "reviewing" {
+		t.Fatalf("current_state = %q", s40.CurrentState)
+	}
+	if s40.TaskStatus == "" {
+		t.Fatalf("task_status = %q", s40.TaskStatus)
+	}
+}
+
+func TestDashboardStatusEndpoint_AddedFields(t *testing.T) {
+	fixture := newInFlightFixture(t)
+
+	resp, err := http.Get(fixture.server.URL + "/api/v1/status")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var body statusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.InFlightIssues != 2 {
+		t.Fatalf("in_flight_issues = %d, want 2", body.InFlightIssues)
+	}
+	// Issue 40's last transition is 30m before fixed-now, so 0 stuck. Issue 41
+	// has no transitions at all (not stuck). Both done/failed counters are
+	// computed from sessions that closed in the last 24h.
+	if body.StuckIssuesOver1H < 0 {
+		t.Fatalf("stuck_issues_over_1h = %d", body.StuckIssuesOver1H)
+	}
+}
+
+func TestDeprecatedSessionPath_AddsHeaderAndKeepsBody(t *testing.T) {
+	st := newTestStore(t)
+	sessionsDir := filepath.Join(t.TempDir(), "sessions")
+	seedDashboardData(t, st, sessionsDir)
+
+	// Build a webui handler so the deprecation alias paths under /sessions/
+	// are registered. This mirrors the coordinator wiring.
+	uiCalled := false
+	stubEvents := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		uiCalled = true
+		writeJSONStatus(w, http.StatusOK, map[string]any{"events": []any{}, "total": 0})
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sessions/", func(w http.ResponseWriter, r *http.Request) {
+		// Mimic the deprecation header that the real webui handler attaches.
+		if strings.HasSuffix(r.URL.Path, "/events.json") {
+			w.Header().Set("Deprecation", "true")
+			stubEvents(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	resp, err := http.Get(server.URL + "/sessions/session-40/events.json")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if !uiCalled {
+		t.Fatal("expected legacy events handler to be called")
+	}
+	if got := resp.Header.Get("Deprecation"); got != "true" {
+		t.Fatalf("Deprecation header = %q, want \"true\"", got)
+	}
+}
+
+func writeJSONStatus(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// TestHandleIssuesInFlight_Golden snapshots the canonical /api/v1/issues/
+// in-flight payload so any future drift in the field names/shape is caught
+// at PR-review time rather than in production. Pattern mirrors
+// internal/reporter/format_golden_test.go.
+func TestHandleIssuesInFlight_Golden(t *testing.T) {
+	fixture := newInFlightFixture(t)
+
+	resp, err := http.Get(fixture.server.URL + "/api/v1/issues/in-flight")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	var rows []inFlightIssueResponse
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Re-marshal indented for stable snapshot (and to filter the issue 41 row,
+	// which has no transitions and no deterministic data to assert).
+	for i := range rows {
+		if rows[i].IssueNum == 40 {
+			var buf bytes.Buffer
+			enc := json.NewEncoder(&buf)
+			enc.SetIndent("", "  ")
+			enc.SetEscapeHTML(false)
+			if err := enc.Encode(rows[i]); err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			got := strings.TrimRight(buf.String(), "\n")
+			want := `{
+  "repo": "owner/repo",
+  "issue_num": 40,
+  "title": "API endpoints for dashboard",
+  "current_state": "reviewing",
+  "current_label": "status:reviewing",
+  "labels": [
+    "status:reviewing",
+    "type:feature"
+  ],
+  "cycle_counts": {
+    "developing->reviewing": 1,
+    "reviewing->developing": 1
+  },
+  "last_transition_at": "2026-04-17T11:30:00Z",
+  "stuck_for_seconds": 1800,
+  "claimed_worker_id": "worker-1",
+  "last_session_id": "session-40",
+  "last_session_url": "http://coord.example.com/workers/worker-1/sessions/session-40"
+}`
+			if got != want {
+				t.Fatalf("issue 40 row drift.\n--- got ---\n%s\n--- want ---\n%s", got, want)
+			}
+			return
+		}
+	}
+	t.Fatal("issue 40 row not found in response")
 }
