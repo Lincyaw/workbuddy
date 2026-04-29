@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/router"
 	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
+	"github.com/Lincyaw/workbuddy/internal/tasknotify"
 	workerexec "github.com/Lincyaw/workbuddy/internal/worker"
 	workersession "github.com/Lincyaw/workbuddy/internal/worker/session"
 )
@@ -769,6 +771,31 @@ func TestServe_HealthEndpoint(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("serve did not exit within timeout")
+	}
+}
+
+func TestNewServeMux_DoesNotExposeLegacyCoordinatorTaskAPI(t *testing.T) {
+	st, err := store.NewStore(filepath.Join(t.TempDir(), "serve.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	mux := newServeMux(
+		st,
+		&config.FullConfig{Global: config.GlobalConfig{Repo: "owner/test-repo"}},
+		eventlog.NewEventLogger(st),
+		t.TempDir(),
+		tasknotify.NewHub(),
+	)
+	req := httptest.NewRequest(http.MethodPost, "/v1/tasks/claim", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
 	}
 }
 

@@ -63,6 +63,16 @@ func TestRootFlagNoColor_StripsANSIFromServeBanner(t *testing.T) {
 	}
 }
 
+func TestServeFlagCoordinatorAPIRemoved(t *testing.T) {
+	_, _, err := executeRootContractTest(t, "serve", "--coordinator-api")
+	if err == nil {
+		t.Fatal("expected serve to reject removed --coordinator-api flag")
+	}
+	if !strings.Contains(err.Error(), "unknown flag: --coordinator-api") {
+		t.Fatalf("expected unknown flag error, got %v", err)
+	}
+}
+
 func TestRootFlagNoColor_StripsANSIFromLogOutput(t *testing.T) {
 	resetRootContractFlagsForTest(t)
 

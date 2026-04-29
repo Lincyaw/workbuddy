@@ -13,7 +13,7 @@
 | Issue 依赖 | 已支持 `workbuddy.depends_on` 解析、本地 verdict/queue、dispatch hard gate、以及 😕 反应信号 | `cmd/serve.go`, `internal/dependency/`, `internal/store/`, `internal/statemachine/`, `internal/router/` |
 | 可观测性 | SQLite、event log、Event Schema v1 session artifact、session audit、`/sessions` Web UI、CLI 诊断工具 | `internal/store/`, `internal/eventlog/`, `internal/launcher/`, `internal/audit/`, `internal/webui/`, `cmd/status.go`, `cmd/diagnose.go` |
 | 工作区隔离 | 已支持每任务 git worktree 隔离 | `internal/workspace/workspace.go` |
-| 分布式通信 | Coordinator HTTP API + Worker 长轮询 + 共享密钥认证 | `internal/app/coordinator.go`, `internal/workerclient/` |
+| 分布式通信 | 仅 `workbuddy coordinator` 暴露 Coordinator HTTP API；Worker 通过长轮询 + 共享密钥认证通信 | `cmd/coordinator.go`, `internal/app/coordinator.go`, `internal/workerclient/` |
 
 ## 文档列表
 

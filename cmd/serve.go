@@ -137,10 +137,10 @@ func parseServeFlags(cmd *cobra.Command) (*serveOpts, error) {
 }
 
 // runServeWithOpts composes the single-process serve topology: store →
-// recovery+security → eventlog → poller → state
-// machine → router → embedded worker. Kept in cmd/ because tests depend on
-// its signature and on the injection points (ghReader, launcherOverride,
-// parentCtx); the individual pieces it assembles live in internal/app.
+// recovery+security → eventlog → poller → state machine → router → embedded
+// worker. Kept in cmd/ because tests depend on its signature and on the
+// injection points (ghReader, launcherOverride, parentCtx); the individual
+// pieces it assembles live in internal/app.
 func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverride *runtimepkg.Registry, parentCtx ...context.Context) error {
 	return runServeWithOutput(opts, ghReader, launcherOverride, os.Stdout, parentCtx...)
 }
