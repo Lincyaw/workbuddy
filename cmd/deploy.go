@@ -19,6 +19,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/app"
 	"github.com/spf13/cobra"
 )
 
@@ -1027,7 +1028,7 @@ func normalizeDeployCommandArgs(args []string) ([]string, error) {
 			"serve",
 			"--config-dir", ".github/workbuddy",
 			"--db-path", ".workbuddy/workbuddy.db",
-			"--max-parallel-tasks", strconv.Itoa(defaultEmbeddedWorkerParallelism()),
+			"--max-parallel-tasks", strconv.Itoa(app.DefaultWorkerParallelism()),
 		}, nil
 	}
 	for _, arg := range trimmed {

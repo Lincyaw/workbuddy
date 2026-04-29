@@ -181,15 +181,15 @@ func (w *DistributedWorker) ExecuteTask(ctx context.Context, task *workerclient.
 	}()
 	defer stopHeartbeat()
 	execution := w.deps.Executor.Execute(taskCtx, Task{
-		TaskID:            task.TaskID,
-		Repo:              task.Repo,
-		IssueNum:          task.IssueNum,
-		AgentName:         task.AgentName,
-		Agent:             &agentCopy,
-		Context:           launchCtx,
-		Workflow:          task.Workflow,
-		WorkerID:          w.deps.WorkerID,
-		WorkspaceManager:  w.deps.WorkspaceManager,
+		TaskID:           task.TaskID,
+		Repo:             task.Repo,
+		IssueNum:         task.IssueNum,
+		AgentName:        task.AgentName,
+		Agent:            &agentCopy,
+		Context:          launchCtx,
+		Workflow:         task.Workflow,
+		WorkerID:         w.deps.WorkerID,
+		WorkspaceManager: w.deps.WorkspaceManager,
 		OnPrepared: func(ctx context.Context, _ Task) {
 			if err := w.deps.Reporter.ReportStarted(ctx, task.Repo, task.IssueNum, task.AgentName, sessionID, w.deps.WorkerID); err != nil {
 				log.Printf("[worker] report started failed: %v", err)
@@ -211,6 +211,28 @@ func (w *DistributedWorker) ExecuteTask(ctx context.Context, task *workerclient.
 			log.Printf("[worker] audit capture failed: %v", err)
 		}
 	}
+
+	labelSummary := ""
+	if execution.PreSnapshotErr == nil && execution.PostSnapshotErr == nil {
+		if validation, ok, validationErr := validateLabelTransition(w.deps.Config, task.Workflow, task.State, execution.PreLabels, execution.PostLabels, result); validationErr != nil {
+			log.Printf("[worker] label validation skipped: %v", validationErr)
+		} else if ok {
+			labelSummary = validation.Summary()
+			recordLabelValidation(w.deps.Recorder, sessionID, task.Repo, task.IssueNum, execution.PreLabels, execution.PostLabels, result, validation)
+			if validation.NeedsHumanRecommendation() {
+				reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedRemoteTaskAPITimeout(w.deps.ShutdownTimeout))
+				if err := w.deps.Reporter.ReportNeedsHuman(reportCtx, task.Repo, task.IssueNum, labelSummary); err != nil {
+					log.Printf("[worker] needs-human recommendation failed: %v", err)
+				}
+				reportCancel()
+			}
+		}
+	} else if execution.PreSnapshotErr == nil || execution.PostSnapshotErr == nil {
+		log.Printf("[worker] label validation skipped: incomplete label snapshots for %s#%d", task.Repo, task.IssueNum)
+	} else {
+		log.Printf("[worker] label validation skipped: label snapshots unavailable for %s#%d", task.Repo, task.IssueNum)
+	}
+
 	if ctx.Err() != nil && !released.Load() {
 		releaseCtx, cancel := context.WithTimeout(context.Background(), boundedRemoteTaskAPITimeout(w.deps.ShutdownTimeout))
 		err := w.deps.Client.ReleaseTask(releaseCtx, task.TaskID, workerclient.ReleaseRequest{WorkerID: w.deps.WorkerID, Reason: "worker shutdown"})
@@ -224,7 +246,7 @@ func (w *DistributedWorker) ExecuteTask(ctx context.Context, task *workerclient.
 	}
 	if execution.FailureSource == "worktree_setup_error" {
 		reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedRemoteTaskAPITimeout(w.deps.ShutdownTimeout))
-		if err := w.deps.Reporter.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, w.deps.WorkerID, 0, workflowMaxRetries(w.deps.Config, task.Workflow), "", ""); err != nil {
+		if err := w.deps.Reporter.Report(reportCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, w.deps.WorkerID, 0, workflowMaxRetries(w.deps.Config, task.Workflow), labelSummary, "", nil); err != nil {
 			log.Printf("[worker] failed to report worktree failure: %v", err)
 		}
 		reportCancel()
@@ -284,7 +306,10 @@ func (w *DistributedWorker) ExecuteTask(ctx context.Context, task *workerclient.
 		log.Printf("[worker] submit result permanently failed for task %s after %d attempts: %v", task.TaskID, submitResultMaxAttempts, submitErr)
 
 		reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedRemoteTaskAPITimeout(w.deps.ShutdownTimeout))
-		if err := w.deps.Reporter.ReportVerified(reportCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, w.deps.WorkerID, 0, workflowMaxRetries(w.deps.Config, task.Workflow), fmt.Sprintf("coordinator sync failed: %v", submitErr), reportWorkDir, verifyRes); err != nil {
+		if err := w.deps.Reporter.ReportVerified(reportCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, w.deps.WorkerID, 0, workflowMaxRetries(w.deps.Config, task.Workflow), labelSummary, reportWorkDir, verifyRes, &reporter.SyncFailure{
+			Operation: "submit_result",
+			Detail:    submitErr.Error(),
+		}); err != nil {
 			log.Printf("[worker] report after submit-failure failed: %v", err)
 		}
 		reportCancel()
@@ -303,7 +328,7 @@ func (w *DistributedWorker) ExecuteTask(ctx context.Context, task *workerclient.
 
 	reportCtx, reportCancel := context.WithTimeout(context.Background(), boundedRemoteTaskAPITimeout(w.deps.ShutdownTimeout))
 	defer reportCancel()
-	if err := w.deps.Reporter.ReportVerified(reportCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, w.deps.WorkerID, 0, workflowMaxRetries(w.deps.Config, task.Workflow), "", reportWorkDir, verifyRes); err != nil {
+	if err := w.deps.Reporter.ReportVerified(reportCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, w.deps.WorkerID, 0, workflowMaxRetries(w.deps.Config, task.Workflow), labelSummary, reportWorkDir, verifyRes, nil); err != nil {
 		log.Printf("[worker] report failed: %v", err)
 	}
 	return nil
@@ -427,16 +452,6 @@ func IsTaskOwnershipLost(err error) bool {
 		strings.Contains(msg, "task already completed") ||
 		strings.Contains(msg, "not claimable by this worker") ||
 		strings.Contains(msg, "task is no longer owned by worker")
-}
-
-func workflowMaxRetries(cfg *config.FullConfig, workflow string) int {
-	if cfg == nil || cfg.Workflows == nil {
-		return 3
-	}
-	if wf, ok := cfg.Workflows[workflow]; ok && wf.MaxRetries > 0 {
-		return wf.MaxRetries
-	}
-	return 3
 }
 
 func recoverDistributedPanic(scope string) {

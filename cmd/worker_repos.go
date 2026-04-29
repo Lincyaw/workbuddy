@@ -19,6 +19,9 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/auditapi"
+	"github.com/Lincyaw/workbuddy/internal/store"
+	"github.com/Lincyaw/workbuddy/internal/webui"
 	"github.com/Lincyaw/workbuddy/internal/workerclient"
 	"github.com/spf13/cobra"
 )
@@ -120,9 +123,10 @@ type workerMgmtServer struct {
 	server   *http.Server
 	listener net.Listener
 	addrFile string
+	baseURL  string
 }
 
-func startWorkerMgmtServer(mgmtAddr, addrFile string, bindings *workerRepoBindingStore, onChange func(context.Context, []string) error, onConfigReload func(context.Context) (any, error)) (*workerMgmtServer, error) {
+func startWorkerMgmtServer(mgmtAddr, addrFile, authToken string, bindings *workerRepoBindingStore, st *store.Store, sessionsDir string, onChange func(context.Context, []string) error, onConfigReload func(context.Context) (any, error)) (*workerMgmtServer, error) {
 	if strings.TrimSpace(mgmtAddr) == "" {
 		mgmtAddr = defaultWorkerMgmtAddr
 	}
@@ -138,7 +142,15 @@ func startWorkerMgmtServer(mgmtAddr, addrFile string, bindings *workerRepoBindin
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/mgmt/repos", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	protected := func(next http.Handler) http.Handler {
+		return wrapBearerAuth(authToken, next)
+	}
+	mux.Handle("/mgmt/repos", protected(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			writeWorkerMgmtJSON(w, http.StatusOK, bindings.list())
@@ -169,8 +181,8 @@ func startWorkerMgmtServer(mgmtAddr, addrFile string, bindings *workerRepoBindin
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
-	})
-	mux.HandleFunc("/mgmt/config/reload", func(w http.ResponseWriter, r *http.Request) {
+	})))
+	mux.Handle("/mgmt/config/reload", protected(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -187,8 +199,8 @@ func startWorkerMgmtServer(mgmtAddr, addrFile string, bindings *workerRepoBindin
 			return
 		}
 		writeWorkerMgmtJSON(w, http.StatusOK, summary)
-	})
-	mux.HandleFunc("/mgmt/repos/", func(w http.ResponseWriter, r *http.Request) {
+	})))
+	mux.Handle("/mgmt/repos/", protected(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -212,7 +224,23 @@ func startWorkerMgmtServer(mgmtAddr, addrFile string, bindings *workerRepoBindin
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
-	})
+	})))
+
+	if st != nil {
+		sessionAPI := auditapi.NewHandler(st)
+		sessionAPI.SetSessionsDir(sessionsDir)
+		sessionAPIMux := http.NewServeMux()
+		sessionAPI.RegisterSessionsOnly(sessionAPIMux)
+		mux.Handle("/sessions/", protected(sessionAPIMux))
+
+		sessionUI := webui.NewHandler(st)
+		sessionUI.SetSessionsDir(sessionsDir)
+		sessionUIMux := http.NewServeMux()
+		sessionUI.Register(sessionUIMux)
+		mux.Handle("/sessions", protected(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			sessionUIMux.ServeHTTP(w, r)
+		})))
+	}
 
 	srv := &http.Server{Handler: mux}
 	go func() {
@@ -230,6 +258,7 @@ func startWorkerMgmtServer(mgmtAddr, addrFile string, bindings *workerRepoBindin
 		server:   srv,
 		listener: ln,
 		addrFile: addrFile,
+		baseURL:  addr,
 	}, nil
 }
 
@@ -254,6 +283,22 @@ func resolvedWorkerMgmtURL(addr net.Addr) string {
 		host = "127.0.0.1"
 	}
 	return fmt.Sprintf("http://%s:%d", host, tcpAddr.Port)
+}
+
+func wrapBearerAuth(token string, next http.Handler) http.Handler {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		const prefix = "Bearer "
+		authz := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authz, prefix) || strings.TrimSpace(strings.TrimPrefix(authz, prefix)) != token {
+			writeWorkerMgmtJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func validateWorkerMgmtAddr(raw string) error {

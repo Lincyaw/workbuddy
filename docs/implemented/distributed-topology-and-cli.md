@@ -9,11 +9,11 @@ workbuddy 支持两种部署形态：
 ### 单机模式 (v0.1.0+)
 
 ```
-workbuddy serve --port 8080 --roles dev
+workbuddy serve --listen 127.0.0.1:8080 --roles dev
 ```
 
-Coordinator 和 Worker 在同一进程内，通过 Go channel 通信。
-`workbuddy serve` 不暴露远程 Worker 领取任务所需的 `/api/v1/tasks/*` 协议。
+Coordinator 和 Worker 在同一进程内启动，但仍然通过同一套 HTTP API 通信。
+`workbuddy serve` 复用 Coordinator 的 `/api/v1/tasks/*`、audit、metrics、`/sessions` surface，并使用与 split deployment 相同的 auth 逻辑。
 
 ### 分布式模式 (v0.2.0+)
 

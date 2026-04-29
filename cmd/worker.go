@@ -51,6 +51,7 @@ type workerOpts struct {
 	reposCSV          string
 	workerID          string
 	mgmtAddr          string
+	mgmtAuthToken     string
 	configDir         string
 	workDir           string
 	sessionsDir       string
@@ -83,6 +84,7 @@ func init() {
 	bindWorkerFlags(workerCmd)
 	workerCmd.Flags().String("id", "", "Stable worker ID (default: hostname)")
 	workerCmd.Flags().String("mgmt-addr", defaultWorkerMgmtAddr, "Local-only worker management listen address")
+	workerCmd.Flags().String("mgmt-auth-token", "", "Optional bearer token for worker management and session-viewer endpoints")
 	workerCmd.Flags().Int("concurrency", 1, "Maximum concurrent tasks per worker")
 	_ = workerCmd.MarkFlagRequired("coordinator")
 
@@ -151,6 +153,7 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	reposCSV, _ := cmd.Flags().GetString("repos")
 	workerID, _ := cmd.Flags().GetString("id")
 	mgmtAddr, _ := cmd.Flags().GetString("mgmt-addr")
+	mgmtAuthToken, _ := cmd.Flags().GetString("mgmt-auth-token")
 	concurrency, _ := cmd.Flags().GetInt("concurrency")
 	if concurrency < 1 {
 		concurrency = 1
@@ -174,6 +177,7 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 		reposCSV:          strings.TrimSpace(reposCSV),
 		workerID:          strings.TrimSpace(workerID),
 		mgmtAddr:          strings.TrimSpace(mgmtAddr),
+		mgmtAuthToken:     strings.TrimSpace(mgmtAuthToken),
 		configDir:         strings.TrimSpace(configDir),
 		pollTimeout:       defaultWorkerPollTimeout,
 		heartbeatInterval: defaultWorkerHeartbeat,
@@ -316,7 +320,10 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	mgmtServer, err := startWorkerMgmtServer(
 		opts.mgmtAddr,
 		addrFile,
+		opts.mgmtAuthToken,
 		bindings,
+		localStore,
+		opts.sessionsDir,
 		func(changeCtx context.Context, _ []string) error {
 			_, err := reloadAndRegister(changeCtx)
 			return err
@@ -328,6 +335,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	if err != nil {
 		return err
 	}
+	rep.SetBaseURL(mgmtServer.baseURL)
 	defer func() {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), opts.shutdownTimeout)
 		defer shutdownCancel()

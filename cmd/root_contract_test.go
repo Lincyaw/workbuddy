@@ -52,7 +52,7 @@ func TestRootFlagNoColor_StripsANSIFromServeBanner(t *testing.T) {
 		},
 	}, &serveOpts{
 		roles: []string{"\x1b[32mdev\x1b[0m"},
-	})
+	}, "127.0.0.1:8080")
 
 	got := stdout.String()
 	if strings.Contains(got, "\x1b[") {

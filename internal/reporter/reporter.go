@@ -201,7 +201,13 @@ func (r *Reporter) ReportStarted(ctx context.Context, repo string, issueNum int,
 	if r.baseURL != "" {
 		sessionURL = r.baseURL + "/sessions/" + sessionID
 	}
-	body := FormatStartedReport(agentName, sessionID, workerID, sessionURL, time.Now())
+	body := FormatStartedReport(StartedData{
+		AgentName:  agentName,
+		SessionID:  sessionID,
+		WorkerID:   workerID,
+		SessionURL: sessionURL,
+		StartedAt:  time.Now(),
+	})
 	return r.writeWithRateLimitRetry(ctx, repo, issueNum, "report_started", func() error {
 		return r.gh.WriteComment(repo, issueNum, body)
 	})
@@ -209,7 +215,10 @@ func (r *Reporter) ReportStarted(ctx context.Context, repo string, issueNum int,
 
 // ReportNeedsHuman posts a needs-human recommendation comment for a transition.
 func (r *Reporter) ReportNeedsHuman(ctx context.Context, repo string, issueNum int, labelLine string) error {
-	body := FormatNeedsHumanReport(labelLine, time.Now())
+	body := FormatNeedsHumanReport(NeedsHumanData{
+		LabelLine: labelLine,
+		Timestamp: time.Now(),
+	})
 	return r.writeWithRateLimitRetry(ctx, repo, issueNum, "needs_human", func() error {
 		return r.gh.WriteComment(repo, issueNum, body)
 	})
@@ -229,8 +238,9 @@ func (r *Reporter) Report(
 	retryCount, maxRetries int,
 	labelLine string,
 	workDir string,
+	syncFailure *SyncFailure,
 ) error {
-	_, err := r.ReportWithVerification(ctx, repo, issueNum, agentName, result, sessionID, workerID, retryCount, maxRetries, labelLine, workDir)
+	_, err := r.ReportWithVerification(ctx, repo, issueNum, agentName, result, sessionID, workerID, retryCount, maxRetries, labelLine, workDir, syncFailure)
 	return err
 }
 
@@ -249,8 +259,9 @@ func (r *Reporter) ReportVerified(
 	labelLine string,
 	workDir string,
 	verification *VerificationResult,
+	syncFailure *SyncFailure,
 ) error {
-	_, err := r.report(ctx, repo, issueNum, agentName, result, sessionID, workerID, retryCount, maxRetries, labelLine, workDir, verification)
+	_, err := r.report(ctx, repo, issueNum, agentName, result, sessionID, workerID, retryCount, maxRetries, labelLine, workDir, verification, syncFailure)
 	return err
 }
 
@@ -268,8 +279,9 @@ func (r *Reporter) ReportWithVerification(
 	retryCount, maxRetries int,
 	labelLine string,
 	workDir string,
+	syncFailure *SyncFailure,
 ) (*VerificationResult, error) {
-	return r.report(ctx, repo, issueNum, agentName, result, sessionID, workerID, retryCount, maxRetries, labelLine, workDir, nil)
+	return r.report(ctx, repo, issueNum, agentName, result, sessionID, workerID, retryCount, maxRetries, labelLine, workDir, nil, syncFailure)
 }
 
 func (r *Reporter) report(
@@ -283,6 +295,7 @@ func (r *Reporter) report(
 	labelLine string,
 	workDir string,
 	verification *VerificationResult,
+	syncFailure *SyncFailure,
 ) (*VerificationResult, error) {
 	status := "success"
 	var errorDetail string
@@ -383,6 +396,7 @@ func (r *Reporter) report(
 		LabelLine:    labelLine,
 		Verification: verification,
 		InfraReason:  infraReason,
+		SyncFailure:  syncFailure,
 	}
 
 	body := FormatReportAt(data, time.Now())

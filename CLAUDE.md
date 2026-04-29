@@ -26,8 +26,8 @@ The catalog is deliberately minimal: only two roles exist, `role:dev` and `role:
                  claude    codex
 ```
 
-v0.1.0: `workbuddy serve` runs Coordinator + Worker in a single process (channel communication).
-v0.2.0: `workbuddy coordinator` + `workbuddy worker` as separate processes (HTTP long-polling).
+One runtime topology: the Worker always talks to the Coordinator over HTTP.
+`workbuddy serve` runs both pieces in one process for convenience; `workbuddy coordinator` + `workbuddy worker` runs the same code as two processes for split deployments.
 
 ## Tech Stack
 
@@ -84,11 +84,11 @@ Simpler code that maps clearly to requirements > clever abstractions.
 ## Version milestones
 
 ### v0.1.0 — 单机合体 (MVP) ✅ shipped
-**Status**: 13/13 requirements `tested` in `project-index.yaml`. `workbuddy serve` runs the full Issue → Agent → label → next Agent cycle end-to-end; SQLite tracks transitions, retries, events.
+**Status**: 13/13 requirements `tested` in `project-index.yaml`. `workbuddy serve` keeps the one-command UX, but now composes the same Coordinator HTTP API + Worker long-poll loop used in split deployments.
 **Scope**: REQ-001~006, REQ-009, REQ-010, REQ-013, REQ-017, REQ-023, REQ-024, REQ-030
 
 ### v0.2.0 — 分布式 + 可观测性 ✅ shipped (2026-04-22)
-**Status**: 13/13 requirements `tested`. `workbuddy coordinator` + `workbuddy worker` run as separate processes with HTTP long-polling and shared-token auth; multi-repo binding, full CLI surface (`init/status/run/validate/logs/coordinator/worker/recover/diagnose`) functional. Currently deployed on a single host via systemd user units; no code change is required to split across machines (swap `--coordinator http://…` + expose port).
+**Status**: 13/13 requirements `tested`. `workbuddy coordinator` + `workbuddy worker` run as separate processes with HTTP long-polling and shared-token auth; this is the same worker implementation and auth surface used by `serve`. Multi-repo binding and the full CLI surface (`init/status/run/validate/logs/coordinator/worker/recover/diagnose`) are functional. Single-host and split-host deployments now differ only in process layout and listen/auth configuration.
 **Scope**: REQ-007, REQ-008, REQ-011, REQ-018~022, REQ-025~029
 
 ### v0.3.0 — 高级编排 ✅ shipped

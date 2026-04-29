@@ -100,7 +100,10 @@ func TestWorkerMgmtServerAddListRemoveAndCleanup(t *testing.T) {
 	server, err := startWorkerMgmtServer(
 		"127.0.0.1:0",
 		addrFile,
+		"",
 		bindings,
+		nil,
+		"",
 		func(_ context.Context, repos []string) error {
 			changeCh <- append([]string(nil), repos...)
 			return nil
@@ -251,7 +254,7 @@ func TestWorkerReposList_JSON(t *testing.T) {
 
 func TestWorkerMgmtServerRejectsInvalidBinding(t *testing.T) {
 	controlDir := t.TempDir()
-	server, err := startWorkerMgmtServer("127.0.0.1:0", workerAddrFile(controlDir), newWorkerRepoBindingStore(nil), func(_ context.Context, repos []string) error {
+	server, err := startWorkerMgmtServer("127.0.0.1:0", workerAddrFile(controlDir), "", newWorkerRepoBindingStore(nil), nil, "", func(_ context.Context, repos []string) error {
 		return nil
 	}, nil)
 	if err != nil {
@@ -363,7 +366,10 @@ func TestWorkerMgmtServerConfigReloadEndpointReloadsAllRepoConfigs(t *testing.T)
 	server, err := startWorkerMgmtServer(
 		"127.0.0.1:0",
 		workerAddrFile(controlDir),
+		"",
 		bindings,
+		nil,
+		"",
 		func(_ context.Context, _ []string) error { return nil },
 		func(_ context.Context) (any, error) { return store.reload(bindings.list()) },
 	)

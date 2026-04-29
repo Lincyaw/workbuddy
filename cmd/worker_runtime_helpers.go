@@ -8,7 +8,17 @@ import (
 // call sites (worker_test, worker, serve) keep compiling after the app split.
 type issueLabelReader = app.IssueLabelReader
 
+type (
+	RunningTasks = app.RunningTasks
+	closedIssues = app.ClosedIssues
+	GHCLIReader  = app.GHCLIReader
+)
+
 var (
-	defaultEmbeddedWorkerParallelism = app.DefaultEmbeddedWorkerParallelism
-	publishTaskCompletion            = app.PublishTaskCompletion
+	publishTaskCompletion = app.PublishTaskCompletion
+	NewRunningTasks       = app.NewRunningTasks
+	recoverTasks          = app.RecoverTasks
+	allowSecurityEvent    = app.AllowSecurityEvent
+	logSecurityPosture    = app.LogSecurityPosture
+	newTaskWatchHandler   = app.NewTaskWatchHandler
 )

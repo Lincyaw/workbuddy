@@ -17,9 +17,9 @@ import (
 // caller leaves --max-parallel-tasks unset.
 const DefaultMaxParallelTasks = 4
 
-// DefaultEmbeddedWorkerParallelism picks the natural parallelism for the
-// embedded worker: min(NumCPU, DefaultMaxParallelTasks).
-func DefaultEmbeddedWorkerParallelism() int {
+// DefaultWorkerParallelism picks the natural worker concurrency:
+// min(NumCPU, DefaultMaxParallelTasks).
+func DefaultWorkerParallelism() int {
 	if runtime.NumCPU() < DefaultMaxParallelTasks {
 		return runtime.NumCPU()
 	}

@@ -37,14 +37,13 @@ type Session interface {
 
 ## 当前主链路
 
-当前 `serve` 主链路已经是：
+当前主链路已经是：
 
 ```text
-Router -> Runtime.Start -> Session.Run -> Event stream -> Reporter / Audit / Web UI
+Coordinator task queue -> Worker Runtime.Start -> Session.Run -> Event stream -> Reporter / Audit / Web UI
 ```
 
-在当前共享 worker 路径里（embedded 由 `internal/worker/embedded.go` 驱动，
-distributed 由 `cmd/worker.go` 调用同一个 `internal/worker.Executor`），执行链会：
+在当前共享 worker 路径里（`workbuddy serve` 和 `workbuddy worker` 都会走 `internal/worker/distributed.go` + `internal/worker.Executor`），执行链会：
 
 1. `launcher.Start(...)` 拿到 `Session`
 2. 启动 Event Schema v1 事件采集
@@ -56,7 +55,7 @@ distributed 由 `cmd/worker.go` 调用同一个 `internal/worker.Executor`），
 
 相关代码：
 
-- `internal/worker/embedded.go`
+- `internal/worker/distributed.go`
 - `internal/worker/executor.go`
 - `internal/labelcheck/labelcheck.go`
 - `internal/reporter/reporter.go`
@@ -106,7 +105,7 @@ distributed 由 `cmd/worker.go` 调用同一个 `internal/worker.Executor`），
 
 相关代码：
 
-- `internal/worker/embedded.go`
+- `internal/worker/distributed.go`
 - `internal/labelcheck/labelcheck.go`
 - `internal/audit/audit.go`
 - `internal/reporter/format.go`
