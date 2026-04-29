@@ -363,7 +363,23 @@ func (h *Handler) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	sessions, err := h.listSessions(r.URL.Query().Get("repo"), limit, offset)
+	q := r.URL.Query()
+	issue := 0
+	if raw := strings.TrimSpace(q.Get("issue")); raw != "" {
+		parsed, perr := strconv.Atoi(raw)
+		if perr != nil || parsed <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid issue parameter")
+			return
+		}
+		issue = parsed
+	}
+	sessions, err := h.listSessions(sessionListParams{
+		Repo:      q.Get("repo"),
+		AgentName: q.Get("agent"),
+		IssueNum:  issue,
+		Limit:     limit,
+		Offset:    offset,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to query sessions")
 		return
@@ -977,11 +993,21 @@ func labelToState(label string) string {
 	return label
 }
 
-func (h *Handler) listSessions(repo string, limit, offset int) ([]sessionListResponse, error) {
+type sessionListParams struct {
+	Repo      string
+	AgentName string
+	IssueNum  int
+	Limit     int
+	Offset    int
+}
+
+func (h *Handler) listSessions(p sessionListParams) ([]sessionListResponse, error) {
 	records, err := h.store.ListSessionsForAPI(store.SessionListFilter{
-		Repo:   repo,
-		Limit:  limit,
-		Offset: offset,
+		Repo:      p.Repo,
+		AgentName: p.AgentName,
+		IssueNum:  p.IssueNum,
+		Limit:     p.Limit,
+		Offset:    p.Offset,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list sessions: %w", err)

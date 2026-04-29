@@ -512,9 +512,11 @@ func (s *Store) LastEventTimestampByType(eventType string) (*time.Time, error) {
 
 // SessionListFilter narrows ListSessionsForAPI.
 type SessionListFilter struct {
-	Repo   string
-	Limit  int
-	Offset int
+	Repo      string
+	AgentName string
+	IssueNum  int
+	Limit     int
+	Offset    int
 }
 
 // ListSessionsForAPI returns session rows with joined task status, ordered
@@ -527,10 +529,18 @@ func (s *Store) ListSessionsForAPI(filter SessionListFilter) ([]SessionRecord, e
 	          FROM sessions s
 	          LEFT JOIN task_queue t ON t.id = s.task_id
 	          WHERE 1=1`
-	args := make([]any, 0, 3)
+	args := make([]any, 0, 5)
 	if trimmed := strings.TrimSpace(filter.Repo); trimmed != "" {
 		query += ` AND s.repo = ?`
 		args = append(args, trimmed)
+	}
+	if trimmed := strings.TrimSpace(filter.AgentName); trimmed != "" {
+		query += ` AND s.agent_name = ?`
+		args = append(args, trimmed)
+	}
+	if filter.IssueNum > 0 {
+		query += ` AND s.issue_num = ?`
+		args = append(args, filter.IssueNum)
 	}
 	query += ` ORDER BY s.id DESC LIMIT ? OFFSET ?`
 	args = append(args, filter.Limit, filter.Offset)
