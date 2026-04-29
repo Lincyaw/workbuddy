@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -157,6 +159,162 @@ func TestCoordinatorAuditEndpointsRequireAuthWhenEnabled(t *testing.T) {
 		}
 		_ = authResp.Body.Close()
 	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("coordinator: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("coordinator did not exit")
+	}
+}
+
+func TestCoordinatorCookieLoginEndToEnd(t *testing.T) {
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", "secret-token")
+
+	port := getFreePort(t)
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	seedCoordinatorAuditDB(t, dbPath)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runCoordinatorWithOpts(&coordinatorOpts{
+			port:         port,
+			pollInterval: time.Second,
+			dbPath:       dbPath,
+			auth:         true,
+			// Loopback test fixtures speak plain HTTP, so drop Secure on
+			// the cookie or the test client would silently discard it
+			// even though the server still sets it.
+			cookieInsecure: true,
+		}, nil, ctx)
+	}()
+	waitForHealth(t, port)
+
+	baseURL := fmt.Sprintf("http://localhost:%d", port)
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar: %v", err)
+	}
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Jar:     jar,
+		// Don't auto-follow redirects so we can inspect the 302 from /login
+		// and the auth-failure 302 from WrapAuth.
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	// Browser visits a protected HTML route with no cookie -> 302 /login.
+	htmlReq, _ := http.NewRequest(http.MethodGet, baseURL+"/api/v1/status", nil)
+	htmlReq.Header.Set("Accept", "text/html,application/xhtml+xml")
+	htmlResp, err := client.Do(htmlReq)
+	if err != nil {
+		t.Fatalf("html GET: %v", err)
+	}
+	if htmlResp.StatusCode != http.StatusFound {
+		t.Fatalf("html GET status = %d, want %d", htmlResp.StatusCode, http.StatusFound)
+	}
+	if loc := htmlResp.Header.Get("Location"); !strings.HasPrefix(loc, "/login?next=") {
+		t.Fatalf("html GET Location = %q, want /login?next=...", loc)
+	}
+	_ = htmlResp.Body.Close()
+
+	// API client with no credentials still gets 401 JSON.
+	apiResp, err := client.Get(baseURL + "/api/v1/status")
+	if err != nil {
+		t.Fatalf("api GET: %v", err)
+	}
+	if apiResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("api GET status = %d, want %d", apiResp.StatusCode, http.StatusUnauthorized)
+	}
+	_ = apiResp.Body.Close()
+
+	// POST /login with the right token -> 302 + Set-Cookie.
+	form := url.Values{}
+	form.Set("token", "secret-token")
+	form.Set("next", "/api/v1/status")
+	loginReq, _ := http.NewRequest(http.MethodPost, baseURL+"/login", strings.NewReader(form.Encode()))
+	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	loginResp, err := client.Do(loginReq)
+	if err != nil {
+		t.Fatalf("login POST: %v", err)
+	}
+	if loginResp.StatusCode != http.StatusFound {
+		t.Fatalf("login POST status = %d, want %d", loginResp.StatusCode, http.StatusFound)
+	}
+	if loc := loginResp.Header.Get("Location"); loc != "/api/v1/status" {
+		t.Fatalf("login Location = %q, want /api/v1/status", loc)
+	}
+	cookies := loginResp.Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("login POST returned no Set-Cookie")
+	}
+	var session *http.Cookie
+	for _, c := range cookies {
+		if c.Name == app.SessionCookieName {
+			session = c
+			break
+		}
+	}
+	if session == nil {
+		t.Fatalf("Set-Cookie missing %s", app.SessionCookieName)
+	}
+	if !session.HttpOnly || session.SameSite != http.SameSiteStrictMode {
+		t.Fatalf("session cookie attributes = %+v, want HttpOnly+SameSite=Strict", session)
+	}
+	_ = loginResp.Body.Close()
+
+	// With the cookie now in the jar, the protected route returns 200.
+	cookieResp, err := client.Get(baseURL + "/api/v1/status")
+	if err != nil {
+		t.Fatalf("cookie GET: %v", err)
+	}
+	if cookieResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(cookieResp.Body)
+		_ = cookieResp.Body.Close()
+		t.Fatalf("cookie GET status = %d, want %d (body=%s)", cookieResp.StatusCode, http.StatusOK, string(body))
+	}
+	_ = cookieResp.Body.Close()
+
+	// Bearer header path is still alive (backwards compatibility).
+	bearerReq, _ := http.NewRequest(http.MethodGet, baseURL+"/api/v1/status", nil)
+	bearerReq.Header.Set("Authorization", "Bearer secret-token")
+	// Strip cookies so we know it's the bearer path that succeeded.
+	bareClient := &http.Client{Timeout: 5 * time.Second}
+	bearerResp, err := bareClient.Do(bearerReq)
+	if err != nil {
+		t.Fatalf("bearer GET: %v", err)
+	}
+	if bearerResp.StatusCode != http.StatusOK {
+		t.Fatalf("bearer GET status = %d, want %d", bearerResp.StatusCode, http.StatusOK)
+	}
+	_ = bearerResp.Body.Close()
+
+	// POST /logout clears the cookie.
+	logoutReq, _ := http.NewRequest(http.MethodPost, baseURL+"/logout", nil)
+	logoutResp, err := client.Do(logoutReq)
+	if err != nil {
+		t.Fatalf("logout POST: %v", err)
+	}
+	if logoutResp.StatusCode != http.StatusFound {
+		t.Fatalf("logout status = %d, want %d", logoutResp.StatusCode, http.StatusFound)
+	}
+	cleared := false
+	for _, c := range logoutResp.Cookies() {
+		if c.Name == app.SessionCookieName && c.MaxAge == -1 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatalf("logout did not clear %s (cookies=%+v)", app.SessionCookieName, logoutResp.Cookies())
+	}
+	_ = logoutResp.Body.Close()
 
 	cancel()
 	select {

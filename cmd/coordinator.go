@@ -61,6 +61,7 @@ type coordinatorOpts struct {
 	auth              bool
 	trustedAuthors    string
 	trustedAuthorsSet bool
+	cookieInsecure    bool
 }
 
 type tokenCreateOpts struct {
@@ -142,6 +143,7 @@ func init() {
 	coordinatorCmd.Flags().Int("port", 8081, "Coordinator API port")
 	coordinatorCmd.Flags().Bool("auth", false, "Require WORKBUDDY_AUTH_TOKEN for worker and repo registration APIs")
 	coordinatorCmd.Flags().String("trusted-authors", "", "Comma-separated GitHub logins allowed to trigger agent work")
+	coordinatorCmd.Flags().Bool("cookie-insecure", false, "Drop the Secure attribute on session cookies (HTTP reverse-proxy fronts only)")
 
 	coordinatorTokenCreateCmd.Flags().String("db", ".workbuddy/workbuddy.db", "SQLite database path")
 	coordinatorTokenCreateCmd.Flags().String("worker-id", "", "Worker ID")
@@ -186,6 +188,7 @@ func parseCoordinatorFlags(cmd *cobra.Command) (*coordinatorOpts, error) {
 	authEnabled, _ := cmd.Flags().GetBool("auth")
 	trustedAuthors, _ := cmd.Flags().GetString("trusted-authors")
 	trustedAuthorsSet := cmd.Flags().Changed("trusted-authors")
+	cookieInsecure, _ := cmd.Flags().GetBool("cookie-insecure")
 	if strings.TrimSpace(listenAddr) == "" {
 		return nil, fmt.Errorf("coordinator: --listen is required")
 	}
@@ -205,6 +208,7 @@ func parseCoordinatorFlags(cmd *cobra.Command) (*coordinatorOpts, error) {
 		auth:              authEnabled,
 		trustedAuthors:    trustedAuthors,
 		trustedAuthorsSet: trustedAuthorsSet,
+		cookieInsecure:    cookieInsecure,
 	}, nil
 }
 
@@ -379,14 +383,15 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	}
 
 	api := &app.FullCoordinatorServer{
-		RootCtx:     ctx,
-		Store:       st,
-		Registry:    reg,
-		Eventlog:    evlog,
-		TaskHub:     taskHub,
-		Pollers:     app.NewPollerManager(ctx, st, reg, evlog, alertBus, ghReader, rep, mustRepoRoot(), pollInterval, secRuntime),
-		AuthEnabled: opts.auth,
-		AuthToken:   authToken,
+		RootCtx:        ctx,
+		Store:          st,
+		Registry:       reg,
+		Eventlog:       evlog,
+		TaskHub:        taskHub,
+		Pollers:        app.NewPollerManager(ctx, st, reg, evlog, alertBus, ghReader, rep, mustRepoRoot(), pollInterval, secRuntime),
+		AuthEnabled:    opts.auth,
+		AuthToken:      authToken,
+		CookieInsecure: opts.cookieInsecure,
 	}
 	if watchSecurityFile {
 		if err := secRuntime.StartFileWatcher(ctx); err != nil {
@@ -536,6 +541,11 @@ func resolveListenAddr(listenAddr string, port int) string {
 func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog *eventlog.EventLogger, dbPath string, taskHub *tasknotify.Hub) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", api.HandleHealth)
+
+	// /login and /logout authenticate the request themselves and must not
+	// be guarded by WrapAuth, otherwise the browser can never sign in.
+	mux.HandleFunc("/login", api.HandleLogin)
+	mux.HandleFunc("/logout", api.HandleLogout)
 
 	readOnlyAuditMux := http.NewServeMux()
 	audit.NewHTTPHandler(st).Register(readOnlyAuditMux)
