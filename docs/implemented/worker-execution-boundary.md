@@ -35,7 +35,7 @@
 
 - `serve`：Coordinator 继续直接挂载 `/sessions`，用于同进程部署下的本地 session 列表/详情。
 - 所有拓扑的 Reporter comment 都统一输出 Coordinator `/workers/{worker_id}/sessions/{session_id}`。该入口与 Coordinator 其他 audit/task/metrics 路由共用同一个 Bearer auth surface，再由 Coordinator 代理到对应 Worker 的 management session viewer。
-- Worker management surface 仍默认 loopback-only，可选共享 Bearer token；如果 Coordinator 与 Worker 分居不同主机，Worker 需要通过 `--mgmt-public-url` 注册一个 Coordinator 可达的管理入口（可以是直接监听地址、反向代理或隧道 URL）。这保证了 split deployment 里也只有一套对外暴露的会话访问入口。
+- Worker management surface 仍默认 loopback-only，可选共享 Bearer token；如果 Coordinator 与 Worker 分居不同主机，Worker 需要通过 `--mgmt-public-url` 注册一个 Coordinator 可达的管理入口（可以是直接监听地址、反向代理或隧道 URL），并且该入口必须复用 Coordinator 的 Bearer token。这保证了 split deployment 里也只有一套对外暴露的会话访问入口。
 
 ## 关键代码
 

@@ -173,8 +173,8 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 		return nil, err
 	}
 	resolvedMgmtAuthToken := defaultWorkerMgmtAuthToken(strings.TrimSpace(mgmtAuthToken))
-	if strings.TrimSpace(mgmtPublicURL) != "" && resolvedMgmtAuthToken == "" {
-		return nil, fmt.Errorf("worker: --mgmt-public-url requires --mgmt-auth-token or WORKBUDDY_AUTH_TOKEN")
+	if err := validateWorkerMgmtPublicURLAuth(strings.TrimSpace(mgmtPublicURL), strings.TrimSpace(token), resolvedMgmtAuthToken); err != nil {
+		return nil, err
 	}
 	if strings.TrimSpace(repo) != "" && strings.TrimSpace(reposCSV) == "" {
 		writeDeprecationWarning(cmd.ErrOrStderr(), "`worker --repo`", "`worker --repos OWNER/NAME=/path`")
@@ -206,6 +206,25 @@ func defaultWorkerMgmtAuthToken(explicit string) string {
 	return strings.TrimSpace(os.Getenv("WORKBUDDY_AUTH_TOKEN"))
 }
 
+func validateWorkerMgmtPublicURLAuth(mgmtPublicURL, coordinatorToken, mgmtAuthToken string) error {
+	mgmtPublicURL = strings.TrimSpace(mgmtPublicURL)
+	if mgmtPublicURL == "" {
+		return nil
+	}
+	mgmtAuthToken = strings.TrimSpace(mgmtAuthToken)
+	if mgmtAuthToken == "" {
+		return fmt.Errorf("worker: --mgmt-public-url requires --mgmt-auth-token or WORKBUDDY_AUTH_TOKEN")
+	}
+	coordinatorToken = strings.TrimSpace(coordinatorToken)
+	if coordinatorToken == "" {
+		return fmt.Errorf("worker: --mgmt-public-url requires coordinator auth")
+	}
+	if mgmtAuthToken != coordinatorToken {
+		return fmt.Errorf("worker: --mgmt-public-url requires --mgmt-auth-token to match coordinator auth")
+	}
+	return nil
+}
+
 func advertisedWorkerMgmtBaseURL(opts *workerOpts, localBaseURL string) string {
 	if opts != nil && strings.TrimSpace(opts.mgmtPublicURL) != "" {
 		return strings.TrimRight(strings.TrimSpace(opts.mgmtPublicURL), "/")
@@ -220,8 +239,8 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	if err := validateWorkerMgmtPublicURL(opts.mgmtPublicURL); err != nil {
 		return err
 	}
-	if strings.TrimSpace(opts.mgmtPublicURL) != "" && strings.TrimSpace(opts.mgmtAuthToken) == "" {
-		return fmt.Errorf("worker: --mgmt-public-url requires --mgmt-auth-token or WORKBUDDY_AUTH_TOKEN")
+	if err := validateWorkerMgmtPublicURLAuth(opts.mgmtPublicURL, opts.token, opts.mgmtAuthToken); err != nil {
+		return err
 	}
 
 	var err error

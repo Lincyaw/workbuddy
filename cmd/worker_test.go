@@ -357,7 +357,7 @@ func TestParseWorkerFlags_MgmtPublicURLRequiresSharedAuth(t *testing.T) {
 	}
 }
 
-func TestParseWorkerFlags_MgmtPublicURLTrimsAndStores(t *testing.T) {
+func TestParseWorkerFlags_MgmtPublicURLRequiresMatchingCoordinatorToken(t *testing.T) {
 	cmd := newWorkerFlagCommand()
 	if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
 		t.Fatalf("set coordinator: %v", err)
@@ -372,6 +372,27 @@ func TestParseWorkerFlags_MgmtPublicURLTrimsAndStores(t *testing.T) {
 		t.Fatalf("set mgmt-auth-token: %v", err)
 	}
 
+	_, err := parseWorkerFlags(cmd)
+	if err == nil || !strings.Contains(err.Error(), "--mgmt-public-url requires --mgmt-auth-token to match coordinator auth") {
+		t.Fatalf("parseWorkerFlags error = %v, want token-match requirement", err)
+	}
+}
+
+func TestParseWorkerFlags_MgmtPublicURLTrimsAndStores(t *testing.T) {
+	cmd := newWorkerFlagCommand()
+	if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
+		t.Fatalf("set coordinator: %v", err)
+	}
+	if err := cmd.Flags().Set("token", "coord-token"); err != nil {
+		t.Fatalf("set token: %v", err)
+	}
+	if err := cmd.Flags().Set("mgmt-public-url", " https://worker.example.com/proxy/ "); err != nil {
+		t.Fatalf("set mgmt-public-url: %v", err)
+	}
+	if err := cmd.Flags().Set("mgmt-auth-token", " coord-token "); err != nil {
+		t.Fatalf("set mgmt-auth-token: %v", err)
+	}
+
 	opts, err := parseWorkerFlags(cmd)
 	if err != nil {
 		t.Fatalf("parseWorkerFlags: %v", err)
@@ -379,7 +400,30 @@ func TestParseWorkerFlags_MgmtPublicURLTrimsAndStores(t *testing.T) {
 	if got, want := opts.mgmtPublicURL, "https://worker.example.com/proxy"; got != want {
 		t.Fatalf("mgmtPublicURL = %q, want %q", got, want)
 	}
-	if got, want := opts.mgmtAuthToken, "worker-secret"; got != want {
+	if got, want := opts.mgmtAuthToken, "coord-token"; got != want {
+		t.Fatalf("mgmtAuthToken = %q, want %q", got, want)
+	}
+}
+
+func TestParseWorkerFlags_MgmtPublicURLUsesSharedEnvToken(t *testing.T) {
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", "shared-token")
+
+	cmd := newWorkerFlagCommand()
+	if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
+		t.Fatalf("set coordinator: %v", err)
+	}
+	if err := cmd.Flags().Set("mgmt-public-url", "https://worker.example.com/proxy"); err != nil {
+		t.Fatalf("set mgmt-public-url: %v", err)
+	}
+
+	opts, err := parseWorkerFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseWorkerFlags: %v", err)
+	}
+	if got, want := opts.token, "shared-token"; got != want {
+		t.Fatalf("token = %q, want %q", got, want)
+	}
+	if got, want := opts.mgmtAuthToken, "shared-token"; got != want {
 		t.Fatalf("mgmtAuthToken = %q, want %q", got, want)
 	}
 }
@@ -856,7 +900,7 @@ func TestWorkerRegistersMgmtPublicURL(t *testing.T) {
 			runtime:           config.RuntimeClaudeCode,
 			reposCSV:          repo + "=" + repoPath,
 			mgmtPublicURL:     "https://worker.example.com/mgmt",
-			mgmtAuthToken:     "shared-worker-token",
+			mgmtAuthToken:     "coord-token",
 			configDir:         ".github/workbuddy",
 			workDir:           controlDir,
 			dbPath:            filepath.Join(controlDir, ".workbuddy", "worker.db"),
