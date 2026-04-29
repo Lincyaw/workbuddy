@@ -577,8 +577,6 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 
 	sessionUI := webui.NewHandler(st)
 	sessionUI.SetSessionsDir(sessionsDir)
-	sessionMux := http.NewServeMux()
-	sessionUI.Register(sessionMux)
 	dashboardAPI.SetSessionEventsHandler(sessionUI.HandleAPISessionEvents)
 	dashboardAPI.SetSessionStreamHandler(sessionUI.HandleAPISessionStream)
 
@@ -595,12 +593,12 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 	mux.Handle("/api/v1/issues/", api.WrapAuth(dashboardMux))
 
 	spa := webui.SPAHandler()
-	sessionUI.SetFallback(spa)
 
-	mux.Handle("/sessions", api.WrapAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sessionMux.ServeHTTP(w, r)
-	})))
-	mux.Handle("/sessions/", api.WrapAuth(sessionMux))
+	// Deprecation aliases for the legacy session events/stream paths. Pinned
+	// to specific suffixes so /sessions and /sessions/{id} (without suffix)
+	// fall through to the SPA catch-all instead of being captured here.
+	mux.Handle("/sessions/{id}/events.json", api.WrapAuth(http.HandlerFunc(sessionUI.HandleLegacyEventsAlias)))
+	mux.Handle("/sessions/{id}/stream", api.WrapAuth(http.HandlerFunc(sessionUI.HandleLegacyStreamAlias)))
 
 	if taskHub != nil {
 		taskWatchMux := http.NewServeMux()

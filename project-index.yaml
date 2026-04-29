@@ -3077,3 +3077,52 @@ requirements:
     related_docs:
       - web/README.md
     deps: [REQ-088, REQ-089]
+
+  - id: REQ-091
+    title: Web UI - Sessions list + detail SPA pages, retire templates.go
+    description: >
+      Replace the server-rendered HTML session list/detail pages in
+      `internal/webui/templates.go` with SPA pages owned by the Preact bundle.
+      The Sessions list page hits `GET /api/v1/sessions` with repo/agent/issue
+      filters synced to the URL query and table-row navigation into the detail
+      page. The detail page shows the session meta card, an event timeline
+      hydrated from `/api/v1/sessions/{id}/events?tail=1&limit=200` and tailed
+      live via the SSE `/api/v1/sessions/{id}/stream` endpoint, with kind
+      filter, keyword filter, and a tail-follow toggle that closes / reopens
+      the EventSource. The Go side drops `templates.go`, prunes
+      `internal/webui.Handler` to events/stream-only, and the coordinator mux
+      no longer registers `/sessions` or `/sessions/` as a subtree — the SPA
+      catch-all at `/` owns them. Two specific path patterns
+      (`/sessions/{id}/events.json` and `/sessions/{id}/stream`) keep working
+      as 30-day deprecation aliases. The audit `/api/v1/sessions` listing also
+      gains agent and issue query filters so the SPA page can filter
+      server-side without paginating through unrelated rows.
+    priority: P1
+    version: v0.5.0
+    status: implemented
+    acceptance_criteria:
+      - "AC-091-1: `internal/webui/templates.go` is deleted; `internal/webui.Handler` exposes only the events/stream endpoints (`HandleAPISessionEvents`, `HandleAPISessionStream`) plus the legacy aliases (`HandleLegacyEventsAlias`, `HandleLegacyStreamAlias`)."
+      - "AC-091-2: Coordinator mux serves `/sessions` and `/sessions/{id}` (no suffix) via the SPA catch-all; `/sessions/{id}/events.json` and `/sessions/{id}/stream` remain available with `Deprecation: true` headers and the existing log line."
+      - "AC-091-3: `web/src/pages/Sessions.tsx` reads filter state from `?repo=&agent=&issue=&offset=` and round-trips it through `useLocation().route()` so the URL is shareable and refresh-stable; rows navigate to `/sessions/:id`."
+      - "AC-091-4: `web/src/pages/SessionDetail.tsx` loads meta + 200 trailing events on mount, opens the SSE stream when `Tail follow` is on, closes it when toggled off, and applies kind + keyword filtering client-side."
+      - "AC-091-5: `internal/auditapi`'s `/api/v1/sessions` accepts `agent` and `issue` query parameters in addition to `repo`/`limit`/`offset`; an invalid `issue` value returns 400."
+      - "AC-091-6: `pnpm -C web build` succeeds and emits separate Sessions and SessionDetail chunks each well under the 50 KB gzipped budget noted on the issue."
+      - "AC-091-7: `go build ./... && go vet ./... && go test ./... -count=1` pass after the changes."
+    code:
+      - internal/webui/handler.go
+      - internal/auditapi/handler.go
+      - internal/store/queries.go
+      - cmd/coordinator.go
+      - web/src/App.tsx
+      - web/src/main.tsx
+      - web/src/styles.css
+      - web/src/api/sessions.ts
+      - web/src/components/Layout.tsx
+      - web/src/lib/format.ts
+      - web/src/pages/Sessions.tsx
+      - web/src/pages/SessionDetail.tsx
+    tests:
+      - internal/webui/handler_test.go
+      - internal/auditapi/handler_test.go
+      - cmd/coordinator_sessions_spa_test.go
+    deps: [REQ-089]

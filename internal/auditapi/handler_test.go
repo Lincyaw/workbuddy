@@ -497,6 +497,61 @@ func TestDashboardSessionsEndpoint(t *testing.T) {
 	}
 }
 
+// TestDashboardSessionsEndpointAgentAndIssueFilters covers the agent + issue
+// query parameters added for the SPA Sessions page (issue #220). The seed
+// fixture has three sessions: session-40 (issue 40, dev-agent),
+// session-41 (issue 41, review-agent), session-active (issue 42, dev-agent).
+func TestDashboardSessionsEndpointAgentAndIssueFilters(t *testing.T) {
+	fixture := newDashboardFixture(t)
+
+	cases := []struct {
+		query string
+		ids   []string
+	}{
+		{"agent=dev-agent", []string{"session-active", "session-40"}},
+		{"agent=review-agent", []string{"session-41"}},
+		{"issue=41", []string{"session-41"}},
+		{"agent=dev-agent&issue=42", []string{"session-active"}},
+	}
+
+	for _, tc := range cases {
+		resp, err := http.Get(fixture.server.URL + "/api/v1/sessions?" + tc.query + "&limit=10")
+		if err != nil {
+			t.Fatalf("GET %s: %v", tc.query, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s status = %d", tc.query, resp.StatusCode)
+		}
+		var body []sessionListResponse
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("%s decode: %v", tc.query, err)
+		}
+		_ = resp.Body.Close()
+		got := make([]string, 0, len(body))
+		for _, row := range body {
+			got = append(got, row.SessionID)
+		}
+		if len(got) != len(tc.ids) {
+			t.Fatalf("%s ids = %v, want %v", tc.query, got, tc.ids)
+		}
+		for i, want := range tc.ids {
+			if got[i] != want {
+				t.Fatalf("%s ids[%d] = %s, want %s (full=%v)", tc.query, i, got[i], want, got)
+			}
+		}
+	}
+
+	// Invalid issue rejects with 400.
+	resp, err := http.Get(fixture.server.URL + "/api/v1/sessions?issue=abc")
+	if err != nil {
+		t.Fatalf("GET invalid issue: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid issue status = %d, want 400", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+}
+
 func TestDashboardSessionDetailEndpoint(t *testing.T) {
 	fixture := newDashboardFixture(t)
 

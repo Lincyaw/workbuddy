@@ -54,7 +54,8 @@ func TestDeprecatedEventsAndStreamPaths(t *testing.T) {
 	h := NewHandler(st)
 	h.SetSessionsDir(sessionsDir)
 	mux := http.NewServeMux()
-	h.Register(mux)
+	mux.HandleFunc("/sessions/{id}/events.json", h.HandleLegacyEventsAlias)
+	mux.HandleFunc("/sessions/{id}/stream", h.HandleLegacyStreamAlias)
 
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
@@ -111,7 +112,8 @@ func TestAPISessionEventsParity(t *testing.T) {
 	h := NewHandler(st)
 	h.SetSessionsDir(sessionsDir)
 	mux := http.NewServeMux()
-	h.Register(mux)
+	mux.HandleFunc("/sessions/{id}/events.json", h.HandleLegacyEventsAlias)
+	mux.HandleFunc("/sessions/{id}/stream", h.HandleLegacyStreamAlias)
 	mux.HandleFunc("/api/v1/sessions/", func(w http.ResponseWriter, r *http.Request) {
 		// Mirror the coordinator wiring: dispatch suffix to the right method.
 		rest := strings.TrimPrefix(r.URL.Path, "/api/v1/sessions/")

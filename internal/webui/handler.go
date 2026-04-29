@@ -1,4 +1,15 @@
-// Package webui provides HTTP handlers for the session viewer web UI.
+// Package webui provides the read-only session events HTTP API consumed by
+// the embedded SPA bundle.
+//
+// All HTML templates were removed in favour of the SPA owned by the wider
+// /-handler. This package now only exposes:
+//
+//   - events.json + SSE stream endpoints under /api/v1/sessions/{id}/...
+//   - the same endpoints under /sessions/{id}/{events.json|stream} as
+//     deprecation aliases (Deprecation/Sunset headers + log line)
+//
+// The legacy /sessions list/detail HTML pages are owned by the SPA via the
+// embedded dist bundle (see SPAHandler).
 package webui
 
 import (
@@ -18,20 +29,16 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
-// Handler serves the session event API (events.json + SSE stream) consumed
-// by the SPA. The legacy HTML list/detail pages have been retired in favour
-// of the embedded SPA bundle; see SetFallback for the bridge to it.
+// Handler serves the per-session events.json and SSE stream endpoints.
 type Handler struct {
 	sessionsDir string
-	basePath    string
-	fallback    http.Handler
 }
 
 // NewHandler creates a Handler. The store argument is retained for API
 // stability; the events.json and stream endpoints read directly from the
 // per-session events-v1.jsonl files configured via SetSessionsDir.
 func NewHandler(_ *store.Store) *Handler {
-	return &Handler{basePath: "/sessions"}
+	return &Handler{}
 }
 
 // SetSessionsDir configures the directory where per-session event logs live,
@@ -41,71 +48,9 @@ func (h *Handler) SetSessionsDir(dir string) {
 	h.sessionsDir = dir
 }
 
-// SetFallback installs a handler used when a request under the session base
-// path does not target the events.json or stream endpoint. The SPA scaffold
-// uses this to take over the legacy HTML list/detail routes — clients that
-// land on /sessions or /sessions/{id} get the SPA shell instead of the
-// retired Go-side templates.
-//
-// When fallback is nil, unrecognised subpaths return 404 (the original
-// behaviour minus the deleted list/detail handlers).
-func (h *Handler) SetFallback(fallback http.Handler) {
-	h.fallback = fallback
-}
-
-// Register adds the session API routes (events.json and stream) to the given
-// mux. The legacy HTML list and detail pages are no longer registered — the
-// SPA handler at "/" owns them.
-func (h *Handler) Register(mux *http.ServeMux) {
-	h.RegisterAt(mux, h.basePath)
-}
-
-// RegisterAt mounts the session API routes under the given base path.
-func (h *Handler) RegisterAt(mux *http.ServeMux, basePath string) {
-	basePath = strings.TrimRight(basePath, "/")
-	if basePath == "" {
-		basePath = "/sessions"
-	}
-	h.basePath = basePath
-	mux.HandleFunc(basePath+"/", h.handleSessionSubpath)
-}
-
-// handleSessionSubpath dispatches requests under /sessions/ based on suffix:
-//
-//	/sessions/{id}/events.json    → paginated JSON events
-//	/sessions/{id}/stream         → SSE tail
-//
-// Anything else (including the empty suffix that used to render the HTML
-// detail page) is delegated to the SPA fallback when one is configured, or
-// returns 404 otherwise.
-func (h *Handler) handleSessionSubpath(w http.ResponseWriter, r *http.Request) {
-	rest := strings.TrimPrefix(r.URL.Path, h.basePath+"/")
-	sessionID, suffix, _ := strings.Cut(rest, "/")
-	switch suffix {
-	case "events.json":
-		markDeprecated(w, r,
-			"/sessions/{id}/events.json",
-			"/api/v1/sessions/{id}/events")
-		h.handleEventsJSON(w, r, sessionID)
-	case "stream":
-		markDeprecated(w, r,
-			"/sessions/{id}/stream",
-			"/api/v1/sessions/{id}/stream")
-		h.handleStream(w, r, sessionID)
-	default:
-		// Empty suffix (the legacy detail page) and any other path now
-		// belong to the SPA when a fallback is configured.
-		if h.fallback != nil {
-			h.fallback.ServeHTTP(w, r)
-			return
-		}
-		http.NotFound(w, r)
-	}
-}
-
-// HandleAPISessionEvents serves /api/v1/sessions/{id}/events. The new path
-// reuses the existing on-disk events-v1.jsonl reader; the legacy
-// /sessions/{id}/events.json route is preserved as a 30-day deprecation alias.
+// HandleAPISessionEvents serves /api/v1/sessions/{id}/events. The webui
+// package owns the implementation because it reads events-v1.jsonl from
+// disk; routers (auditapi, worker mgmt) route the suffix to it.
 func (h *Handler) HandleAPISessionEvents(w http.ResponseWriter, r *http.Request) {
 	sessionID, ok := apiSessionID(r.URL.Path)
 	if !ok {
@@ -125,9 +70,50 @@ func (h *Handler) HandleAPISessionStream(w http.ResponseWriter, r *http.Request)
 	h.handleStream(w, r, sessionID)
 }
 
+// HandleLegacyEventsAlias serves the deprecation alias
+// /sessions/{id}/events.json. Adds Deprecation/Sunset headers + log line.
+func (h *Handler) HandleLegacyEventsAlias(w http.ResponseWriter, r *http.Request) {
+	sessionID, ok := legacySessionID(r.URL.Path, "/events.json")
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	markDeprecated(w, r,
+		"/sessions/{id}/events.json",
+		"/api/v1/sessions/{id}/events")
+	h.handleEventsJSON(w, r, sessionID)
+}
+
+// HandleLegacyStreamAlias serves the deprecation alias /sessions/{id}/stream.
+func (h *Handler) HandleLegacyStreamAlias(w http.ResponseWriter, r *http.Request) {
+	sessionID, ok := legacySessionID(r.URL.Path, "/stream")
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	markDeprecated(w, r,
+		"/sessions/{id}/stream",
+		"/api/v1/sessions/{id}/stream")
+	h.handleStream(w, r, sessionID)
+}
+
 func apiSessionID(path string) (string, bool) {
 	rest := strings.TrimPrefix(path, "/api/v1/sessions/")
 	id, _, _ := strings.Cut(rest, "/")
+	if !isValidSessionID(id) {
+		return "", false
+	}
+	return id, true
+}
+
+// legacySessionID extracts {id} from /sessions/{id}<suffix>. The suffix must
+// match exactly so /sessions/{id} (no suffix) is not handled here.
+func legacySessionID(path, suffix string) (string, bool) {
+	rest := strings.TrimPrefix(path, "/sessions/")
+	if !strings.HasSuffix(rest, suffix) {
+		return "", false
+	}
+	id := strings.TrimSuffix(rest, suffix)
 	if !isValidSessionID(id) {
 		return "", false
 	}
