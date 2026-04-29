@@ -171,6 +171,7 @@ func (s *Store) createTables() error {
 			repos_json TEXT NOT NULL DEFAULT '[]',
 			roles TEXT NOT NULL,
 			hostname TEXT,
+			mgmt_base_url TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL DEFAULT 'online',
 			token_kid TEXT,
 			token_hash TEXT,
@@ -309,6 +310,9 @@ func (s *Store) createTables() error {
 	}
 	if _, err := s.db.Exec(`ALTER TABLE workers ADD COLUMN token_revoked_at DATETIME`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("store: alter workers add token_revoked_at: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE workers ADD COLUMN mgmt_base_url TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("store: alter workers add mgmt_base_url: %w", err)
 	}
 	taskQueueMigrations := []string{
 		`ALTER TABLE task_queue ADD COLUMN role TEXT NOT NULL DEFAULT ''`,
@@ -1023,15 +1027,16 @@ func (s *Store) InsertWorker(w WorkerRecord) error {
 		w.ReposJSON = "[]"
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO workers (id, repo, repos_json, roles, hostname, status)
-		 VALUES (?, ?, ?, ?, ?, ?)
+		`INSERT INTO workers (id, repo, repos_json, roles, hostname, mgmt_base_url, status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		 repo = excluded.repo,
 		 repos_json = excluded.repos_json,
 		 roles = excluded.roles,
 		 hostname = excluded.hostname,
+		 mgmt_base_url = excluded.mgmt_base_url,
 		 status = excluded.status`,
-		w.ID, w.Repo, w.ReposJSON, w.Roles, w.Hostname, w.Status,
+		w.ID, w.Repo, w.ReposJSON, w.Roles, w.Hostname, w.MgmtBaseURL, w.Status,
 	)
 	if err != nil {
 		return fmt.Errorf("store: insert worker: %w", err)
@@ -1041,7 +1046,7 @@ func (s *Store) InsertWorker(w WorkerRecord) error {
 
 // QueryWorkers returns workers filtered by repo (empty = all).
 func (s *Store) QueryWorkers(repo string) ([]WorkerRecord, error) {
-	rows, err := s.db.Query(`SELECT id, repo, repos_json, roles, hostname, status, last_heartbeat, registered_at FROM workers ORDER BY id`)
+	rows, err := s.db.Query(`SELECT id, repo, repos_json, roles, hostname, mgmt_base_url, status, last_heartbeat, registered_at FROM workers ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("store: query workers: %w", err)
 	}
@@ -1051,7 +1056,7 @@ func (s *Store) QueryWorkers(repo string) ([]WorkerRecord, error) {
 	for rows.Next() {
 		var w WorkerRecord
 		var hb, ra string
-		if err := rows.Scan(&w.ID, &w.Repo, &w.ReposJSON, &w.Roles, &w.Hostname, &w.Status, &hb, &ra); err != nil {
+		if err := rows.Scan(&w.ID, &w.Repo, &w.ReposJSON, &w.Roles, &w.Hostname, &w.MgmtBaseURL, &w.Status, &hb, &ra); err != nil {
 			return nil, fmt.Errorf("store: scan worker: %w", err)
 		}
 		w.LastHeartbeat, _ = ParseTimestamp(hb, "worker.last_heartbeat")
@@ -1062,6 +1067,22 @@ func (s *Store) QueryWorkers(repo string) ([]WorkerRecord, error) {
 		out = append(out, w)
 	}
 	return out, rows.Err()
+}
+
+// GetWorker returns a single registered worker by ID, or nil when absent.
+func (s *Store) GetWorker(workerID string) (*WorkerRecord, error) {
+	row := s.db.QueryRow(`SELECT id, repo, repos_json, roles, hostname, mgmt_base_url, status, last_heartbeat, registered_at FROM workers WHERE id = ?`, workerID)
+	var w WorkerRecord
+	var hb, ra string
+	if err := row.Scan(&w.ID, &w.Repo, &w.ReposJSON, &w.Roles, &w.Hostname, &w.MgmtBaseURL, &w.Status, &hb, &ra); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("store: get worker: %w", err)
+	}
+	w.LastHeartbeat, _ = ParseTimestamp(hb, "worker.last_heartbeat")
+	w.RegisteredAt, _ = ParseTimestamp(ra, "worker.registered_at")
+	return &w, nil
 }
 
 // UpdateWorkerHeartbeat updates the last_heartbeat timestamp.

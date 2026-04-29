@@ -6,8 +6,8 @@
 
 | 主题 | 结论 | 主要代码 |
 | --- | --- | --- |
-| 运行形态 | `workbuddy serve`（单机）和 `workbuddy coordinator` + `workbuddy worker`（分布式）两种模式 | `cmd/serve.go`, `cmd/coordinator.go`, `cmd/worker.go` |
-| 执行模型 | Router 通过 channel（v0.1.0）或 HTTP 长轮询（v0.2.0）派发给 Worker，canonical runtime 已升级为 `Start(...) -> Session.Run(...)`，并保留 `Launch(...)` 兼容包装 | `internal/router/router.go`, `internal/runtime/`, `internal/launcher/process.go` |
+| 运行形态 | 一个运行时拓扑，两种部署形态：`workbuddy serve`（单进程包装 coordinator + worker）和 `workbuddy coordinator` + `workbuddy worker`（双进程/多机） | `cmd/serve.go`, `cmd/coordinator.go`, `cmd/worker.go` |
+| 执行模型 | Worker 一律通过 HTTP 长轮询 / submit-result 与 Coordinator 通信；canonical runtime 已升级为 `Start(...) -> Session.Run(...)`，并保留 `Launch(...)` 兼容包装 | `internal/app/coordinator.go`, `internal/worker/distributed.go`, `internal/runtime/`, `internal/launcher/process.go` |
 | 配置模型 | 使用 `.github/workbuddy/` 下的 Markdown + YAML frontmatter | `internal/config/loader.go`, `internal/config/types.go` |
 | 工作流模型 | 以 issue label 为主驱动；Go 侧记录 retry/failure intent，agent 通过 `gh issue edit` 推进状态 | `internal/statemachine/statemachine.go`, `internal/store/store.go`, `.github/workbuddy/workflows/*.md` |
 | Issue 依赖 | 已支持 `workbuddy.depends_on` 解析、本地 verdict/queue、dispatch hard gate、以及 😕 反应信号 | `cmd/serve.go`, `internal/dependency/`, `internal/store/`, `internal/statemachine/`, `internal/router/` |
@@ -25,7 +25,7 @@
 | `agent-catalog.md` | 2-agent catalog（dev-agent, review-agent）与各自 schema/output contract | `.github/workbuddy/agents/`, `internal/config/loader.go` |
 | `current-runtime-reporting-and-audit.md` | launcher、reporter、audit、sessions UI 行为 | `internal/launcher/`, `internal/agent/codex/`, `internal/reporter/`, `internal/audit/`, `internal/webui/` |
 | `remote-runner-github-actions.md` | GitHub Actions remote runner 的 agent config、dispatch/poll 行为 | `internal/config/`, `internal/launcher/`, `.github/workflows/` |
-| `runtime-session-architecture.md` | Runtime.Start → Session.Run 主链路，post-Run label validation | `internal/worker/embedded.go`, `internal/worker/executor.go`, `internal/runtime/`, `internal/launcher/`, `internal/labelcheck/`, `internal/reporter/`, `internal/audit/` |
+| `runtime-session-architecture.md` | Runtime.Start → Session.Run 主链路，post-Run label validation | `internal/worker/distributed.go`, `internal/worker/executor.go`, `internal/runtime/`, `internal/launcher/`, `internal/labelcheck/`, `internal/reporter/`, `internal/audit/` |
 | `event-schema-v1.md` | Event Schema v1 合同、runtime 映射、artifact 消费路径 | `internal/launcher/events/`, `internal/launcher/agent_bridge.go`, `internal/agent/codex/events.go`, `internal/launcher/claude_stream.go` |
 | `current-persistence-and-workspace.md` | 存储、事件日志、worker registry、worktree 隔离 | `internal/store/`, `internal/eventlog/`, `internal/registry/`, `internal/workspace/` |
 | `artifact-layout.md` | session artifact 位于仓库根 `.workbuddy/sessions/` | `cmd/serve.go`, `cmd/run.go`, `internal/worker/executor.go`, `internal/launcher/`, `internal/audit/` |

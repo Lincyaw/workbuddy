@@ -43,6 +43,7 @@ type WorkerRecord struct {
 	ReposJSON     string
 	Roles         string // JSON array
 	Hostname      string
+	MgmtBaseURL   string
 	Status        string // online, offline
 	LastHeartbeat time.Time
 	RegisteredAt  time.Time

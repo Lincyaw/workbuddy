@@ -29,6 +29,32 @@ type ReportData struct {
 	// was classified as an infra failure (exec error, scanner overflow,
 	// runtime panic, etc.). Only set when Status == "infra-error".
 	InfraReason string
+	// SyncFailure describes a coordinator-sync failure that happened after the
+	// agent finished locally. This keeps submit/release transport problems out
+	// of ad-hoc string payloads in worker code.
+	SyncFailure *SyncFailure
+}
+
+// SyncFailure captures a typed transport-layer sync failure for report
+// formatting.
+type SyncFailure struct {
+	Operation string
+	Detail    string
+}
+
+// StartedData holds the canonical facts for an "Agent Started" comment.
+type StartedData struct {
+	AgentName  string
+	SessionID  string
+	WorkerID   string
+	SessionURL string
+	StartedAt  time.Time
+}
+
+// NeedsHumanData holds the canonical facts for a needs-human recommendation.
+type NeedsHumanData struct {
+	LabelLine string
+	Timestamp time.Time
 }
 
 // statusBadge returns a Markdown status badge string.
@@ -114,6 +140,15 @@ func FormatReportAt(d ReportData, ts time.Time) string {
 		b.WriteString("\n\n")
 	}
 
+	if d.SyncFailure != nil {
+		b.WriteString("### Coordinator Sync\n\n")
+		fmt.Fprintf(&b, "- Operation: `%s`\n", d.SyncFailure.Operation)
+		if d.SyncFailure.Detail != "" {
+			fmt.Fprintf(&b, "- Result: %s\n", d.SyncFailure.Detail)
+		}
+		b.WriteString("\n")
+	}
+
 	// Verification claim vs. reality table
 	if d.Verification != nil && len(d.Verification.Checks) > 0 {
 		b.WriteString("### Claim Verification\n\n")
@@ -167,43 +202,43 @@ func FormatReportAt(d ReportData, ts time.Time) string {
 	return b.String()
 }
 
-func FormatNeedsHumanReport(labelLine string, ts time.Time) string {
+func FormatNeedsHumanReport(d NeedsHumanData) string {
 	var b strings.Builder
 
 	b.WriteString("## Managed Follow-up\n\n")
 	b.WriteString("The agent exited successfully but did not change the workflow label.\n\n")
-	if labelLine != "" {
-		b.WriteString(labelLine)
+	if d.LabelLine != "" {
+		b.WriteString(d.LabelLine)
 		b.WriteString("\n\n")
 	}
 	b.WriteString("Recommended next step: add `needs-human` and review the issue manually.\n\n")
 
 	b.WriteString("---\n")
-	fmt.Fprintf(&b, "*workbuddy coordinator | %s*\n", ts.UTC().Format(time.RFC3339))
+	fmt.Fprintf(&b, "*workbuddy coordinator | %s*\n", d.Timestamp.UTC().Format(time.RFC3339))
 
 	return b.String()
 }
 
 // FormatStartedReport generates a Markdown "Agent Started" notification comment.
-func FormatStartedReport(agentName, sessionID, workerID, sessionURL string, ts time.Time) string {
+func FormatStartedReport(d StartedData) string {
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "## :robot: Agent Started: %s\n\n", agentName)
+	fmt.Fprintf(&b, "## :robot: Agent Started: %s\n\n", d.AgentName)
 
 	b.WriteString("| Field | Value |\n")
 	b.WriteString("|-------|-------|\n")
-	fmt.Fprintf(&b, "| Agent | `%s` |\n", agentName)
-	fmt.Fprintf(&b, "| Session ID | `%s` |\n", sessionID)
-	fmt.Fprintf(&b, "| Worker | `%s` |\n", workerID)
-	fmt.Fprintf(&b, "| Started | %s |\n", ts.UTC().Format(time.RFC3339))
+	fmt.Fprintf(&b, "| Agent | `%s` |\n", d.AgentName)
+	fmt.Fprintf(&b, "| Session ID | `%s` |\n", d.SessionID)
+	fmt.Fprintf(&b, "| Worker | `%s` |\n", d.WorkerID)
+	fmt.Fprintf(&b, "| Started | %s |\n", d.StartedAt.UTC().Format(time.RFC3339))
 	b.WriteString("\n")
 
-	if sessionURL != "" {
-		fmt.Fprintf(&b, ":mag: **[View Live Session](%s)**\n\n", sessionURL)
+	if d.SessionURL != "" {
+		fmt.Fprintf(&b, ":mag: **[View Live Session](%s)**\n\n", d.SessionURL)
 	}
 
 	b.WriteString("---\n")
-	fmt.Fprintf(&b, "*workbuddy coordinator | %s*\n", ts.UTC().Format(time.RFC3339))
+	fmt.Fprintf(&b, "*workbuddy coordinator | %s*\n", d.StartedAt.UTC().Format(time.RFC3339))
 
 	return b.String()
 }

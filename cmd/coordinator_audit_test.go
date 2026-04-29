@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/app"
 	"github.com/Lincyaw/workbuddy/internal/audit"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
@@ -162,5 +166,83 @@ func TestCoordinatorAuditEndpointsRequireAuthWhenEnabled(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("coordinator did not exit")
+	}
+}
+
+func TestCoordinatorWorkerSessionProxyUsesCoordinatorAuthSurface(t *testing.T) {
+	var forwardedAuth []string
+	mgmt := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwardedAuth = append(forwardedAuth, r.Header.Get("Authorization"))
+		switch r.URL.Path {
+		case "/sessions/session-123":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte(`<a href="/sessions">Back</a><script>fetch("/sessions/session-123/events.json")</script>`))
+		case "/sessions/session-123/events.json":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"session_id":"session-123"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mgmt.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	if err := st.InsertWorker(store.WorkerRecord{
+		ID:          "worker-a",
+		Repo:        "owner/repo",
+		Roles:       `["dev"]`,
+		Hostname:    "host-a",
+		MgmtBaseURL: mgmt.URL,
+		Status:      "online",
+	}); err != nil {
+		t.Fatalf("InsertWorker: %v", err)
+	}
+
+	api := &app.FullCoordinatorServer{Store: st, AuthEnabled: true, AuthToken: "secret-token"}
+	mux := http.NewServeMux()
+	mux.Handle("/workers/", api.WrapAuth(newCoordinatorSessionProxy(st, api.AuthToken)))
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	unauthResp, err := http.Get(server.URL + "/workers/worker-a/sessions/session-123")
+	if err != nil {
+		t.Fatalf("GET unauth proxy: %v", err)
+	}
+	if unauthResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauth status = %d, want %d", unauthResp.StatusCode, http.StatusUnauthorized)
+	}
+	_ = unauthResp.Body.Close()
+
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/workers/worker-a/sessions/session-123", nil)
+	if err != nil {
+		t.Fatalf("build req: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer secret-token")
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET auth proxy: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("auth status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	bodyText := string(body)
+	if !strings.Contains(bodyText, `/workers/worker-a/sessions/session-123/events.json`) {
+		t.Fatalf("proxy body missing rewritten session path: %s", bodyText)
+	}
+	if strings.Contains(bodyText, `"/sessions/session-123/events.json"`) {
+		t.Fatalf("proxy body still contains raw worker-local session path: %s", bodyText)
+	}
+	if len(forwardedAuth) == 0 || forwardedAuth[len(forwardedAuth)-1] != "Bearer secret-token" {
+		t.Fatalf("forwarded auth = %v, want Bearer secret-token", forwardedAuth)
 	}
 }

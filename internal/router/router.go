@@ -25,7 +25,7 @@ import (
 )
 
 // WorkerTask is re-exported from internal/taskprep so existing consumers
-// (cmd/serve.go, cmd/coordinator.go, internal/worker/embedded.go, tests)
+// (cmd/serve.go, cmd/coordinator.go, internal/worker/distributed.go, tests)
 // continue to compile against router.WorkerTask. The canonical definition
 // lives on the preparer side because materialising a WorkerTask is the
 // preparer's responsibility.
@@ -58,8 +58,8 @@ type readerAwarePreparer interface {
 //
 // The registry is kept on the struct for call-site compatibility and for a
 // potential future when scheduling actually selects among multiple workers;
-// today the preparer either dispatches to the single embedded worker or
-// persists the task for a remote worker to claim.
+// today the preparer persists the task for a worker to claim, whether that
+// worker was launched by `serve` or by a standalone `workbuddy worker`.
 type Router struct {
 	agents    map[string]*config.AgentConfig
 	workflows map[string]*config.WorkflowConfig
@@ -68,8 +68,8 @@ type Router struct {
 	preparer  Preparer
 }
 
-// NewRouter creates a Router wired for v0.1.0 channel-based dispatch. The
-// call signature matches the pre-split router.NewRouter so existing
+// NewRouter creates a Router wired for the task-queue based worker handoff.
+// The call signature matches the pre-split router.NewRouter so existing
 // consumers (cmd/serve.go, cmd/repo_runtime.go) don't have to be rewired.
 //
 // The wsMgr argument is retained for signature compatibility but is unused
@@ -193,4 +193,3 @@ func (r *Router) lookupState(workflowName, stateName string) *config.State {
 	}
 	return state
 }
-

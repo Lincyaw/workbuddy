@@ -9,11 +9,11 @@ workbuddy 支持两种部署形态：
 ### 单机模式 (v0.1.0+)
 
 ```
-workbuddy serve --port 8080 --roles dev
+workbuddy serve --listen 127.0.0.1:8080 --roles dev
 ```
 
-Coordinator 和 Worker 在同一进程内，通过 Go channel 通信。
-`workbuddy serve` 不暴露远程 Worker 领取任务所需的 `/api/v1/tasks/*` 协议。
+Coordinator 和 Worker 在同一进程内启动，但仍然通过同一套 HTTP API 通信。
+`workbuddy serve` 复用 Coordinator 的 `/api/v1/tasks/*`、audit、metrics、`/sessions` surface，并使用与 split deployment 相同的 auth 逻辑。
 
 ### 分布式模式 (v0.2.0+)
 
@@ -22,13 +22,20 @@ Coordinator 和 Worker 在同一进程内，通过 Go channel 通信。
 workbuddy coordinator --port 8080
 
 # 机器 B
-workbuddy worker --coordinator http://A:8080 --token <secret> --role dev --repos owner/repo=/srv/workbuddy-worker
+workbuddy worker \
+  --coordinator http://A:8080 \
+  --token <secret> \
+  --role dev \
+  --repos owner/repo=/srv/workbuddy-worker \
+  --mgmt-auth-token <secret> \
+  --mgmt-public-url https://worker-b.example.com/workbuddy
 ```
 
 - Coordinator 负责：GitHub Poller、状态机、任务路由、HTTP API、审计
 - Worker 负责：向 Coordinator 注册、长轮询领取任务、执行 agent 子进程、提交结果
 - 通信方式：HTTP 长轮询（`GET /api/v1/tasks/poll`，无任务时挂起最多 timeout 秒）
 - 认证：共享密钥，`Authorization: Bearer <token>`（REQ-029）
+- Session viewer：两种拓扑的 GitHub comment 都统一链接到 Coordinator `/workers/{worker_id}/sessions/{session_id}`。Coordinator 在同一个 Bearer auth surface 下代理到对应 Worker 的 management session viewer；同机部署直接使用 loopback 管理地址，split-host 部署则通过 `--mgmt-public-url` 注册一个 Coordinator 可达的 Worker management base URL。Worker management listener 仍默认 loopback-only；一旦配置 `--mgmt-public-url`，其 `--mgmt-auth-token` 必须与 Coordinator bearer token 相同，这样 Coordinator 代理才能稳定转发共享认证。
 
 ## CLI 命令列表
 

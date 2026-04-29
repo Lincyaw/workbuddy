@@ -2,101 +2,66 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
-	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
-	"github.com/Lincyaw/workbuddy/internal/alertbus"
 	"github.com/Lincyaw/workbuddy/internal/app"
-	"github.com/Lincyaw/workbuddy/internal/audit"
-	"github.com/Lincyaw/workbuddy/internal/auditapi"
 	"github.com/Lincyaw/workbuddy/internal/config"
-	"github.com/Lincyaw/workbuddy/internal/dependency"
-	"github.com/Lincyaw/workbuddy/internal/eventlog"
-	"github.com/Lincyaw/workbuddy/internal/launcher"
-	"github.com/Lincyaw/workbuddy/internal/metrics"
-	"github.com/Lincyaw/workbuddy/internal/operator"
 	"github.com/Lincyaw/workbuddy/internal/poller"
-	"github.com/Lincyaw/workbuddy/internal/registry"
-	"github.com/Lincyaw/workbuddy/internal/reporter"
-	"github.com/Lincyaw/workbuddy/internal/router"
 	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
-	"github.com/Lincyaw/workbuddy/internal/security"
-	"github.com/Lincyaw/workbuddy/internal/statemachine"
-	"github.com/Lincyaw/workbuddy/internal/store"
-	"github.com/Lincyaw/workbuddy/internal/tasknotify"
-	"github.com/Lincyaw/workbuddy/internal/webui"
-	workerexec "github.com/Lincyaw/workbuddy/internal/worker"
-	workersession "github.com/Lincyaw/workbuddy/internal/worker/session"
-	"github.com/Lincyaw/workbuddy/internal/workspace"
 	"github.com/spf13/cobra"
 )
 
-// cmd-local defaults kept for back-compat with existing Cobra flag defaults
-// and tests that still reference them.
 const (
 	defaultPort             = app.DefaultPort
 	defaultPollInterval     = app.DefaultPollInterval
 	defaultMaxParallelTasks = app.DefaultMaxParallelTasks
-	taskChanSize            = app.TaskChanSize
-	dispatchChanSize        = app.DispatchChanSize
-	agentShutdownWait       = app.AgentShutdownWait
 )
 
-// Aliases to the app package so tests and other cmd files keep compiling.
-type (
-	RunningTasks = app.RunningTasks
-	closedIssues = app.ClosedIssues
-	GHCLIReader  = app.GHCLIReader
-)
-
-var (
-	NewRunningTasks     = app.NewRunningTasks
-	recoverTasks        = app.RecoverTasks
-	allowSecurityEvent  = app.AllowSecurityEvent
-	logSecurityPosture  = app.LogSecurityPosture
-	newTaskWatchHandler = app.NewTaskWatchHandler
-)
-
-// serveOpts holds parsed CLI flags for the serve command. Flag parsing and
-// Cobra wiring stay here; the actual composition lives in runServeWithOpts,
-// which delegates the assembly graph to internal/app-level helpers.
 type serveOpts struct {
 	port              int
+	listenAddr        string
 	pollInterval      time.Duration
 	maxParallelTasks  int
 	roles             []string
 	configDir         string
 	dbPath            string
+	auth              bool
+	loopbackOnly      bool
 	trustedAuthors    string
 	trustedAuthorsSet bool
 }
 
 var serveCmd = &cobra.Command{
 	Use:   "serve",
-	Short: "Run Coordinator + Worker in single process (v0.1.0)",
-	Long: `Start workbuddy in single-process mode (v0.1.0).
+	Short: "Run coordinator + worker in one process via the distributed HTTP path",
+	Long: `Start workbuddy in combined mode.
 
-Runs the Coordinator (Poller + StateMachine + TaskRouter) and an embedded
-Worker in the same process. Communication is via Go channels.`,
+This command is a thin in-process wrapper around the same coordinator HTTP API
+and standalone worker used in split deployments. The worker always talks to
+the coordinator over HTTP, even when both run inside one process.`,
 	RunE: runServe,
 }
 
 func init() {
-	serveCmd.Flags().IntP("port", "p", defaultPort, "HTTP server port")
+	serveCmd.Flags().String("listen", "", "Coordinator listen address (default: 127.0.0.1:<port>)")
+	serveCmd.Flags().IntP("port", "p", defaultPort, "Coordinator port used when --listen is omitted")
 	serveCmd.Flags().Duration("poll-interval", defaultPollInterval, "GitHub poll interval")
-	serveCmd.Flags().Int("max-parallel-tasks", 0, fmt.Sprintf("Maximum number of embedded worker tasks to run in parallel across issues (0 = auto, min(NumCPU, %d))", defaultMaxParallelTasks))
+	serveCmd.Flags().Int("max-parallel-tasks", 0, fmt.Sprintf("Worker task concurrency override (0 = worker default, min(NumCPU, %d))", defaultMaxParallelTasks))
 	serveCmd.Flags().StringSlice("roles", []string{"dev", "test", "review"}, "Worker roles")
 	serveCmd.Flags().String("config-dir", ".github/workbuddy", "Configuration directory")
-	serveCmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "SQLite database path")
+	serveCmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "SQLite database path shared by coordinator and worker")
+	serveCmd.Flags().Bool("loopback-only", false, "Allow auth-free task endpoints only when the listen address is loopback-only")
+	serveCmd.Flags().Bool("auth", false, "Require WORKBUDDY_AUTH_TOKEN for the coordinator HTTP surface")
 	serveCmd.Flags().String("trusted-authors", "", "Comma-separated GitHub logins allowed to trigger agent work")
 	rootCmd.AddCommand(serveCmd)
 }
@@ -114,11 +79,14 @@ func runServe(cmd *cobra.Command, _ []string) error {
 
 func parseServeFlags(cmd *cobra.Command) (*serveOpts, error) {
 	port, _ := cmd.Flags().GetInt("port")
+	listenAddr, _ := cmd.Flags().GetString("listen")
 	pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
 	maxParallelTasks, _ := cmd.Flags().GetInt("max-parallel-tasks")
 	roles, _ := cmd.Flags().GetStringSlice("roles")
 	configDir, _ := cmd.Flags().GetString("config-dir")
 	dbPath, _ := cmd.Flags().GetString("db-path")
+	authEnabled, _ := cmd.Flags().GetBool("auth")
+	loopbackOnly, _ := cmd.Flags().GetBool("loopback-only")
 	trustedAuthors, _ := cmd.Flags().GetString("trusted-authors")
 	trustedAuthorsSet := cmd.Flags().Changed("trusted-authors")
 	if maxParallelTasks < 0 {
@@ -126,21 +94,19 @@ func parseServeFlags(cmd *cobra.Command) (*serveOpts, error) {
 	}
 	return &serveOpts{
 		port:              port,
+		listenAddr:        strings.TrimSpace(listenAddr),
 		pollInterval:      pollInterval,
 		maxParallelTasks:  maxParallelTasks,
 		roles:             roles,
 		configDir:         configDir,
 		dbPath:            dbPath,
+		auth:              authEnabled,
+		loopbackOnly:      loopbackOnly,
 		trustedAuthors:    trustedAuthors,
 		trustedAuthorsSet: trustedAuthorsSet,
 	}, nil
 }
 
-// runServeWithOpts composes the single-process serve topology: store →
-// recovery+security → eventlog → poller → state machine → router → embedded
-// worker. Kept in cmd/ because tests depend on its signature and on the
-// injection points (ghReader, launcherOverride, parentCtx); the individual
-// pieces it assembles live in internal/app.
 func runServeWithOpts(opts *serveOpts, ghReader poller.GHReader, launcherOverride *runtimepkg.Registry, parentCtx ...context.Context) error {
 	return runServeWithOutput(opts, ghReader, launcherOverride, os.Stdout, parentCtx...)
 }
@@ -154,241 +120,110 @@ func runServeWithOutput(opts *serveOpts, ghReader poller.GHReader, launcherOverr
 		stdout = io.Discard
 	}
 
-	st, err := store.NewStore(opts.dbPath)
+	repoRoot, err := mustAbsWD()
 	if err != nil {
-		return fmt.Errorf("serve: init store: %w", err)
+		return fmt.Errorf("serve: resolve repo root: %w", err)
 	}
-	defer func() { _ = st.Close() }()
-	alertBus := alertbus.NewBus(64)
-	if err := app.RecoverCoordinatorIssueClaims(st, os.Getpid()); err != nil {
-		log.Printf("[serve] warning: issue-claim recovery failed: %v", err)
-	}
-	if err := app.RecoverTasks(st, alertBus); err != nil {
-		log.Printf("[serve] warning: recovery failed: %v", err)
-	}
-
-	evlog := eventlog.NewEventLoggerWithWriter(st, log.Writer())
-	reg := registry.NewRegistry(st, cfg.Global.PollInterval)
-
-	repoDir, err := os.Getwd()
+	listenAddr, err := resolveServeListenAddr(opts, cfg)
 	if err != nil {
-		return fmt.Errorf("serve: get working directory: %w", err)
+		return err
 	}
-	secRuntime, watchSecurityFile, err := security.NewRuntime(security.Options{
-		FlagValue: opts.trustedAuthors,
-		FlagSet:   opts.trustedAuthorsSet,
-		EnvValue:  os.Getenv("WORKBUDDY_TRUSTED_AUTHORS"),
-		FilePath:  filepath.Join(repoDir, ".workbuddy", "security.yaml"),
-	})
-	if err != nil {
-		return fmt.Errorf("serve: load security config: %w", err)
+	if err := validateServeListenSecurity(listenAddr, opts.auth, opts.loopbackOnly); err != nil {
+		return err
 	}
-	app.LogSecurityPosture(secRuntime.Current())
-	sessionsDir := filepath.Join(repoDir, ".workbuddy", "sessions")
-	recorder := workersession.NewRecorder(st, sessionsDir)
-
-	workerID, err := reg.RegisterEmbedded(cfg.Global.Repo, opts.roles)
-	if err != nil {
-		return fmt.Errorf("serve: register embedded worker: %w", err)
-	}
-
-	dispatchCh := make(chan statemachine.DispatchRequest, dispatchChanSize)
-	taskCh := make(chan router.WorkerTask, taskChanSize)
-
-	if ghReader == nil {
-		ghReader = &app.GHCLIReader{}
-	}
-	var labelReader issueLabelReader
-	if reader, ok := ghReader.(issueLabelReader); ok {
-		labelReader = reader
-	}
-
-	sm := statemachine.NewStateMachine(cfg.Workflows, st, dispatchCh, evlog, alertBus)
-	claimerID := workerID
-	if claimerID == "" {
-		claimerID = "coordinator-" + app.HostnameOrUnknown()
-	}
-	sm.SetIssueClaim(app.BuildIssueClaimerID(claimerID, os.Getpid()), statemachine.DefaultIssueClaimLease)
-	depResolver := dependency.NewResolver(st, ghReader, evlog, alertBus)
-
-	wsMgr := workspace.NewManager(repoDir)
-	_ = wsMgr.Prune()
-
-	rt := router.NewRouter(cfg.Agents, reg, st, cfg.Global.Repo, repoDir, taskCh, wsMgr, true)
-	rt.SetWorkflows(cfg.Workflows)
-	if issueDataReader, ok := ghReader.(router.IssueDataReader); ok {
-		rt.SetIssueDataReader(issueDataReader)
-	}
-
-	lnch := launcherOverride
-	if lnch == nil {
-		lnch = launcher.NewLauncher()
-	}
-	lnch.SetSessionManager(runtimepkg.NewSessionManager(sessionsDir, st))
-
-	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
-	rep.SetBaseURL(fmt.Sprintf("http://localhost:%d", cfg.Global.Port))
-	rep.SetEventRecorder(recorder)
-	rep.SetVerifier(reporter.NewGHClaimVerifier())
-	// Note: router no longer holds a Reporter — worktree-failure reporting
-	// now lives on the worker side (see internal/worker/executor.go). The
-	// reporter wired above is used by the poller/worker paths.
-
-	p := poller.NewPoller(ghReader, st, cfg.Global.Repo, cfg.Global.PollInterval)
-	p.SetEventRecorder(evlog)
+	baseURL := "http://" + listenAddr
 
 	ctx, cancel, sigCh := buildRunContext(parentCtx)
 	defer cancel()
-	if watchSecurityFile {
-		if err := secRuntime.StartFileWatcher(ctx); err != nil {
-			return fmt.Errorf("serve: start security watcher: %w", err)
-		}
+
+	coordErrCh := make(chan error, 1)
+	go func() {
+		coordErrCh <- runCoordinatorWithOpts(&coordinatorOpts{
+			dbPath:            opts.dbPath,
+			listenAddr:        listenAddr,
+			loopbackOnly:      opts.loopbackOnly,
+			port:              cfg.Global.Port,
+			pollInterval:      cfg.Global.PollInterval,
+			configDir:         opts.configDir,
+			auth:              opts.auth,
+			trustedAuthors:    opts.trustedAuthors,
+			trustedAuthorsSet: opts.trustedAuthorsSet,
+		}, ghReader, ctx)
+	}()
+
+	if err := waitForCoordinatorHealth(ctx, baseURL); err != nil {
+		cancel()
+		return fmt.Errorf("serve: coordinator did not become healthy: %w", err)
 	}
 
-	go app.RunRateLimitBudgetCheck(ctx, "serve", cfg.Global.Repo)
-
-	var wg sync.WaitGroup
-	taskHub := tasknotify.NewHub()
-	// In serve mode we don't expose live config reload — just start the
-	// notifier with the loaded config; ctx cancellation stops it.
-	if _, err := app.NewNotifierRuntime(ctx, cfg.Notifications, alertBus, taskHub, evlog); err != nil {
-		return fmt.Errorf("serve: init notifier: %w", err)
-	}
-
-	if cfg.Operator.Enabled {
-		detector := operator.NewDetector(operator.DetectorOptions{
-			Store:                   st,
-			Config:                  cfg.Operator,
-			AlertBus:                alertBus,
-			DefaultRepo:             cfg.Global.Repo,
-			DefaultPollInterval:     cfg.Global.PollInterval,
-			WorkerHeartbeatInterval: defaultWorkerHeartbeat,
-		})
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := detector.Run(ctx); err != nil {
-				log.Printf("[serve] operator detector error: %v", err)
-			}
-		}()
-	}
-
-	mux := newServeMux(st, cfg, evlog, sessionsDir, taskHub)
-	srv := &http.Server{Addr: fmt.Sprintf(":%d", cfg.Global.Port), Handler: mux}
-	wg.Add(1)
+	workerErrCh := make(chan error, 1)
 	go func() {
-		defer wg.Done()
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("[serve] HTTP server error: %v", err)
-		}
+		workerErrCh <- runWorkerWithOpts(&workerOpts{
+			coordinatorURL:    baseURL,
+			token:             strings.TrimSpace(os.Getenv("WORKBUDDY_AUTH_TOKEN")),
+			reportBaseURL:     baseURL,
+			mgmtAuthToken:     strings.TrimSpace(os.Getenv("WORKBUDDY_AUTH_TOKEN")),
+			roleCSV:           strings.Join(opts.roles, ","),
+			configDir:         opts.configDir,
+			workDir:           repoRoot,
+			sessionsDir:       deriveServeSessionsDir(opts.dbPath, repoRoot),
+			dbPath:            opts.dbPath,
+			pollTimeout:       defaultWorkerPollTimeout,
+			heartbeatInterval: defaultWorkerHeartbeat,
+			shutdownTimeout:   defaultWorkerShutdownDeadline,
+			concurrency:       serveWorkerConcurrency(opts.maxParallelTasks),
+			mgmtAddr:          defaultWorkerMgmtAddr,
+		}, launcherOverride, nil, ctx)
 	}()
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := p.Run(ctx); err != nil {
-			log.Printf("[serve] poller error: %v", err)
-		}
-	}()
+	writeServeBanner(stdout, cfg, opts, listenAddr)
 
-	runningTasks := app.NewRunningTasks()
-	closedTracker := &app.ClosedIssues{}
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		runServeEventLoop(ctx, p, sm, evlog, rep, st, depResolver, cfg.Global.Repo, secRuntime, runningTasks, closedTracker)
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := rt.Run(ctx, dispatchCh); err != nil {
-			log.Printf("[serve] router error: %v", err)
-		}
-	}()
-
-	workerDone := make(chan struct{})
-	deps := &workerDeps{
-		executor:     workerexec.NewExecutor(lnch, labelReader),
-		recorder:     recorder,
-		reporter:     rep,
-		store:        st,
-		sm:           sm,
-		workerID:     workerID,
-		cfg:          cfg,
-		wsMgr:        wsMgr,
-		runningTasks: runningTasks,
-		closedIssues: closedTracker,
-		taskHub:      taskHub,
-		sessionsDir:  sessionsDir,
-		issueReader:  labelReader,
-	}
-	wg.Add(1)
-	embeddedWorker := workerexec.NewEmbeddedWorker(deps.embeddedDeps(), opts.maxParallelTasks)
-	go func() {
-		defer wg.Done()
-		defer close(workerDone)
-		embeddedWorker.Run(ctx, taskCh)
-	}()
-
-	writeServeBanner(stdout, cfg, opts)
-
+	var serveErr error
 	if sigCh != nil {
 		select {
 		case sig := <-sigCh:
-			log.Printf("[serve] received signal %s, shutting down...", sig)
+			fmt.Fprintf(stdout, "shutting down after %s\n", sig)
+			cancel()
+		case err := <-coordErrCh:
+			serveErr = err
+			cancel()
+		case err := <-workerErrCh:
+			serveErr = err
+			cancel()
 		case <-ctx.Done():
 		}
 	} else {
-		<-ctx.Done()
+		select {
+		case err := <-coordErrCh:
+			serveErr = err
+			cancel()
+		case err := <-workerErrCh:
+			serveErr = err
+			cancel()
+		case <-ctx.Done():
+		}
 	}
 
-	cancel()
-	agentDone := make(chan struct{})
-	go func() {
-		<-workerDone
-		close(agentDone)
-	}()
-	select {
-	case <-agentDone:
-		log.Printf("[serve] all agents completed")
-	case <-time.After(agentShutdownWait):
-		log.Printf("[serve] agent shutdown timeout (%s), forcing exit", agentShutdownWait)
+	coordErr := <-coordErrCh
+	workerErr := <-workerErrCh
+	if serveErr == nil {
+		serveErr = firstNonNilErr(coordErr, workerErr)
 	}
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer shutdownCancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("[serve] HTTP server shutdown error: %v", err)
-	}
-
-	// Stop any shared agent-backend resources (codex app-server, etc.) held
-	// by the runtime registry. No-op for runtimes without persistent state.
-	if err := lnch.Shutdown(shutdownCtx); err != nil {
-		log.Printf("[serve] runtime shutdown error: %v", err)
-	}
-
-	wg.Wait()
-	log.Printf("[serve] shutdown complete")
-	return nil
+	return serveErr
 }
 
-func writeServeBanner(stdout io.Writer, cfg *config.FullConfig, opts *serveOpts) {
-	fmt.Fprintf(stdout, "workbuddy serving (repo=%s, roles=[%s], poll=%s, port=%d)\n",
-		cfg.Global.Repo, strings.Join(opts.roles, ","), cfg.Global.PollInterval, cfg.Global.Port)
+func writeServeBanner(stdout io.Writer, cfg *config.FullConfig, opts *serveOpts, listenAddr string) {
+	fmt.Fprintf(stdout, "workbuddy serve (repo=%s, roles=[%s], poll=%s, listen=%s)\n",
+		cfg.Global.Repo, strings.Join(opts.roles, ","), cfg.Global.PollInterval, listenAddr)
 }
 
-// loadServeConfig loads, validates, and applies CLI overrides to the serve
-// FullConfig. Kept separate so flag parsing is cleanly isolated from
-// composition.
 func loadServeConfig(opts *serveOpts) (*config.FullConfig, error) {
 	cfg, warnings, err := config.LoadConfig(opts.configDir)
 	if err != nil {
 		return nil, fmt.Errorf("serve: load config: %w", err)
 	}
 	for _, w := range warnings {
-		log.Printf("[serve] warning: %s", w)
+		fmt.Fprintf(os.Stderr, "[serve] warning: %s\n", w)
 	}
 	if cfg.Global.Repo == "" {
 		return nil, fmt.Errorf("serve: config must specify repo")
@@ -408,8 +243,6 @@ func loadServeConfig(opts *serveOpts) (*config.FullConfig, error) {
 	return cfg, nil
 }
 
-// buildRunContext wires the shutdown context, either from an explicit parent
-// (tests) or from SIGINT/SIGTERM (real runs).
 func buildRunContext(parentCtx []context.Context) (context.Context, context.CancelFunc, chan os.Signal) {
 	if len(parentCtx) > 0 && parentCtx[0] != nil {
 		ctx, cancel := context.WithCancel(parentCtx[0])
@@ -421,179 +254,104 @@ func buildRunContext(parentCtx []context.Context) (context.Context, context.Canc
 	return ctx, cancel, sigCh
 }
 
-// newServeMux registers the HTTP handlers for the embedded serve mode.
-func newServeMux(st *store.Store, cfg *config.FullConfig, evlog *eventlog.EventLogger, sessionsDir string, taskHub *tasknotify.Hub) *http.ServeMux {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprintf(w, `{"status":"ok","repo":%q}`, cfg.Global.Repo)
-	})
-	audit.NewHTTPHandler(st).Register(mux)
-	metrics.NewHandler(st).WithEventLogger(evlog).Register(mux)
-	dashboardAPI := auditapi.NewHandler(st)
-	dashboardAPI.SetSessionsDir(sessionsDir)
-	dashboardAPI.RegisterDashboard(mux)
-	mux.HandleFunc("/tasks/watch", app.NewTaskWatchHandler(taskHub))
-	sessionUI := webui.NewHandler(st)
-	sessionUI.SetSessionsDir(sessionsDir)
-	sessionUI.Register(mux)
-	return mux
-}
-
-// runServeEventLoop is the poll-event fanout loop: it bridges poller events
-// into the state machine, runs dependency maintenance on cycle boundaries,
-// and cancels running agents when their issues close.
-func runServeEventLoop(
-	ctx context.Context,
-	p *poller.Poller,
-	sm *statemachine.StateMachine,
-	evlog *eventlog.EventLogger,
-	rep *reporter.Reporter,
-	st *store.Store,
-	depResolver *dependency.Resolver,
-	repo string,
-	secRuntime *security.Runtime,
-	runningTasks *app.RunningTasks,
-	closedTracker *app.ClosedIssues,
-) {
-	var depsResolvedThisCycle bool
-	var depGraphVersion int64
-	runDependencyMaintenance := func(ctx context.Context) {
-		depGraphVersion++
-		unblockedIssues, err := depResolver.EvaluateOpenIssues(ctx, repo, depGraphVersion)
-		if err != nil {
-			log.Printf("[serve] dependency resolver error: %v", err)
-			return
-		}
-		for _, issueNum := range unblockedIssues {
-			if delErr := st.DeleteIssueCache(repo, issueNum); delErr != nil {
-				log.Printf("[serve] dependency unblock cache-invalidate #%d: %v", issueNum, delErr)
-			} else {
-				log.Printf("[serve] dependency unblocked #%d — cache invalidated for redispatch", issueNum)
-			}
-		}
-		caches, err := st.ListIssueCaches(repo)
-		if err != nil {
-			log.Printf("[serve] dependency reaction list-caches error: %v", err)
-			return
-		}
-		for _, cached := range caches {
-			if cached.State != "open" {
-				continue
-			}
-			state, err := st.QueryIssueDependencyState(cached.Repo, cached.IssueNum)
-			if err != nil {
-				log.Printf("[serve] dependency reaction query state %s#%d: %v", cached.Repo, cached.IssueNum, err)
-				continue
-			}
-			if state == nil {
-				continue
-			}
-			wantBlocked := state.Verdict == store.DependencyVerdictBlocked || state.Verdict == store.DependencyVerdictNeedsHuman
-			if wantBlocked == state.LastReactionBlocked {
-				continue
-			}
-			if err := rep.SetBlockedReaction(ctx, cached.Repo, cached.IssueNum, wantBlocked); err != nil {
-				log.Printf("[serve] dependency reaction set %s#%d blocked=%v: %v", cached.Repo, cached.IssueNum, wantBlocked, err)
-				continue
-			}
-			if err := st.MarkDependencyReactionApplied(cached.Repo, cached.IssueNum, wantBlocked); err != nil {
-				log.Printf("[serve] dependency reaction mark %s#%d: %v", cached.Repo, cached.IssueNum, err)
-			}
-		}
-	}
+func waitForCoordinatorHealth(ctx context.Context, baseURL string) error {
+	client := &http.Client{Timeout: 250 * time.Millisecond}
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
 	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/health", nil)
+		if err == nil {
+			resp, err := client.Do(req)
+			if err == nil {
+				_ = resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					return nil
+				}
+			}
+		}
 		select {
 		case <-ctx.Done():
-			return
-		case ev, ok := <-p.Events():
-			if !ok {
-				return
-			}
-			if ev.Type == poller.EventPollCycleDone {
-				evlog.Log(poller.EventPollCycleDone, ev.Repo, 0, map[string]any{"source": "poller"})
-				if !depsResolvedThisCycle {
-					runDependencyMaintenance(ctx)
-				}
-				sm.CheckAllStuck(ev.Repo)
-				depsResolvedThisCycle = false
-				sm.ResetDedup()
-				continue
-			}
-			if ev.Type == poller.EventIssueClosed {
-				closedTracker.MarkClosed(ev.Repo, ev.IssueNum)
-				if cancelled := runningTasks.Cancel(ev.Repo, ev.IssueNum); cancelled {
-					log.Printf("[serve] cancelled agent for closed issue %s#%d", ev.Repo, ev.IssueNum)
-				}
-				continue
-			}
-			closedTracker.MarkOpen(ev.Repo, ev.IssueNum)
-			if !app.AllowSecurityEvent(secRuntime, ev) {
-				continue
-			}
-			if !depsResolvedThisCycle {
-				runDependencyMaintenance(ctx)
-				depsResolvedThisCycle = true
-			}
-			smEvent := statemachine.ChangeEvent{
-				Type:     ev.Type,
-				Repo:     ev.Repo,
-				IssueNum: ev.IssueNum,
-				Labels:   ev.Labels,
-				Detail:   ev.Detail,
-				Author:   ev.Author,
-			}
-			if err := sm.HandleEvent(ctx, smEvent); err != nil {
-				log.Printf("[serve] state machine error: %v", err)
-			}
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("timeout waiting for %s/health", baseURL)
+		case <-ticker.C:
 		}
 	}
 }
 
-// workerDeps bundles the dependencies for the embedded worker, avoiding
-// parameter sprawl. Kept in cmd/ because tests construct this directly.
-type workerDeps struct {
-	executor     *workerexec.Executor
-	recorder     *workersession.Recorder
-	reporter     *reporter.Reporter
-	store        *store.Store
-	sm           *statemachine.StateMachine
-	workerID     string
-	cfg          *config.FullConfig
-	wsMgr        *workspace.Manager
-	runningTasks *app.RunningTasks
-	closedIssues *app.ClosedIssues
-	taskHub      *tasknotify.Hub
-	sessionsDir  string
-	issueReader  issueLabelReader
+func resolveServeListenAddr(opts *serveOpts, cfg *config.FullConfig) (string, error) {
+	if opts == nil || cfg == nil {
+		return "", fmt.Errorf("serve: options and config are required")
+	}
+	if opts.listenAddr != "" {
+		if host, port, err := net.SplitHostPort(opts.listenAddr); err == nil && port == "0" {
+			return reserveListenAddr(host)
+		}
+		return opts.listenAddr, nil
+	}
+	return reserveListenAddr("127.0.0.1", cfg.Global.Port)
 }
 
-func (d *workerDeps) embeddedDeps() workerexec.EmbeddedDeps {
-	var runningTasks workerexec.RunningTaskRegistry
-	if d.runningTasks != nil {
-		runningTasks = d.runningTasks
+func reserveListenAddr(host string, portOverride ...int) (string, error) {
+	port := 0
+	if len(portOverride) > 0 {
+		port = portOverride[0]
 	}
-	var closedIssues workerexec.ClosedIssueTracker
-	if d.closedIssues != nil {
-		closedIssues = d.closedIssues
+	candidate := net.JoinHostPort(host, fmt.Sprintf("%d", port))
+	ln, err := net.Listen("tcp", candidate)
+	if err != nil {
+		return "", fmt.Errorf("serve: reserve listen addr %s: %w", candidate, err)
 	}
-	var issueReader workerexec.IssueLabelReader
-	if d.issueReader != nil {
-		issueReader = d.issueReader
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		return "", fmt.Errorf("serve: close reserved listener %s: %w", addr, err)
 	}
-	return workerexec.EmbeddedDeps{
-		Executor:         d.executor,
-		Recorder:         d.recorder,
-		Reporter:         d.reporter,
-		Store:            d.store,
-		StateMachine:     d.sm,
-		WorkerID:         d.workerID,
-		Config:           d.cfg,
-		WorkspaceManager: d.wsMgr,
-		RunningTasks:     runningTasks,
-		ClosedIssues:     closedIssues,
-		TaskHub:          d.taskHub,
-		IssueReader:      issueReader,
+	return addr, nil
+}
+
+func validateServeListenSecurity(listenAddr string, authEnabled, loopbackOnly bool) error {
+	if strings.TrimSpace(listenAddr) == "" {
+		return fmt.Errorf("serve: listen address is required")
 	}
+	if loopbackOnly && !isLoopbackListenAddr(listenAddr) {
+		return fmt.Errorf("serve: --loopback-only requires a loopback --listen address, got %q", listenAddr)
+	}
+	if !authEnabled && !isLoopbackListenAddr(listenAddr) {
+		return fmt.Errorf("serve: non-loopback --listen requires --auth, got %q", listenAddr)
+	}
+	return nil
+}
+
+func deriveServeSessionsDir(dbPath, repoRoot string) string {
+	trimmed := strings.TrimSpace(dbPath)
+	if trimmed == "" {
+		return repoRoot + "/.workbuddy/sessions"
+	}
+	return filepath.Join(filepath.Dir(trimmed), "sessions")
+}
+
+func mustAbsWD() (string, error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Abs(wd)
+}
+
+func firstNonNilErr(errs ...error) error {
+	for _, err := range errs {
+		if err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+	}
+	return nil
+}
+
+func serveWorkerConcurrency(raw int) int {
+	if raw > 0 {
+		return raw
+	}
+	return app.DefaultWorkerParallelism()
 }

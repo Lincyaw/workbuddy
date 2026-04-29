@@ -42,7 +42,7 @@ worktree 只装 agent 改的代码，不再装事件流。
 ### 2. 错误路径下 artifact 不丢
 
 由于 artifact 已经不在 worktree 里，worktree 清理不会再把它删掉。
-`internal/worker/embedded.go` 的 embedded worker 路径行为是：
+`internal/worker/distributed.go` 的 canonical worker 路径行为是：
 
 - 无论 runtime 是否返错，只要 `session.Run(...)` 返回了非 nil `Result`（含
   `SessionPath`、`LastMessage`、`TokenUsage`），都在 return 前先调 `audit.Capture(...)`。

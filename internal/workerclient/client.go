@@ -26,12 +26,13 @@ type Client struct {
 }
 
 type RegisterRequest struct {
-	WorkerID string   `json:"worker_id"`
-	Repo     string   `json:"repo"`
-	Roles    []string `json:"roles"`
-	Runtime  string   `json:"runtime,omitempty"`
-	Repos    []string `json:"repos,omitempty"`
-	Hostname string   `json:"hostname,omitempty"`
+	WorkerID    string   `json:"worker_id"`
+	Repo        string   `json:"repo"`
+	Roles       []string `json:"roles"`
+	Runtime     string   `json:"runtime,omitempty"`
+	Repos       []string `json:"repos,omitempty"`
+	Hostname    string   `json:"hostname,omitempty"`
+	MgmtBaseURL string   `json:"mgmt_base_url,omitempty"`
 }
 
 type Task struct {

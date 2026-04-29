@@ -36,12 +36,13 @@ type FullCoordinatorServer struct {
 
 // WorkerRegisterRequest is the body of POST /api/v1/workers/register.
 type WorkerRegisterRequest struct {
-	WorkerID string   `json:"worker_id"`
-	Repo     string   `json:"repo"`
-	Roles    []string `json:"roles"`
-	Runtime  string   `json:"runtime,omitempty"`
-	Repos    []string `json:"repos,omitempty"`
-	Hostname string   `json:"hostname"`
+	WorkerID    string   `json:"worker_id"`
+	Repo        string   `json:"repo"`
+	Roles       []string `json:"roles"`
+	Runtime     string   `json:"runtime,omitempty"`
+	Repos       []string `json:"repos,omitempty"`
+	Hostname    string   `json:"hostname"`
+	MgmtBaseURL string   `json:"mgmt_base_url,omitempty"`
 }
 
 // TaskPollResponse is returned from GET /api/v1/tasks/poll when a task is
@@ -299,6 +300,7 @@ func (s *FullCoordinatorServer) HandleRegisterWorker(w http.ResponseWriter, r *h
 	req.WorkerID = strings.TrimSpace(req.WorkerID)
 	req.Repo = strings.TrimSpace(req.Repo)
 	req.Runtime = strings.TrimSpace(req.Runtime)
+	req.MgmtBaseURL = strings.TrimRight(strings.TrimSpace(req.MgmtBaseURL), "/")
 	if len(req.Repos) == 0 && req.Repo != "" {
 		req.Repos = []string{req.Repo}
 	}
@@ -320,7 +322,7 @@ func (s *FullCoordinatorServer) HandleRegisterWorker(w http.ResponseWriter, r *h
 			return
 		}
 	}
-	if err := s.Registry.RegisterWithRepos(req.WorkerID, req.Repo, req.Repos, req.Roles, req.Hostname); err != nil {
+	if err := s.Registry.RegisterWithRepos(req.WorkerID, req.Repo, req.Repos, req.Roles, req.Hostname, req.MgmtBaseURL); err != nil {
 		CoordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -330,6 +332,7 @@ func (s *FullCoordinatorServer) HandleRegisterWorker(w http.ResponseWriter, r *h
 		"runtime":   req.Runtime,
 		"repos":     req.Repos,
 		"hostname":  req.Hostname,
+		"mgmt_url":  req.MgmtBaseURL,
 	})
 	CoordWriteJSON(w, http.StatusCreated, map[string]string{"status": "registered"})
 }

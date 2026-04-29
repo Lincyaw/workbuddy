@@ -4,87 +4,65 @@
 
 ## 当前系统边界
 
-当前真正可运行的形态是 `workbuddy serve` 单进程模式，而不是旧文档里描述的 coordinator/worker 分布式部署。
+当前只有**一套**运行时主链路：Worker 总是通过 HTTP 与 Coordinator 通信。
+区别只在部署形态：
+
+- `workbuddy serve`：在一个进程里同时启动 Coordinator HTTP server 和 Worker。
+- `workbuddy coordinator` + `workbuddy worker`：把同一套代码拆成两个进程，可继续拆到不同机器。
 
 主入口：
 
 - `cmd/serve.go`
+- `cmd/coordinator.go`
+- `cmd/worker.go`
 - `cmd/root.go`
-
-当前 CLI 事实：
-
-- 已实现命令：`workbuddy serve`
-- 未实现旧设计中提到的 `coordinator`、`worker`、`init`、`status`、`run`、`validate`、`logs`
 
 ## 当前主链路
 
-`serve` 启动后会组装下面这些模块：
+无论如何启动，执行链都是：
 
-1. 加载 `.github/workbuddy/` 配置。
-2. 打开 SQLite：`.workbuddy/workbuddy.db`。
-3. 初始化 event log、worker registry、router、state machine、launcher、reporter、audit、web UI。
-4. 用 `gh` CLI 轮询 GitHub issue/PR。
-5. Poller 事件进入 state machine。
-6. 进入带 `agent` 的状态时，state machine 发出 dispatch request。
-7. Router 创建 task，并通过 Go channel 发送给进程内 worker。
-8. Worker 调用 launcher 运行 agent 子进程；不同 issue 可以并行执行，但同一 `repo#issue` 仍严格串行，并受 `--max-parallel-tasks` 全局限流。
-9. 结果写回 reporter、audit、store，并通过 `/sessions` 可查看。
+1. Coordinator 加载 `.github/workbuddy/` 配置并打开 SQLite。
+2. Coordinator 轮询 GitHub issue / PR，并驱动状态机。
+3. 状态机通过 Router 持久化 task。
+4. Worker 通过 `GET /api/v1/tasks/poll` 领取任务。
+5. Worker 调用 runtime 的 `Start(...) -> Session.Run(...)` 执行 agent。
+6. Worker 做 label snapshot / label validation / reporter comment / session audit。
+7. Worker 通过 `/api/v1/tasks/:id/result` 或 `/release` 回写结果。
+8. Coordinator 持久化事件、更新 task 状态，并暴露 audit / metrics / session surface。
 
 关键代码：
 
 - `cmd/serve.go`
-- `internal/poller/poller.go`
-- `internal/statemachine/statemachine.go`
-- `internal/router/router.go`
+- `cmd/coordinator.go`
+- `cmd/worker.go`
+- `internal/app/coordinator.go`
+- `internal/worker/distributed.go`
+- `internal/worker/executor.go`
 
 ## 当前拓扑
 
 ```text
-workbuddy serve
-  -> Poller
-  -> StateMachine
-  -> Router
-  -> embedded worker
-  -> Launcher runtime
-  -> Reporter / Audit / Web UI
+serve
+  -> start coordinator HTTP surface
+  -> start worker (pointed at localhost coordinator)
+
+split deployment
+  coordinator process
+    -> poller / state machine / HTTP API
+  worker process
+    -> long-poll / execute / submit result
 ```
 
 这意味着：
 
-- 当前不是 HTTP 长轮询 worker 通信。
-- 当前不是多 repo coordinator 中心调度。
-- 当前不是远端 worker 注册后领取任务。
-- 当前 transport 固定是进程内 channel。
+- 已不存在进程内 channel worker transport。
+- comment payload、claim verification、needs-human comment、submit-result fallback 都走同一个 worker 实现。
+- `serve` 与 split deployment 的差异只剩下 listen/auth 配置和是否拆进程。
 
-## 当前 GitHub 交互方式
+## 当前 HTTP / Auth 事实
 
-当前所有 GitHub 读写都依赖 `gh` CLI，而不是 Go 内嵌 REST client：
-
-- Poller 读 issue/pr：`cmd/serve.go`
-- Router 拉 issue 详情：`internal/router/router.go`
-- Reporter 写 issue comment：`internal/reporter/reporter.go`
-- Agent 自己在 prompt/command 中调用 `gh issue edit` 推进 label
-
-## 当前状态推进原则
-
-当前系统更接近“Agent-as-Router”：
-
-- Go 侧负责检测 label 变化、识别当前状态、派发 agent。
-- Agent 子进程负责实际改 label。
-- Go 侧并不直接代替 agent 修改 issue label。
-
-这和旧设计的“中心状态机统一管理所有迁移”不是同一件事；后续如要调整，应先同步更新当前实现文档（尤其是 `docs/implemented/current-config-workflow-and-agents.md`），如果新方案仍未落地，再补充对应的 `docs/planned/` 或 `docs/mismatch/` 文档。
-
-## 当前重试与失败边界
-
-当前 `max_retries` 闭环只有“检测 + 计数 + 记录 intent”，还不是 Go 侧完整的失败标签编排能力。
-
-- `internal/statemachine/statemachine.go` 会根据回退边历史调用 `internal/store/store.go` 的 `IncrementTransition` / `QueryTransitionCounts`，把每个 issue 的回退次数持久化到 SQLite `transition_counts` 表。
-- 当回退次数达到 `workflow.max_retries` 时，state machine 只记录 `TypeCycleLimitReached` 和 `TypeTransitionToFailed` 事件，并停止派发这次回退；这里记录的是“应该失败 / 需要人工介入”的 intent。
-- Go 侧不会直接写 `status:failed` 或 `needs-human` label。当前 GH call boundary 仍然是 agent 通过 `gh issue edit` 负责 label 写回，Go 侧只做检测、审计和派发。
-
-这也意味着当前 retry/failure 语义仍然有明确边界：
-
-- 去重只覆盖单个 poll 周期内的相同事件，`ResetDedup()` 会在下一轮 poll 前清空内存去重集合，所以 retry 是否再次触发仍然受 poll 周期切分影响。
-- state entry 在 label 变化时会主动清理 stale inflight；`MarkAgentCompleted` 和 `CheckStuck` 再依据“任务完成时看到的 labels”判断后续事件，label 变化和 task 完成之间仍然存在竞态窗口。
-- back-edge 计数持久化与 GitHub label 写回不是同一个原子动作，所以 `transition_counts` 已更新，并不等于 `status:failed` / `needs-human` 已经被外部执行端成功写回。
+- Coordinator 默认监听 loopback 地址。
+- 非 `/health` 路由在开启 `--auth` 时都经过同一个 `WrapAuth` Bearer middleware。
+- `serve` 复用 Coordinator 的 HTTP surface，而不是维护第二套无认证 mux。
+- Worker management server 仍默认 loopback-only，并支持可选共享 Bearer token；split-host 部署通过 `--mgmt-public-url` 把一个 Coordinator 可达的 management base URL 注册进 worker metadata，且该公开入口必须复用 Coordinator 的 Bearer token。
+- GitHub issue comments 现在统一链接 Coordinator `/workers/{worker_id}/sessions/{session_id}`；Coordinator 在同一个 auth surface 下代理到 Worker session viewer，因此 `serve` 和 split deployment 的 comment payload 保持一致。

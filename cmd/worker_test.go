@@ -144,6 +144,8 @@ func newWorkerFlagCommand() *cobra.Command {
 	cmd.Flags().String("repos", "", "")
 	cmd.Flags().String("id", "", "")
 	cmd.Flags().String("mgmt-addr", defaultWorkerMgmtAddr, "")
+	cmd.Flags().String("mgmt-public-url", "", "")
+	cmd.Flags().String("mgmt-auth-token", "", "")
 	cmd.Flags().Int("concurrency", 1, "")
 	return cmd
 }
@@ -314,6 +316,115 @@ func TestParseWorkerFlags_DeprecatedTokenWarns(t *testing.T) {
 	}
 	if got := stderr.String(); !strings.Contains(got, "--token is deprecated") {
 		t.Fatalf("stderr = %q, want deprecation warning", got)
+	}
+}
+
+func TestParseWorkerFlags_DefaultReportBaseURLAndMgmtAuthToken(t *testing.T) {
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", "shared-token")
+
+	cmd := newWorkerFlagCommand()
+	if err := cmd.Flags().Set("coordinator", "http://coord:8081/"); err != nil {
+		t.Fatalf("set coordinator: %v", err)
+	}
+
+	opts, err := parseWorkerFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseWorkerFlags: %v", err)
+	}
+	if got, want := opts.reportBaseURL, "http://coord:8081"; got != want {
+		t.Fatalf("reportBaseURL = %q, want %q", got, want)
+	}
+	if got, want := opts.mgmtAuthToken, "shared-token"; got != want {
+		t.Fatalf("mgmtAuthToken = %q, want %q", got, want)
+	}
+}
+
+func TestParseWorkerFlags_MgmtPublicURLRequiresSharedAuth(t *testing.T) {
+	cmd := newWorkerFlagCommand()
+	if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
+		t.Fatalf("set coordinator: %v", err)
+	}
+	if err := cmd.Flags().Set("token", "coord-token"); err != nil {
+		t.Fatalf("set token: %v", err)
+	}
+	if err := cmd.Flags().Set("mgmt-public-url", "https://worker.example.com"); err != nil {
+		t.Fatalf("set mgmt-public-url: %v", err)
+	}
+
+	_, err := parseWorkerFlags(cmd)
+	if err == nil || !strings.Contains(err.Error(), "--mgmt-public-url requires --mgmt-auth-token or WORKBUDDY_AUTH_TOKEN") {
+		t.Fatalf("parseWorkerFlags error = %v, want shared-auth requirement", err)
+	}
+}
+
+func TestParseWorkerFlags_MgmtPublicURLRequiresMatchingCoordinatorToken(t *testing.T) {
+	cmd := newWorkerFlagCommand()
+	if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
+		t.Fatalf("set coordinator: %v", err)
+	}
+	if err := cmd.Flags().Set("token", "coord-token"); err != nil {
+		t.Fatalf("set token: %v", err)
+	}
+	if err := cmd.Flags().Set("mgmt-public-url", " https://worker.example.com/proxy/ "); err != nil {
+		t.Fatalf("set mgmt-public-url: %v", err)
+	}
+	if err := cmd.Flags().Set("mgmt-auth-token", " worker-secret "); err != nil {
+		t.Fatalf("set mgmt-auth-token: %v", err)
+	}
+
+	_, err := parseWorkerFlags(cmd)
+	if err == nil || !strings.Contains(err.Error(), "--mgmt-public-url requires --mgmt-auth-token to match coordinator auth") {
+		t.Fatalf("parseWorkerFlags error = %v, want token-match requirement", err)
+	}
+}
+
+func TestParseWorkerFlags_MgmtPublicURLTrimsAndStores(t *testing.T) {
+	cmd := newWorkerFlagCommand()
+	if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
+		t.Fatalf("set coordinator: %v", err)
+	}
+	if err := cmd.Flags().Set("token", "coord-token"); err != nil {
+		t.Fatalf("set token: %v", err)
+	}
+	if err := cmd.Flags().Set("mgmt-public-url", " https://worker.example.com/proxy/ "); err != nil {
+		t.Fatalf("set mgmt-public-url: %v", err)
+	}
+	if err := cmd.Flags().Set("mgmt-auth-token", " coord-token "); err != nil {
+		t.Fatalf("set mgmt-auth-token: %v", err)
+	}
+
+	opts, err := parseWorkerFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseWorkerFlags: %v", err)
+	}
+	if got, want := opts.mgmtPublicURL, "https://worker.example.com/proxy"; got != want {
+		t.Fatalf("mgmtPublicURL = %q, want %q", got, want)
+	}
+	if got, want := opts.mgmtAuthToken, "coord-token"; got != want {
+		t.Fatalf("mgmtAuthToken = %q, want %q", got, want)
+	}
+}
+
+func TestParseWorkerFlags_MgmtPublicURLUsesSharedEnvToken(t *testing.T) {
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", "shared-token")
+
+	cmd := newWorkerFlagCommand()
+	if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
+		t.Fatalf("set coordinator: %v", err)
+	}
+	if err := cmd.Flags().Set("mgmt-public-url", "https://worker.example.com/proxy"); err != nil {
+		t.Fatalf("set mgmt-public-url: %v", err)
+	}
+
+	opts, err := parseWorkerFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseWorkerFlags: %v", err)
+	}
+	if got, want := opts.token, "shared-token"; got != want {
+		t.Fatalf("token = %q, want %q", got, want)
+	}
+	if got, want := opts.mgmtAuthToken, "shared-token"; got != want {
+		t.Fatalf("mgmtAuthToken = %q, want %q", got, want)
 	}
 }
 
@@ -738,8 +849,91 @@ func TestWorkerUsesMappedRepoPathAndCleansAddrFile(t *testing.T) {
 	if len(registerReq.Repos) != 1 || registerReq.Repos[0] != repo {
 		t.Fatalf("unexpected registered repos: %+v", registerReq.Repos)
 	}
+	if got := registerReq.MgmtBaseURL; !strings.HasPrefix(got, "http://127.0.0.1:") {
+		t.Fatalf("registerReq.MgmtBaseURL = %q, want loopback worker management URL", got)
+	}
 	if _, err := os.Stat(addrFile); !os.IsNotExist(err) {
 		t.Fatalf("expected worker addr cleanup, stat err = %v", err)
+	}
+}
+
+func TestWorkerRegistersMgmtPublicURL(t *testing.T) {
+	setupFakeGHCLI(t)
+
+	repo := "owner/test-repo"
+	repoPath := setupWorkerRepoConfig(t, repo, `echo hi`, "status:developing")
+	controlDir := t.TempDir()
+
+	var registerReq workerclient.RegisterRequest
+	registered := make(chan struct{}, 1)
+	polled := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/workers/register":
+			if err := json.NewDecoder(r.Body).Decode(&registerReq); err != nil {
+				t.Fatalf("decode register: %v", err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			select {
+			case registered <- struct{}{}:
+			default:
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tasks/poll":
+			select {
+			case polled <- struct{}{}:
+			default:
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runWorkerWithOpts(&workerOpts{
+			coordinatorURL:    server.URL,
+			token:             "coord-token",
+			roleCSV:           "dev",
+			runtime:           config.RuntimeClaudeCode,
+			reposCSV:          repo + "=" + repoPath,
+			mgmtPublicURL:     "https://worker.example.com/mgmt",
+			mgmtAuthToken:     "coord-token",
+			configDir:         ".github/workbuddy",
+			workDir:           controlDir,
+			dbPath:            filepath.Join(controlDir, ".workbuddy", "worker.db"),
+			sessionsDir:       filepath.Join(controlDir, ".workbuddy", "sessions"),
+			pollTimeout:       20 * time.Millisecond,
+			heartbeatInterval: 20 * time.Millisecond,
+			shutdownTimeout:   100 * time.Millisecond,
+		}, launcher.NewLauncher(), &mockGHReader{}, ctx)
+	}()
+
+	select {
+	case <-registered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not register")
+	}
+	select {
+	case <-polled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not poll after register")
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("worker: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not exit")
+	}
+
+	if got, want := registerReq.MgmtBaseURL, "https://worker.example.com/mgmt"; got != want {
+		t.Fatalf("registerReq.MgmtBaseURL = %q, want %q", got, want)
 	}
 }
 

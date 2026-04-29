@@ -28,6 +28,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/security"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/tasknotify"
+	"github.com/Lincyaw/workbuddy/internal/webui"
 	"github.com/spf13/cobra"
 )
 
@@ -190,6 +191,9 @@ func parseCoordinatorFlags(cmd *cobra.Command) (*coordinatorOpts, error) {
 	}
 	if loopbackOnly && !isLoopbackListenAddr(listenAddr) {
 		return nil, fmt.Errorf("coordinator: --loopback-only requires a loopback --listen address, got %q", listenAddr)
+	}
+	if !authEnabled && !isLoopbackListenAddr(listenAddr) {
+		return nil, fmt.Errorf("coordinator: non-loopback --listen requires --auth, got %q", listenAddr)
 	}
 	return &coordinatorOpts{
 		dbPath:            dbPath,
@@ -398,7 +402,7 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 
 	srv := &http.Server{
 		Addr:    resolveListenAddr(opts.listenAddr, port),
-		Handler: buildCoordinatorMux(api, st, evlog, opts.dbPath),
+		Handler: buildCoordinatorMux(api, st, evlog, opts.dbPath, taskHub),
 	}
 
 	var wg sync.WaitGroup
@@ -529,24 +533,54 @@ func resolveListenAddr(listenAddr string, port int) string {
 	return listenAddr
 }
 
-func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog *eventlog.EventLogger, dbPath string) *http.ServeMux {
+func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog *eventlog.EventLogger, dbPath string, taskHub *tasknotify.Hub) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", api.HandleHealth)
-	metrics.NewHandler(st).WithEventLogger(evlog).Register(mux)
-	readOnlyAudit := audit.NewHTTPHandler(st)
+
 	readOnlyAuditMux := http.NewServeMux()
-	readOnlyAudit.Register(readOnlyAuditMux)
+	audit.NewHTTPHandler(st).Register(readOnlyAuditMux)
 	mux.Handle("/events", api.WrapAuth(readOnlyAuditMux))
 	mux.Handle("/tasks", api.WrapAuth(readOnlyAuditMux))
 	mux.Handle("/issues/", api.WrapAuth(readOnlyAuditMux))
+
+	metricsMux := http.NewServeMux()
+	metrics.NewHandler(st).WithEventLogger(evlog).Register(metricsMux)
+	mux.Handle("/metrics", api.WrapAuth(metricsMux))
+
 	dashboardAPI := auditapi.NewHandler(st)
-	dashboardAPI.SetSessionsDir(filepath.Join(filepath.Dir(dbPath), "sessions"))
-	dashboardAPI.RegisterDashboard(mux)
+	sessionsDir := filepath.Join(filepath.Dir(dbPath), "sessions")
+	dashboardAPI.SetSessionsDir(sessionsDir)
+	dashboardMux := http.NewServeMux()
+	dashboardAPI.RegisterDashboard(dashboardMux)
+	mux.Handle("/api/v1/status", api.WrapAuth(dashboardMux))
+	mux.Handle("/api/v1/sessions", api.WrapAuth(dashboardMux))
+	mux.Handle("/api/v1/sessions/", api.WrapAuth(dashboardMux))
+	mux.Handle("/api/v1/events", api.WrapAuth(dashboardMux))
+	mux.Handle("/api/v1/alerts", api.WrapAuth(dashboardMux))
+	mux.Handle("/api/v1/metrics", api.WrapAuth(dashboardMux))
+	mux.Handle("/api/v1/workers", api.WrapAuth(dashboardMux))
+
+	sessionUI := webui.NewHandler(st)
+	sessionUI.SetSessionsDir(sessionsDir)
+	sessionMux := http.NewServeMux()
+	sessionUI.Register(sessionMux)
+	mux.Handle("/sessions", api.WrapAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sessionMux.ServeHTTP(w, r)
+	})))
+	mux.Handle("/sessions/", api.WrapAuth(sessionMux))
+
+	if taskHub != nil {
+		taskWatchMux := http.NewServeMux()
+		taskWatchMux.HandleFunc("/tasks/watch", app.NewTaskWatchHandler(taskHub))
+		mux.Handle("/tasks/watch", api.WrapAuth(taskWatchMux))
+	}
+
 	mux.Handle("/api/v1/repos/register", api.WrapAuth(http.HandlerFunc(api.HandleRegisterRepo)))
 	mux.Handle("/api/v1/repos/", api.WrapAuth(http.HandlerFunc(api.HandleRepoByPath)))
 	mux.Handle("/api/v1/repos", api.WrapAuth(http.HandlerFunc(api.HandleListRepos)))
 	mux.Handle("/api/v1/workers/register", api.WrapAuth(http.HandlerFunc(api.HandleRegisterWorker)))
 	mux.Handle("/api/v1/workers/", api.WrapAuth(http.HandlerFunc(api.HandleWorkerByPath)))
+	mux.Handle("/workers/", api.WrapAuth(newCoordinatorSessionProxy(st, api.AuthToken)))
 	mux.Handle("/api/v1/config/reload", api.WrapAuth(http.HandlerFunc(api.HandleConfigReload)))
 	mux.Handle("/api/v1/tasks/poll", api.WrapAuth(http.HandlerFunc(api.HandlePollTask)))
 	mux.Handle("/api/v1/tasks/", api.WrapAuth(http.HandlerFunc(api.HandleTaskAction)))

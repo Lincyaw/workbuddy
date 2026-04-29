@@ -125,8 +125,8 @@ documentation:
       related_code: []
       notes: Future-state design map. All prior planned docs have been implemented and migrated to docs/implemented/.
 
-    - path: docs/planned/worker-execution-boundary.md
-      bucket: planned
+    - path: docs/implemented/worker-execution-boundary.md
+      bucket: implemented
       status: maintained
       related_code:
         - cmd/serve.go
@@ -137,7 +137,6 @@ documentation:
         - internal/runtime/session_manager.go
         - internal/runtime/infra_failure.go
         - internal/worker/distributed.go
-        - internal/worker/embedded.go
         - internal/worker/executor.go
         - internal/worker/session/recorder.go
         - internal/worker/session/stream.go
@@ -148,7 +147,7 @@ documentation:
         - internal/router/router.go
         - internal/workspace/workspace.go
         - internal/workerclient/client.go
-      notes: Planned design for issue #146: extract a canonical worker execution core, converge runtime/session abstractions, and centralize GitHub/session-recording boundaries.
+      notes: Canonical worker execution boundary after issue #210: `serve` and split deployments both run the same distributed worker implementation and shared runtime/session core.
 
     - path: docs/implemented/runtime-session-architecture.md
       bucket: implemented
@@ -164,7 +163,6 @@ documentation:
         - internal/launcher/events/
         - internal/launcher/agent_bridge.go
         - internal/worker/distributed.go
-        - internal/worker/embedded.go
         - internal/worker/executor.go
         - internal/labelcheck/labelcheck.go
         - internal/audit/audit.go
@@ -379,8 +377,9 @@ requirements:
     title: Task Router
     description: >
       Route tasks to matching Workers based on repo + agent role.
-      In v0.1.0, routes to the embedded Worker via Go channel.
-      In v0.2.0, places tasks in SQLite queue for Worker long-polling.
+      Persist tasks in SQLite and let Workers claim them through the
+      Coordinator task API. `workbuddy serve` and split deployments use
+      the same queue + long-poll handoff.
     priority: P0
     version: v0.1.0
     status: tested
@@ -389,7 +388,7 @@ requirements:
       - "AC-004-2: 在 Worker Registry 查找匹配 repo + role + status=online 的 Worker"
       - "AC-004-3: 无匹配 Worker → 任务进入 pending 队列，等待 Worker 上线后分配"
       - "AC-004-4: 构造任务上下文：通过 `gh issue view --json` 获取完整 issue 信息，加上 agent config"
-      - "AC-004-5: v0.1.0 通过 Go channel 将任务发送给内嵌 Worker"
+      - "AC-004-5: Router 将任务写入 SQLite task_queue，Worker 通过 Coordinator API 领取"
       - "AC-004-6: agent 定义不存在时记录错误并跳过，不崩溃"
       - "AC-004-7: 任务记录到 SQLite task_queue 表（含 status/worker_id/timestamps）"
       - "AC-004-8: 单元测试：有匹配 Worker、无匹配 Worker、agent 不存在 3 种场景"
@@ -652,7 +651,8 @@ requirements:
     code:
       - internal/reporter/format.go
       - internal/reporter/reporter.go
-    tests: []
+    tests:
+      - internal/reporter/format_golden_test.go
     deps: [REQ-005]
 
   - id: REQ-011
@@ -815,35 +815,38 @@ requirements:
   # ============================================================
 
   - id: REQ-017
-    title: CLI - serve command (single-process mode)
+    title: CLI - serve command (single-process wrapper)
     description: >
-      `workbuddy serve` — v0.1.0 single-process mode running both
-      Coordinator and Worker in the same binary. Coordinator polls
-      GitHub and manages state machine; embedded Worker executes
-      Claude Code via channel communication with bounded cross-issue
-      parallelism and per-issue serialization.
+      `workbuddy serve` runs Coordinator and Worker in the same binary,
+      but the Worker still talks to the Coordinator over the same HTTP
+      API used in split deployments. The one-command UX remains, while
+      comment payloads, auth behavior, session viewing, and task-result
+      handling stay identical to `workbuddy coordinator` +
+      `workbuddy worker`.
     priority: P0
     version: v0.1.0
     status: tested
     acceptance_criteria:
-      - "AC-017-1: cobra 命令 `workbuddy serve`，支持 --port, --poll-interval, --roles 标志"
+      - "AC-017-1: cobra 命令 `workbuddy serve`，支持 --listen, --auth, --loopback-only, --poll-interval, --roles 标志（保留 --port 兼容默认 loopback 端口）"
       - "AC-017-2: 启动时加载配置 + 初始化 SQLite，失败则打印错误并 exit 1"
       - "AC-017-3: 启动 Poller goroutine"
-      - "AC-017-4: 启动 State Machine + Task Router（channel 模式）"
-      - "AC-017-5: 启动内嵌 Worker（从 channel 接收任务，启动 Claude Code）"
-      - "AC-017-6: 启动 HTTP Server（/health + 审计端点）"
+      - "AC-017-4: 启动 Coordinator HTTP surface（含 /api/v1/tasks/*、audit、metrics、/sessions）"
+      - "AC-017-5: 启动 Worker，并通过 localhost Coordinator API 领取任务 / 提交结果"
+      - "AC-017-6: serve 与 split deployment 共享同一个 worker 实现和 reporter comment 形状"
       - "AC-017-7: 监听 SIGINT/SIGTERM，graceful shutdown：停止 poller → 等待 agent（最多 60s）→ 关闭 HTTP"
-      - "AC-017-8: 启动成功时打印 'workbuddy serving (repo=X, roles=[dev,test], poll=30s, port=8080)'"
+      - "AC-017-8: 启动成功时打印包含 repo / roles / poll / listen 的 serve banner"
       - "AC-017-9: 重启恢复——启动时从 SQLite 读取 task_queue 中 status=running 的任务，标记为 failed（子进程已丢失），status=pending 的任务重新路由"
       - "AC-017-10: 集成测试：启动 serve → 发送 SIGTERM → 验证优雅退出；重启后 pending 任务重新路由"
       - "AC-017-11: E2E 集成测试（mock-based）：使用 mock GHExecutor 模拟完整闭环——创建 Issue → Agent mock 执行 → mock Agent 改 label → 状态机检测 → 下一个 Agent 触发 → 完成或重试上限触发 failed"
-      - "AC-017-12: 内嵌 Worker 支持 `--max-parallel-tasks` 限制跨 issue 的并发执行；不同 issue 的任务可并行推进"
+      - "AC-017-12: Worker 支持 `--max-parallel-tasks`/concurrency 限制跨 issue 的并发执行；不同 issue 的任务可并行推进"
       - "AC-017-13: 同一 repo#issue 的任务必须串行执行；Issue 关闭时仅取消该 issue 当前运行中的任务，不影响其他 issue"
     code:
       - cmd/serve.go
+      - cmd/coordinator_session_proxy.go
       - internal/router/router.go
     tests:
       - cmd/serve_test.go
+      - cmd/coordinator_audit_test.go
     deps: [REQ-002, REQ-004, REQ-006, REQ-009, REQ-024]
 
   - id: REQ-018
@@ -965,9 +968,10 @@ requirements:
   - id: REQ-023
     title: Worker Registry
     description: >
-      Manage registered Workers. In v0.1.0, a single embedded Worker
-      auto-registers. In v0.2.0, remote Workers register via HTTP API.
-      Stores repo+roles per Worker, tracks heartbeat and online/offline.
+      Manage registered Workers. Workers always register through the
+      Coordinator HTTP API, including the Worker launched internally by
+      `workbuddy serve`. Stores repo+roles per Worker, tracks heartbeat
+      and online/offline.
     priority: P0
     version: v0.1.0
     status: tested
@@ -976,7 +980,7 @@ requirements:
       - "AC-023-2: 每次任务领取/心跳更新 last_heartbeat"
       - "AC-023-3: last_heartbeat 超过 3 个 poll 周期 → 标记 offline"
       - "AC-023-4: 支持按 repo + role 查询 online Worker 列表"
-      - "AC-023-5: v0.1.0 内嵌 Worker 自动注册（无需 HTTP）"
+      - "AC-023-5: serve 启动的本地 Worker 也通过 Coordinator HTTP API 自动注册"
       - "AC-023-6: 数据持久化到 SQLite workers 表"
       - "AC-023-7: 单元测试：注册/心跳/离线检测/按 repo+role 查询 4 种场景"
     code: [internal/registry/registry.go]
@@ -1010,7 +1014,7 @@ requirements:
   - id: REQ-027
     title: CLI - coordinator command
     description: >
-      `workbuddy coordinator` — run Coordinator only (no embedded Worker).
+      `workbuddy coordinator` — run Coordinator only.
       For v0.2.0 distributed deployment.
     priority: P1
     version: v0.2.0
@@ -1068,7 +1072,8 @@ requirements:
       Authenticate Workers connecting to Coordinator via shared secret or
       coordinator-issued per-worker bearer tokens.
       Prevent unauthorized Workers from registering and receiving tasks.
-      v0.1.0 内嵌 Worker 免认证；v0.2.0 HTTP 通信必须认证。
+      The same Bearer-token surface applies to split deployments and to
+      `workbuddy serve` when `--auth` is enabled.
     priority: P1
     version: v0.2.0
     status: tested
@@ -1076,18 +1081,20 @@ requirements:
       - "AC-029-1: Coordinator 启动时从 config.yaml 或环境变量 WORKBUDDY_AUTH_TOKEN 读取共享密钥"
       - "AC-029-2: Worker HTTP 请求须携带 Authorization: Bearer <token> header"
       - "AC-029-3: 无 token 或 token 不匹配的请求返回 401 Unauthorized"
-      - "AC-029-4: v0.1.0 内嵌 Worker 通过 channel 通信，跳过认证"
+      - "AC-029-4: `workbuddy serve` 在启用 `--auth` 时也通过 HTTP Bearer token 走同一套认证链路；未启用 auth 时仅允许 loopback 监听"
       - "AC-029-5: 未配置 token 时 Coordinator 启动打印 warning（不阻塞，但明确提示不安全）"
       - "AC-029-6: 单元测试：有效 token、无效 token、缺失 token、v0.1.0 跳过认证 4 种场景"
     code:
       - cmd/coordinator.go
       - cmd/worker.go
+      - cmd/coordinator_session_proxy.go
       - internal/app/coordinator.go
       - internal/store/store.go
       - internal/store/worker_tokens.go
       - internal/workerclient/client.go
     tests:
       - cmd/coordinator_test.go
+      - cmd/coordinator_audit_test.go
       - cmd/worker_test.go
       - internal/app/coordinator_test.go
       - internal/store/store_test.go
@@ -1173,7 +1180,7 @@ requirements:
       Extend `workbuddy status` with a `--tasks` flag that shows
       running/pending/failed tasks from the task_queue table,
       giving operators and monitoring agents structured visibility
-      into what the embedded worker is currently doing.
+      into what the canonical worker path is currently doing.
     priority: P0
     version: v0.2.0
     status: tested
@@ -1278,7 +1285,7 @@ requirements:
       - main.go
       - cmd/status.go
       - cmd/serve.go
-      - internal/worker/embedded.go
+      - internal/worker/distributed.go
       - cmd/exit_error.go
       - internal/tasknotify/hub.go
     tests:
@@ -1662,9 +1669,11 @@ requirements:
     description: >
       Allow a running worker to add or remove repo-to-local-path bindings
       without restart. Workers expose a loopback-only management API,
-      persist a discoverable `.workbuddy/worker.addr`, re-register with the
-      coordinator when bindings change, and route each claimed task through
-      the repo-specific local checkout/worktree root.
+      persist a discoverable `.workbuddy/worker.addr`, can optionally
+      advertise a coordinator-reachable management base URL for split-host
+      session proxying, re-register with the coordinator when bindings
+      change, and route each claimed task through the repo-specific local
+      checkout/worktree root.
     priority: P1
     version: v0.2.0
     status: tested
@@ -1672,6 +1681,7 @@ requirements:
       - "AC-049-1: `workbuddy worker` supports stable `--id` with hostname default and `--repos owner/repo=/path,...` startup bindings"
       - "AC-049-2: legacy `--repo owner/repo` remains supported and defaults its path to cwd"
       - "AC-049-3: worker starts a loopback-only management API at `--mgmt-addr` (default 127.0.0.1:0) and writes the resolved address to `.workbuddy/worker.addr`"
+      - "AC-049-3a: split-host deployments can register a coordinator-reachable management base URL via `--mgmt-public-url`, and that URL requires bearer auth that exactly matches the Coordinator shared token"
       - "AC-049-4: GET/POST/DELETE `/mgmt/repos` list, add, and remove repo bindings; worker re-registers with coordinator after successful changes"
       - "AC-049-5: `workbuddy worker repos add|remove|list` discover the management API via `.workbuddy/worker.addr`"
       - "AC-049-6: claimed tasks use repo-specific path mapping for RepoRoot/WorkDir/worktree isolation"
@@ -1861,7 +1871,7 @@ requirements:
     acceptance_criteria:
       - "AC-056-1: Runtime detection sets Result.Meta[infra_failure]=true when the process cannot be started (exec.Error pre-LLM), a Rust plugin panic fires before any agent output, or the Go scanner hits a buffer-too-long condition; applies to both Claude and Codex runtimes"
       - "AC-056-2: Reporter renders a distinct 'Infra Error' header (not 'Failure') for infra-failure results; body surfaces the launcher reason and explicitly states this was not an agent verdict"
-      - "AC-056-3: In the embedded and distributed worker paths (`internal/worker/embedded.go`, `cmd/worker.go`) an infra-failure still posts a report comment but does NOT call StateMachine.MarkAgentCompleted with a failure signal; the #130 failure-cap bounds retries"
+      - "AC-056-3: In the canonical worker path (`internal/worker/distributed.go`, reached from both `cmd/serve.go` and `cmd/worker.go`) an infra-failure still posts a report comment but does NOT call StateMachine.MarkAgentCompleted with a failure signal; the #130 failure-cap bounds retries"
       - "AC-056-4: A dedicated eventlog entry (eventlog.TypeInfraFailure) is emitted for every infra-failure run"
       - "AC-056-5: Unit tests cover pre-exec launcher error producing Meta[infra_failure] and an 'Infra Error' rendered comment; genuine agent exit!=0 NOT producing Meta[infra_failure] and still rendering as 'Failure'; worker path infra-failure does not call MarkAgentCompleted's fail path"
     code:
@@ -1874,7 +1884,7 @@ requirements:
       - internal/reporter/format.go
       - internal/reporter/reporter.go
       - internal/eventlog/eventlog.go
-      - internal/worker/embedded.go
+      - internal/worker/distributed.go
       - internal/worker/executor.go
       - internal/workerclient/client.go
       - cmd/coordinator.go
@@ -1883,7 +1893,6 @@ requirements:
     tests:
       - internal/launcher/infra_failure_test.go
       - internal/runtime/gha_runner_test.go
-      - cmd/serve_infra_failure_test.go
       - cmd/coordinator_infra_failure_test.go
     deps: [REQ-055]
 
@@ -1947,7 +1956,7 @@ requirements:
       - "AC-058-8: When multiple agents share the same per-issue worktree (dev→review handoff), Manager tracks active references; Remove decrements the count and only performs the actual git worktree remove + branch delete when the last reference releases, so a late defer from a finished agent does not invalidate cwd for a still-running agent"
     code:
       - internal/workspace/workspace.go
-      - internal/worker/embedded.go
+      - internal/worker/distributed.go
       - internal/worker/executor.go
       - cmd/worker.go
       - internal/router/router.go
@@ -2530,7 +2539,7 @@ requirements:
       - internal/config/types.go
       - internal/config/loader.go
       - internal/statemachine/statemachine.go
-      - internal/worker/embedded.go
+      - internal/worker/distributed.go
       - .github/workbuddy/workflows/default.md
       - cmd/initdata/workflows/default.md
     tests:
