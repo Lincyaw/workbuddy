@@ -1,0 +1,24 @@
+name: validate-docs
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  validate-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Validate docs/skills/plugin drift surfaces
+        run: go run . validate-docs --strict

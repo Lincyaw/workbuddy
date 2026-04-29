@@ -44,7 +44,7 @@ Dev writes code + PR → flips to `reviewing`. Review evaluates each AC →
 |------|---------|-------------|
 | **Serve** (single process) | `workbuddy serve` | Local dev, single-host setups, testing |
 | **Distributed** (coordinator + workers) | `workbuddy coordinator` + `workbuddy worker` | Workers on different hosts, horizontal scale, multi-repo |
-| **Managed install** (systemd) | `workbuddy deploy install` | Long-lived production; survives reboots; `deploy redeploy`/`deploy upgrade` update it, and `deploy stop`/`deploy start`/`deploy delete` pause, resume, or remove it |
+| **Managed install** (systemd) | `workbuddy deploy install` | Long-lived production; survives reboots; `deploy redeploy`/`deploy upgrade` for updates |
 
 All three share the same state machine, SQLite store, and agent configs.
 Run `workbuddy <mode> --help` for flags, `workbuddy deploy install --help`
@@ -62,20 +62,17 @@ Run `workbuddy --help` for the full list. Grouped by intent:
 **Run workbuddy**
 - `workbuddy serve` — single-process dev mode
 - `workbuddy coordinator` + `workbuddy worker` — distributed mode
-- `workbuddy deploy install|redeploy|upgrade|stop|start|delete` — managed systemd install lifecycle
+- `workbuddy deploy install|redeploy|upgrade` — managed systemd install
 
 **Observe**
 - `workbuddy status` — issues, tasks, events, stuck issues, or watch until done
-- `workbuddy logs --issue N --repo owner/name` — per-attempt session logs (stdout/stderr/tool calls)
+- `workbuddy logs <issue>` — per-attempt session logs (stdout/stderr/tool calls)
 - `workbuddy diagnose` — surfaces stuck issues, 3-retry caps, stale claims; `--fix` for safe auto-remediation
 
 **Recover**
-- `workbuddy cache invalidate` — force re-poll after manual label edits (legacy `cache-invalidate` still works with a deprecation warning)
-- `workbuddy issue restart` — re-run one stuck issue end-to-end (legacy `admin restart-issue` still works with a deprecation warning)
+- `workbuddy cache-invalidate` — force re-poll after manual label edits
 - `workbuddy recover` — clean stale processes/worktrees/claims after a crash
 - `workbuddy operator-watch` — auto-dispatch Claude on coordinator incident files
-
-Destructive commands (`issue restart`, `cache invalidate`, `deploy stop/delete`, `recover --prune-remote-branches`) accept `--dry-run` to preview actions and `--force` to skip the TTY confirmation. Output-producing commands accept `--format {text,json}`.
 
 **Worker runtime ops**
 - `workbuddy worker repos add|list|remove` — change a running worker's repo bindings without restart
@@ -101,7 +98,7 @@ read the relevant decision docs for depth; the short version:
 Impact for operators: if `diagnose` says "failed 3 times in a row", check
 the issue's comments — if they're "Infra Error", the bug is infrastructure
 (usually runtime/launcher), not the acceptance criteria. Fix infra and
-`workbuddy cache invalidate` to restart; don't rewrite the issue.
+`cache-invalidate` to restart; don't rewrite the issue.
 
 ## Common workflows
 
@@ -126,7 +123,7 @@ workbuddy diagnose --repo owner/name
 
 # Manually nudge state and force re-poll
 gh issue edit N -R owner/name --remove-label status:blocked --add-label status:developing
-workbuddy cache invalidate --repo owner/name --issue N
+workbuddy cache-invalidate --repo owner/name --issue N
 ```
 
 **Add a repo to a running deployment** (no restart)

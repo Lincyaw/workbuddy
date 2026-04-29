@@ -55,8 +55,8 @@ ps aux | grep "workbuddy worker" | grep -v grep
    ls -lt .workbuddy/sessions/
    
    # Check latest activity in a session
-   tail -3 .workbuddy/sessions/session-<ID>/events-v1.jsonl | \
-     python3 -c "import sys,json; [print((json.loads(l).get('kind') or '') + ' ' + str(json.loads(l).get('payload', {}))[:120]) for l in sys.stdin]"
+   tail -3 .workbuddy/sessions/session-<ID>/codex-exec.jsonl | \
+     python3 -c "import sys,json; [print(json.loads(l).get('item',{}).get('command','')[:100] or json.loads(l).get('item',{}).get('type','')) for l in sys.stdin]"
    ```
 
 ### Serve mode checks
@@ -189,8 +189,7 @@ ps aux | grep "workbuddy worker" | grep -v grep
 - **Cause:** Poller hasn't run yet (poll_interval), or issue cache is stale.
 - **Fix:** Wait for next poll cycle, or invalidate cache:
   ```bash
-  ./workbuddy cache invalidate --repo Owner/Repo --issue N
-  # or, for machine-readable output: --format json
+  ./workbuddy cache-invalidate --repo Owner/Repo --issue N
   ```
 
 ### H. Codex stuck in API inference (most common failure mode)
@@ -199,7 +198,7 @@ ps aux | grep "workbuddy worker" | grep -v grep
 - **Diagnosis:**
   ```bash
   # Check JSONL staleness
-  for f in $(find .workbuddy -name "events-v1.jsonl" -newer /tmp/workbuddy-worker*.log); do
+  for f in $(find .workbuddy -name "codex-exec.jsonl" -newer /tmp/workbuddy-worker*.log); do
     age=$(( $(date +%s) - $(stat -c '%Y' "$f") ))
     if [ $age -gt 600 ]; then echo "STALE ($age s): $f"; fi
   done
@@ -214,7 +213,7 @@ ps aux | grep "workbuddy worker" | grep -v grep
 - **Fix:** Kill the worker process (`kill -9`), clean up stale running tasks in DB, start new worker.
 
 ### J. Issue claim stuck after coordinator crash
-- **Symptom:** No dispatch after `cache invalidate`; `diagnose` shows a claim still held by a dead coordinator/worker.
+- **Symptom:** No dispatch after cache-invalidate; `diagnose` shows a claim still held by a dead coordinator/worker.
 - **Cause:** Per-issue claim (REQ-057/059) wasn't released cleanly.
 - **Self-heal:** Claims have a TTL — wait for expiry and the next poll overwrites with a `claim_expired` event.
 - **Force:** `workbuddy recover` clears stale runtime state (processes, worktrees, claims).
@@ -222,9 +221,9 @@ ps aux | grep "workbuddy worker" | grep -v grep
 ### K. Consecutive-failure cap reached (REQ-055)
 - **Symptom:** `workbuddy diagnose` reports "dev-agent has failed 3 times in a row"; dispatch stops.
 - **First check:** is it infra or verdict? Read the latest few comments on the issue:
-  - "Infra Error" header → launcher/runtime crash (REQ-056). Fix infra, `workbuddy cache invalidate`, retry.
+  - "Infra Error" header → launcher/runtime crash (REQ-056). Fix infra, `cache-invalidate`, retry.
   - "Failure" header → agent disagrees with the AC. Tighten AC or intervene manually.
-- **Reset:** fix the root cause, flip label back to `status:developing`, `workbuddy cache invalidate`. To force a full replay (clear poller cache + claim + dependency state in one shot) use `workbuddy issue restart --repo Owner/Repo --issue N --force`.
+- **Reset:** fix the root cause, flip label back to `status:developing`, `cache-invalidate`.
 
 ### L. Worktree setup failed — worker refuses to run
 - **Symptom:** Issue comment: "worktree setup failed"; task marked failed.
@@ -242,7 +241,7 @@ watch -n 60 "gh issue view N -R Owner/Repo --json labels --jq '[.labels[].name]'
 ### Strategy 2: Monitor session log growth (agent is working)
 ```bash
 # Track codex activity
-watch -n 10 "wc -l .workbuddy/sessions/session-*/events-v1.jsonl 2>/dev/null"
+watch -n 10 "wc -l .workbuddy/sessions/session-*/codex-exec.jsonl 2>/dev/null"
 ```
 
 ### Strategy 3: Monitor with until-loop (wait for completion)

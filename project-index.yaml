@@ -1541,7 +1541,6 @@ requirements:
       - internal/operatorwatch/watch.go
     tests:
       - cmd/operator_watch_test.go
-      - internal/operatorwatch/watch_test.go
     deps: [REQ-009]
     title: Event-driven operator anomaly detector
     description: >
@@ -2709,3 +2708,46 @@ requirements:
       - internal/validate/validate_codes_test.go
     deps: [REQ-081, REQ-082]
 
+  - id: REQ-084
+    title: Docs/skills/plugin consistency validator
+    description: >
+      `workbuddy validate-docs` statically checks the repo's documentation-
+      shaped drift surfaces. L1 verifies that `project-index.yaml` `code`,
+      `tests`, and `related_docs` entries still point at existing files and
+      that SKILL.md bodies do not reference missing `references/*.md` files.
+      L2 shells out to `scripts/sync_codex_plugin.py --check` so generated
+      `plugins/workbuddy/` content stays in sync with the canonical
+      `.claude/plugins/workbuddy/` source tree. L3 compares the frontmatter
+      shape of `cmd/initdata/agents/*.md` and `.github/workbuddy/agents/*.md`
+      plus warns when duplicated skill catalogs diverge without a
+      `WHY-TWO-COPIES.md` explanation. L4 lints SKILL.md frontmatter/body
+      hygiene (directory-name match, sufficiently specific description, and
+      direct CLI-flag tables). Warnings stay non-fatal unless `--strict`
+      is passed, matching the existing validator contract.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-084-1: `workbuddy validate-docs` exists and exits 0 on a clean checkout"
+      - "AC-084-2: WB-D001..WB-D004 cover project-index path existence and missing skill references"
+      - "AC-084-3: WB-D101 fires when `scripts/sync_codex_plugin.py --check` detects generated plugin drift"
+      - "AC-084-4: WB-D201/WB-D202 cover sibling agent/skill parity drift"
+      - "AC-084-5: WB-D301/WB-D302/WB-D303 lint SKILL.md hygiene and `--strict` promotes warnings to failure"
+      - "AC-084-6: Layered passing/failing fixtures live under `internal/validatedocs/testdata/`"
+      - "AC-084-7: PR CI runs `workbuddy validate-docs --strict`"
+    code:
+      - cmd/validate_docs.go
+      - internal/validatedocs/validate.go
+      - scripts/sync_codex_plugin.py
+      - .github/workflows/validate-docs.yml
+      - .codex/skills/setup-repo/WHY-TWO-COPIES.md
+      - .claude/plugins/workbuddy/skills/setup-repo/WHY-TWO-COPIES.md
+      - CLAUDE.md
+    tests:
+      - cmd/validate_docs_test.go
+      - internal/validatedocs/validate_test.go
+      - internal/validatedocs/testdata/
+    related_docs:
+      - CLAUDE.md
+      - .github/workflows/validate-docs.yml
+    deps: [REQ-021, REQ-083]

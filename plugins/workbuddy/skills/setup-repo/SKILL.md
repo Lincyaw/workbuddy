@@ -307,6 +307,7 @@ states:
 
   done:
     enter_label: "status:done"
+    action: close_issue
 ```
 
 ### State graph
@@ -318,8 +319,7 @@ developing ⇄ reviewing → done
 
 Any revisit of a state — including developing↔blocked — counts toward
 max_retries; exceeding the limit records retry/failure intent. Label
-writeback remains an agent/human action, and closing the issue after merge is
-still the responsibility of the review-agent or the human who merged the PR.
+writeback remains an agent/human action.
 ```
 ````
 
@@ -489,30 +489,22 @@ after committing and pushing the config:
 ```bash
 export WORKBUDDY_AUTH_TOKEN="<token>"
 workbuddy repo register \
-  --coordinator http://coordinator-host:8081
-# or: workbuddy repo register --coordinator ... --token-file /path/to/token
+  --coordinator http://coordinator-host:8081 \
+  --token "$WORKBUDDY_AUTH_TOKEN"
 ```
 
 This must be run from the target repo's root directory. It serializes
 the local `.github/workbuddy/` config and POSTs it to the coordinator.
-Add `--format json` if another program will consume the output.
 
 Then start a worker for the repo:
 
 ```bash
 workbuddy worker \
   --coordinator http://coordinator-host:8081 \
-  --token-file /etc/workbuddy/auth-token \
+  --token "$WORKBUDDY_AUTH_TOKEN" \
   --runtime codex \
-  --repos Owner/Repo=/path/to/repo
+  --repo Owner/Repo
 ```
-
-Auth and repo-binding guidance:
-- Prefer `--token-file` or `WORKBUDDY_AUTH_TOKEN` over plain `--token`. The
-  plain form still works but prints a deprecation warning because the value
-  leaks into `ps` and shell history.
-- `--repos OWNER/NAME=/path` is the canonical flag. The legacy `--repo
-  Owner/Repo` alias defaults the path to cwd and prints a deprecation warning.
 
 The worker must also be started from the repo root — it loads agent
 prompt templates from `.github/workbuddy/agents/` locally.
