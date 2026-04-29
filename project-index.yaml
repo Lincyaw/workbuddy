@@ -2337,3 +2337,141 @@ requirements:
     tests:
       - cmd/root_contract_test.go
     deps: [REQ-032, REQ-042, REQ-060]
+
+  - id: REQ-071
+    title: Validate diagnostic severity, code, and --strict gating
+    description: >
+      Extend `internal/validate.Diagnostic` with `Severity` (error|warning|info)
+      and stable `Code` fields, plumb both through the CLI's text and JSON
+      output, and add a `--strict` flag that promotes warnings to errors.
+      Existing diagnostics keep their back-compat string formatting when no
+      severity/code are set so external callers do not break. Issue #204 batch
+      1 — foundation for the new validation codes added in subsequent
+      requirements.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-071-1: Diagnostic exposes Severity and Code; EffectiveSeverity defaults empty to error"
+      - "AC-071-2: Diagnostic.String() uses `<basename>:<line>: <severity>[<code>] <message>` for non-default severity, keeps the legacy format otherwise"
+      - "AC-071-3: cmd/validate JSON output emits `severity` and `code` fields"
+      - "AC-071-4: warnings exit 0 by default; --strict promotes warnings to non-zero exit"
+      - "AC-071-5: Unit tests cover severity classification, --strict, and JSON shape"
+    code:
+      - internal/validate/validate.go
+      - cmd/validate.go
+    tests:
+      - internal/validate/validate_codes_test.go
+      - cmd/validate_test.go
+    deps: [REQ-018]
+
+  - id: REQ-072
+    title: Validate cross-reference integrity (WB-X001..X006)
+    description: >
+      Layer-2 validator checks that catch missing or inconsistent references
+      between agent files, workflow states, and the runtime/role catalogs.
+      Codes WB-X001 unknown agent reference (existing behaviour, now tagged),
+      WB-X002 agent basename mismatch (warning), WB-X003 unknown runtime,
+      WB-X004 unknown role, WB-X005 duplicate enter_label within a workflow,
+      WB-X006 unbound trigger label (existing behaviour, now tagged).
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-072-1: Each WB-X00x code is emitted with file:line and the correct severity"
+      - "AC-072-2: Existing WB-X001 / WB-X006 messages keep their wording for back-compat"
+      - "AC-072-3: ValidRuntimes constant lists the runtimes registered in internal/runtime"
+      - "AC-072-4: ValidRoles is exactly {dev, review} per docs/decisions/2026-04-15-agent-role-consolidation.md"
+      - "AC-072-5: Fixture-based table tests exercise every code with a positive and negative case"
+    code:
+      - internal/validate/cross_refs.go
+      - internal/validate/validate.go
+    tests:
+      - internal/validate/cross_refs_test.go
+      - internal/validate/validate_codes_test.go
+    deps: [REQ-071]
+
+  - id: REQ-073
+    title: Validate template field schema (WB-T001, WB-T101)
+    description: >
+      Layer-3 template-field check. Reflects over runtime.TaskContext to build
+      a canonical FieldSchema, parses each agent's `prompt:` template with
+      runtime.TemplateFuncMap, walks the parse tree to enumerate every dotted
+      field reference, and reports unknown paths with a Levenshtein-based
+      "did you mean…?" hint. WB-T001 = parse error, WB-T101 = unknown field.
+      Includes a golden snapshot of the schema to guard against accidental
+      drift when TaskContext gains a field.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-073-1: BuildTaskContextSchema reflects over runtime.TaskContext recursively, skipping unexported fields and opaque leaves (time, json.RawMessage)"
+      - "AC-073-2: Slice element fields are exposed as `Path[].Sub` and resolve correctly inside `range` blocks"
+      - "AC-073-3: WB-T001 fires on broken template syntax with file:line"
+      - "AC-073-4: WB-T101 fires on unknown fields with a hint when a candidate is within Levenshtein distance ≤ 2"
+      - "AC-073-5: runtime.TemplateFuncMap() is exported and used by the validator so funcs like shellEscape do not falsely trigger WB-T001"
+      - "AC-073-6: Golden snapshot test guards the schema against drift"
+    code:
+      - internal/validate/template_check.go
+      - internal/validate/template_schema.go
+      - internal/runtime/template.go
+    tests:
+      - internal/validate/template_check_test.go
+      - internal/validate/template_schema_test.go
+      - internal/validate/testdata/template_fields.golden
+      - internal/validate/validate_codes_test.go
+    deps: [REQ-071]
+
+  - id: REQ-074
+    title: Validate semantic / cross-knob consistency (WB-S001..S004)
+    description: >
+      Layer-4 semantic checks that catch foot-guns crossing config files.
+      WB-S001 — agent.policy.timeout < worker.stale_inference.idle_threshold;
+      WB-S002 — policy.timeout > 4h (likely unit typo);
+      WB-S003 — declared runtime binary missing on $PATH (warning,
+      suppressible via `--no-runtime-check`);
+      WB-S004 — agent assigned to a workflow state with no outgoing
+      transitions.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-074-1: WB-S001 fires when policy.timeout < worker.stale_inference.idle_threshold"
+      - "AC-074-2: WB-S002 fires when policy.timeout > 4h (warning)"
+      - "AC-074-3: WB-S003 fires when the declared runtime's binary is not on $PATH (warning, suppressible)"
+      - "AC-074-4: WB-S004 fires when a workflow state with no transitions has an agent assigned"
+      - "AC-074-5: --no-runtime-check disables WB-S003 only"
+    code:
+      - internal/validate/semantics.go
+      - internal/validate/validate.go
+      - cmd/validate.go
+    tests:
+      - internal/validate/semantics_test.go
+      - internal/validate/validate_codes_test.go
+    deps: [REQ-071]
+
+  - id: REQ-075
+    title: Editor-facing JSON Schemas for agent and workflow YAML
+    description: >
+      Publish JSON Schemas under `schemas/` so editors with YAML schema
+      support (VSCode, JetBrains, Helix) get autocomplete and inline lints
+      for `.github/workbuddy/agents/*.md` and
+      `.github/workbuddy/workflows/*.md` frontmatter. The state-machine YAML
+      embedded in the workflow Markdown body is not covered by JSON Schema
+      and stays the responsibility of `workbuddy validate`.
+    priority: P2
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-075-1: schemas/agent.schema.json exists and matches AgentConfig (Batch 1 surface)"
+      - "AC-075-2: schemas/workflow.schema.json exists and matches WorkflowConfig frontmatter"
+      - "AC-075-3: CLAUDE.md project conventions section references both schema files and explains the embedded-YAML caveat"
+      - "AC-075-4: Repo's own .github/workbuddy/agents/*.md and workflows/*.md continue to validate cleanly"
+    code:
+      - schemas/agent.schema.json
+      - schemas/workflow.schema.json
+      - CLAUDE.md
+    tests:
+      - internal/validate/validate_codes_test.go
+    deps: [REQ-071]
+

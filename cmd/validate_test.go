@@ -105,6 +105,80 @@ func TestRunValidateWithOpts_JSONInvalid(t *testing.T) {
 	}
 }
 
+func TestRunValidateWithOpts_WarningExitsZeroByDefault(t *testing.T) {
+	// A WB-X002 (basename mismatch) is a warning, so without --strict
+	// validate should still exit 0 even though stderr lists it.
+	configDir := writeValidateFixture(t, validateFixtureFiles{
+		"config.yaml":            "repo: octo/workbuddy\n",
+		"agents/wrongname.md":    validateAgentFixture("dev-agent", "status:developing"),
+		"agents/review-agent.md": validateAgentFixture("review-agent", "status:reviewing"),
+		"workflows/default.md":   validateWorkflowFixture(),
+	})
+
+	var stderr bytes.Buffer
+	err := runValidateWithOpts(t.Context(), &validateOpts{configDir: configDir, noRuntimeCheck: true}, io.Discard, &stderr)
+	if err != nil {
+		t.Fatalf("warning-only run should exit 0, got %v (stderr=%q)", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "WB-X002") {
+		t.Fatalf("stderr should mention WB-X002, got %q", stderr.String())
+	}
+}
+
+func TestRunValidateWithOpts_StrictPromotesWarnings(t *testing.T) {
+	configDir := writeValidateFixture(t, validateFixtureFiles{
+		"config.yaml":            "repo: octo/workbuddy\n",
+		"agents/wrongname.md":    validateAgentFixture("dev-agent", "status:developing"),
+		"agents/review-agent.md": validateAgentFixture("review-agent", "status:reviewing"),
+		"workflows/default.md":   validateWorkflowFixture(),
+	})
+
+	var stderr bytes.Buffer
+	err := runValidateWithOpts(t.Context(), &validateOpts{configDir: configDir, strict: true, noRuntimeCheck: true}, io.Discard, &stderr)
+	if err == nil {
+		t.Fatal("--strict should fail when warnings are present")
+	}
+	var exitErr *cliExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected exit 1 from --strict, got %v", err)
+	}
+}
+
+func TestRunValidateWithOpts_JSONIncludesSeverityAndCode(t *testing.T) {
+	configDir := writeValidateFixture(t, validateFixtureFiles{
+		"config.yaml":            "repo: octo/workbuddy\n",
+		"agents/review-agent.md": validateAgentFixture("review-agent", "status:reviewing"),
+		"workflows/default.md":   strings.Replace(validateWorkflowFixture(), "agent: dev-agent", "agent: ghost-agent", 1),
+	})
+
+	var stdout bytes.Buffer
+	err := runValidateWithOpts(t.Context(), &validateOpts{configDir: configDir, format: outputFormatJSON, noRuntimeCheck: true}, &stdout, io.Discard)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+
+	var result validateResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	foundSeverity := false
+	foundCode := false
+	for _, d := range result.Diagnostics {
+		if d.Severity != "" {
+			foundSeverity = true
+		}
+		if d.Code != "" {
+			foundCode = true
+		}
+	}
+	if !foundSeverity {
+		t.Errorf("expected at least one diagnostic with severity, got %+v", result.Diagnostics)
+	}
+	if !foundCode {
+		t.Errorf("expected at least one diagnostic with code, got %+v", result.Diagnostics)
+	}
+}
+
 func TestValidateHelp(t *testing.T) {
 	var out bytes.Buffer
 	rootCmd.SetOut(&out)

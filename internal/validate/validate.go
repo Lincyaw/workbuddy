@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"gopkg.in/yaml.v3"
@@ -15,11 +16,38 @@ import (
 
 var yamlLineErrorRe = regexp.MustCompile(`line (\d+):`)
 
-// Diagnostic represents a single validation failure.
+// Severity classifies a Diagnostic. Only "error" entries cause a non-zero
+// exit code from `workbuddy validate`. "warning" entries print to stderr but
+// exit 0 unless --strict is set; "info" entries are advisory.
+type Severity string
+
+// Severity values.
+const (
+	SeverityError   Severity = "error"
+	SeverityWarning Severity = "warning"
+	SeverityInfo    Severity = "info"
+)
+
+// Diagnostic represents a single validation finding.
+//
+// The Severity and Code fields are optional — when Severity is empty it is
+// treated as SeverityError for back-compat with the original API. Code is a
+// stable identifier (e.g. "WB-X003") used by editor integrations and tests.
 type Diagnostic struct {
-	Path    string
-	Line    int
-	Message string
+	Path     string
+	Line     int
+	Severity Severity
+	Code     string
+	Message  string
+}
+
+// EffectiveSeverity returns d.Severity, defaulting to SeverityError when the
+// field is empty.
+func (d Diagnostic) EffectiveSeverity() Severity {
+	if d.Severity == "" {
+		return SeverityError
+	}
+	return d.Severity
 }
 
 func (d Diagnostic) String() string {
@@ -27,7 +55,19 @@ func (d Diagnostic) String() string {
 	if line <= 0 {
 		line = 1
 	}
-	return fmt.Sprintf("%s:%d: %s", filepath.Base(d.Path), line, d.Message)
+	sev := d.Severity
+	// Back-compat: when no severity/code are set, render the original
+	// "<file>:<line>: <message>" format used by the v0.4.0 validator.
+	if (sev == "" || sev == SeverityError) && d.Code == "" {
+		return fmt.Sprintf("%s:%d: %s", filepath.Base(d.Path), line, d.Message)
+	}
+	if sev == "" {
+		sev = SeverityError
+	}
+	if d.Code == "" {
+		return fmt.Sprintf("%s:%d: %s %s", filepath.Base(d.Path), line, sev, d.Message)
+	}
+	return fmt.Sprintf("%s:%d: %s[%s] %s", filepath.Base(d.Path), line, sev, d.Code, d.Message)
 }
 
 type agentDoc struct {
@@ -35,6 +75,23 @@ type agentDoc struct {
 	Path         string
 	NameLine     int
 	TriggerLines []labelRef
+
+	// Runtime, Role, Prompt are scalar fields drawn from the frontmatter.
+	// The corresponding *Line fields are absolute line numbers in the
+	// source file (1-based) used to point diagnostics at the right token.
+	Runtime     string
+	RuntimeLine int
+
+	Role     string
+	RoleLine int
+
+	Prompt     string
+	PromptLine int // line where the literal prompt body begins (post-`prompt:` indicator)
+
+	// Policy timeout (Go duration). 0 if unset/unparseable.
+	PolicyTimeout     time.Duration
+	PolicyTimeoutLine int
+	PolicyTimeoutRaw  string
 }
 
 type labelRef struct {
@@ -65,8 +122,23 @@ type transitionDoc struct {
 	ToLine int
 }
 
-// ValidateDir validates a .github/workbuddy configuration directory.
+// Options controls optional validator behaviour. The zero value performs
+// every check.
+type Options struct {
+	// SkipRuntimeBinaryCheck disables WB-S003 (runtime binary on $PATH).
+	// Useful for CI/sandbox environments where neither codex nor claude
+	// is installed.
+	SkipRuntimeBinaryCheck bool
+}
+
+// ValidateDir validates a .github/workbuddy configuration directory using
+// the default Options.
 func ValidateDir(configDir string) ([]Diagnostic, error) {
+	return ValidateDirWithOptions(configDir, Options{})
+}
+
+// ValidateDirWithOptions validates a .github/workbuddy configuration directory.
+func ValidateDirWithOptions(configDir string, opts Options) ([]Diagnostic, error) {
 	info, err := os.Stat(configDir)
 	if err != nil {
 		return nil, fmt.Errorf("validate: config directory %q: %w", configDir, err)
@@ -102,6 +174,8 @@ func ValidateDir(configDir string) ([]Diagnostic, error) {
 
 	for _, wf := range workflows {
 		diags = append(diags, validateWorkflowGraph(wf)...)
+		// WB-X005: enter_label collisions across states in one workflow.
+		diags = append(diags, validateEnterLabelUniqueness(wf)...)
 		for _, stateName := range wf.StateOrder {
 			state := wf.States[stateName]
 			if strings.TrimSpace(state.Agent) == "" {
@@ -109,9 +183,11 @@ func ValidateDir(configDir string) ([]Diagnostic, error) {
 			}
 			if _, ok := agents[state.Agent]; !ok {
 				diags = append(diags, Diagnostic{
-					Path:    wf.Path,
-					Line:    state.AgentLine,
-					Message: fmt.Sprintf("workflow %q references unknown agent %q", wf.Name, state.Agent),
+					Path:     wf.Path,
+					Line:     state.AgentLine,
+					Severity: SeverityError,
+					Code:     CodeUnknownAgent,
+					Message:  fmt.Sprintf("workflow %q references unknown agent %q", wf.Name, state.Agent),
 				})
 			}
 		}
@@ -130,13 +206,29 @@ func ValidateDir(configDir string) ([]Diagnostic, error) {
 			}
 			if _, ok := enterLabels[trigger.Label]; !ok {
 				diags = append(diags, Diagnostic{
-					Path:    agent.Path,
-					Line:    trigger.Line,
-					Message: fmt.Sprintf("agent %q trigger label %q does not match any workflow state label", agent.Name, trigger.Label),
+					Path:     agent.Path,
+					Line:     trigger.Line,
+					Severity: SeverityError,
+					Code:     CodeUnboundTriggerLabel,
+					Message:  fmt.Sprintf("agent %q trigger label %q does not match any workflow state label", agent.Name, trigger.Label),
 				})
 			}
 		}
 	}
+
+	// Layer 2 — cross-reference checks (WB-X002, WB-X003, WB-X004).
+	for _, name := range agentNames {
+		diags = append(diags, validateAgentCrossRefs(agents[name])...)
+	}
+
+	// Layer 3 — template-field schema check (WB-T001, WB-T101).
+	schema := BuildTaskContextSchema()
+	for _, name := range agentNames {
+		diags = append(diags, validateAgentTemplate(agents[name], schema)...)
+	}
+
+	// Layer 4 — semantic / cross-knob consistency (WB-S001..S004).
+	diags = append(diags, validateSemantics(configDir, agents, workflows, semanticsOptions(opts))...)
 
 	sort.Slice(diags, func(i, j int) bool {
 		a := diags[i]
@@ -250,6 +342,32 @@ func parseAgentFile(path string) (*agentDoc, []Diagnostic) {
 	root := doc.Content[0]
 	agent := &agentDoc{Path: path}
 	agent.Name, agent.NameLine = scalarValue(root, "name", fmStartLine)
+	agent.Runtime, agent.RuntimeLine = scalarValue(root, "runtime", fmStartLine)
+	agent.Role, agent.RoleLine = scalarValue(root, "role", fmStartLine)
+
+	if promptNode, _ := mappingValue(root, "prompt"); promptNode != nil && promptNode.Kind == yaml.ScalarNode {
+		agent.Prompt = promptNode.Value
+		// For block scalars (`prompt: |`), Node.Line points at the
+		// declaration line; the actual body begins on the next line.
+		// For flow scalars on the same line we keep the declaration line.
+		baseLine := absoluteLine(fmStartLine, promptNode.Line)
+		if promptNode.Style == yaml.LiteralStyle || promptNode.Style == yaml.FoldedStyle {
+			agent.PromptLine = baseLine + 1
+		} else {
+			agent.PromptLine = baseLine
+		}
+	}
+
+	if policyNode, _ := mappingValue(root, "policy"); policyNode != nil && policyNode.Kind == yaml.MappingNode {
+		raw, line := scalarValue(policyNode, "timeout", fmStartLine)
+		if raw != "" {
+			agent.PolicyTimeoutRaw = raw
+			agent.PolicyTimeoutLine = line
+			if d, err := time.ParseDuration(raw); err == nil {
+				agent.PolicyTimeout = d
+			}
+		}
+	}
 
 	triggersNode, _ := mappingValue(root, "triggers")
 	if triggersNode != nil && triggersNode.Kind == yaml.SequenceNode {
