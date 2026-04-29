@@ -58,8 +58,16 @@ one cycle. On cap-hit the Coordinator stops dispatching `dev-agent` and
 (assembled from existing `completed` events — no agent re-invocation), and
 emits a `dev_review_cycle_cap_reached` event + alert. A heads-up alert fires
 when `cycles == max_review_cycles - 1` so an operator can intervene
-preemptively. Use `workbuddy issue restart` to clear the counter after human
-intervention.
+preemptively.
+
+To resume work after a cap-hit (or any other manual block), a human flips
+`status:blocked` → `status:developing` on the issue. The Coordinator
+detects this label transition and **resets the cycle counter to zero**
+(Option A semantics: "give the agent another shot"). The
+blocked→developing transition itself does not count as a round-trip, so
+the next genuine review→developing increments to 1, not cap+1.
+`workbuddy issue restart` is still available for explicit, full-state
+restarts that also clear `first_dispatch_at` (long-flight clock).
 
 `status:done` is the post-merge terminal label; the review-agent (or the human
 who merged the PR) is responsible for closing the issue. The state machine

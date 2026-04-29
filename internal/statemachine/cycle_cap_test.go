@@ -254,6 +254,125 @@ func TestCycleCapHitBlocksDispatchAndPostsComment(t *testing.T) {
 	}
 }
 
+// TestCycleCapResetOnBlockedToDeveloping: after the cap is hit and a human
+// flips status:blocked → status:developing, the cycle counter must reset
+// to 0 and a subsequent review→developing round-trip must increment to 1
+// (not cap+1). This is the Option A semantic from REQ-085 maintainer
+// override: "Counter resets when a human transitions status:blocked →
+// status:developing".
+func TestCycleCapResetOnBlockedToDeveloping(t *testing.T) {
+	sm, rec, dispatch, _, rep := newCapTestSM(t, 2) // cap=2 so we hit it on the second dev re-entry
+	const repo = "test/repo"
+	const issue = 600
+
+	// Drive developing → reviewing → developing → reviewing → developing
+	// up to the cap.
+	stepStateEntry(t, sm, repo, issue, "status:developing")
+	<-dispatch
+	sm.MarkAgentCompleted(repo, issue, "t1", "dev-agent", 0, []string{"workbuddy", "status:developing"})
+
+	stepStateEntry(t, sm, repo, issue, "status:reviewing")
+	<-dispatch
+	sm.MarkAgentCompleted(repo, issue, "t2", "review-agent", 1, []string{"workbuddy", "status:reviewing"})
+
+	// Cycle 1 (count=1).
+	stepStateEntry(t, sm, repo, issue, "status:developing")
+	<-dispatch
+	sm.MarkAgentCompleted(repo, issue, "t3", "dev-agent", 0, []string{"workbuddy", "status:developing"})
+
+	stepStateEntry(t, sm, repo, issue, "status:reviewing")
+	<-dispatch
+	sm.MarkAgentCompleted(repo, issue, "t4", "review-agent", 1, []string{"workbuddy", "status:reviewing"})
+
+	// Cycle 2 — cap-hit, dispatch blocked.
+	stepStateEntry(t, sm, repo, issue, "status:developing")
+	select {
+	case req := <-dispatch:
+		t.Fatalf("dispatch must be blocked at cap, got %+v", req)
+	default:
+	}
+
+	state, err := sm.store.QueryIssueCycleState(repo, issue)
+	if err != nil {
+		t.Fatalf("QueryIssueCycleState pre-reset: %v", err)
+	}
+	if state == nil || state.DevReviewCycleCount != 2 || state.CapHitAt.IsZero() {
+		t.Fatalf("expected cap-hit state pre-reset, got %+v", state)
+	}
+	if len(rep.calls) != 1 {
+		t.Fatalf("expected 1 cap-hit reporter call before reset, got %d", len(rep.calls))
+	}
+
+	// Human flips status:blocked. With the workflow_instance now advancing
+	// through stateless states, this records "blocked" as the new
+	// current_state in workflow_instance.
+	stepStateEntry(t, sm, repo, issue, "status:blocked")
+	select {
+	case req := <-dispatch:
+		t.Fatalf("status:blocked must not dispatch, got %+v", req)
+	default:
+	}
+
+	// Human flips back to status:developing — Option A reset must fire.
+	stepStateEntry(t, sm, repo, issue, "status:developing")
+	select {
+	case req := <-dispatch:
+		if req.AgentName != "dev-agent" {
+			t.Fatalf("expected dev-agent dispatch after reset, got %q", req.AgentName)
+		}
+	default:
+		t.Fatalf("expected dev-agent dispatch after blocked→developing reset")
+	}
+
+	// Counter must be 0 (or row absent) and cap_hit_at must be cleared.
+	state, err = sm.store.QueryIssueCycleState(repo, issue)
+	if err != nil {
+		t.Fatalf("QueryIssueCycleState post-reset: %v", err)
+	}
+	if state != nil {
+		if state.DevReviewCycleCount != 0 {
+			t.Fatalf("dev_review_cycle_count post-reset = %d, want 0", state.DevReviewCycleCount)
+		}
+		if !state.CapHitAt.IsZero() {
+			t.Fatalf("cap_hit_at post-reset = %v, want zero", state.CapHitAt)
+		}
+	}
+
+	// The reset event must have been logged.
+	if len(rec.find(eventlog.TypeDevReviewCycleCountReset)) != 1 {
+		t.Fatalf("expected dev_review_cycle_count_reset event, got %d", len(rec.find(eventlog.TypeDevReviewCycleCountReset)))
+	}
+
+	// A subsequent review→developing round-trip must increment to 1, not cap+1.
+	sm.MarkAgentCompleted(repo, issue, "t5", "dev-agent", 0, []string{"workbuddy", "status:developing"})
+	stepStateEntry(t, sm, repo, issue, "status:reviewing")
+	<-dispatch
+	sm.MarkAgentCompleted(repo, issue, "t6", "review-agent", 1, []string{"workbuddy", "status:reviewing"})
+
+	stepStateEntry(t, sm, repo, issue, "status:developing")
+	select {
+	case req := <-dispatch:
+		if req.AgentName != "dev-agent" {
+			t.Fatalf("expected dev-agent dispatch on first post-reset cycle, got %q", req.AgentName)
+		}
+	default:
+		t.Fatalf("expected dev-agent dispatch on first post-reset cycle")
+	}
+
+	state, err = sm.store.QueryIssueCycleState(repo, issue)
+	if err != nil {
+		t.Fatalf("QueryIssueCycleState post-cycle: %v", err)
+	}
+	if state == nil || state.DevReviewCycleCount != 1 {
+		t.Fatalf("dev_review_cycle_count post-cycle = %+v, want 1", state)
+	}
+
+	// No new cap-hit reporter call: the post-reset cycle is at 1, well below cap=2.
+	if len(rep.calls) != 1 {
+		t.Fatalf("unexpected extra cap-hit reporter calls: %d", len(rep.calls))
+	}
+}
+
 // TestCycleCapTouchFirstDispatch: state-entry into developing must record
 // first_dispatch_at on the first encounter so the long-flight stuck
 // detector has a baseline.

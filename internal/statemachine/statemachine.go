@@ -77,6 +77,7 @@ const DefaultMaxReviewCycles = 3
 const (
 	stateNameDeveloping = "developing"
 	stateNameReviewing  = "reviewing"
+	stateNameBlocked    = "blocked"
 )
 
 // CycleCapReporter is the optional callback used by the StateMachine to post
@@ -356,12 +357,17 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 		return sm.dispatchStateAgents(ctx, event.Repo, event.IssueNum, wf.Name, currentStateName, currentState)
 	}
 
-	if !stateEntryDetected {
-		_, err := sm.evaluateTransitions(ctx, wf, event, currentStateName, currentState)
-		return err
+	if stateEntryDetected {
+		// Stateless state-entry (e.g. status:blocked, status:done): no agent
+		// dispatch, but still advance the persisted workflow_instance so
+		// subsequent state-aware checks (in particular the dev↔review cycle
+		// counter's blocked→developing reset) see the correct prior state.
+		sm.recordStateEntry(wf.Name, event.Repo, event.IssueNum, currentStateName, currentState)
+		return nil
 	}
 
-	return nil
+	_, err := sm.evaluateTransitions(ctx, wf, event, currentStateName, currentState)
+	return err
 }
 
 func (sm *StateMachine) publishAlert(eventKind string, severity alertbus.Severity, repo string, issueNum int, agentName string, payload map[string]any) {
@@ -475,6 +481,12 @@ func (sm *StateMachine) evaluateTransitions(ctx context.Context, wf *config.Work
 // re-enters the developing state after the workflow_instance's persisted
 // current_state was reviewing. The very first entry into developing is
 // not counted (no prior reviewing state exists).
+//
+// Option A reset (REQ-085 maintainer override): when the prior workflow
+// state is "blocked" — i.e. a human has flipped status:blocked →
+// status:developing to give the issue another shot — the dev↔review cycle
+// counter is reset so the cap re-engages from scratch. The blocked→developing
+// label transition itself does not count as a round-trip.
 func (sm *StateMachine) applyDevReviewCycleCap(ctx context.Context, wf *config.WorkflowConfig, repo string, issueNum int, currentStateName string) (bool, error) {
 	if currentStateName != stateNameDeveloping {
 		return false, nil
@@ -483,6 +495,24 @@ func (sm *StateMachine) applyDevReviewCycleCap(ctx context.Context, wf *config.W
 		return false, nil
 	}
 	priorState := sm.queryPriorWorkflowState(wf.Name, repo, issueNum)
+
+	// Option A counter reset: a human-driven blocked→developing transition
+	// clears the cycle counter and the cap-hit marker so future round-trips
+	// start fresh. We rely on the workflow_instance state advancing through
+	// "blocked" via processWorkflowEvent's stateless state-entry branch.
+	if priorState == stateNameBlocked {
+		if err := sm.store.ResetIssueCycleState(repo, issueNum); err != nil {
+			log.Printf("[statemachine] reset issue cycle state on blocked→developing for %s#%d: %v", repo, issueNum, err)
+			return false, fmt.Errorf("statemachine: reset issue cycle state: %w", err)
+		}
+		sm.eventlog.Log(eventlog.TypeDevReviewCycleCountReset, repo, issueNum, map[string]any{
+			"workflow":    wf.Name,
+			"prior_state": priorState,
+			"reason":      "blocked_to_developing",
+		})
+		return false, nil
+	}
+
 	if priorState != stateNameReviewing {
 		return false, nil
 	}

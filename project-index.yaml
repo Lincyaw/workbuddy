@@ -2827,6 +2827,25 @@ requirements:
       and long-flight stuck signals independently. `workbuddy issue restart`
       clears the per-issue cycle state so a human-resolved issue can be
       requeued without manual SQL.
+
+      Per the maintainer override comment on issue #214, the cycle counter
+      uses Option A reset semantics: when a human flips status:blocked →
+      status:developing, the StateMachine clears `dev_review_cycle_count`
+      and `cap_hit_at` so the cap re-engages from zero. The
+      blocked→developing label transition itself does not count as a
+      round-trip. The reset is detected via the persisted
+      workflow_instance.current_state, which now advances through stateless
+      states (e.g. blocked, done) so the prior-state check is reliable.
+
+      Architectural note (deviation from literal AC-085-2): the Coordinator
+      does NOT auto-flip `status:blocked` from Go code, since the project's
+      GH call boundary forbids label writes from Coordinator. Instead, on
+      cap-hit the Coordinator (a) blocks all further dispatch for the issue,
+      (b) records `cap_hit_at`, and (c) posts a needs-human comment with
+      explicit instructions to flip the label or run `workbuddy issue
+      restart`. The dispatch block is enforced at the orchestration layer
+      regardless of label state, so the user-visible effect ("agent stops
+      retrying after the cap") is identical to an auto-flip.
     priority: P1
     version: v0.5.0
     status: tested
@@ -2839,6 +2858,7 @@ requirements:
       - "AC-086-6: Notifier publishes `dev_review_cycle_approaching` at cycles == cap-1 so an operator heads-up notification can fire"
       - "AC-086-7: Tests cover clean issue (no extra cycle), 1-cycle issue, cap-hit issue (auto-block + digest), long-flight issue without cycles"
       - "AC-086-8: `workbuddy issue restart` clears the issue_cycle_state row and reports cycle_state_cleared"
+      - "AC-086-9: Cycle counter resets on a human-driven status:blocked → status:developing label transition (Option A reset), preserving the maintainer-stated 'give the agent another shot' semantic; the blocked→developing transition itself does not count as a round-trip"
     code:
       - internal/config/types.go
       - internal/config/loader.go

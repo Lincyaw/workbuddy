@@ -51,6 +51,7 @@ const (
 	TypeDevReviewCycleCount         = "dev_review_cycle_count"
 	TypeDevReviewCycleApproaching   = "dev_review_cycle_approaching"
 	TypeDevReviewCycleCapReached    = "dev_review_cycle_cap_reached"
+	TypeDevReviewCycleCountReset    = "dev_review_cycle_count_reset"
 	TypeLongFlightStuck             = "long_flight_stuck_detected"
 )
 
@@ -92,6 +93,7 @@ var AllEventTypes = []string{
 	TypeDevReviewCycleCount,
 	TypeDevReviewCycleApproaching,
 	TypeDevReviewCycleCapReached,
+	TypeDevReviewCycleCountReset,
 	TypeLongFlightStuck,
 }
 
