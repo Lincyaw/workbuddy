@@ -107,6 +107,7 @@ Simpler code that maps clearly to requirements > clever abstractions.
 | Test | `go test ./... -count=1` | Run after every change |
 | Vet | `go vet ./...` | Run after every change |
 | Lint | `golangci-lint run ./...` | Config: .golangci.yml |
+| Docs | `go run . validate-docs --strict` | Drift gate for docs/skills/plugins |
 | Measure | `python3 ~/.autoharness/scripts/validate_index.py project-index.yaml` | Compare to baseline |
 
 ## Iteration tracking

@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Build the repo-local Codex plugin from the Claude plugin source tree."""
+"""Build or verify the repo-local Codex plugin generated from Claude content."""
 
 from __future__ import annotations
 
+import argparse
+import filecmp
 import json
 import shutil
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -87,12 +90,12 @@ Run `python3 scripts/sync_codex_plugin.py` after updating the Claude plugin file
 """
 
 
-def ensure_clean_dest() -> None:
-    if DEST.exists():
-        shutil.rmtree(DEST)
-    DEST.mkdir(parents=True, exist_ok=True)
-    (DEST / ".codex-plugin").mkdir(parents=True, exist_ok=True)
-    (DEST / "skills").mkdir(parents=True, exist_ok=True)
+def ensure_clean_dest(dest: Path) -> None:
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / ".codex-plugin").mkdir(parents=True, exist_ok=True)
+    (dest / "skills").mkdir(parents=True, exist_ok=True)
 
 
 def strip_frontmatter_keys(text: str) -> str:
@@ -128,16 +131,16 @@ def normalize_workbuddy_guide_skill(text: str) -> str:
     )
 
 
-def copy_skills() -> None:
+def copy_skills(dest: Path) -> None:
     transforms = {
         "setup-repo": normalize_setup_repo_skill,
         "workbuddy-guide": normalize_workbuddy_guide_skill,
     }
-    for src in sorted((SOURCE / "skills").glob("*/**")):
+    for src in sorted((SOURCE / "skills").rglob("*")):
         if src.is_dir():
             continue
         rel = src.relative_to(SOURCE / "skills")
-        dst = DEST / "skills" / rel
+        dst = dest / "skills" / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         text = src.read_text(encoding="utf-8")
         if src.name == "SKILL.md":
@@ -153,15 +156,75 @@ def write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def build(dest: Path, marketplace: Path) -> None:
+    ensure_clean_dest(dest)
+    copy_skills(dest)
+    write_json(dest / ".codex-plugin" / "plugin.json", PLUGIN_MANIFEST)
+    (dest / "README.md").write_text(README, encoding="utf-8")
+    write_json(marketplace, MARKETPLACE_MANIFEST)
+
+
+def collect_diffs(left: Path, right: Path) -> list[str]:
+    cmp = filecmp.dircmp(left, right)
+    diffs: list[str] = []
+    diffs.extend(f"only in {left}: {name}" for name in cmp.left_only)
+    diffs.extend(f"only in {right}: {name}" for name in cmp.right_only)
+    diffs.extend(
+        f"file contents differ: {cmp.left}/{name} vs {cmp.right}/{name}"
+        for name in cmp.diff_files
+    )
+    diffs.extend(
+        f"funny files: {cmp.left}/{name} vs {cmp.right}/{name}"
+        for name in cmp.funny_files
+    )
+    for child in cmp.subdirs.values():
+        diffs.extend(collect_diffs(Path(child.left), Path(child.right)))
+    return diffs
+
+
+def check_synced() -> int:
+    with tempfile.TemporaryDirectory(prefix="sync_codex_plugin_") as tmpdir:
+        temp_root = Path(tmpdir)
+        temp_dest = temp_root / "plugins" / "workbuddy"
+        temp_marketplace = temp_root / ".agents" / "plugins" / "marketplace.json"
+        build(temp_dest, temp_marketplace)
+
+        diffs = collect_diffs(temp_dest, DEST)
+        if temp_marketplace.read_text(encoding="utf-8") != MARKETPLACE.read_text(
+            encoding="utf-8"
+        ):
+            diffs.append(
+                f"file contents differ: {temp_marketplace} vs {MARKETPLACE}"
+            )
+
+        if diffs:
+            print("generated Codex plugin is out of sync with .claude/plugins/workbuddy")
+            for diff in diffs:
+                print(diff)
+            return 1
+    return 0
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Generate or verify the repo-local Codex plugin snapshot."
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="exit non-zero if plugins/workbuddy or marketplace.json would change",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
     if not SOURCE.exists():
         raise SystemExit(f"source plugin not found: {SOURCE}")
 
-    ensure_clean_dest()
-    copy_skills()
-    write_json(DEST / ".codex-plugin" / "plugin.json", PLUGIN_MANIFEST)
-    (DEST / "README.md").write_text(README, encoding="utf-8")
-    write_json(MARKETPLACE, MARKETPLACE_MANIFEST)
+    if args.check:
+        raise SystemExit(check_synced())
+    build(DEST, MARKETPLACE)
 
 
 if __name__ == "__main__":

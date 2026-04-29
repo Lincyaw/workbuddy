@@ -1,0 +1,1 @@
+These copies diverge intentionally: the Codex repo-local skill is concise, while the Claude plugin copy carries plugin-packaging and onboarding detail. Keep names aligned, but allow content to differ until they are unified.

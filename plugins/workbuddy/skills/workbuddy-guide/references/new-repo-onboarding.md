@@ -168,37 +168,27 @@ cd /path/to/target-repo
 
 ## Step 10: Register with Coordinator (distributed mode only)
 
-If running in distributed mode, register the repo with the coordinator. The
-recommended auth input is either `WORKBUDDY_AUTH_TOKEN` in the env or
-`--token-file /path/to/token`. Plain `--token <value>` still works but prints a
-deprecation warning because it leaks into `ps`/shell history.
+If running in distributed mode, register the repo with the coordinator:
 
 ```bash
 export WORKBUDDY_AUTH_TOKEN="your-token"
 /path/to/workbuddy repo register \
-  --coordinator http://coordinator-host:8081
+  --coordinator http://coordinator-host:8081 \
+  --token "$WORKBUDDY_AUTH_TOKEN"
 ```
 
 This must be run from the target repo's root directory (where `.github/workbuddy/`
 lives). The command serializes the local config and POSTs it to the coordinator.
-Add `--format json` if you need machine-readable confirmation output.
 
 ## Step 11: Start a Worker (distributed mode only)
 
 ```bash
 /path/to/workbuddy worker \
   --coordinator http://coordinator-host:8081 \
-  --token-file /etc/workbuddy/auth-token \
+  --token "$WORKBUDDY_AUTH_TOKEN" \
   --runtime codex \
-  --repos Owner/RepoName=/path/to/repo
+  --repo Owner/RepoName
 ```
-
-Notes:
-- `--repos OWNER/NAME=/path` is the canonical repo-binding flag. The legacy
-  `--repo Owner/RepoName` alias still works but defaults the path to cwd and
-  prints a deprecation warning.
-- Use `--token-file` (or the `WORKBUDDY_AUTH_TOKEN` env var) instead of passing
-  a secret on the command line.
 
 The worker must be started from the target repo's directory because it loads
 agent prompt templates from the local `.github/workbuddy/agents/` directory.
