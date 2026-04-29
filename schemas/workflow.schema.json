@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Lincyaw/workbuddy/schemas/workflow.schema.json",
+  "title": "Workbuddy Workflow (Batch 1 — issue #204)",
+  "description": "Schema for the YAML frontmatter of .github/workbuddy/workflows/*.md. The state machine itself lives in a fenced ```yaml code block in the Markdown body and is parsed by the loader, not this schema (see $comment). Keep this in sync with internal/config/types.go (WorkflowConfig).",
+  "$comment": "JSON Schema cannot validate content embedded in a Markdown code block; the `states:` map under the body is enforced by the Go validator (codes WB-X001/X005/S004 etc.) rather than by this file. Editor integrations get coverage of the frontmatter only.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "description", "trigger", "max_retries"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable workflow identifier."
+    },
+    "description": {
+      "type": "string"
+    },
+    "trigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issue_label"],
+      "properties": {
+        "issue_label": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Issue label that activates this workflow. Two workflows must not share the same trigger label."
+        }
+      }
+    },
+    "max_retries": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 3,
+      "description": "Upper bound on state revisits before the runtime records retry/failure intent."
+    }
+  }
+}

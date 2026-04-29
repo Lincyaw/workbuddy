@@ -9,7 +9,9 @@ runtime: codex
 policy:
   sandbox: danger-full-access
   approval: never
-  timeout: 15m
+  # Must be >= worker.stale_inference.idle_threshold (currently 30m) to
+  # avoid being killed by the watchdog before our own timeout fires.
+  timeout: 30m
 prompt: |
   You are the review agent for repo {{.Repo}}, verifying the artifact produced for issue #{{.Issue.Number}}.
 

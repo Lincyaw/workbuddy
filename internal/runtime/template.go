@@ -34,6 +34,18 @@ var templateFuncMap = template.FuncMap{
 	"shellEscape": ShellEscape,
 }
 
+// TemplateFuncMap returns a copy of the template FuncMap registered for
+// agent prompt/command rendering. Callers (e.g. the validator) use this to
+// parse templates with the same set of helpers used at execution time, so
+// references like `{{shellEscape ...}}` are not flagged as parse errors.
+func TemplateFuncMap() template.FuncMap {
+	out := make(template.FuncMap, len(templateFuncMap))
+	for k, v := range templateFuncMap {
+		out[k] = v
+	}
+	return out
+}
+
 func RenderCommand(cmdTemplate string, task *TaskContext) (string, error) {
 	tmpl, err := template.New("command").Funcs(templateFuncMap).Parse(cmdTemplate)
 	if err != nil {
