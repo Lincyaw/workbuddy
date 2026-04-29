@@ -13,7 +13,7 @@
 | Issue 依赖 | 已支持 `workbuddy.depends_on` 解析、本地 verdict/queue、dispatch hard gate、以及 😕 反应信号 | `cmd/serve.go`, `internal/dependency/`, `internal/store/`, `internal/statemachine/`, `internal/router/` |
 | 可观测性 | SQLite、event log、Event Schema v1 session artifact、session audit、`/sessions` Web UI、CLI 诊断工具 | `internal/store/`, `internal/eventlog/`, `internal/launcher/`, `internal/audit/`, `internal/webui/`, `cmd/status.go`, `cmd/diagnose.go` |
 | 工作区隔离 | 已支持每任务 git worktree 隔离 | `internal/workspace/workspace.go` |
-| 分布式通信 | Coordinator HTTP API + Worker 长轮询 + 共享密钥认证 | `internal/coordinator/http/`, `internal/workerclient/` |
+| 分布式通信 | Coordinator HTTP API + Worker 长轮询 + 共享密钥认证 | `internal/app/coordinator.go`, `internal/workerclient/` |
 
 ## 文档列表
 
@@ -31,7 +31,7 @@
 | `artifact-layout.md` | session artifact 位于仓库根 `.workbuddy/sessions/` | `cmd/serve.go`, `cmd/run.go`, `internal/worker/executor.go`, `internal/launcher/`, `internal/audit/` |
 | `issue-dependencies.md` | issue dependency 声明、verdict、dispatch gate、😕 反应信号 | `cmd/serve.go`, `internal/dependency/`, `internal/store/`, `internal/statemachine/` |
 | `audit-http-server.md` | REQ-011 审计 HTTP 端点：/events、/issues/.../state、/sessions/:id | `cmd/serve.go`, `internal/auditapi/`, `internal/webui/` |
-| `distributed-topology-and-cli.md` | Coordinator/Worker 分布式拓扑、全部 CLI 命令列表、HTTP API | `cmd/coordinator.go`, `cmd/worker.go`, `internal/coordinator/http/` |
+| `distributed-topology-and-cli.md` | Coordinator/Worker 分布式拓扑、全部 CLI 命令列表、HTTP API | `cmd/coordinator.go`, `cmd/worker.go`, `internal/app/coordinator.go` |
 | `runtime-migration-plan.md` | Runtime/Session 迁移完成状态、command deprecation 路线 | `internal/runtime/`, `internal/launcher/process.go` |
 | `pipeline-observability-and-diagnosis.md` | status --tasks/--events/--watch/--stuck、cache invalidate（alias: cache-invalidate）、issue restart（alias: admin restart-issue）、diagnose | `cmd/status.go`, `cmd/diagnose.go`, `cmd/cache_invalidate.go`, `cmd/admin_restart_issue.go` |
 | `worker-execution-boundary.md` | Worker 执行核心、`internal/worker/` 拆分、runtime 收口、GitHub/session boundary（#146~#151 已落地） | `internal/worker/`, `internal/runtime/`, `internal/ghadapter/`, `internal/launcher/` |

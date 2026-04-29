@@ -51,8 +51,7 @@ func TestRootFlagNoColor_StripsANSIFromServeBanner(t *testing.T) {
 			Port:         8080,
 		},
 	}, &serveOpts{
-		roles:          []string{"\x1b[32mdev\x1b[0m"},
-		coordinatorAPI: true,
+		roles: []string{"\x1b[32mdev\x1b[0m"},
 	})
 
 	got := stdout.String()
