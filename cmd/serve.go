@@ -39,6 +39,7 @@ type serveOpts struct {
 	loopbackOnly      bool
 	trustedAuthors    string
 	trustedAuthorsSet bool
+	cookieInsecure    bool
 }
 
 var serveCmd = &cobra.Command{
@@ -63,6 +64,7 @@ func init() {
 	serveCmd.Flags().Bool("loopback-only", false, "Allow auth-free task endpoints only when the listen address is loopback-only")
 	serveCmd.Flags().Bool("auth", false, "Require WORKBUDDY_AUTH_TOKEN for the coordinator HTTP surface")
 	serveCmd.Flags().String("trusted-authors", "", "Comma-separated GitHub logins allowed to trigger agent work")
+	serveCmd.Flags().Bool("cookie-insecure", false, "Drop the Secure attribute on session cookies (HTTP reverse-proxy fronts only)")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -89,6 +91,7 @@ func parseServeFlags(cmd *cobra.Command) (*serveOpts, error) {
 	loopbackOnly, _ := cmd.Flags().GetBool("loopback-only")
 	trustedAuthors, _ := cmd.Flags().GetString("trusted-authors")
 	trustedAuthorsSet := cmd.Flags().Changed("trusted-authors")
+	cookieInsecure, _ := cmd.Flags().GetBool("cookie-insecure")
 	if maxParallelTasks < 0 {
 		return nil, fmt.Errorf("serve: --max-parallel-tasks must be >= 0")
 	}
@@ -104,6 +107,7 @@ func parseServeFlags(cmd *cobra.Command) (*serveOpts, error) {
 		loopbackOnly:      loopbackOnly,
 		trustedAuthors:    trustedAuthors,
 		trustedAuthorsSet: trustedAuthorsSet,
+		cookieInsecure:    cookieInsecure,
 	}, nil
 }
 
@@ -148,6 +152,7 @@ func runServeWithOutput(opts *serveOpts, ghReader poller.GHReader, launcherOverr
 			auth:              opts.auth,
 			trustedAuthors:    opts.trustedAuthors,
 			trustedAuthorsSet: opts.trustedAuthorsSet,
+			cookieInsecure:    opts.cookieInsecure,
 		}, ghReader, ctx)
 	}()
 

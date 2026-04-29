@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -32,7 +33,19 @@ type FullCoordinatorServer struct {
 	Config      *CoordinatorConfigRuntime
 	AuthEnabled bool
 	AuthToken   string
+	// CookieInsecure drops the Secure attribute on session cookies. Default
+	// false (Secure required); set true only for HTTP reverse-proxy fronts
+	// where TLS terminates upstream.
+	CookieInsecure bool
 }
+
+// SessionCookieName is the HTTP cookie that carries the bearer token after
+// browser login. Cookie value is the bearer token verbatim (no server-side
+// session table; trade-off accepted in #215 design).
+const SessionCookieName = "wb_session"
+
+// SessionCookieMaxAge is the lifetime of the wb_session cookie (8 hours).
+const SessionCookieMaxAge = 8 * 60 * 60
 
 // WorkerRegisterRequest is the body of POST /api/v1/workers/register.
 type WorkerRegisterRequest struct {
@@ -116,19 +129,60 @@ func (s *FullCoordinatorServer) HandleConfigReload(w http.ResponseWriter, r *htt
 }
 
 // WrapAuth returns a handler that enforces Bearer-token auth when enabled.
+// It accepts either an `Authorization: Bearer <token>` header (API clients)
+// or a `wb_session` cookie carrying the same token (browser sessions). When
+// auth fails on a request that prefers HTML, it 302s to /login?next=<path>;
+// otherwise it returns 401 JSON to keep API clients machine-friendly.
 func (s *FullCoordinatorServer) WrapAuth(next http.Handler) http.Handler {
 	if !s.AuthEnabled {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		const prefix = "Bearer "
-		authz := r.Header.Get("Authorization")
-		if !strings.HasPrefix(authz, prefix) || !s.isAuthorizedBearer(strings.TrimSpace(strings.TrimPrefix(authz, prefix))) {
-			CoordWriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		if s.requestAuthorized(r) {
+			next.ServeHTTP(w, r)
 			return
 		}
-		next.ServeHTTP(w, r)
+		if prefersHTML(r) {
+			redirectToLogin(w, r)
+			return
+		}
+		CoordWriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 	})
+}
+
+// requestAuthorized returns true when the request carries a valid bearer
+// token in either the Authorization header or the wb_session cookie.
+func (s *FullCoordinatorServer) requestAuthorized(r *http.Request) bool {
+	const prefix = "Bearer "
+	if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, prefix) {
+		token := strings.TrimSpace(strings.TrimPrefix(authz, prefix))
+		if s.isAuthorizedBearer(token) {
+			return true
+		}
+	}
+	if c, err := r.Cookie(SessionCookieName); err == nil {
+		if s.isAuthorizedBearer(strings.TrimSpace(c.Value)) {
+			return true
+		}
+	}
+	return false
+}
+
+// prefersHTML reports whether the client's Accept header signals a browser
+// (i.e. wants HTML). Empty/missing Accept defaults to API semantics.
+func prefersHTML(r *http.Request) bool {
+	accept := r.Header.Get("Accept")
+	return strings.Contains(accept, "text/html")
+}
+
+// redirectToLogin issues a 302 to /login?next=<original path+query>.
+func redirectToLogin(w http.ResponseWriter, r *http.Request) {
+	next := r.URL.RequestURI()
+	target := "/login"
+	if next != "" && next != "/login" {
+		target = "/login?next=" + url.QueryEscape(next)
+	}
+	http.Redirect(w, r, target, http.StatusFound)
 }
 
 func (s *FullCoordinatorServer) isAuthorizedBearer(token string) bool {

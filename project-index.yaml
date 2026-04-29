@@ -2760,3 +2760,43 @@ requirements:
       - CLAUDE.md
       - .github/workflows/validate-docs.yml
     deps: [REQ-021, REQ-083]
+
+  - id: REQ-085
+    title: Browser cookie auth for coordinator HTTP surface
+    description: >
+      `WrapAuth` previously accepted only `Authorization: Bearer <token>`
+      headers, which meant a session-viewer link clicked from a GitHub
+      comment had no way to authenticate (browsers cannot attach the bearer
+      header). This requirement adds an opt-in cookie path: WrapAuth now
+      also accepts the `wb_session` cookie, while a new `/login` form sets
+      that cookie and `/logout` clears it. API clients keep the original
+      Bearer header path (and 401 JSON when unauthenticated); browsers get
+      a 302 redirect to /login when they ask for HTML. A `--cookie-insecure`
+      flag drops the cookie's `Secure` attribute for HTTP reverse-proxy
+      fronts that explicitly accept the trade-off. The cookie value is the
+      bearer token itself - no server-side session table - per the parent
+      design (#215).
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-085-1: `Authorization: Bearer <token>` keeps returning 200 on protected routes (backwards compatibility)"
+      - "AC-085-2: `Cookie: wb_session=<token>` returns 200 on protected routes"
+      - "AC-085-3: HTML clients (Accept contains text/html) without credentials get 302 to `/login?next=<encoded path>`"
+      - "AC-085-4: API clients without credentials still get 401 JSON `{\"error\":\"unauthorized\"}`"
+      - "AC-085-5: `POST /login` with a valid token sets `wb_session` cookie with HttpOnly+Secure+SameSite=Strict and 302s to next or /"
+      - "AC-085-6: `POST /login` with an invalid token re-renders the form with an error message and no Set-Cookie"
+      - "AC-085-7: `POST /logout` clears the cookie (Max-Age=-1) and 302s to /login"
+      - "AC-085-8: `--cookie-insecure` drops the Secure attribute while keeping HttpOnly and SameSite=Strict"
+      - "AC-085-9: Worker token authentication path (store.AuthenticateWorkerToken) is unchanged"
+      - "AC-085-10: Unit tests cover header/cookie/missing-credential WrapAuth paths plus /login success and failure; integration test covers full POST /login → cookie GET flow"
+    code:
+      - internal/app/coordinator.go
+      - internal/app/auth_handlers.go
+      - cmd/coordinator.go
+      - cmd/serve.go
+    tests:
+      - internal/app/auth_handlers_test.go
+      - internal/app/coordinator_test.go
+      - cmd/coordinator_audit_test.go
+    deps: [REQ-019]
