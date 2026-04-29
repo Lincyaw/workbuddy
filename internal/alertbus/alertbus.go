@@ -23,6 +23,9 @@ const (
 	KindRepeatedFailure        = "repeated_failure"
 	KindTaskCompletedSuccess    = "task_completed"
 	KindDispatchBlocked         = "dispatch_blocked"
+	KindDevReviewCycleApproaching = "dev_review_cycle_approaching"
+	KindDevReviewCycleCapReached  = "dev_review_cycle_cap_reached"
+	KindLongFlightStuck           = "long_flight_stuck_detected"
 )
 
 // AlertEvent is the payload emitted by system components for notification.

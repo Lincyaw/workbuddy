@@ -33,6 +33,12 @@
       "minimum": 0,
       "default": 3,
       "description": "Upper bound on state revisits before the runtime records retry/failure intent."
+    },
+    "max_review_cycles": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 3,
+      "description": "Orchestrator-level cap on dev↔review round-trips (developing→reviewing→developing). On cap-hit the Coordinator stops dispatching dev-agent and review-agent, posts a needs-human comment with a rejection-trail digest, and emits dev_review_cycle_cap_reached. 0 (or unset) inherits the default of 3."
     }
   }
 }

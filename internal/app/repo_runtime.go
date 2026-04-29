@@ -262,6 +262,10 @@ func (pm *PollerManager) StartOrUpdate(rec store.RepoRegistrationRecord) error {
 	// The claimer id is process-scoped so two coordinators on the same host do
 	// not collapse onto the same logical owner.
 	sm.SetIssueClaim(BuildIssueClaimerID("coordinator-"+HostnameOrUnknown(), os.Getpid()), statemachine.DefaultIssueClaimLease)
+	if pm.reporter != nil {
+		pm.reporter.SetCycleCapTrailLoader(NewCycleCapTrailLoader(pm.store))
+		sm.SetCycleCapReporter(&cycleCapReporterAdapter{rep: pm.reporter})
+	}
 	depResolver := dependency.NewResolver(pm.store, pm.ghReader, pm.eventlog, pm.alertBus)
 	rt := router.NewRouter(cfg.Agents, pm.registry, pm.store, rec.Repo, pm.repoRoot, nil, nil, false)
 	rt.SetWorkflows(cfg.Workflows)

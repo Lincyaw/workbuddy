@@ -145,11 +145,16 @@ type TriggerRule struct {
 
 // WorkflowConfig defines a workflow loaded from .github/workbuddy/workflows/*.md.
 type WorkflowConfig struct {
-	Name        string            `yaml:"name"`
-	Description string            `yaml:"description"`
-	Trigger     WorkflowTrigger   `yaml:"trigger"`
-	MaxRetries  int               `yaml:"max_retries"`
-	States      map[string]*State // parsed from embedded YAML code block
+	Name        string          `yaml:"name"`
+	Description string          `yaml:"description"`
+	Trigger     WorkflowTrigger `yaml:"trigger"`
+	MaxRetries  int             `yaml:"max_retries"`
+	// MaxReviewCycles caps the number of dev↔review round-trips
+	// (developing→reviewing→developing transitions) the orchestrator will
+	// dispatch automatically before flagging the issue as needing human review.
+	// Default: 3. Set to 0 in YAML to inherit the default.
+	MaxReviewCycles int               `yaml:"max_review_cycles"`
+	States          map[string]*State // parsed from embedded YAML code block
 }
 
 // WorkflowTrigger defines what issue label activates this workflow.

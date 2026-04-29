@@ -16,7 +16,10 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
-const stuckThreshold = time.Hour
+const (
+	stuckThreshold      = time.Hour
+	longFlightThreshold = 4 * time.Hour
+)
 
 type HTTPHandler struct {
 	store *store.Store
@@ -37,14 +40,18 @@ type EventsResponse struct {
 }
 
 type IssueStateResponse struct {
-	Repo              string     `json:"repo"`
-	IssueNum          int        `json:"issue_num"`
-	IssueState        string     `json:"issue_state"`
-	CurrentState      string     `json:"current_state"`
-	CycleCount        int        `json:"cycle_count"`
-	DependencyVerdict string     `json:"dependency_verdict"`
-	LastEventAt       *time.Time `json:"last_event_at,omitempty"`
-	Stuck             bool       `json:"stuck"`
+	Repo                string     `json:"repo"`
+	IssueNum            int        `json:"issue_num"`
+	IssueState          string     `json:"issue_state"`
+	CurrentState        string     `json:"current_state"`
+	CycleCount          int        `json:"cycle_count"`
+	DevReviewCycleCount int        `json:"dev_review_cycle_count"`
+	DependencyVerdict   string     `json:"dependency_verdict"`
+	LastEventAt         *time.Time `json:"last_event_at,omitempty"`
+	FirstDispatchAt     *time.Time `json:"first_dispatch_at,omitempty"`
+	Stuck               bool       `json:"stuck"`
+	StuckReason         string     `json:"stuck_reason,omitempty"`
+	LongFlight          bool       `json:"long_flight"`
 }
 
 func NewHTTPHandler(st *store.Store) *HTTPHandler {
@@ -162,6 +169,11 @@ func (h *HTTPHandler) queryIssueState(repo string, issueNum int) (IssueStateResp
 		dependencyVerdict = depState.Verdict
 	}
 
+	cycleState, err := h.store.QueryIssueCycleState(repo, issueNum)
+	if err != nil {
+		return IssueStateResponse{}, err
+	}
+
 	resp := IssueStateResponse{
 		Repo:              repo,
 		IssueNum:          issueNum,
@@ -170,11 +182,33 @@ func (h *HTTPHandler) queryIssueState(repo string, issueNum int) (IssueStateResp
 		CycleCount:        maxTransitionCount(counts),
 		DependencyVerdict: dependencyVerdict,
 	}
+	if cycleState != nil {
+		resp.DevReviewCycleCount = cycleState.DevReviewCycleCount
+		if !cycleState.FirstDispatchAt.IsZero() {
+			fd := cycleState.FirstDispatchAt
+			resp.FirstDispatchAt = &fd
+			if cache.State == "open" && isIntermediateState(currentState) && h.now().Sub(fd) > longFlightThreshold {
+				resp.LongFlight = true
+			}
+		}
+	}
+	stuckByDwell := false
 	if lastEvent != nil {
 		resp.LastEventAt = &lastEvent.TS
-		resp.Stuck = cache.State == "open" &&
+		stuckByDwell = cache.State == "open" &&
 			isIntermediateState(currentState) &&
 			(lastEvent.Type == eventlog.TypeDispatchSkippedClaim || h.now().Sub(lastEvent.TS) > stuckThreshold)
+	}
+	switch {
+	case stuckByDwell && resp.LongFlight:
+		resp.Stuck = true
+		resp.StuckReason = "dwell_and_long_flight"
+	case stuckByDwell:
+		resp.Stuck = true
+		resp.StuckReason = "dwell"
+	case resp.LongFlight:
+		resp.Stuck = true
+		resp.StuckReason = "long_flight"
 	}
 	return resp, nil
 }

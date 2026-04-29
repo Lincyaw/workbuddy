@@ -48,6 +48,10 @@ const (
 	TypeIssueClaimExpired           = "issue_claim_expired"
 	TypeIssueRestarted              = "issue_restarted"
 	TypeInfraFailure                = "infra_failure"
+	TypeDevReviewCycleCount         = "dev_review_cycle_count"
+	TypeDevReviewCycleApproaching   = "dev_review_cycle_approaching"
+	TypeDevReviewCycleCapReached    = "dev_review_cycle_cap_reached"
+	TypeLongFlightStuck             = "long_flight_stuck_detected"
 )
 
 // AllEventTypes lists every recognised event type.
@@ -85,6 +89,10 @@ var AllEventTypes = []string{
 	TypeIssueClaimExpired,
 	TypeIssueRestarted,
 	TypeInfraFailure,
+	TypeDevReviewCycleCount,
+	TypeDevReviewCycleApproaching,
+	TypeDevReviewCycleCapReached,
+	TypeLongFlightStuck,
 }
 
 // EventFilter specifies optional criteria for querying events.

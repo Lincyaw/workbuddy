@@ -31,6 +31,7 @@ type restartIssueResult struct {
 	CacheCleared           bool   `json:"cache_cleared"`
 	DependencyStateCleared bool   `json:"dependency_state_cleared"`
 	ClaimCleared           bool   `json:"claim_cleared"`
+	CycleStateCleared      bool   `json:"cycle_state_cleared"`
 	ClaimOwner             string `json:"claim_owner,omitempty"`
 	EventLogged            bool   `json:"event_logged"`
 }
@@ -157,6 +158,7 @@ func runRestartIssueWithOpts(_ context.Context, opts *restartIssueOpts, stdout i
 			fmt.Sprintf("clear issue cache: %t", preview.CacheCleared),
 			fmt.Sprintf("clear dependency state: %t", preview.DependencyStateCleared),
 			fmt.Sprintf("clear issue claim: %t", preview.ClaimCleared),
+			fmt.Sprintf("clear dev↔review cycle state: %t", preview.CycleStateCleared),
 			"log issue_restarted event",
 		},
 	)
@@ -193,7 +195,7 @@ func writeRestartIssueResult(stdout io.Writer, result restartIssueResult, dryRun
 	if dryRun {
 		prefix = "dry-run: "
 	}
-	_, _ = fmt.Fprintf(stdout, "%s%s#%d: cache=%t dependency_state=%t claim=%t", prefix, result.Repo, result.IssueNum, result.CacheCleared, result.DependencyStateCleared, result.ClaimCleared)
+	_, _ = fmt.Fprintf(stdout, "%s%s#%d: cache=%t dependency_state=%t claim=%t cycle_state=%t", prefix, result.Repo, result.IssueNum, result.CacheCleared, result.DependencyStateCleared, result.ClaimCleared, result.CycleStateCleared)
 	if result.ClaimOwner != "" {
 		_, _ = fmt.Fprintf(stdout, " held_by=%s", result.ClaimOwner)
 	}
@@ -227,6 +229,14 @@ func inspectRestartIssueStore(st *store.Store, repo string, issueNum int) (resta
 		result.ClaimCleared = true
 		result.ClaimOwner = claim.WorkerID
 	}
+
+	cycleState, err := st.QueryIssueCycleState(repo, issueNum)
+	if err != nil {
+		return result, fmt.Errorf("restart-issue: query cycle state #%d: %w", issueNum, err)
+	}
+	if cycleState != nil {
+		result.CycleStateCleared = true
+	}
 	return result, nil
 }
 
@@ -253,6 +263,11 @@ func runRestartIssueStore(st *store.Store, repo string, issueNum int, source str
 		}
 		result.ClaimCleared = deletedClaim
 	}
+	if result.CycleStateCleared {
+		if err := st.ResetIssueCycleState(repo, issueNum); err != nil {
+			return result, fmt.Errorf("restart-issue: reset cycle state #%d: %w", issueNum, err)
+		}
+	}
 
 	payload, err := json.Marshal(map[string]any{
 		"repo":                     repo,
@@ -261,6 +276,7 @@ func runRestartIssueStore(st *store.Store, repo string, issueNum int, source str
 		"cache_cleared":            result.CacheCleared,
 		"dependency_state_cleared": result.DependencyStateCleared,
 		"claim_cleared":            result.ClaimCleared,
+		"cycle_state_cleared":      result.CycleStateCleared,
 		"claim_owner":              result.ClaimOwner,
 	})
 	if err != nil {

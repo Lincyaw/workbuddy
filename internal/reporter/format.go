@@ -219,6 +219,81 @@ func FormatNeedsHumanReport(d NeedsHumanData) string {
 	return b.String()
 }
 
+// CycleCapData holds the canonical facts for a dev↔review cycle-cap
+// needs-human comment. Rejection trail entries are summarized one-per-line
+// in the order they occurred (oldest first).
+type CycleCapData struct {
+	WorkflowName    string
+	CycleCount      int
+	MaxReviewCycles int
+	HitAt           time.Time
+	RejectionTrail  []CycleRejectionEntry
+	LatestPRURL     string
+	BranchName      string
+}
+
+// CycleRejectionEntry summarizes a single review-agent rejection round used
+// in the rejection-trail digest assembled by Coordinator Go code.
+type CycleRejectionEntry struct {
+	Timestamp time.Time
+	Summary   string
+}
+
+// FormatCycleCapReport assembles the needs-human comment posted when an
+// issue trips the dev↔review cycle cap.
+func FormatCycleCapReport(d CycleCapData) string {
+	var b strings.Builder
+
+	b.WriteString("## :rotating_light: Dev↔Review Cycle Cap Reached\n\n")
+	fmt.Fprintf(&b,
+		"This issue hit the configured **%d-cycle dev↔review cap** and will not be auto-dispatched again until a human intervenes.\n\n",
+		d.MaxReviewCycles,
+	)
+
+	b.WriteString("| Field | Value |\n")
+	b.WriteString("|-------|-------|\n")
+	fmt.Fprintf(&b, "| Workflow | `%s` |\n", d.WorkflowName)
+	fmt.Fprintf(&b, "| Cycle count | `%d` (cap: `%d`) |\n", d.CycleCount, d.MaxReviewCycles)
+	fmt.Fprintf(&b, "| Cap hit at | %s |\n", d.HitAt.UTC().Format(time.RFC3339))
+	if d.LatestPRURL != "" {
+		fmt.Fprintf(&b, "| Latest PR | %s |\n", d.LatestPRURL)
+	}
+	if d.BranchName != "" {
+		fmt.Fprintf(&b, "| Branch | `%s` |\n", d.BranchName)
+	}
+	b.WriteString("\n")
+
+	if len(d.RejectionTrail) > 0 {
+		b.WriteString("### Rejection trail (oldest first)\n\n")
+		for i, entry := range d.RejectionTrail {
+			summary := strings.TrimSpace(entry.Summary)
+			if summary == "" {
+				summary = "(no summary captured)"
+			}
+			fmt.Fprintf(&b, "%d. `%s` — %s\n",
+				i+1,
+				entry.Timestamp.UTC().Format(time.RFC3339),
+				summary,
+			)
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("### What this means\n\n")
+	b.WriteString("- Coordinator stopped dispatching `dev-agent` and `review-agent` for this issue.\n")
+	b.WriteString("- Either the dev↔review loop was not converging, or the disagreement is architectural and needs human judgement.\n\n")
+
+	b.WriteString("### Required action\n\n")
+	b.WriteString("A human reviewer must inspect the rejection trail above, decide on the path forward, then either:\n\n")
+	b.WriteString("- Flip the label to `status:blocked` to signal the issue needs human authorship; or\n")
+	b.WriteString("- Resolve the disagreement, run `workbuddy issue restart --repo <repo> --issue <num>` to reset the counter, and re-add `status:developing`.\n\n")
+
+	b.WriteString("---\n")
+	fmt.Fprintf(&b, "*workbuddy coordinator | %s*\n", d.HitAt.UTC().Format(time.RFC3339))
+
+	return b.String()
+}
+
 // FormatStartedReport generates a Markdown "Agent Started" notification comment.
 func FormatStartedReport(d StartedData) string {
 	var b strings.Builder

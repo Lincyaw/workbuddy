@@ -101,14 +101,16 @@ type eventFilterEcho struct {
 }
 
 type issueStateResponse struct {
-	Repo              string                    `json:"repo"`
-	IssueNum          int                       `json:"issue_num"`
-	State             string                    `json:"state,omitempty"`
-	Labels            []string                  `json:"labels"`
-	CycleCount        int                       `json:"cycle_count"`
-	DependencyVerdict string                    `json:"dependency_verdict,omitempty"`
-	DependencyState   *dependencyStateResponse  `json:"dependency_state,omitempty"`
-	TransitionCounts  []transitionCountResponse `json:"transition_counts,omitempty"`
+	Repo                string                    `json:"repo"`
+	IssueNum            int                       `json:"issue_num"`
+	State               string                    `json:"state,omitempty"`
+	Labels              []string                  `json:"labels"`
+	CycleCount          int                       `json:"cycle_count"`
+	DevReviewCycleCount int                       `json:"dev_review_cycle_count"`
+	CapHit              bool                      `json:"cap_hit,omitempty"`
+	DependencyVerdict   string                    `json:"dependency_verdict,omitempty"`
+	DependencyState     *dependencyStateResponse  `json:"dependency_state,omitempty"`
+	TransitionCounts    []transitionCountResponse `json:"transition_counts,omitempty"`
 }
 
 type dependencyStateResponse struct {
@@ -424,6 +426,15 @@ func (h *Handler) handleIssueState(w http.ResponseWriter, r *http.Request) {
 			ToState:   tc.ToState,
 			Count:     tc.Count,
 		})
+	}
+	cycleState, err := h.store.QueryIssueCycleState(repo, issueNum)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query cycle state")
+		return
+	}
+	if cycleState != nil {
+		resp.DevReviewCycleCount = cycleState.DevReviewCycleCount
+		resp.CapHit = !cycleState.CapHitAt.IsZero()
 	}
 	if depState != nil {
 		resp.DependencyVerdict = depState.Verdict

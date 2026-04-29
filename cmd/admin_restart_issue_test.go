@@ -110,6 +110,9 @@ func TestRunRestartIssueStoreClearsCacheClaimAndLogsEvent(t *testing.T) {
 	if !result.CacheCleared || !result.DependencyStateCleared || !result.ClaimCleared || !result.EventLogged {
 		t.Fatalf("unexpected result: %+v", result)
 	}
+	if result.CycleStateCleared {
+		t.Fatalf("CycleStateCleared = true unexpectedly: %+v", result)
+	}
 	if result.ClaimOwner != "coordinator-host-pid-123" {
 		t.Fatalf("ClaimOwner = %q", result.ClaimOwner)
 	}
@@ -128,6 +131,48 @@ func TestRunRestartIssueStoreClearsCacheClaimAndLogsEvent(t *testing.T) {
 	}
 	if latest == nil || latest.Type != eventlog.TypeIssueRestarted {
 		t.Fatalf("latest event = %+v, want %q", latest, eventlog.TypeIssueRestarted)
+	}
+}
+
+func TestRunRestartIssueStoreClearsCycleState(t *testing.T) {
+	st, err := store.NewStore(filepath.Join(t.TempDir(), "restart-cycle.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	const (
+		repo     = "owner/repo"
+		issueNum = 211
+	)
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     repo,
+		IssueNum: issueNum,
+		Labels:   `["workbuddy","status:developing"]`,
+		State:    "open",
+	}); err != nil {
+		t.Fatalf("UpsertIssueCache: %v", err)
+	}
+	if _, err := st.IncrementDevReviewCycleCount(repo, issueNum); err != nil {
+		t.Fatalf("IncrementDevReviewCycleCount: %v", err)
+	}
+	if err := st.MarkIssueCycleCapHit(repo, issueNum); err != nil {
+		t.Fatalf("MarkIssueCycleCapHit: %v", err)
+	}
+
+	result, err := runRestartIssueStore(st, repo, issueNum, "test")
+	if err != nil {
+		t.Fatalf("runRestartIssueStore: %v", err)
+	}
+	if !result.CycleStateCleared {
+		t.Fatalf("CycleStateCleared = false: %+v", result)
+	}
+	state, err := st.QueryIssueCycleState(repo, issueNum)
+	if err != nil {
+		t.Fatalf("QueryIssueCycleState: %v", err)
+	}
+	if state != nil {
+		t.Fatalf("expected nil cycle state after restart, got %+v", state)
 	}
 }
 

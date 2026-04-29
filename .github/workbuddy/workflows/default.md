@@ -4,6 +4,7 @@ description: Default 2-agent lifecycle for any workbuddy-tracked issue
 trigger:
   issue_label: "workbuddy"
 max_retries: 3
+max_review_cycles: 3
 ---
 
 ## Default Workflow
@@ -49,6 +50,16 @@ states:
 
 `failed` 仍然是 workflow schema 中可识别的终态 label，但当前 Go runtime 不会在 retry 超限时直接写入
 `status:failed` 或 `needs-human`；它只记录 retry/failure intent，后续 label 写回仍由 agent 或人工执行。
+
+`max_review_cycles` (default 3) caps the orchestrator-level dev↔review
+round-trip count: every developing→reviewing→developing increment counts as
+one cycle. On cap-hit the Coordinator stops dispatching `dev-agent` and
+`review-agent`, posts a needs-human comment with a rejection-trail digest
+(assembled from existing `completed` events — no agent re-invocation), and
+emits a `dev_review_cycle_cap_reached` event + alert. A heads-up alert fires
+when `cycles == max_review_cycles - 1` so an operator can intervene
+preemptively. Use `workbuddy issue restart` to clear the counter after human
+intervention.
 
 `status:done` is the post-merge terminal label; the review-agent (or the human
 who merged the PR) is responsible for closing the issue. The state machine

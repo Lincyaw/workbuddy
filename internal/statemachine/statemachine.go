@@ -67,6 +67,36 @@ const DoneLabel = "status:done"
 // enough to recover from a crashed coordinator.
 const DefaultIssueClaimLease = 30 * time.Minute
 
+// DefaultMaxReviewCycles is the orchestrator-level cap on dev↔review
+// round-trips (developing→reviewing→developing) used when a workflow does
+// not specify max_review_cycles in its frontmatter. See REQ-085.
+const DefaultMaxReviewCycles = 3
+
+// State names recognized by the dev↔review cycle counter. These match the
+// canonical default workflow shipped in `.github/workbuddy/workflows/default.md`.
+const (
+	stateNameDeveloping = "developing"
+	stateNameReviewing  = "reviewing"
+)
+
+// CycleCapReporter is the optional callback used by the StateMachine to post
+// a needs-human comment with the rejection-trail digest when an issue trips
+// the dev↔review cycle cap. The interface is satisfied by *reporter.Reporter
+// in production wiring; tests pass a fake.
+type CycleCapReporter interface {
+	ReportDevReviewCycleCap(ctx context.Context, repo string, issueNum int, info CycleCapInfo) error
+}
+
+// CycleCapInfo carries the data the Reporter needs to assemble the
+// needs-human comment posted on cap-hit. The rejection-trail digest is
+// expected to be assembled by Coordinator Go code (no agent re-invocation).
+type CycleCapInfo struct {
+	WorkflowName    string
+	CycleCount      int
+	MaxReviewCycles int
+	HitAt           time.Time
+}
+
 type dispatchGroup struct {
 	workflow string
 	state    string
@@ -125,6 +155,11 @@ type StateMachine struct {
 
 	workflowManager *workflow.Manager
 
+	// capReporter posts the needs-human comment when an issue trips the
+	// dev↔review cycle cap. Optional; when nil, cap-hit still records an
+	// event + alert but no GitHub comment is written.
+	capReporter CycleCapReporter
+
 	// issueClaim configuration (REQ-057). When claimerID is empty, per-issue
 	// claim acquisition is skipped — useful for tests that don't care and for
 	// backwards compatibility with the existing NewStateMachine signature.
@@ -168,6 +203,13 @@ func NewStateMachine(
 		claimTokens:     make(map[string]string),
 		claimWarned:     make(map[string]struct{}),
 	}
+}
+
+// SetCycleCapReporter installs the callback used to post a needs-human
+// comment when an issue trips the dev↔review cycle cap. Pass nil to disable
+// the comment side-effect (event + alert still fire).
+func (sm *StateMachine) SetCycleCapReporter(r CycleCapReporter) {
+	sm.capReporter = r
 }
 
 // SetIssueClaim enables per-issue dispatch-claim acquisition (REQ-057). When
@@ -289,6 +331,28 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 		}
 		sm.inflightMu.Unlock()
 
+		// REQ-085: orchestrator-level dev↔review cycle counter and cap.
+		// Production state changes flow through the state-entry branch (agents
+		// flip labels atomically), so this is where we count round-trips.
+		blocked, err := sm.applyDevReviewCycleCap(ctx, wf, event.Repo, event.IssueNum, currentStateName)
+		if err != nil {
+			return err
+		}
+		if blocked {
+			return nil
+		}
+
+		// Persist the new current state so future cycles can compare against it.
+		sm.recordStateEntry(wf.Name, event.Repo, event.IssueNum, currentStateName, currentState)
+
+		// Touch first_dispatch_at so the long-flight stuck detector knows when
+		// the issue first received an agent dispatch.
+		if sm.store != nil {
+			if err := sm.store.TouchIssueFirstDispatch(event.Repo, event.IssueNum); err != nil {
+				log.Printf("[statemachine] touch first dispatch for %s#%d: %v", event.Repo, event.IssueNum, err)
+			}
+		}
+
 		return sm.dispatchStateAgents(ctx, event.Repo, event.IssueNum, wf.Name, currentStateName, currentState)
 	}
 
@@ -400,6 +464,120 @@ func (sm *StateMachine) evaluateTransitions(ctx context.Context, wf *config.Work
 	}
 
 	return true, nil
+}
+
+// applyDevReviewCycleCap detects a developing→reviewing→developing round-trip
+// and enforces the workflow's max_review_cycles cap (REQ-085). Returns
+// (blocked=true) when the cap is hit and dispatch should NOT proceed; the
+// caller is responsible for halting state-entry dispatch in that case.
+//
+// Cycle detection rule: a "round-trip" is recorded each time the issue
+// re-enters the developing state after the workflow_instance's persisted
+// current_state was reviewing. The very first entry into developing is
+// not counted (no prior reviewing state exists).
+func (sm *StateMachine) applyDevReviewCycleCap(ctx context.Context, wf *config.WorkflowConfig, repo string, issueNum int, currentStateName string) (bool, error) {
+	if currentStateName != stateNameDeveloping {
+		return false, nil
+	}
+	if sm.store == nil || sm.workflowManager == nil {
+		return false, nil
+	}
+	priorState := sm.queryPriorWorkflowState(wf.Name, repo, issueNum)
+	if priorState != stateNameReviewing {
+		return false, nil
+	}
+
+	cycleCount, err := sm.store.IncrementDevReviewCycleCount(repo, issueNum)
+	if err != nil {
+		return false, fmt.Errorf("statemachine: increment dev_review_cycle_count: %w", err)
+	}
+
+	maxCycles := wf.MaxReviewCycles
+	if maxCycles <= 0 {
+		maxCycles = DefaultMaxReviewCycles
+	}
+
+	payload := map[string]any{
+		"workflow":          wf.Name,
+		"cycle_count":       cycleCount,
+		"max_review_cycles": maxCycles,
+	}
+	sm.eventlog.Log(eventlog.TypeDevReviewCycleCount, repo, issueNum, payload)
+
+	if cycleCount >= maxCycles {
+		if err := sm.store.MarkIssueCycleCapHit(repo, issueNum); err != nil {
+			log.Printf("[statemachine] mark issue cycle cap hit for %s#%d: %v", repo, issueNum, err)
+		}
+		sm.eventlog.Log(eventlog.TypeDevReviewCycleCapReached, repo, issueNum, payload)
+		sm.publishAlert(alertbus.KindDevReviewCycleCapReached, alertbus.SeverityError, repo, issueNum, "", payload)
+		if sm.capReporter != nil {
+			info := CycleCapInfo{
+				WorkflowName:    wf.Name,
+				CycleCount:      cycleCount,
+				MaxReviewCycles: maxCycles,
+				HitAt:           time.Now().UTC(),
+			}
+			if err := sm.capReporter.ReportDevReviewCycleCap(ctx, repo, issueNum, info); err != nil {
+				log.Printf("[statemachine] report cycle cap for %s#%d: %v", repo, issueNum, err)
+			}
+		}
+		return true, nil
+	}
+
+	if cycleCount == maxCycles-1 {
+		warnPayload := map[string]any{
+			"workflow":          wf.Name,
+			"cycle_count":       cycleCount,
+			"max_review_cycles": maxCycles,
+			"remaining":         maxCycles - cycleCount,
+		}
+		sm.eventlog.Log(eventlog.TypeDevReviewCycleApproaching, repo, issueNum, warnPayload)
+		sm.publishAlert(alertbus.KindDevReviewCycleApproaching, alertbus.SeverityWarn, repo, issueNum, "", warnPayload)
+	}
+	return false, nil
+}
+
+// recordStateEntry advances the persisted workflow_instance current_state
+// when a state-entry causes a real transition. Idempotent for self-entries.
+func (sm *StateMachine) recordStateEntry(workflowName, repo string, issueNum int, currentStateName string, currentState *config.State) {
+	if sm.workflowManager == nil {
+		return
+	}
+	prior := sm.queryPriorWorkflowState(workflowName, repo, issueNum)
+	if prior == "" || prior == currentStateName {
+		return
+	}
+	triggerAgent := ""
+	if currentState != nil {
+		triggerAgent = currentState.Agent
+	}
+	if err := sm.workflowManager.Advance(repo, issueNum, workflowName, prior, currentStateName, triggerAgent); err != nil {
+		log.Printf("[statemachine] advance workflow instance %s#%d %s→%s: %v", repo, issueNum, prior, currentStateName, err)
+		return
+	}
+	if _, err := sm.store.IncrementTransition(repo, issueNum, prior, currentStateName); err != nil {
+		log.Printf("[statemachine] increment transition %s#%d %s→%s: %v", repo, issueNum, prior, currentStateName, err)
+	}
+}
+
+// queryPriorWorkflowState returns the persisted current_state for the issue
+// before the present state-entry. Empty string if the workflow instance does
+// not exist or its persisted state cannot be read.
+func (sm *StateMachine) queryPriorWorkflowState(workflowName, repo string, issueNum int) string {
+	if sm.workflowManager == nil {
+		return ""
+	}
+	instances, err := sm.workflowManager.QueryByRepoIssue(repo, issueNum)
+	if err != nil {
+		log.Printf("[statemachine] query workflow instances %s#%d: %v", repo, issueNum, err)
+		return ""
+	}
+	for _, inst := range instances {
+		if inst.WorkflowName == workflowName {
+			return inst.CurrentState
+		}
+	}
+	return ""
 }
 
 func (sm *StateMachine) ensureWorkflowInstance(workflowName, repo string, issueNum int, currentState string) error {
