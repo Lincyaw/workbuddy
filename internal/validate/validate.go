@@ -122,6 +122,18 @@ type workflowDoc struct {
 	NameLine   int
 	StateOrder []string
 	States     map[string]*stateDoc
+	// Body is the markdown body (everything after the closing frontmatter
+	// `---`), preserved for diagnostics that need to scan documentation
+	// prose (e.g. WB-L003).
+	Body string
+	// BodyStartLine is the absolute file line where Body begins (1-based).
+	BodyStartLine int
+	// StatesYAMLStartLine and StatesYAMLEndLine are the absolute file line
+	// numbers (1-based, inclusive) of the embedded ```yaml states: ... ```
+	// fenced block. Used by lint passes that need to skip the structured
+	// YAML when scanning workflow prose.
+	StatesYAMLStartLine int
+	StatesYAMLEndLine   int
 }
 
 type stateDoc struct {
@@ -255,6 +267,15 @@ func ValidateDirWithOptions(configDir string, opts Options) ([]Diagnostic, error
 
 	// Layer 4 — semantic / cross-knob consistency (WB-S001..S004).
 	diags = append(diags, validateSemantics(configDir, agents, workflows, semanticsOptions(opts))...)
+
+	// Layer L — content/control-flow drift lint (WB-L001..L003). All
+	// warnings; default exit 0, gated by --strict.
+	for _, name := range agentNames {
+		diags = append(diags, validateAgentPromptLint(agents[name])...)
+	}
+	for _, wf := range workflows {
+		diags = append(diags, validateWorkflowProseLint(wf)...)
+	}
 
 	sort.Slice(diags, func(i, j int) bool {
 		a := diags[i]
@@ -461,7 +482,7 @@ func parseWorkflowFile(path string) (*workflowDoc, []Diagnostic) {
 		return nil, []Diagnostic{{Path: path, Line: fmStartLine, Message: "empty workflow frontmatter"}}
 	}
 
-	yamlBlock, yamlStartLine, ok := firstYAMLCodeBlock(body, bodyStartLine)
+	yamlBlock, yamlStartLine, yamlEndLine, ok := firstYAMLCodeBlockBounded(body, bodyStartLine)
 	if !ok {
 		return nil, []Diagnostic{{Path: path, Line: bodyStartLine, Message: "missing workflow states yaml block"}}
 	}
@@ -476,8 +497,12 @@ func parseWorkflowFile(path string) (*workflowDoc, []Diagnostic) {
 
 	root := frontmatter.Content[0]
 	workflow := &workflowDoc{
-		Path:   path,
-		States: make(map[string]*stateDoc),
+		Path:                path,
+		States:              make(map[string]*stateDoc),
+		Body:                body,
+		BodyStartLine:       bodyStartLine,
+		StatesYAMLStartLine: yamlStartLine,
+		StatesYAMLEndLine:   yamlEndLine,
 	}
 	workflow.Name, workflow.NameLine = scalarValue(root, "name", fmStartLine)
 
@@ -620,6 +645,14 @@ func splitFrontmatter(content string) (frontmatter string, body string, fmStartL
 }
 
 func firstYAMLCodeBlock(body string, bodyStartLine int) (string, int, bool) {
+	block, startLine, _, ok := firstYAMLCodeBlockBounded(body, bodyStartLine)
+	return block, startLine, ok
+}
+
+// firstYAMLCodeBlockBounded behaves like firstYAMLCodeBlock but also returns
+// the absolute file line of the closing ``` fence (inclusive). Used by lint
+// passes that need to skip the YAML block when scanning workflow prose.
+func firstYAMLCodeBlockBounded(body string, bodyStartLine int) (string, int, int, bool) {
 	lines := strings.Split(body, "\n")
 	for i := 0; i < len(lines); i++ {
 		if strings.TrimSpace(lines[i]) != "```yaml" {
@@ -627,12 +660,12 @@ func firstYAMLCodeBlock(body string, bodyStartLine int) (string, int, bool) {
 		}
 		for j := i + 1; j < len(lines); j++ {
 			if strings.TrimSpace(lines[j]) == "```" {
-				return strings.Join(lines[i+1:j], "\n"), bodyStartLine + i + 1, true
+				return strings.Join(lines[i+1:j], "\n"), bodyStartLine + i + 1, bodyStartLine + j, true
 			}
 		}
-		return "", bodyStartLine + i, false
+		return "", bodyStartLine + i, 0, false
 	}
-	return "", 0, false
+	return "", 0, 0, false
 }
 
 func scalarValue(node *yaml.Node, key string, baseLine int) (string, int) {

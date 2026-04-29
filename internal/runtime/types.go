@@ -75,6 +75,24 @@ type TaskContext struct {
 	RelatedPRs     []PRSummary
 	RelatedPRsText string
 	sessionHandle  *ManagedSession
+
+	// stateName / state carry the workflow state metadata used to synthesize
+	// the transition footer that is appended to the agent prompt at dispatch
+	// (issue #204 batch 3). They are intentionally unexported so they do not
+	// appear in the TaskContext schema and cannot be referenced directly from
+	// agent prompt templates as `{{.State…}}` — the footer is the only way
+	// state metadata leaks into the rendered prompt.
+	stateName string
+	state     *stateMetadata
+}
+
+// stateMetadata mirrors the subset of *config.State that the footer renderer
+// needs. Storing only the values (rather than the pointer to config.State)
+// keeps the runtime package free of a circular dependency on internal/config
+// for TaskContext, while still letting the Preparer attach the data once.
+type stateMetadata struct {
+	EnterLabel  string
+	Transitions map[string]string
 }
 
 type IssueContext struct {
@@ -128,6 +146,49 @@ func (t *TaskContext) SetSessionHandle(handle *ManagedSession) {
 		return
 	}
 	t.sessionHandle = handle
+}
+
+// SetWorkflowState attaches workflow-state metadata used by the runtime to
+// build the transition footer appended to the agent prompt. Pass an empty
+// stateName and nil transitions to clear it.
+//
+// The runtime package owns this seam intentionally so internal/config is not
+// imported into TaskContext directly.
+func (t *TaskContext) SetWorkflowState(stateName, enterLabel string, transitions map[string]string) {
+	if t == nil {
+		return
+	}
+	t.stateName = stateName
+	if stateName == "" && enterLabel == "" && len(transitions) == 0 {
+		t.state = nil
+		return
+	}
+	cloned := make(map[string]string, len(transitions))
+	for k, v := range transitions {
+		cloned[k] = v
+	}
+	t.state = &stateMetadata{EnterLabel: enterLabel, Transitions: cloned}
+}
+
+// WorkflowStateName returns the workflow state attached via SetWorkflowState.
+func (t *TaskContext) WorkflowStateName() string {
+	if t == nil {
+		return ""
+	}
+	return t.stateName
+}
+
+// WorkflowStateMetadata returns the enter_label and transitions attached via
+// SetWorkflowState. The returned map is a defensive copy.
+func (t *TaskContext) WorkflowStateMetadata() (enterLabel string, transitions map[string]string) {
+	if t == nil || t.state == nil {
+		return "", nil
+	}
+	cloned := make(map[string]string, len(t.state.Transitions))
+	for k, v := range t.state.Transitions {
+		cloned[k] = v
+	}
+	return t.state.EnterLabel, cloned
 }
 
 type SessionRef struct {

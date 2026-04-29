@@ -62,6 +62,7 @@ type readerAwarePreparer interface {
 // persists the task for a remote worker to claim.
 type Router struct {
 	agents    map[string]*config.AgentConfig
+	workflows map[string]*config.WorkflowConfig
 	registry  *registry.Registry
 	gateStore dependency.GateStore
 	preparer  Preparer
@@ -109,6 +110,15 @@ func (r *Router) SetPreparer(p Preparer) {
 	if p != nil {
 		r.preparer = p
 	}
+}
+
+// SetWorkflows wires workflow definitions into the router so it can attach
+// state metadata to dispatch decisions. The state metadata travels onward to
+// the Preparer (and the runtime task context) so the transition footer can
+// be synthesized at prompt-render time without reaching back into the
+// state-machine. Calling with nil clears the registry.
+func (r *Router) SetWorkflows(workflows map[string]*config.WorkflowConfig) {
+	r.workflows = workflows
 }
 
 // Run consumes dispatch requests until ctx is cancelled.
@@ -162,6 +172,25 @@ func (r *Router) decide(req statemachine.DispatchRequest) (Decision, bool) {
 		Agent:     agent,
 		Workflow:  req.Workflow,
 		State:     req.State,
+		StateDef:  r.lookupState(req.Workflow, req.State),
 	}, true
+}
+
+// lookupState returns the *config.State for a (workflow, state) pair, or nil
+// when the workflow registry is not wired or the state is unknown. nil is
+// fine — the preparer treats it as "no footer".
+func (r *Router) lookupState(workflowName, stateName string) *config.State {
+	if r.workflows == nil {
+		return nil
+	}
+	wf, ok := r.workflows[workflowName]
+	if !ok || wf == nil {
+		return nil
+	}
+	state, ok := wf.States[stateName]
+	if !ok {
+		return nil
+	}
+	return state
 }
 

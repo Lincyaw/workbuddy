@@ -264,6 +264,7 @@ func (pm *PollerManager) StartOrUpdate(rec store.RepoRegistrationRecord) error {
 	sm.SetIssueClaim(BuildIssueClaimerID("coordinator-"+HostnameOrUnknown(), os.Getpid()), statemachine.DefaultIssueClaimLease)
 	depResolver := dependency.NewResolver(pm.store, pm.ghReader, pm.eventlog, pm.alertBus)
 	rt := router.NewRouter(cfg.Agents, pm.registry, pm.store, rec.Repo, pm.repoRoot, nil, nil, false)
+	rt.SetWorkflows(cfg.Workflows)
 	if issueDataReader, ok := pm.ghReader.(router.IssueDataReader); ok {
 		rt.SetIssueDataReader(issueDataReader)
 	}

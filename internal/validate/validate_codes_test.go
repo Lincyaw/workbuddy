@@ -224,6 +224,54 @@ func TestValidateDir_CodeFixtures(t *testing.T) {
 			opts:    Options{SkipRuntimeBinaryCheck: true},
 			wantHas: CodeAgentInTerminalState,
 		},
+		{
+			name: "WB-L001 prompt body inlines gh issue edit",
+			files: map[string]string{
+				"config.yaml": "repo: octo/x\n",
+				"agents/dev-agent.md": fixtureAgent(
+					"dev-agent", "developing", "dev", "claude-code",
+					"Repo: {{.Repo}}\nWhen finished, run `gh issue edit 1 --add-label foo`.",
+				),
+				"workflows/default.md": fixtureWorkflow(map[string]workflowState{
+					"developing": {EnterLabel: "status:developing", Agent: "dev-agent", Transitions: []string{"reviewing"}},
+					"reviewing":  {EnterLabel: "status:reviewing"},
+				}),
+			},
+			opts:    Options{SkipRuntimeBinaryCheck: true},
+			wantHas: CodeAgentPromptInlinesGhEdit,
+		},
+		{
+			name: "WB-L002 prompt body inlines status: label",
+			files: map[string]string{
+				"config.yaml": "repo: octo/x\n",
+				"agents/dev-agent.md": fixtureAgent(
+					"dev-agent", "developing", "dev", "claude-code",
+					"Repo: {{.Repo}}\nIf the criterion fails, set status:blocked and stop.",
+				),
+				"workflows/default.md": fixtureWorkflow(map[string]workflowState{
+					"developing": {EnterLabel: "status:developing", Agent: "dev-agent", Transitions: []string{"reviewing"}},
+					"reviewing":  {EnterLabel: "status:reviewing"},
+				}),
+			},
+			opts:    Options{SkipRuntimeBinaryCheck: true},
+			wantHas: CodeAgentPromptInlinesStatusLabel,
+		},
+		{
+			name: "WB-L003 workflow prose contains template expression",
+			files: map[string]string{
+				"config.yaml":         "repo: octo/x\n",
+				"agents/dev-agent.md": fixtureAgent("dev-agent", "developing", "dev", "claude-code", "Repo: {{.Repo}}"),
+				"workflows/default.md": fixtureWorkflowWithProse(
+					map[string]workflowState{
+						"developing": {EnterLabel: "status:developing", Agent: "dev-agent", Transitions: []string{"reviewing"}},
+						"reviewing":  {EnterLabel: "status:reviewing"},
+					},
+					"\nIssue {{.Issue.Number}} flows through this graph.\n",
+				),
+			},
+			opts:    Options{SkipRuntimeBinaryCheck: true},
+			wantHas: CodeWorkflowProseTemplateExpr,
+		},
 	}
 
 	for _, tc := range cases {
@@ -455,6 +503,26 @@ type orderedState struct {
 // helper synthesises the driving label as `status:<target>` so the tests
 // remain compact.
 func fixtureOrderedWorkflow(states []orderedState) string {
+	return fixtureOrderedWorkflowWithTrailing(states, "")
+}
+
+// fixtureWorkflowWithProse appends `trailing` text after the closing fence
+// of the states YAML block — used by lint cases (WB-L003) that need to put
+// arbitrary prose into the workflow body.
+func fixtureWorkflowWithProse(states map[string]workflowState, trailing string) string {
+	names := make([]string, 0, len(states))
+	for n := range states {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	ordered := make([]orderedState, 0, len(states))
+	for _, n := range names {
+		ordered = append(ordered, orderedState{Name: n, State: states[n]})
+	}
+	return fixtureOrderedWorkflowWithTrailing(ordered, trailing)
+}
+
+func fixtureOrderedWorkflowWithTrailing(states []orderedState, trailing string) string {
 	var b strings.Builder
 	b.WriteString("---\nname: default\ndescription: t\ntrigger:\n  issue_label: \"workbuddy\"\n---\n## W\n\n```yaml\nstates:\n")
 	for _, item := range states {
@@ -473,6 +541,9 @@ func fixtureOrderedWorkflow(states []orderedState) string {
 		}
 	}
 	b.WriteString("```\n")
+	if trailing != "" {
+		b.WriteString(trailing)
+	}
 	return b.String()
 }
 

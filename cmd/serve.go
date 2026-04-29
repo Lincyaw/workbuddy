@@ -215,6 +215,7 @@ func runServeWithOutput(opts *serveOpts, ghReader poller.GHReader, launcherOverr
 	_ = wsMgr.Prune()
 
 	rt := router.NewRouter(cfg.Agents, reg, st, cfg.Global.Repo, repoDir, taskCh, wsMgr, true)
+	rt.SetWorkflows(cfg.Workflows)
 	if issueDataReader, ok := ghReader.(router.IssueDataReader); ok {
 		rt.SetIssueDataReader(issueDataReader)
 	}

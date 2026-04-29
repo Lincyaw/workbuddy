@@ -127,7 +127,7 @@ func (s *ProcessSession) Run(ctx context.Context, events chan<- launcherevents.E
 
 func (s *ProcessSession) BuildCommand(execCtx context.Context) (*exec.Cmd, error) {
 	if IsClaudeRuntime(s.RuntimeName) && strings.TrimSpace(s.Agent.Prompt) != "" {
-		prompt, err := RenderCommandRaw(s.Agent.Prompt, s.Task)
+		prompt, err := RenderAgentPrompt(s.Agent.Prompt, s.Task)
 		if err != nil {
 			return nil, err
 		}
