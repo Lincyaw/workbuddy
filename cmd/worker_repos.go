@@ -21,7 +21,6 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/auditapi"
 	"github.com/Lincyaw/workbuddy/internal/store"
-	"github.com/Lincyaw/workbuddy/internal/webui"
 	"github.com/Lincyaw/workbuddy/internal/workerclient"
 	"github.com/spf13/cobra"
 )
@@ -232,14 +231,6 @@ func startWorkerMgmtServer(mgmtAddr, addrFile, authToken string, bindings *worke
 		sessionAPIMux := http.NewServeMux()
 		sessionAPI.RegisterSessionsOnly(sessionAPIMux)
 		mux.Handle("/sessions/", protected(sessionAPIMux))
-
-		sessionUI := webui.NewHandler(st)
-		sessionUI.SetSessionsDir(sessionsDir)
-		sessionUIMux := http.NewServeMux()
-		sessionUI.Register(sessionUIMux)
-		mux.Handle("/sessions", protected(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			sessionUIMux.ServeHTTP(w, r)
-		})))
 	}
 
 	srv := &http.Server{Handler: mux}

@@ -1,6 +1,16 @@
 # Build output
 /workbuddy
 /dist/
+/bin/
+
+# Front-end build artefacts. The SPA bundle is rebuilt by `make web`;
+# only the placeholder index.html and .keep marker stay in version
+# control so `go build` / `go:embed` keep working on a fresh clone.
+/web/dist/
+/web/node_modules/
+/internal/webui/dist/*
+!/internal/webui/dist/.keep
+!/internal/webui/dist/index.html
 
 # Local state and logs
 .workbuddy/
