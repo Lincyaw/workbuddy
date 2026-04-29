@@ -51,8 +51,7 @@ func TestRootFlagNoColor_StripsANSIFromServeBanner(t *testing.T) {
 			Port:         8080,
 		},
 	}, &serveOpts{
-		roles:          []string{"\x1b[32mdev\x1b[0m"},
-		coordinatorAPI: true,
+		roles: []string{"\x1b[32mdev\x1b[0m"},
 	})
 
 	got := stdout.String()
@@ -61,6 +60,16 @@ func TestRootFlagNoColor_StripsANSIFromServeBanner(t *testing.T) {
 	}
 	if !strings.Contains(got, "owner/repo") {
 		t.Fatalf("expected stripped repo name in output, got %q", got)
+	}
+}
+
+func TestServeFlagCoordinatorAPIRemoved(t *testing.T) {
+	_, _, err := executeRootContractTest(t, "serve", "--coordinator-api")
+	if err == nil {
+		t.Fatal("expected serve to reject removed --coordinator-api flag")
+	}
+	if !strings.Contains(err.Error(), "unknown flag: --coordinator-api") {
+		t.Fatalf("expected unknown flag error, got %v", err)
 	}
 }
 
