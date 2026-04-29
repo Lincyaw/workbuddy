@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -113,12 +114,61 @@ func (h *Handler) handleSessionSubpath(w http.ResponseWriter, r *http.Request) {
 	case "":
 		h.handleDetail(w, r, sessionID)
 	case "events.json":
+		markDeprecated(w, r,
+			"/sessions/{id}/events.json",
+			"/api/v1/sessions/{id}/events")
 		h.handleEventsJSON(w, r, sessionID)
 	case "stream":
+		markDeprecated(w, r,
+			"/sessions/{id}/stream",
+			"/api/v1/sessions/{id}/stream")
 		h.handleStream(w, r, sessionID)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// HandleAPISessionEvents serves /api/v1/sessions/{id}/events. The new path
+// reuses the existing on-disk events-v1.jsonl reader; the legacy
+// /sessions/{id}/events.json route is preserved as a 30-day deprecation alias.
+func (h *Handler) HandleAPISessionEvents(w http.ResponseWriter, r *http.Request) {
+	sessionID, ok := apiSessionID(r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	h.handleEventsJSON(w, r, sessionID)
+}
+
+// HandleAPISessionStream serves /api/v1/sessions/{id}/stream (SSE).
+func (h *Handler) HandleAPISessionStream(w http.ResponseWriter, r *http.Request) {
+	sessionID, ok := apiSessionID(r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	h.handleStream(w, r, sessionID)
+}
+
+func apiSessionID(path string) (string, bool) {
+	rest := strings.TrimPrefix(path, "/api/v1/sessions/")
+	id, _, _ := strings.Cut(rest, "/")
+	if !isValidSessionID(id) {
+		return "", false
+	}
+	return id, true
+}
+
+// markDeprecated tags responses to legacy /sessions/{id}/events.json and
+// /sessions/{id}/stream paths. Operators get a `Deprecation: true` header
+// (per RFC 8594 the value would be a date, but the issue spec asks for a
+// boolean shape) and a stdout log line so log-scrapers can spot lingering
+// callers before the alias is removed.
+func markDeprecated(w http.ResponseWriter, r *http.Request, oldPath, newPath string) {
+	w.Header().Set("Deprecation", "true")
+	w.Header().Set("Sunset", "30 days")
+	w.Header().Set("Link", `<`+newPath+`>; rel="successor-version"`)
+	log.Printf("[deprecated] old path %s accessed (request %s), prefer %s", oldPath, r.URL.Path, newPath)
 }
 
 // handleDetail renders a single session detail page.

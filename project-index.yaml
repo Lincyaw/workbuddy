@@ -2936,3 +2936,43 @@ requirements:
     related_docs:
       - docs/implemented/distributed-topology-and-cli.md
     deps: [REQ-027, REQ-028, REQ-029, REQ-051]
+
+  - id: REQ-088
+    title: Dashboard JSON API surface (in-flight, issue detail, session subpaths)
+    description: >
+      The dashboard SPA planned in #215 needs a single JSON contract: an
+      "in-flight" panorama listing every non-terminal issue with its
+      current_state, cycle_counts, last_transition_at, stuck_for_seconds,
+      claimed_worker_id and last_session_id/url; a per-issue detail endpoint
+      with the full transitions and sessions history; and the events/stream
+      session subpaths moved under /api/v1/* with a 30-day deprecation alias
+      under /sessions/. /api/v1/status, /api/v1/sessions, and /api/v1/workers
+      gain summary fields (in_flight_issues, stuck_issues_over_1h, done_24h,
+      failed_24h, task_status, workflow, current_state, current_task_id,
+      mgmt_base_url) without removing existing fields. last_session_url reuses
+      the reporter URL formatter via internal/sessionref so the dashboard and
+      GitHub comments cannot drift.
+    priority: P0
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-088-1: GET /api/v1/issues/in-flight returns a JSON array (never null) of every non-done/non-closed issue with repo, issue_num, title, current_state, current_label, cycle_counts, last_transition_at, stuck_for_seconds, claimed_worker_id, last_session_id, last_session_url"
+      - "AC-088-2: GET /api/v1/issues/{owner}/{repo}/{num} returns the cached issue with its full transitions list (from/to/at/by), transition_counts and sessions history"
+      - "AC-088-3: GET /api/v1/sessions/{id}/events serves the same body as the legacy /sessions/{id}/events.json (byte-for-byte parity); GET /api/v1/sessions/{id}/stream proxies to the SSE handler with no Deprecation header"
+      - "AC-088-4: Legacy /sessions/{id}/events.json and /sessions/{id}/stream paths still respond OK but emit Deprecation: true and a stdout [deprecated] log line"
+      - "AC-088-5: /api/v1/status response adds in_flight_issues, stuck_issues_over_1h, done_24h, failed_24h; /api/v1/sessions adds task_status, workflow, current_state; /api/v1/workers adds last_heartbeat_at, current_task_id, mgmt_base_url; existing fields remain unchanged"
+      - "AC-088-6: A golden snapshot test in internal/auditapi locks the in-flight row JSON shape so accidental field renames fail at PR-review time"
+      - "AC-088-7: go build ./... && go vet ./... && go test ./internal/auditapi/... ./internal/webui/... ./internal/store/... ./cmd/... -count=1 are green"
+    code:
+      - internal/auditapi/handler.go
+      - internal/webui/handler.go
+      - internal/store/queries.go
+      - internal/store/store.go
+      - internal/sessionref/url.go
+      - internal/reporter/reporter.go
+      - cmd/coordinator.go
+    tests:
+      - internal/auditapi/handler_test.go
+      - internal/webui/handler_test.go
+      - cmd/coordinator_audit_test.go
+    deps: [REQ-013, REQ-018, REQ-019, REQ-029]

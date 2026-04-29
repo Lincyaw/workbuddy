@@ -1408,15 +1408,29 @@ func (s *Store) QueryIssueCache(repo string, issueNum int) (*IssueCache, error) 
 	return &ic, nil
 }
 
-// ListIssueCaches returns all non-PR cached issues for a repo.
+// ListIssueCaches returns all non-PR cached issues. Pass "" for repo to fan
+// out across every repo recorded in the cache.
 func (s *Store) ListIssueCaches(repo string) ([]IssueCache, error) {
-	rows, err := s.db.Query(
-		`SELECT repo, issue_num, labels, body, state, updated_at
-		 FROM issue_cache
-		 WHERE repo = ? AND (state IS NULL OR state NOT LIKE 'pr:%')
-		 ORDER BY issue_num`,
-		repo,
+	var (
+		rows *sql.Rows
+		err  error
 	)
+	if repo == "" {
+		rows, err = s.db.Query(
+			`SELECT repo, issue_num, labels, body, state, updated_at
+			 FROM issue_cache
+			 WHERE state IS NULL OR state NOT LIKE 'pr:%'
+			 ORDER BY repo, issue_num`,
+		)
+	} else {
+		rows, err = s.db.Query(
+			`SELECT repo, issue_num, labels, body, state, updated_at
+			 FROM issue_cache
+			 WHERE repo = ? AND (state IS NULL OR state NOT LIKE 'pr:%')
+			 ORDER BY issue_num`,
+			repo,
+		)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("store: list issue caches: %w", err)
 	}
