@@ -172,6 +172,9 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	if err := validateWorkerMgmtPublicURL(mgmtPublicURL); err != nil {
 		return nil, err
 	}
+	if err := validateWorkerMgmtBind(mgmtAddr, mgmtPublicURL); err != nil {
+		return nil, err
+	}
 	resolvedMgmtAuthToken := defaultWorkerMgmtAuthToken(strings.TrimSpace(mgmtAuthToken))
 	if err := validateWorkerMgmtPublicURLAuth(strings.TrimSpace(mgmtPublicURL), strings.TrimSpace(token), resolvedMgmtAuthToken); err != nil {
 		return nil, err
@@ -237,6 +240,9 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 		return fmt.Errorf("worker: options are required")
 	}
 	if err := validateWorkerMgmtPublicURL(opts.mgmtPublicURL); err != nil {
+		return err
+	}
+	if err := validateWorkerMgmtBind(opts.mgmtAddr, opts.mgmtPublicURL); err != nil {
 		return err
 	}
 	if err := validateWorkerMgmtPublicURLAuth(opts.mgmtPublicURL, opts.token, opts.mgmtAuthToken); err != nil {

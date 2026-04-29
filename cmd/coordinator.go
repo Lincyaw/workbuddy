@@ -62,6 +62,10 @@ type coordinatorOpts struct {
 	trustedAuthors    string
 	trustedAuthorsSet bool
 	cookieInsecure    bool
+	// reportBaseURL is the URL the Reporter writes into GitHub issue comments
+	// as the prefix of session links. Required when --listen is non-loopback;
+	// optional (defaults to http://<listen>) when --listen is loopback.
+	reportBaseURL string
 }
 
 type tokenCreateOpts struct {
@@ -144,6 +148,7 @@ func init() {
 	coordinatorCmd.Flags().Bool("auth", false, "Require WORKBUDDY_AUTH_TOKEN for worker and repo registration APIs")
 	coordinatorCmd.Flags().String("trusted-authors", "", "Comma-separated GitHub logins allowed to trigger agent work")
 	coordinatorCmd.Flags().Bool("cookie-insecure", false, "Drop the Secure attribute on session cookies (HTTP reverse-proxy fronts only)")
+	coordinatorCmd.Flags().String("report-base-url", "", "Required when --listen is not a loopback address. The URL written into GitHub issue comments as the prefix of session links. Must be reachable from where you'll click the link in a browser. Falls back to WORKBUDDY_REPORT_BASE_URL when unset.")
 
 	coordinatorTokenCreateCmd.Flags().String("db", ".workbuddy/workbuddy.db", "SQLite database path")
 	coordinatorTokenCreateCmd.Flags().String("worker-id", "", "Worker ID")
@@ -189,6 +194,7 @@ func parseCoordinatorFlags(cmd *cobra.Command) (*coordinatorOpts, error) {
 	trustedAuthors, _ := cmd.Flags().GetString("trusted-authors")
 	trustedAuthorsSet := cmd.Flags().Changed("trusted-authors")
 	cookieInsecure, _ := cmd.Flags().GetBool("cookie-insecure")
+	reportBaseURL, _ := cmd.Flags().GetString("report-base-url")
 	if strings.TrimSpace(listenAddr) == "" {
 		return nil, fmt.Errorf("coordinator: --listen is required")
 	}
@@ -197,6 +203,10 @@ func parseCoordinatorFlags(cmd *cobra.Command) (*coordinatorOpts, error) {
 	}
 	if !authEnabled && !isLoopbackListenAddr(listenAddr) {
 		return nil, fmt.Errorf("coordinator: non-loopback --listen requires --auth, got %q", listenAddr)
+	}
+	resolvedReportURL, err := resolveReportBaseURL("coordinator", listenAddr, reportBaseURL, os.Getenv("WORKBUDDY_REPORT_BASE_URL"))
+	if err != nil {
+		return nil, err
 	}
 	return &coordinatorOpts{
 		dbPath:            dbPath,
@@ -209,6 +219,7 @@ func parseCoordinatorFlags(cmd *cobra.Command) (*coordinatorOpts, error) {
 		trustedAuthors:    trustedAuthors,
 		trustedAuthorsSet: trustedAuthorsSet,
 		cookieInsecure:    cookieInsecure,
+		reportBaseURL:     resolvedReportURL,
 	}, nil
 }
 
@@ -362,6 +373,9 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	evlog := eventlog.NewEventLoggerWithWriter(st, log.Writer())
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
 	rep.SetEventRecorder(evlog)
+	if base := strings.TrimRight(strings.TrimSpace(opts.reportBaseURL), "/"); base != "" {
+		rep.SetBaseURL(base)
+	}
 	reg := registry.NewRegistry(st, pollInterval)
 
 	ctx, cancel, sigCh := buildRunContext(parentCtx)

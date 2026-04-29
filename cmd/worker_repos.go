@@ -302,22 +302,69 @@ func wrapBearerAuth(token string, next http.Handler) http.Handler {
 }
 
 func validateWorkerMgmtAddr(raw string) error {
-	host, _, err := net.SplitHostPort(raw)
+	host, _, err := net.SplitHostPort(strings.TrimSpace(raw))
 	if err != nil {
 		return fmt.Errorf("worker mgmt: invalid addr %q: %w", raw, err)
 	}
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return fmt.Errorf("worker mgmt: addr must bind to a loopback host")
-	}
-	if strings.EqualFold(host, "localhost") {
-		return nil
-	}
-	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("worker mgmt: addr must bind to a loopback host")
+	if strings.TrimSpace(host) == "" {
+		return fmt.Errorf("worker mgmt: addr must include a host, got %q", raw)
 	}
 	return nil
+}
+
+// validateWorkerMgmtBind enforces the policy for the worker management
+// listener. The mgmt server publishes the per-worker session viewer that the
+// coordinator proxies to (so issue-comment session links are resolvable). A
+// non-loopback bind is only safe when --mgmt-public-url advertises a host that
+// is reachable from the operator's browser; otherwise comment links would be
+// unclickable. The function intentionally returns the actionable error
+// suggested in #221.
+func validateWorkerMgmtBind(mgmtAddr, mgmtPublicURL string) error {
+	if strings.TrimSpace(mgmtAddr) == "" {
+		// Empty mgmt-addr is filled in by startWorkerMgmtServer with the
+		// loopback default; no policy check is needed here.
+		return nil
+	}
+	if err := validateWorkerMgmtAddr(mgmtAddr); err != nil {
+		return err
+	}
+	host, port, err := net.SplitHostPort(strings.TrimSpace(mgmtAddr))
+	if err != nil {
+		return fmt.Errorf("worker mgmt: invalid addr %q: %w", mgmtAddr, err)
+	}
+	if isLoopbackMgmtHost(host) {
+		return nil
+	}
+	publicURL := strings.TrimSpace(mgmtPublicURL)
+	if publicURL == "" {
+		return fmt.Errorf(
+			"worker: --mgmt-addr %s is non-loopback but --mgmt-public-url is missing.\n"+
+				"Session links proxied through the coordinator would be unreachable from a browser.\n"+
+				"Pass --mgmt-public-url=http://<your-worker-host>:%s (or set WORKBUDDY_REPORT_BASE_URL in the deploy env) to fix.",
+			mgmtAddr, port,
+		)
+	}
+	if isLoopbackReportBaseURL(publicURL) {
+		return fmt.Errorf(
+			"worker: --mgmt-addr %s is non-loopback but --mgmt-public-url is loopback (%s).\n"+
+				"Session links proxied through the coordinator would be unreachable from a browser.\n"+
+				"Pass --mgmt-public-url=http://<your-worker-host>:%s to fix.",
+			mgmtAddr, publicURL, port,
+		)
+	}
+	return nil
+}
+
+func isLoopbackMgmtHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func validateWorkerMgmtPublicURL(raw string) error {

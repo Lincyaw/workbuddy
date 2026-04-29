@@ -18,8 +18,11 @@ Coordinator 和 Worker 在同一进程内启动，但仍然通过同一套 HTTP 
 ### 分布式模式 (v0.2.0+)
 
 ```
-# 机器 A
-workbuddy coordinator --port 8080
+# 机器 A —— 非 loopback bind 必须显式声明 --report-base-url（REQ-085）
+workbuddy coordinator \
+  --listen 0.0.0.0:8080 \
+  --report-base-url https://workbuddy.example.com:8080 \
+  --auth
 
 # 机器 B
 workbuddy worker \
@@ -30,6 +33,8 @@ workbuddy worker \
   --mgmt-auth-token <secret> \
   --mgmt-public-url https://worker-b.example.com/workbuddy
 ```
+
+`--report-base-url` 决定了写入 GitHub issue 评论的 session 链接 host。当 coordinator/serve 绑定到非 loopback 地址时，必须显式提供该值（可改用环境变量 `WORKBUDDY_REPORT_BASE_URL`）；loopback 绑定时可省略，自动落到 `http://<listen>`。Worker 同理：当 `--mgmt-addr` 不是 loopback 时，必须配置非 loopback 的 `--mgmt-public-url`，否则启动失败并给出修复建议。
 
 - Coordinator 负责：GitHub Poller、状态机、任务路由、HTTP API、审计
 - Worker 负责：向 Coordinator 注册、长轮询领取任务、执行 agent 子进程、提交结果

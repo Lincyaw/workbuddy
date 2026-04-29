@@ -255,4 +255,9 @@ environment: dev          # dev | staging | prod
 repo: {{ .Repo }}
 poll_interval: 30s
 port: 8080                # HTTP audit server port
+
+# report_base_url: http://your-host:8090  # required for non-loopback --listen
+#   The URL written into GitHub issue comments as the prefix of session links.
+#   Pass to coordinator/serve via --report-base-url, or export WORKBUDDY_REPORT_BASE_URL.
+#   Loopback binds (127.0.0.1) default to http://<listen> for local development.
 `

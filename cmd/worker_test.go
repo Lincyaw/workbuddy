@@ -405,6 +405,75 @@ func TestParseWorkerFlags_MgmtPublicURLTrimsAndStores(t *testing.T) {
 	}
 }
 
+func TestParseWorkerFlags_NonLoopbackMgmtAddrRequiresPublicURL(t *testing.T) {
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", "shared-token")
+	cmd := newWorkerFlagCommand()
+	if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
+		t.Fatalf("set coordinator: %v", err)
+	}
+	if err := cmd.Flags().Set("mgmt-addr", "0.0.0.0:9090"); err != nil {
+		t.Fatalf("set mgmt-addr: %v", err)
+	}
+
+	_, err := parseWorkerFlags(cmd)
+	if err == nil {
+		t.Fatal("expected non-loopback --mgmt-addr without --mgmt-public-url to be rejected")
+	}
+	if !strings.Contains(err.Error(), "--mgmt-public-url is missing") {
+		t.Fatalf("error = %q, want missing-mgmt-public-url diagnostic", err.Error())
+	}
+	if !strings.Contains(err.Error(), "--mgmt-public-url=http://<your-worker-host>:9090") {
+		t.Fatalf("error = %q, want fix-it suggestion", err.Error())
+	}
+}
+
+func TestParseWorkerFlags_NonLoopbackMgmtAddrRejectsLoopbackPublicURL(t *testing.T) {
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", "shared-token")
+	cmd := newWorkerFlagCommand()
+	if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
+		t.Fatalf("set coordinator: %v", err)
+	}
+	if err := cmd.Flags().Set("mgmt-addr", "0.0.0.0:9090"); err != nil {
+		t.Fatalf("set mgmt-addr: %v", err)
+	}
+	if err := cmd.Flags().Set("mgmt-public-url", "http://localhost:9090"); err != nil {
+		t.Fatalf("set mgmt-public-url: %v", err)
+	}
+
+	_, err := parseWorkerFlags(cmd)
+	if err == nil {
+		t.Fatal("expected loopback --mgmt-public-url for non-loopback bind to be rejected")
+	}
+	if !strings.Contains(err.Error(), "--mgmt-public-url is loopback") {
+		t.Fatalf("error = %q, want loopback diagnostic", err.Error())
+	}
+}
+
+func TestParseWorkerFlags_NonLoopbackMgmtAddrAcceptsExternalPublicURL(t *testing.T) {
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", "shared-token")
+	cmd := newWorkerFlagCommand()
+	if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
+		t.Fatalf("set coordinator: %v", err)
+	}
+	if err := cmd.Flags().Set("mgmt-addr", "0.0.0.0:9090"); err != nil {
+		t.Fatalf("set mgmt-addr: %v", err)
+	}
+	if err := cmd.Flags().Set("mgmt-public-url", "https://worker.example.com:9090"); err != nil {
+		t.Fatalf("set mgmt-public-url: %v", err)
+	}
+
+	opts, err := parseWorkerFlags(cmd)
+	if err != nil {
+		t.Fatalf("parseWorkerFlags: %v", err)
+	}
+	if opts.mgmtAddr != "0.0.0.0:9090" {
+		t.Fatalf("mgmtAddr = %q, want 0.0.0.0:9090", opts.mgmtAddr)
+	}
+	if opts.mgmtPublicURL != "https://worker.example.com:9090" {
+		t.Fatalf("mgmtPublicURL = %q, want https://worker.example.com:9090", opts.mgmtPublicURL)
+	}
+}
+
 func TestParseWorkerFlags_MgmtPublicURLUsesSharedEnvToken(t *testing.T) {
 	t.Setenv("WORKBUDDY_AUTH_TOKEN", "shared-token")
 

@@ -300,12 +300,37 @@ func TestWorkerMgmtClientTimesOutWithReadableError(t *testing.T) {
 	}
 }
 
-func TestValidateWorkerMgmtAddrRejectsNonLoopback(t *testing.T) {
-	if err := validateWorkerMgmtAddr("0.0.0.0:0"); err == nil {
-		t.Fatal("expected non-loopback addr rejection")
+func TestValidateWorkerMgmtAddrAcceptsParsableHosts(t *testing.T) {
+	if err := validateWorkerMgmtAddr("0.0.0.0:0"); err != nil {
+		t.Fatalf("non-loopback addr rejected at format-check layer: %v", err)
 	}
 	if err := validateWorkerMgmtAddr("127.0.0.1:0"); err != nil {
 		t.Fatalf("loopback addr rejected: %v", err)
+	}
+	if err := validateWorkerMgmtAddr("not-an-addr"); err == nil {
+		t.Fatal("expected malformed addr to be rejected")
+	}
+}
+
+func TestValidateWorkerMgmtBindRequiresPublicURLForNonLoopback(t *testing.T) {
+	if err := validateWorkerMgmtBind("0.0.0.0:9090", ""); err == nil {
+		t.Fatal("expected non-loopback bind without --mgmt-public-url to be rejected")
+	} else if !strings.Contains(err.Error(), "--mgmt-public-url is missing") || !strings.Contains(err.Error(), "--mgmt-public-url=http://<your-worker-host>:9090") {
+		t.Fatalf("error = %q, want missing-url guidance with port hint", err.Error())
+	}
+	if err := validateWorkerMgmtBind("0.0.0.0:9090", "http://127.0.0.1:9090"); err == nil {
+		t.Fatal("expected loopback --mgmt-public-url to be rejected for non-loopback bind")
+	} else if !strings.Contains(err.Error(), "--mgmt-public-url is loopback") {
+		t.Fatalf("error = %q, want loopback-url guidance", err.Error())
+	}
+	if err := validateWorkerMgmtBind("0.0.0.0:9090", "http://worker.example.com:9090"); err != nil {
+		t.Fatalf("non-loopback bind with non-loopback --mgmt-public-url rejected: %v", err)
+	}
+	if err := validateWorkerMgmtBind("127.0.0.1:0", ""); err != nil {
+		t.Fatalf("loopback bind rejected unexpectedly: %v", err)
+	}
+	if err := validateWorkerMgmtBind("", ""); err != nil {
+		t.Fatalf("empty bind treated as default loopback rejected: %v", err)
 	}
 }
 

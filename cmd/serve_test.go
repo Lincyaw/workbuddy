@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -144,8 +145,8 @@ func setupFakeGHCLI(t *testing.T) {
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-func TestParseServeFlagsRejectsNonLoopbackListenWithoutAuth(t *testing.T) {
-	configDir := setupTestConfigDir(t, "owner/repo")
+func newServeFlagCommand(t *testing.T, configDir string) *cobra.Command {
+	t.Helper()
 	cmd := &cobra.Command{Use: "serve"}
 	cmd.Flags().String("listen", "", "")
 	cmd.Flags().Int("port", defaultPort, "")
@@ -157,6 +158,13 @@ func TestParseServeFlagsRejectsNonLoopbackListenWithoutAuth(t *testing.T) {
 	cmd.Flags().Bool("loopback-only", false, "")
 	cmd.Flags().Bool("auth", false, "")
 	cmd.Flags().String("trusted-authors", "", "")
+	cmd.Flags().String("report-base-url", "", "")
+	return cmd
+}
+
+func TestParseServeFlagsRejectsNonLoopbackListenWithoutAuth(t *testing.T) {
+	configDir := setupTestConfigDir(t, "owner/repo")
+	cmd := newServeFlagCommand(t, configDir)
 	_ = cmd.Flags().Set("listen", "0.0.0.0:8090")
 
 	opts, err := parseServeFlags(cmd)
@@ -173,6 +181,88 @@ func TestParseServeFlagsRejectsNonLoopbackListenWithoutAuth(t *testing.T) {
 	}
 	if err := validateServeListenSecurity(listenAddr, opts.auth, opts.loopbackOnly); err == nil {
 		t.Fatal("expected non-loopback listen without auth to fail")
+	}
+}
+
+func TestServeRejectsNonLoopbackWithoutBaseURL(t *testing.T) {
+	t.Setenv("WORKBUDDY_REPORT_BASE_URL", "")
+	configDir := setupTestConfigDir(t, "owner/repo")
+	cmd := newServeFlagCommand(t, configDir)
+	_ = cmd.Flags().Set("listen", "0.0.0.0:8090")
+
+	opts, err := parseServeFlags(cmd)
+	if err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	cfg, err := loadServeConfig(opts)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	listenAddr, err := resolveServeListenAddr(opts, cfg)
+	if err != nil {
+		t.Fatalf("resolve listen addr: %v", err)
+	}
+	_, err = resolveReportBaseURL("serve", listenAddr, opts.reportBaseURL, "")
+	if err == nil {
+		t.Fatal("expected non-loopback bind without --report-base-url to fail")
+	}
+	if !strings.Contains(err.Error(), "--report-base-url is missing") {
+		t.Fatalf("error = %q, want missing-url diagnostic", err.Error())
+	}
+}
+
+func TestServeAcceptsLoopbackWithoutBaseURL(t *testing.T) {
+	t.Setenv("WORKBUDDY_REPORT_BASE_URL", "")
+	configDir := setupTestConfigDir(t, "owner/repo")
+	cmd := newServeFlagCommand(t, configDir)
+	_ = cmd.Flags().Set("listen", "127.0.0.1:8090")
+
+	opts, err := parseServeFlags(cmd)
+	if err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	cfg, err := loadServeConfig(opts)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	listenAddr, err := resolveServeListenAddr(opts, cfg)
+	if err != nil {
+		t.Fatalf("resolve listen addr: %v", err)
+	}
+	got, err := resolveReportBaseURL("serve", listenAddr, opts.reportBaseURL, "")
+	if err != nil {
+		t.Fatalf("loopback bind without --report-base-url rejected: %v", err)
+	}
+	if want := "http://" + listenAddr; got != want {
+		t.Fatalf("got = %q, want default %q", got, want)
+	}
+}
+
+func TestServeAcceptsNonLoopbackWithExternalBaseURL(t *testing.T) {
+	t.Setenv("WORKBUDDY_REPORT_BASE_URL", "")
+	configDir := setupTestConfigDir(t, "owner/repo")
+	cmd := newServeFlagCommand(t, configDir)
+	_ = cmd.Flags().Set("listen", "0.0.0.0:8090")
+	_ = cmd.Flags().Set("report-base-url", "http://example.com:8090")
+
+	opts, err := parseServeFlags(cmd)
+	if err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	cfg, err := loadServeConfig(opts)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	listenAddr, err := resolveServeListenAddr(opts, cfg)
+	if err != nil {
+		t.Fatalf("resolve listen addr: %v", err)
+	}
+	got, err := resolveReportBaseURL("serve", listenAddr, opts.reportBaseURL, "")
+	if err != nil {
+		t.Fatalf("non-loopback bind with external --report-base-url rejected: %v", err)
+	}
+	if want := "http://example.com:8090"; got != want {
+		t.Fatalf("got = %q, want %q", got, want)
 	}
 }
 

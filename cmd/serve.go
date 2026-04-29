@@ -40,6 +40,7 @@ type serveOpts struct {
 	trustedAuthors    string
 	trustedAuthorsSet bool
 	cookieInsecure    bool
+	reportBaseURL     string
 }
 
 var serveCmd = &cobra.Command{
@@ -65,6 +66,7 @@ func init() {
 	serveCmd.Flags().Bool("auth", false, "Require WORKBUDDY_AUTH_TOKEN for the coordinator HTTP surface")
 	serveCmd.Flags().String("trusted-authors", "", "Comma-separated GitHub logins allowed to trigger agent work")
 	serveCmd.Flags().Bool("cookie-insecure", false, "Drop the Secure attribute on session cookies (HTTP reverse-proxy fronts only)")
+	serveCmd.Flags().String("report-base-url", "", "Required when --listen is not a loopback address. The URL written into GitHub issue comments as the prefix of session links. Must be reachable from where you'll click the link in a browser. Falls back to WORKBUDDY_REPORT_BASE_URL when unset.")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -92,6 +94,7 @@ func parseServeFlags(cmd *cobra.Command) (*serveOpts, error) {
 	trustedAuthors, _ := cmd.Flags().GetString("trusted-authors")
 	trustedAuthorsSet := cmd.Flags().Changed("trusted-authors")
 	cookieInsecure, _ := cmd.Flags().GetBool("cookie-insecure")
+	reportBaseURL, _ := cmd.Flags().GetString("report-base-url")
 	if maxParallelTasks < 0 {
 		return nil, fmt.Errorf("serve: --max-parallel-tasks must be >= 0")
 	}
@@ -108,6 +111,7 @@ func parseServeFlags(cmd *cobra.Command) (*serveOpts, error) {
 		trustedAuthors:    trustedAuthors,
 		trustedAuthorsSet: trustedAuthorsSet,
 		cookieInsecure:    cookieInsecure,
+		reportBaseURL:     strings.TrimSpace(reportBaseURL),
 	}, nil
 }
 
@@ -136,6 +140,10 @@ func runServeWithOutput(opts *serveOpts, ghReader poller.GHReader, launcherOverr
 		return err
 	}
 	baseURL := "http://" + listenAddr
+	resolvedReportBaseURL, err := resolveReportBaseURL("serve", listenAddr, opts.reportBaseURL, os.Getenv("WORKBUDDY_REPORT_BASE_URL"))
+	if err != nil {
+		return err
+	}
 
 	ctx, cancel, sigCh := buildRunContext(parentCtx)
 	defer cancel()
@@ -153,6 +161,7 @@ func runServeWithOutput(opts *serveOpts, ghReader poller.GHReader, launcherOverr
 			trustedAuthors:    opts.trustedAuthors,
 			trustedAuthorsSet: opts.trustedAuthorsSet,
 			cookieInsecure:    opts.cookieInsecure,
+			reportBaseURL:     resolvedReportBaseURL,
 		}, ghReader, ctx)
 	}()
 
@@ -166,7 +175,7 @@ func runServeWithOutput(opts *serveOpts, ghReader poller.GHReader, launcherOverr
 		workerErrCh <- runWorkerWithOpts(&workerOpts{
 			coordinatorURL:    baseURL,
 			token:             strings.TrimSpace(os.Getenv("WORKBUDDY_AUTH_TOKEN")),
-			reportBaseURL:     baseURL,
+			reportBaseURL:     resolvedReportBaseURL,
 			mgmtAuthToken:     strings.TrimSpace(os.Getenv("WORKBUDDY_AUTH_TOKEN")),
 			roleCSV:           strings.Join(opts.roles, ","),
 			configDir:         opts.configDir,
