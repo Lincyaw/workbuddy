@@ -29,6 +29,7 @@ workbuddy worker --coordinator http://A:8080 --token <secret> --role dev --repos
 - Worker 负责：向 Coordinator 注册、长轮询领取任务、执行 agent 子进程、提交结果
 - 通信方式：HTTP 长轮询（`GET /api/v1/tasks/poll`，无任务时挂起最多 timeout 秒）
 - 认证：共享密钥，`Authorization: Bearer <token>`（REQ-029）
+- Session viewer：`serve` 直接复用 Coordinator `/sessions`；split deployment 则通过 worker management surface 暴露 loopback-only viewer（可选 Bearer token），避免把 GitHub comment 链接固定到某个 worker-local 地址。
 
 ## CLI 命令列表
 

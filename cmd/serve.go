@@ -161,6 +161,7 @@ func runServeWithOutput(opts *serveOpts, ghReader poller.GHReader, launcherOverr
 		workerErrCh <- runWorkerWithOpts(&workerOpts{
 			coordinatorURL:    baseURL,
 			token:             strings.TrimSpace(os.Getenv("WORKBUDDY_AUTH_TOKEN")),
+			reportBaseURL:     baseURL,
 			mgmtAuthToken:     strings.TrimSpace(os.Getenv("WORKBUDDY_AUTH_TOKEN")),
 			roleCSV:           strings.Join(opts.roles, ","),
 			configDir:         opts.configDir,

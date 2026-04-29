@@ -45,6 +45,7 @@ const (
 type workerOpts struct {
 	coordinatorURL    string
 	token             string
+	reportBaseURL     string
 	roleCSV           string
 	runtime           string
 	repo              string
@@ -335,7 +336,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	if err != nil {
 		return err
 	}
-	rep.SetBaseURL(mgmtServer.baseURL)
+	rep.SetBaseURL(strings.TrimRight(strings.TrimSpace(opts.reportBaseURL), "/"))
 	defer func() {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), opts.shutdownTimeout)
 		defer shutdownCancel()

@@ -33,8 +33,8 @@
 
 ## Session viewer / audit
 
-- `serve`：Coordinator 直接挂载 `/sessions`，因为 Coordinator 与 Worker 共用同一个 DB / sessions 目录。
-- split deployment：Worker management surface 提供 loopback-only 的 session viewer，可选 Bearer token 保护；Coordinator 继续提供统一的 audit / task / metrics surface。
+- `serve`：Coordinator 直接挂载 `/sessions`，因为 Coordinator 与 Worker 共用同一个 DB / sessions 目录；Reporter comment 里的 session 链接也指向这个 surface。
+- split deployment：Worker management surface 提供 loopback-only 的 session viewer，可选 Bearer token 保护；Coordinator 继续提供统一的 audit / task / metrics surface。为了避免把 GitHub comments 绑到 worker-local 监听地址，split deployment 的 Reporter comment 不直接输出 session viewer URL。
 
 ## 关键代码
 

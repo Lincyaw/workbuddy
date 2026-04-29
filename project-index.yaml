@@ -651,7 +651,8 @@ requirements:
     code:
       - internal/reporter/format.go
       - internal/reporter/reporter.go
-    tests: []
+    tests:
+      - internal/reporter/format_golden_test.go
     deps: [REQ-005]
 
   - id: REQ-011
