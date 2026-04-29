@@ -127,13 +127,15 @@ func TestCoordinatorConfigWatcherReloadsAgentConfigWithoutAffectingClaimedTask(t
 name: dev-agent
 description: Dev agent
 triggers:
-  - label: "status:developing"
+  - state: developing
 role: dev
 runtime: codex
 command: echo "hello"
 timeout: 30s
+context:
+  - Repo
 ---
-# Agent
+Repo: {{.Repo}}
 `)
 	waitForEventType(t, dbPath, repo, eventlog.TypeConfigReloaded)
 
@@ -184,12 +186,14 @@ func TestCoordinatorConfigReloadValidationErrorIsNonFatal(t *testing.T) {
 name: dev-agent
 description: broken
 triggers:
-  - label: "status:developing"
+  - state: developing
 role: dev
 runtime: invalid-runtime
 command: echo "broken"
+context:
+  - Repo
 ---
-# Agent
+Repo: {{.Repo}}
 `)
 
 	client := &http.Client{Timeout: 5 * time.Second}

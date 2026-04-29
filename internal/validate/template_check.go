@@ -19,12 +19,23 @@ const (
 	// CodeUnknownTemplateField — a `{{.Foo.Bar}}` expression refers to
 	// a path that does not exist in TaskContext.
 	CodeUnknownTemplateField = "WB-T101"
+
+	// CodeContextFieldUndeclared — the prompt body references a TaskContext
+	// field path that is not listed in the agent's `context:` declaration.
+	// "Explicitly declare your inputs" enforcement.
+	CodeContextFieldUndeclared = "WB-CT002"
+
+	// CodeContextFieldUnused — the agent declares a `context:` entry that
+	// is not referenced anywhere in the prompt body. Warning, not error;
+	// dead declarations rot fast.
+	CodeContextFieldUnused = "WB-CT003"
 )
 
-// validateAgentTemplate parses the agent's frontmatter `prompt:` body as a
-// Go text/template, then walks the parsed tree to find every dotted field
-// reference. Each reference is resolved against `schema`; unknown paths
-// emit WB-T101 with a "did you mean…?" hint when a near match exists.
+// validateAgentTemplate parses the agent's prompt body (markdown body of the
+// agent file in the issue #204 batch 2 format) as a Go text/template, walks
+// the parsed tree to find every dotted field reference, and reports unknown
+// paths against `schema`. Also drives the context-coverage diff
+// (WB-CT002/WB-CT003) using the same parse tree.
 //
 // Parse errors short-circuit and emit a single WB-T001.
 func validateAgentTemplate(agent *agentDoc, schema FieldSchema) []Diagnostic {
@@ -33,7 +44,9 @@ func validateAgentTemplate(agent *agentDoc, schema FieldSchema) []Diagnostic {
 	}
 	prompt := agent.Prompt
 	if strings.TrimSpace(prompt) == "" {
-		return nil
+		// Empty prompt: no template work, but the context-coverage diff
+		// still flags any declared-but-unused entries (WB-CT003).
+		return validateContextCoverage(agent, map[string]struct{}{}, schemaPathSet(schema))
 	}
 
 	tmpl, err := template.New(agent.Name).Funcs(runtime.TemplateFuncMap()).Parse(prompt)
@@ -48,12 +61,13 @@ func validateAgentTemplate(agent *agentDoc, schema FieldSchema) []Diagnostic {
 	}
 
 	refs := collectFieldRefs(tmpl)
-	if len(refs) == 0 {
-		return nil
-	}
 
 	known := schemaPathSet(schema)
 	candidates := schema.SortedPaths()
+
+	// Build the set of fields the prompt actually references for the
+	// context-coverage diff (WB-CT002 / WB-CT003).
+	usedPaths := make(map[string]struct{}, len(refs))
 
 	var diags []Diagnostic
 	seen := make(map[string]bool, len(refs))
@@ -61,6 +75,7 @@ func validateAgentTemplate(agent *agentDoc, schema FieldSchema) []Diagnostic {
 		if ref.path == "" {
 			continue
 		}
+		usedPaths[ref.path] = struct{}{}
 		if _, ok := known[ref.path]; ok {
 			continue
 		}
@@ -84,12 +99,133 @@ func validateAgentTemplate(agent *agentDoc, schema FieldSchema) []Diagnostic {
 			Message:  msg,
 		})
 	}
+
+	// WB-CT002 / WB-CT003 — context coverage diff.
+	diags = append(diags, validateContextCoverage(agent, usedPaths, known)...)
+
 	sort.SliceStable(diags, func(i, j int) bool {
 		if diags[i].Line != diags[j].Line {
 			return diags[i].Line < diags[j].Line
 		}
 		return diags[i].Message < diags[j].Message
 	})
+	return diags
+}
+
+// validateContextCoverage computes the set diff between the declared `context:`
+// list and the field paths the prompt actually references.
+//
+//   - Path used in prompt but not declared in `context:` → WB-CT002 (error).
+//   - Path declared in `context:` but never used in prompt → WB-CT003 (warning).
+//
+// Iteration variants like `Issue.Comments[].Author` are normalized to their
+// declared form in two ways: a context entry of `Issue.Comments[].Author`
+// matches the iterator scope, and an entry of `Issue.Comments` covers any
+// `Issue.Comments[].*` reference (declaring the whole slice covers its
+// elements).
+func validateContextCoverage(agent *agentDoc, usedPaths, known map[string]struct{}) []Diagnostic {
+	if agent == nil {
+		return nil
+	}
+	if len(agent.Context) == 0 && len(usedPaths) == 0 {
+		// Nothing declared and nothing used — handled elsewhere (WB-CT001
+		// fires on missing context; empty body fires WB-F002).
+		return nil
+	}
+
+	declared := make(map[string]int, len(agent.Context))
+	for i, entry := range agent.Context {
+		declared[strings.TrimSpace(entry)] = i
+	}
+
+	declaredCovers := func(path string) bool {
+		if _, ok := declared[path]; ok {
+			return true
+		}
+		// `Issue.Comments` covers `Issue.Comments[].Foo`.
+		for d := range declared {
+			if d == "" {
+				continue
+			}
+			if strings.HasPrefix(path, d+"[].") || strings.HasPrefix(path, d+".") {
+				return true
+			}
+		}
+		return false
+	}
+
+	usedCovers := func(decl string) bool {
+		if _, ok := usedPaths[decl]; ok {
+			return true
+		}
+		// A declaration of `Issue.Comments` is "used" if any `Issue.Comments[].*`
+		// path appears, or any `Issue.Comments.*` path appears.
+		for u := range usedPaths {
+			if strings.HasPrefix(u, decl+"[].") || strings.HasPrefix(u, decl+".") {
+				return true
+			}
+		}
+		return false
+	}
+
+	var diags []Diagnostic
+
+	// WB-CT002 — used but not declared. We only flag paths that exist in
+	// the schema; unknown paths already produced WB-T101 above.
+	usedSorted := make([]string, 0, len(usedPaths))
+	for p := range usedPaths {
+		usedSorted = append(usedSorted, p)
+	}
+	sort.Strings(usedSorted)
+	seenUndeclared := make(map[string]struct{}, len(usedSorted))
+	for _, p := range usedSorted {
+		if _, ok := known[p]; !ok {
+			continue
+		}
+		if declaredCovers(p) {
+			continue
+		}
+		if _, dup := seenUndeclared[p]; dup {
+			continue
+		}
+		seenUndeclared[p] = struct{}{}
+		diags = append(diags, Diagnostic{
+			Path:     agent.Path,
+			Line:     orFallback(agent.ContextDeclLine, agent.PromptLine),
+			Severity: SeverityError,
+			Code:     CodeContextFieldUndeclared,
+			Message: fmt.Sprintf(
+				"agent %q prompt references {{.%s}} but %q is not declared in context:",
+				agent.Name, p, p,
+			),
+		})
+	}
+
+	// WB-CT003 — declared but unused.
+	for i, entry := range agent.Context {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if usedCovers(entry) {
+			continue
+		}
+		line := agent.ContextDeclLine
+		if i < len(agent.ContextLines) && agent.ContextLines[i] > 0 {
+			line = agent.ContextLines[i]
+		}
+		diags = append(diags, Diagnostic{
+			Path:     agent.Path,
+			Line:     line,
+			Severity: SeverityWarning,
+			Code:     CodeContextFieldUnused,
+			Message: fmt.Sprintf(
+				"agent %q declares context: %q but the prompt never references it",
+				agent.Name, entry,
+			),
+		})
+	}
+
 	return diags
 }
 

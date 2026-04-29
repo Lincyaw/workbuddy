@@ -30,9 +30,10 @@ const (
 	// same enter_label.
 	CodeDuplicateEnterLabel = "WB-X005"
 
-	// CodeUnboundTriggerLabel — agent trigger label has no matching
-	// workflow state enter_label.
-	CodeUnboundTriggerLabel = "WB-X006"
+	// CodeUnknownTriggerState — agent's `triggers[].state:` references a
+	// state name that is not present in any loaded workflow. Replaces the
+	// removed WB-X006 (which keyed off the legacy label-based trigger).
+	CodeUnknownTriggerState = "WB-X007"
 )
 
 // ValidRuntimes is the canonical set of runtime identifiers accepted in

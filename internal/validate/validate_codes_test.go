@@ -24,7 +24,7 @@ func TestValidateDir_CodeFixtures(t *testing.T) {
 			name: "WB-X001 unknown agent reference",
 			files: map[string]string{
 				"config.yaml":         "repo: octo/x\n",
-				"agents/dev-agent.md": fixtureAgent("dev-agent", "status:developing", "dev", "claude-code", ""),
+				"agents/dev-agent.md": fixtureAgent("dev-agent", "developing", "dev", "claude-code", "Repo: {{.Repo}}"),
 				"workflows/default.md": fixtureWorkflow(map[string]workflowState{
 					"developing": {EnterLabel: "status:developing", Agent: "missing-agent"},
 				}),
@@ -36,8 +36,8 @@ func TestValidateDir_CodeFixtures(t *testing.T) {
 			name: "WB-X002 basename mismatch",
 			files: map[string]string{
 				"config.yaml":         "repo: octo/x\n",
-				"agents/dev-agent.md": fixtureAgent("dev-agent", "status:developing", "dev", "claude-code", ""),
-				"agents/wrongname.md": fixtureAgent("review-agent", "status:reviewing", "review", "claude-code", ""),
+				"agents/dev-agent.md": fixtureAgent("dev-agent", "developing", "dev", "claude-code", "Repo: {{.Repo}}"),
+				"agents/wrongname.md": fixtureAgent("review-agent", "reviewing", "review", "claude-code", "Repo: {{.Repo}}"),
 				"workflows/default.md": fixtureWorkflow(map[string]workflowState{
 					"developing": {EnterLabel: "status:developing", Agent: "dev-agent"},
 					"reviewing":  {EnterLabel: "status:reviewing", Agent: "review-agent"},
@@ -50,7 +50,7 @@ func TestValidateDir_CodeFixtures(t *testing.T) {
 			name: "WB-X003 unknown runtime",
 			files: map[string]string{
 				"config.yaml":         "repo: octo/x\n",
-				"agents/dev-agent.md": fixtureAgent("dev-agent", "status:developing", "dev", "rust-agent", ""),
+				"agents/dev-agent.md": fixtureAgent("dev-agent", "developing", "dev", "rust-agent", "Repo: {{.Repo}}"),
 				"workflows/default.md": fixtureWorkflow(map[string]workflowState{
 					"developing": {EnterLabel: "status:developing", Agent: "dev-agent"},
 				}),
@@ -62,7 +62,7 @@ func TestValidateDir_CodeFixtures(t *testing.T) {
 			name: "WB-X004 unknown role",
 			files: map[string]string{
 				"config.yaml":         "repo: octo/x\n",
-				"agents/dev-agent.md": fixtureAgent("dev-agent", "status:developing", "tester", "claude-code", ""),
+				"agents/dev-agent.md": fixtureAgent("dev-agent", "developing", "tester", "claude-code", "Repo: {{.Repo}}"),
 				"workflows/default.md": fixtureWorkflow(map[string]workflowState{
 					"developing": {EnterLabel: "status:developing", Agent: "dev-agent"},
 				}),
@@ -74,7 +74,7 @@ func TestValidateDir_CodeFixtures(t *testing.T) {
 			name: "WB-X005 duplicate enter_label",
 			files: map[string]string{
 				"config.yaml":         "repo: octo/x\n",
-				"agents/dev-agent.md": fixtureAgent("dev-agent", "status:developing", "dev", "claude-code", ""),
+				"agents/dev-agent.md": fixtureAgent("dev-agent", "developing", "dev", "claude-code", "Repo: {{.Repo}}"),
 				"workflows/default.md": fixtureWorkflow(map[string]workflowState{
 					"developing": {EnterLabel: "status:dup", Agent: "dev-agent"},
 					"reviewing":  {EnterLabel: "status:dup"},
@@ -84,22 +84,90 @@ func TestValidateDir_CodeFixtures(t *testing.T) {
 			wantHas: CodeDuplicateEnterLabel,
 		},
 		{
-			name: "WB-X006 unbound trigger label",
+			name: "WB-X007 unknown trigger state",
 			files: map[string]string{
 				"config.yaml":         "repo: octo/x\n",
-				"agents/dev-agent.md": fixtureAgent("dev-agent", "status:nowhere", "dev", "claude-code", ""),
+				"agents/dev-agent.md": fixtureAgent("dev-agent", "missingstate", "dev", "claude-code", "Repo: {{.Repo}}"),
 				"workflows/default.md": fixtureWorkflow(map[string]workflowState{
 					"developing": {EnterLabel: "status:developing", Agent: "dev-agent"},
 				}),
 			},
 			opts:    Options{SkipRuntimeBinaryCheck: true},
-			wantHas: CodeUnboundTriggerLabel,
+			wantHas: CodeUnknownTriggerState,
+		},
+		{
+			name: "WB-F001 legacy prompt field",
+			files: map[string]string{
+				"config.yaml":         "repo: octo/x\n",
+				"agents/dev-agent.md": fixtureAgentLegacyPrompt("dev-agent", "developing", "dev", "claude-code"),
+				"workflows/default.md": fixtureWorkflow(map[string]workflowState{
+					"developing": {EnterLabel: "status:developing", Agent: "dev-agent"},
+				}),
+			},
+			opts:    Options{SkipRuntimeBinaryCheck: true},
+			wantHas: CodeLegacyPromptField,
+		},
+		{
+			name: "WB-F002 empty prompt body",
+			files: map[string]string{
+				"config.yaml":         "repo: octo/x\n",
+				"agents/dev-agent.md": fixtureAgent("dev-agent", "developing", "dev", "claude-code", ""),
+				"workflows/default.md": fixtureWorkflow(map[string]workflowState{
+					"developing": {EnterLabel: "status:developing", Agent: "dev-agent"},
+				}),
+			},
+			opts:    Options{SkipRuntimeBinaryCheck: true},
+			wantHas: CodeEmptyPromptBody,
+		},
+		{
+			name: "WB-CT001 missing context field",
+			files: map[string]string{
+				"config.yaml":         "repo: octo/x\n",
+				"agents/dev-agent.md": fixtureAgentNoContext("dev-agent", "developing", "dev", "claude-code", "Repo: {{.Repo}}"),
+				"workflows/default.md": fixtureWorkflow(map[string]workflowState{
+					"developing": {EnterLabel: "status:developing", Agent: "dev-agent"},
+				}),
+			},
+			opts:    Options{SkipRuntimeBinaryCheck: true},
+			wantHas: CodeMissingContextField,
+		},
+		{
+			name: "WB-CT002 prompt uses field not in context",
+			files: map[string]string{
+				"config.yaml": "repo: octo/x\n",
+				"agents/dev-agent.md": fixtureAgentWithContext(
+					"dev-agent", "developing", "dev", "claude-code",
+					"Issue {{.Issue.Number}} in {{.Repo}}",
+					[]string{"Repo"},
+				),
+				"workflows/default.md": fixtureWorkflow(map[string]workflowState{
+					"developing": {EnterLabel: "status:developing", Agent: "dev-agent"},
+				}),
+			},
+			opts:    Options{SkipRuntimeBinaryCheck: true},
+			wantHas: CodeContextFieldUndeclared,
+		},
+		{
+			name: "WB-CT003 context entry never used",
+			files: map[string]string{
+				"config.yaml": "repo: octo/x\n",
+				"agents/dev-agent.md": fixtureAgentWithContext(
+					"dev-agent", "developing", "dev", "claude-code",
+					"Repo: {{.Repo}}",
+					[]string{"Repo", "Issue.Title"},
+				),
+				"workflows/default.md": fixtureWorkflow(map[string]workflowState{
+					"developing": {EnterLabel: "status:developing", Agent: "dev-agent"},
+				}),
+			},
+			opts:    Options{SkipRuntimeBinaryCheck: true},
+			wantHas: CodeContextFieldUnused,
 		},
 		{
 			name: "WB-T001 prompt parse error",
 			files: map[string]string{
 				"config.yaml":         "repo: octo/x\n",
-				"agents/dev-agent.md": fixtureAgent("dev-agent", "status:developing", "dev", "claude-code", "{{.Issue"),
+				"agents/dev-agent.md": fixtureAgent("dev-agent", "developing", "dev", "claude-code", "{{.Issue"),
 				"workflows/default.md": fixtureWorkflow(map[string]workflowState{
 					"developing": {EnterLabel: "status:developing", Agent: "dev-agent"},
 				}),
@@ -111,7 +179,7 @@ func TestValidateDir_CodeFixtures(t *testing.T) {
 			name: "WB-T101 unknown template field",
 			files: map[string]string{
 				"config.yaml":         "repo: octo/x\n",
-				"agents/dev-agent.md": fixtureAgent("dev-agent", "status:developing", "dev", "claude-code", "Hi {{.Bogus.Field}}"),
+				"agents/dev-agent.md": fixtureAgent("dev-agent", "developing", "dev", "claude-code", "Hi {{.Bogus.Field}}"),
 				"workflows/default.md": fixtureWorkflow(map[string]workflowState{
 					"developing": {EnterLabel: "status:developing", Agent: "dev-agent"},
 				}),
@@ -123,7 +191,7 @@ func TestValidateDir_CodeFixtures(t *testing.T) {
 			name: "WB-S001 timeout below stale threshold",
 			files: map[string]string{
 				"config.yaml":         staleConfig("30m"),
-				"agents/dev-agent.md": fixtureAgentWithTimeout("dev-agent", "status:developing", "dev", "claude-code", "", "10m"),
+				"agents/dev-agent.md": fixtureAgentWithTimeout("dev-agent", "developing", "dev", "claude-code", "Repo: {{.Repo}}", "10m"),
 				"workflows/default.md": fixtureWorkflow(map[string]workflowState{
 					"developing": {EnterLabel: "status:developing", Agent: "dev-agent"},
 				}),
@@ -135,7 +203,7 @@ func TestValidateDir_CodeFixtures(t *testing.T) {
 			name: "WB-S002 suspiciously large timeout",
 			files: map[string]string{
 				"config.yaml":         staleConfig("1m"),
-				"agents/dev-agent.md": fixtureAgentWithTimeout("dev-agent", "status:developing", "dev", "claude-code", "", "60h"),
+				"agents/dev-agent.md": fixtureAgentWithTimeout("dev-agent", "developing", "dev", "claude-code", "Repo: {{.Repo}}", "60h"),
 				"workflows/default.md": fixtureWorkflow(map[string]workflowState{
 					"developing": {EnterLabel: "status:developing", Agent: "dev-agent"},
 				}),
@@ -147,7 +215,7 @@ func TestValidateDir_CodeFixtures(t *testing.T) {
 			name: "WB-S004 agent in terminal state",
 			files: map[string]string{
 				"config.yaml":         "repo: octo/x\n",
-				"agents/dev-agent.md": fixtureAgent("dev-agent", "status:developing", "dev", "claude-code", ""),
+				"agents/dev-agent.md": fixtureAgent("dev-agent", "developing", "dev", "claude-code", "Repo: {{.Repo}}"),
 				"workflows/default.md": fixtureWorkflow(map[string]workflowState{
 					"developing": {EnterLabel: "status:developing", Agent: "dev-agent", Transitions: []string{"finished"}},
 					"finished":   {EnterLabel: "status:finished", Agent: "dev-agent"},
@@ -191,8 +259,8 @@ func TestValidateDir_CodeFixtures(t *testing.T) {
 func TestValidateDir_CleanFixtureNoDiagnostics(t *testing.T) {
 	files := map[string]string{
 		"config.yaml":            staleConfig("10m"),
-		"agents/dev-agent.md":    fixtureAgentWithTimeout("dev-agent", "status:developing", "dev", "claude-code", "Repo: {{.Repo}}", "30m"),
-		"agents/review-agent.md": fixtureAgentWithTimeout("review-agent", "status:reviewing", "review", "claude-code", "Repo: {{.Repo}}", "30m"),
+		"agents/dev-agent.md":    fixtureAgentWithTimeout("dev-agent", "developing", "dev", "claude-code", "Repo: {{.Repo}}", "30m"),
+		"agents/review-agent.md": fixtureAgentWithTimeout("review-agent", "reviewing", "review", "claude-code", "Repo: {{.Repo}}", "30m"),
 		"workflows/default.md": fixtureOrderedWorkflow([]orderedState{
 			{Name: "developing", State: workflowState{EnterLabel: "status:developing", Agent: "dev-agent", Transitions: []string{"reviewing"}}},
 			{Name: "reviewing", State: workflowState{EnterLabel: "status:reviewing", Agent: "review-agent", Transitions: []string{"done"}}},
@@ -237,23 +305,69 @@ func diagSummary(diags []Diagnostic) string {
 }
 
 type workflowState struct {
-	EnterLabel  string
-	Agent       string
+	EnterLabel string
+	Agent      string
+	// Transitions is keyed by target-state-name; the entry value is the
+	// label that drives the transition. We invert at render time so the
+	// emitted YAML matches the new map form (label → target).
 	Transitions []string
 }
 
-func fixtureAgent(name, label, role, runtime, prompt string) string {
-	return fixtureAgentWithTimeout(name, label, role, runtime, prompt, "")
+// fixtureAgent emits a new-format agent file: triggers use `state:`, the
+// markdown body holds the prompt template, and `context:` is auto-derived
+// from the dotted field references in the prompt body. `triggerState` is the
+// workflow state name (NOT a label).
+func fixtureAgent(name, triggerState, role, runtime, prompt string) string {
+	return fixtureAgentWithTimeout(name, triggerState, role, runtime, prompt, "")
 }
 
-func fixtureAgentWithTimeout(name, label, role, runtime, prompt, timeout string) string {
+// fixtureAgentWithTimeout is fixtureAgent + a policy.timeout. Same body-as-
+// prompt shape; context list is auto-derived.
+func fixtureAgentWithTimeout(name, triggerState, role, runtime, prompt, timeout string) string {
+	context := autoContextFromPrompt(prompt)
+	return buildAgentFixture(name, triggerState, role, runtime, prompt, timeout, context, false)
+}
+
+// fixtureAgentWithContext lets a test pin the `context:` list explicitly so
+// the WB-CT002/WB-CT003 cases can express the diff under test.
+func fixtureAgentWithContext(name, triggerState, role, runtime, prompt string, context []string) string {
+	return buildAgentFixture(name, triggerState, role, runtime, prompt, "", context, false)
+}
+
+// fixtureAgentNoContext emits an otherwise-valid agent that omits `context:`
+// entirely so the WB-CT001 case can fire.
+func fixtureAgentNoContext(name, triggerState, role, runtime, prompt string) string {
+	return buildAgentFixture(name, triggerState, role, runtime, prompt, "", nil, true)
+}
+
+// fixtureAgentLegacyPrompt emits an agent that still carries the removed
+// `prompt:` frontmatter field (alongside a body). Drives the WB-F001 check.
+func fixtureAgentLegacyPrompt(name, triggerState, role, runtime string) string {
 	var b strings.Builder
 	b.WriteString("---\n")
 	b.WriteString("name: " + name + "\n")
 	b.WriteString("description: test agent\n")
 	b.WriteString("triggers:\n")
-	b.WriteString("  - label: \"" + label + "\"\n")
-	b.WriteString("    event: labeled\n")
+	b.WriteString("  - state: " + triggerState + "\n")
+	if role != "" {
+		b.WriteString("role: " + role + "\n")
+	}
+	if runtime != "" {
+		b.WriteString("runtime: " + runtime + "\n")
+	}
+	b.WriteString("context:\n  - Repo\n")
+	b.WriteString("prompt: |\n  Repo: {{.Repo}}\n")
+	b.WriteString("---\nRepo: {{.Repo}}\n")
+	return b.String()
+}
+
+func buildAgentFixture(name, triggerState, role, runtime, prompt, timeout string, context []string, omitContext bool) string {
+	var b strings.Builder
+	b.WriteString("---\n")
+	b.WriteString("name: " + name + "\n")
+	b.WriteString("description: test agent\n")
+	b.WriteString("triggers:\n")
+	b.WriteString("  - state: " + triggerState + "\n")
 	if role != "" {
 		b.WriteString("role: " + role + "\n")
 	}
@@ -264,16 +378,57 @@ func fixtureAgentWithTimeout(name, label, role, runtime, prompt, timeout string)
 		b.WriteString("policy:\n")
 		b.WriteString("  timeout: " + timeout + "\n")
 	}
-	if prompt != "" {
-		b.WriteString("prompt: |\n")
-		for _, ln := range strings.Split(prompt, "\n") {
-			b.WriteString("  " + ln + "\n")
+	if !omitContext && len(context) > 0 {
+		b.WriteString("context:\n")
+		for _, c := range context {
+			b.WriteString("  - " + c + "\n")
 		}
-	} else {
-		b.WriteString("command: echo run\n")
 	}
-	b.WriteString("---\n## Agent\n")
+	b.WriteString("---\n")
+	if prompt != "" {
+		b.WriteString(prompt + "\n")
+	}
 	return b.String()
+}
+
+// autoContextFromPrompt extracts the unique top-level dotted-field roots from
+// a prompt body, e.g. "Repo: {{.Repo}}, Title: {{.Issue.Title}}" → ["Repo",
+// "Issue.Title"]. Only used by helper fixtures so they satisfy WB-CT002 by
+// default; tests that need to exercise the diff use fixtureAgentWithContext.
+func autoContextFromPrompt(prompt string) []string {
+	if strings.TrimSpace(prompt) == "" {
+		return []string{"Repo"}
+	}
+	seen := map[string]struct{}{}
+	var out []string
+	i := 0
+	for i < len(prompt) {
+		idx := strings.Index(prompt[i:], "{{.")
+		if idx < 0 {
+			break
+		}
+		j := i + idx + 3 // skip "{{."
+		end := j
+		for end < len(prompt) {
+			c := prompt[end]
+			if c == '}' || c == ' ' || c == '\t' || c == '\n' || c == '|' {
+				break
+			}
+			end++
+		}
+		path := prompt[j:end]
+		if path != "" {
+			if _, ok := seen[path]; !ok {
+				seen[path] = struct{}{}
+				out = append(out, path)
+			}
+		}
+		i = end
+	}
+	if len(out) == 0 {
+		out = []string{"Repo"}
+	}
+	return out
 }
 
 func fixtureWorkflow(states map[string]workflowState) string {
@@ -295,6 +450,10 @@ type orderedState struct {
 	State workflowState
 }
 
+// fixtureOrderedWorkflow emits a workflow markdown using the new transitions
+// map form. Each entry in `Transitions` is a target state name; the test
+// helper synthesises the driving label as `status:<target>` so the tests
+// remain compact.
 func fixtureOrderedWorkflow(states []orderedState) string {
 	var b strings.Builder
 	b.WriteString("---\nname: default\ndescription: t\ntrigger:\n  issue_label: \"workbuddy\"\n---\n## W\n\n```yaml\nstates:\n")
@@ -307,8 +466,9 @@ func fixtureOrderedWorkflow(states []orderedState) string {
 		}
 		if len(s.Transitions) > 0 {
 			b.WriteString("    transitions:\n")
-			for _, to := range s.Transitions {
-				b.WriteString("      - to: " + to + "\n")
+			for _, target := range s.Transitions {
+				label := "status:" + target
+				b.WriteString("      \"" + label + "\": " + target + "\n")
 			}
 		}
 	}

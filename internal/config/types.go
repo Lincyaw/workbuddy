@@ -111,6 +111,12 @@ type GitHubActionsRunnerConfig struct {
 }
 
 // AgentConfig defines an agent loaded from .github/workbuddy/agents/*.md.
+//
+// The new format (issue #204 batch 2) stores agent metadata in YAML frontmatter
+// and uses the markdown body as the prompt template. The body lives on the
+// `Prompt` field (yaml tag `-`) — it is populated by the loader from the bytes
+// after the closing `---`, never parsed from YAML. Frontmatter no longer
+// accepts a `prompt:` field.
 type AgentConfig struct {
 	Name           string                    `yaml:"name"`
 	Description    string                    `yaml:"description"`
@@ -119,7 +125,8 @@ type AgentConfig struct {
 	Runner         string                    `yaml:"runner"`
 	Runtime        string                    `yaml:"runtime"`
 	Command        string                    `yaml:"command"`
-	Prompt         string                    `yaml:"prompt"`
+	Context        []string                  `yaml:"context"`
+	Prompt         string                    `yaml:"-"` // markdown body, populated by the loader
 	Policy         PolicyConfig              `yaml:"policy"`
 	Permissions    PermissionsConfig         `yaml:"permissions"`
 	GitHubActions  GitHubActionsRunnerConfig `yaml:"github_actions"`
@@ -128,9 +135,11 @@ type AgentConfig struct {
 	SourcePath     string                    `yaml:"-"`
 }
 
-// TriggerRule defines when an agent is activated.
+// TriggerRule defines when an agent is activated. The agent references workflow
+// state names symbolically; the actual issue-label string is owned only by the
+// workflow's State.EnterLabel.
 type TriggerRule struct {
-	Label string `yaml:"label"`
+	State string `yaml:"state"`
 	Event string `yaml:"event"`
 }
 
@@ -148,19 +157,16 @@ type WorkflowTrigger struct {
 	IssueLabel string `yaml:"issue_label"`
 }
 
-// State defines a single state in the workflow state machine.
+// State defines a single state in the workflow state machine. Transitions are
+// modeled as a label→target-state-name map: the key is the issue label whose
+// arrival drives the transition, the value is the target state name. Empty
+// map (or nil) marks a terminal state.
 type State struct {
-	EnterLabel  string       `yaml:"enter_label"`
-	Agent       string       `yaml:"agent,omitempty"`
-	Agents      []string     `yaml:"agents,omitempty"`
-	Join        string       `yaml:"join,omitempty"`
-	Transitions []Transition `yaml:"transitions"`
-}
-
-// Transition defines a possible state change.
-type Transition struct {
-	To   string `yaml:"to"`
-	When string `yaml:"when"`
+	EnterLabel  string            `yaml:"enter_label"`
+	Agent       string            `yaml:"agent,omitempty"`
+	Agents      []string          `yaml:"agents,omitempty"`
+	Join        string            `yaml:"join,omitempty"`
+	Transitions map[string]string `yaml:"transitions"`
 }
 
 // StatesBlock is the wrapper for parsing the YAML code block in workflow markdown.

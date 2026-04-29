@@ -197,14 +197,30 @@ func parseFrontmatter(data []byte) (frontmatter []byte, body string, err error) 
 
 var yamlCodeBlockRe = regexp.MustCompile("(?s)```yaml\\s*\n(.*?)```")
 
+// legacyPromptKeyRe matches a top-level `prompt:` key in YAML frontmatter
+// (anchored at column 0, key followed by ':' and either space or end-of-line).
+var legacyPromptKeyRe = regexp.MustCompile(`(?m)^prompt\s*:`)
+
+func hasLegacyPromptField(fm []byte) bool {
+	return legacyPromptKeyRe.Match(fm)
+}
+
 func parseAgentFile(path string) (*AgentConfig, []Warning, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("config: %s: %w", path, err)
 	}
-	fm, _, err := parseFrontmatter(data)
+	fm, body, err := parseFrontmatter(data)
 	if err != nil {
 		return nil, nil, fmt.Errorf("config: %s: %w", path, err)
+	}
+
+	// Reject the legacy `prompt:` frontmatter field eagerly. Issue #204 batch 2
+	// is a hard cut: the prompt now lives in the markdown body. Detecting this
+	// here gives a clear actionable error instead of a confusing yaml field
+	// rejection from the strict-tagged struct below.
+	if hasLegacyPromptField(fm) {
+		return nil, nil, fmt.Errorf("config: %s: legacy \"prompt:\" frontmatter field is no longer supported; move the prompt into the markdown body", filepath.Base(path))
 	}
 
 	var agent AgentConfig
@@ -212,6 +228,7 @@ func parseAgentFile(path string) (*AgentConfig, []Warning, error) {
 		return nil, nil, fmt.Errorf("config: %s: %w", path, err)
 	}
 	agent.SourcePath = path
+	agent.Prompt = strings.TrimSpace(body)
 
 	fname := filepath.Base(path)
 	if agent.Name == "" {
@@ -223,8 +240,11 @@ func parseAgentFile(path string) (*AgentConfig, []Warning, error) {
 	if agent.Role == "" {
 		return nil, nil, fmt.Errorf("config: %s: missing required field \"role\"", fname)
 	}
-	if agent.Command == "" && strings.TrimSpace(agent.Prompt) == "" {
-		return nil, nil, fmt.Errorf("config: %s: missing required field \"command\" or \"prompt\"", fname)
+	if len(agent.Context) == 0 {
+		return nil, nil, fmt.Errorf("config: %s: missing required field \"context\" (list of TaskContext field paths used by the prompt)", fname)
+	}
+	if agent.Command == "" && agent.Prompt == "" {
+		return nil, nil, fmt.Errorf("config: %s: agent has empty prompt body and no command", fname)
 	}
 
 	if agent.Runtime == "" {
@@ -417,13 +437,15 @@ func parseWorkflowFile(path string) (*WorkflowConfig, error) {
 
 func validateStates(fname string, wf *WorkflowConfig) error {
 	for stateName, state := range wf.States {
-		seen := make(map[string]bool)
-		for _, t := range state.Transitions {
-			key := stateName + "->" + t.To
-			if seen[key] {
-				return fmt.Errorf("config: %s: duplicate transition edge from %q to %q", fname, stateName, t.To)
+		for label, target := range state.Transitions {
+			label = strings.TrimSpace(label)
+			target = strings.TrimSpace(target)
+			if label == "" {
+				return fmt.Errorf("config: %s: state %q has a transition with an empty label key", fname, stateName)
 			}
-			seen[key] = true
+			if target == "" {
+				return fmt.Errorf("config: %s: state %q transition for label %q has empty target state", fname, stateName, label)
+			}
 		}
 	}
 	return nil
@@ -478,8 +500,8 @@ func autoAddFailedState(wf *WorkflowConfig) {
 		return
 	}
 	for _, state := range wf.States {
-		for _, t := range state.Transitions {
-			if target, ok := wf.States[t.To]; ok && len(target.Transitions) > 0 {
+		for _, targetName := range state.Transitions {
+			if target, ok := wf.States[targetName]; ok && len(target.Transitions) > 0 {
 				wf.States[StateNameFailed] = &State{EnterLabel: LabelFailed}
 				return
 			}
@@ -503,11 +525,11 @@ func validateWorkflowTriggerConflicts(workflows map[string]*WorkflowConfig) erro
 }
 
 func checkAgentLabelConsistency(cfg *FullConfig) []Warning {
-	enterLabels := make(map[string]bool)
+	knownStates := make(map[string]bool)
 	for _, wf := range cfg.Workflows {
-		for _, state := range wf.States {
-			if state.EnterLabel != "" {
-				enterLabels[state.EnterLabel] = true
+		for stateName := range wf.States {
+			if stateName != "" {
+				knownStates[stateName] = true
 			}
 		}
 	}
@@ -521,8 +543,8 @@ func checkAgentLabelConsistency(cfg *FullConfig) []Warning {
 	for _, name := range names {
 		agent := cfg.Agents[name]
 		for _, trigger := range agent.Triggers {
-			if trigger.Label != "" && !enterLabels[trigger.Label] {
-				warnings = append(warnings, Warning{Message: fmt.Sprintf("agent %q trigger label %q does not match any workflow state enter_label", agent.Name, trigger.Label)})
+			if trigger.State != "" && !knownStates[trigger.State] {
+				warnings = append(warnings, Warning{Message: fmt.Sprintf("agent %q trigger state %q does not match any workflow state name", agent.Name, trigger.State)})
 			}
 		}
 	}

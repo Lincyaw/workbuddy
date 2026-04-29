@@ -12,6 +12,7 @@ func TestValidateAgentTemplate_ValidPrompt(t *testing.T) {
 		Name:       "dev-agent",
 		Prompt:     "Issue {{.Issue.Number}} in {{.Repo}}: {{.Issue.Title}}",
 		PromptLine: 13,
+		Context:    []string{"Issue.Number", "Issue.Title", "Repo"},
 	}
 	if got := validateAgentTemplate(agent, schema); len(got) != 0 {
 		t.Fatalf("unexpected diagnostics: %+v", got)
@@ -25,6 +26,8 @@ func TestValidateAgentTemplate_RangeOverComments(t *testing.T) {
 		Name:       "dev-agent",
 		Prompt:     "{{range .Issue.Comments}}- {{.Author}}: {{.Body}}\n{{end}}",
 		PromptLine: 13,
+		// Declaring the slice covers any iterator-element reference.
+		Context: []string{"Issue.Comments"},
 	}
 	if got := validateAgentTemplate(agent, schema); len(got) != 0 {
 		t.Fatalf("unexpected diagnostics: %+v", got)
@@ -98,6 +101,7 @@ func TestValidateAgentTemplate_UnknownInRange(t *testing.T) {
 		Name:       "dev-agent",
 		Prompt:     "{{range .Issue.Comments}}{{.Username}}{{end}}",
 		PromptLine: 10,
+		Context:    []string{"Issue.Comments"},
 	}
 	got := validateAgentTemplate(agent, schema)
 	if len(got) != 1 {
@@ -135,6 +139,7 @@ func TestValidateAgentTemplate_ShellEscapeFunc(t *testing.T) {
 		Name:       "dev-agent",
 		Prompt:     "{{shellEscape .Issue.Title}}",
 		PromptLine: 10,
+		Context:    []string{"Issue.Title"},
 	}
 	if got := validateAgentTemplate(agent, schema); len(got) != 0 {
 		t.Fatalf("shellEscape func should be known: %+v", got)
