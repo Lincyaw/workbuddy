@@ -54,6 +54,11 @@ type Decision struct {
 	Agent     *config.AgentConfig
 	Workflow  string
 	State     string
+	// StateDef is the workflow state object, attached so the preparer can
+	// synthesize the transition footer (issue #204 batch 3) without reaching
+	// back into the state-machine. May be nil for legacy callers; the
+	// preparer treats a nil StateDef as "no footer".
+	StateDef *config.State
 }
 
 // TaskStore is the narrow persistence surface the preparer needs.
@@ -171,6 +176,14 @@ func (p *Preparer) Prepare(ctx context.Context, d Decision) error {
 		Session: runtimepkg.SessionContext{
 			ID: fmt.Sprintf("session-%s-%s", taskID, uuid.New().String()[:8]),
 		},
+	}
+	// Attach workflow-state metadata so the runtime can synthesize the
+	// transition footer at prompt-render time. Terminal / nil states result
+	// in no footer (BuildTransitionFooter returns "").
+	if d.StateDef != nil {
+		taskCtx.SetWorkflowState(d.State, d.StateDef.EnterLabel, d.StateDef.Transitions)
+	} else {
+		taskCtx.SetWorkflowState(d.State, "", nil)
 	}
 
 	task := WorkerTask{

@@ -76,6 +76,36 @@ func RenderCommandRaw(cmdTemplate string, task *TaskContext) (string, error) {
 	return buf.String(), nil
 }
 
+// AssembleAgentPrompt combines the agent's prompt body with the runtime-
+// generated transition footer (from the workflow state metadata attached to
+// task) and returns the unrendered template string. Callers that want the
+// final rendered prompt should follow up with RenderCommandRaw or
+// RenderCommand on the result.
+//
+// When task carries no workflow-state metadata, or the state is terminal
+// (no outgoing transitions), the body is returned unchanged. The combined
+// output preserves the body's leading content and appends the footer with a
+// single blank line of separation, matching AssemblePrompt.
+func AssembleAgentPrompt(promptBody string, task *TaskContext) string {
+	if task == nil {
+		return promptBody
+	}
+	enterLabel, transitions := task.WorkflowStateMetadata()
+	footer := BuildTransitionFooter(task.WorkflowStateName(), enterLabel, transitions)
+	return AssemblePrompt(promptBody, footer)
+}
+
+// RenderAgentPrompt is a convenience wrapper that assembles body+footer and
+// renders the result against task. Used at dispatch boundaries that send the
+// rendered prompt directly to a runtime adapter (claude / codex bridge).
+func RenderAgentPrompt(promptBody string, task *TaskContext) (string, error) {
+	combined := AssembleAgentPrompt(promptBody, task)
+	if strings.TrimSpace(combined) == "" {
+		return "", nil
+	}
+	return RenderCommandRaw(combined, task)
+}
+
 var promptPattern = regexp.MustCompile(`^claude\s+.*-p\s+["']`)
 
 func ExtractPrompt(rendered string) (prompt string, extraArgs []string, ok bool) {

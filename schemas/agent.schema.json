@@ -1,9 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Lincyaw/workbuddy/schemas/agent.schema.json",
-  "title": "Workbuddy Agent (Batch 2 — issue #204)",
-  "description": "Schema for the YAML frontmatter of .github/workbuddy/agents/*.md. The Markdown body below the closing `---` IS the prompt template (rendered as a Go text/template against runtime.TaskContext). Frontmatter no longer accepts `prompt:`. Keep this in sync with internal/config/types.go (AgentConfig).",
-  "$comment": "Batch 2 hard-cut: `prompt:` is removed; `context:` is required and lists every TaskContext field path the prompt body references; `triggers[].state:` references workflow state names symbolically (not raw labels).",
+  "title": "Workbuddy Agent (Batch 3 — issue #204)",
+  "description": "Schema for the YAML frontmatter of .github/workbuddy/agents/*.md. The Markdown body below the closing `---` IS the prompt template (rendered as a Go text/template against runtime.TaskContext). Frontmatter no longer accepts `prompt:`. As of batch 3, label-flip instructions (the `gh issue edit` command and the available `status:*` outcomes) are NOT authored in the prompt body — the runtime injects them automatically as a transition footer derived from the workflow state's transitions map. Linter codes WB-L001/WB-L002 fire when the body still inlines `gh issue edit` or a `status:` literal. Keep this in sync with internal/config/types.go (AgentConfig).",
+  "$comment": "Batch 3: transition footer is runtime-generated from the workflow state's transitions map and appended to the prompt body at dispatch. The prompt body should describe the agent's job in prose; do not embed the gh issue edit command or status:* labels manually.",
   "type": "object",
   "additionalProperties": false,
   "required": ["name", "description", "triggers", "role", "runtime", "context", "policy"],

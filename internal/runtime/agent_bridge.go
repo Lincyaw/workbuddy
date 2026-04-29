@@ -240,10 +240,12 @@ func (s *AgentBridgeSession) Close() error {
 
 func resolvePrompt(agentCfg *config.AgentConfig, task *TaskContext) string {
 	if p := strings.TrimSpace(agentCfg.Prompt); p != "" {
-		rendered, err := RenderCommandRaw(p, task)
+		rendered, err := RenderAgentPrompt(p, task)
 		if err == nil {
 			return rendered
 		}
+		// Fall back to the body without the footer if the combined render
+		// fails (parse error in the agent body itself).
 		return p
 	}
 	if cmd := strings.TrimSpace(agentCfg.Command); cmd != "" {

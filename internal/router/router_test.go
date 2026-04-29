@@ -144,6 +144,72 @@ func TestRouter_AllowsDispatchWhenReady(t *testing.T) {
 	}
 }
 
+// TestRouter_AttachesStateDef verifies that when SetWorkflows wires the
+// router to a workflow registry, the Decision emitted by handleDispatch
+// carries the *config.State pointer (used by the preparer to attach the
+// workflow-state metadata to the runtime TaskContext for transition footer
+// rendering — issue #204 batch 3).
+func TestRouter_AttachesStateDef(t *testing.T) {
+	agents := map[string]*config.AgentConfig{
+		"dev-agent": {Name: "dev-agent", Role: "dev", Runtime: "claude-code", Command: "echo"},
+	}
+	r, fp, _ := newSchedulingRouter(t, agents)
+	state := &config.State{
+		EnterLabel: "status:developing",
+		Transitions: map[string]string{
+			"status:reviewing": "reviewing",
+			"status:blocked":   "blocked",
+		},
+	}
+	r.SetWorkflows(map[string]*config.WorkflowConfig{
+		"default": {
+			Name:   "default",
+			States: map[string]*config.State{"developing": state},
+		},
+	})
+
+	r.handleDispatch(context.Background(), statemachine.DispatchRequest{
+		Repo:      "test/repo",
+		IssueNum:  10,
+		AgentName: "dev-agent",
+		Workflow:  "default",
+		State:     "developing",
+	})
+
+	if len(fp.got) != 1 {
+		t.Fatalf("preparer invocations = %d, want 1", len(fp.got))
+	}
+	if fp.got[0].StateDef != state {
+		t.Fatalf("StateDef pointer mismatch; want the wired state, got %+v", fp.got[0].StateDef)
+	}
+}
+
+// TestRouter_NilStateDefWhenWorkflowsUnwired makes sure the existing
+// dispatch path is unaffected for callers that have not yet wired
+// SetWorkflows — Decision.StateDef stays nil and the preparer treats that
+// as "no footer".
+func TestRouter_NilStateDefWhenWorkflowsUnwired(t *testing.T) {
+	agents := map[string]*config.AgentConfig{
+		"dev-agent": {Name: "dev-agent", Role: "dev", Runtime: "claude-code", Command: "echo"},
+	}
+	r, fp, _ := newSchedulingRouter(t, agents)
+
+	r.handleDispatch(context.Background(), statemachine.DispatchRequest{
+		Repo:      "test/repo",
+		IssueNum:  11,
+		AgentName: "dev-agent",
+		Workflow:  "default",
+		State:     "developing",
+	})
+
+	if len(fp.got) != 1 {
+		t.Fatalf("preparer invocations = %d, want 1", len(fp.got))
+	}
+	if fp.got[0].StateDef != nil {
+		t.Fatalf("StateDef = %+v, want nil when workflows registry is unwired", fp.got[0].StateDef)
+	}
+}
+
 func TestRouter_RunConsumesDispatchChannel(t *testing.T) {
 	agents := map[string]*config.AgentConfig{
 		"dev-agent": {Name: "dev-agent", Role: "dev", Runtime: "claude-code", Command: "echo"},

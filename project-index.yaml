@@ -2612,3 +2612,100 @@ requirements:
       - internal/validate/validate_codes_test.go
     deps: [REQ-072, REQ-076]
 
+  - id: REQ-081
+    title: Workflow-injected transition footer in agent prompts
+    description: >
+      Issue #204 batch 3: at dispatch time the runtime synthesizes a
+      "Transition" footer from the workflow state's transitions map and
+      appends it to the agent prompt body. The combined string is rendered
+      as a single Go text/template against TaskContext so footer lines such
+      as `gh issue edit {{.Issue.Number}} --repo {{.Repo}}` resolve
+      correctly. Terminal states (no transitions) inject no footer. State
+      metadata travels via Decision.StateDef into the Preparer (and the
+      remote-task path through worker.distributed.BuildRemoteTaskContext +
+      a workflow lookup on the worker's local config) and is attached to
+      TaskContext through SetWorkflowState so the runtime can read it back
+      via WorkflowStateMetadata. The body+footer assembly happens in
+      runtime.AssembleAgentPrompt / runtime.RenderAgentPrompt; the existing
+      ProcessSession.BuildCommand and runtime.resolvePrompt call sites are
+      the only injection points.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-081-1: Non-terminal states emit a deterministic footer with rows sorted by label"
+      - "AC-081-2: Terminal states (empty transitions map) emit no footer"
+      - "AC-081-3: The combined body+footer template parses + executes against TaskContext"
+      - "AC-081-4: Workflow state metadata reaches both the embedded preparer path and the distributed worker path"
+    code:
+      - internal/runtime/footer.go
+      - internal/runtime/template.go
+      - internal/runtime/types.go
+      - internal/runtime/process.go
+      - internal/runtime/agent_bridge.go
+      - internal/router/router.go
+      - internal/taskprep/taskprep.go
+      - internal/worker/distributed.go
+      - cmd/serve.go
+      - internal/app/repo_runtime.go
+    tests:
+      - internal/runtime/footer_test.go
+    deps: [REQ-076, REQ-079]
+
+  - id: REQ-082
+    title: L-layer lint for content vs control-flow drift (WB-L001/L002/L003)
+    description: >
+      Three new validator diagnostic codes (warnings, gated by --strict)
+      that catch agent/workflow files which still embed control-flow
+      details that now belong to the runtime-injected footer or the
+      workflow's transitions map. WB-L001 fires when the agent prompt body
+      contains the literal `gh issue edit`. WB-L002 fires when the agent
+      prompt body contains a `status:<word>` label literal. WB-L003 fires
+      when the workflow markdown body — outside the fenced `states:` YAML
+      block — contains a `{{.X}}` Go-template-style expression. Each is
+      SeverityWarning so default `workbuddy validate` exits 0; passing
+      `--strict` upgrades them to failures.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-082-1: WB-L001 fires on agent body containing `gh issue edit`"
+      - "AC-082-2: WB-L002 fires on agent body containing `status:<token>`"
+      - "AC-082-3: WB-L003 fires on workflow prose with `{{.Field}}` outside the YAML block"
+      - "AC-082-4: All three codes are tagged SeverityWarning so default validate exits 0"
+      - "AC-082-5: --strict promotes the warnings to a non-zero exit"
+    code:
+      - internal/validate/lint_check.go
+      - internal/validate/validate.go
+    tests:
+      - internal/validate/validate_codes_test.go
+    deps: [REQ-076, REQ-081]
+
+  - id: REQ-083
+    title: Agent prompt fixture migration to footer-injected layout
+    description: >
+      The repo's own agent fixtures and the cmd/initdata/agents copies are
+      migrated to the batch-3 layout: prompt prose owns the semantic
+      decision ("transition to the blocked outcome / reviewing outcome /
+      pass / fail") and references a "Transition footer below"; literal
+      label values and `gh issue edit` commands are removed. After
+      migration, `workbuddy validate --strict` against the repo's own
+      .github/workbuddy directory exits 0 with no WB-L001 or WB-L002
+      warnings, demonstrating the lint+fixture pair shipping together.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-083-1: .github/workbuddy/agents/dev-agent.md no longer mentions `gh issue edit` or `status:*` labels"
+      - "AC-083-2: .github/workbuddy/agents/review-agent.md no longer mentions `gh issue edit` or `status:*` labels"
+      - "AC-083-3: cmd/initdata/agents/{dev,review}-agent.md mirror the same migration so `workbuddy init` produces footer-friendly prompts"
+      - "AC-083-4: workbuddy validate --strict --config-dir .github/workbuddy exits 0"
+    code:
+      - .github/workbuddy/agents/dev-agent.md
+      - .github/workbuddy/agents/review-agent.md
+      - cmd/initdata/agents/dev-agent.md
+      - cmd/initdata/agents/review-agent.md
+    tests:
+      - internal/validate/validate_codes_test.go
+    deps: [REQ-081, REQ-082]
+

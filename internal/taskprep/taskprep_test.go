@@ -186,6 +186,55 @@ func TestPreparer_DispatchUsesBaseRepoRootAndWorkDir(t *testing.T) {
 	}
 }
 
+// TestPreparer_AttachesWorkflowStateMetadata verifies that the Decision's
+// StateDef (the *config.State pointer the router looks up) is propagated
+// onto the dispatched WorkerTask's TaskContext via SetWorkflowState. This
+// is the wiring that drives the runtime-injected transition footer (issue
+// #204 batch 3).
+func TestPreparer_AttachesWorkflowStateMetadata(t *testing.T) {
+	st := newTestStore(t)
+	repoRoot := initGitRepo(t)
+	taskCh := make(chan WorkerTask, 1)
+	p := NewPreparer(st, repoRoot, taskCh, true)
+	p.SetIssueDataReader(fakeReader{})
+
+	agent := &config.AgentConfig{Name: "dev-agent", Role: "dev", Runtime: "claude-code", Command: "echo"}
+	state := &config.State{
+		EnterLabel: "status:developing",
+		Transitions: map[string]string{
+			"status:reviewing": "reviewing",
+			"status:blocked":   "blocked",
+		},
+	}
+	d := newDecision(agent, 99)
+	d.StateDef = state
+	if err := p.Prepare(context.Background(), d); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+
+	select {
+	case task := <-taskCh:
+		if task.Context == nil {
+			t.Fatal("expected dispatched task context")
+		}
+		if got := task.Context.WorkflowStateName(); got != "developing" {
+			t.Fatalf("WorkflowStateName = %q, want %q", got, "developing")
+		}
+		enterLabel, transitions := task.Context.WorkflowStateMetadata()
+		if enterLabel != "status:developing" {
+			t.Fatalf("enterLabel = %q, want %q", enterLabel, "status:developing")
+		}
+		if len(transitions) != 2 {
+			t.Fatalf("transitions = %v, want 2 entries", transitions)
+		}
+		if transitions["status:reviewing"] != "reviewing" || transitions["status:blocked"] != "blocked" {
+			t.Fatalf("transitions = %v, want reviewing/blocked targets", transitions)
+		}
+	default:
+		t.Fatal("expected dispatched task")
+	}
+}
+
 func TestPreparer_NilAgentReturnsError(t *testing.T) {
 	st := newTestStore(t)
 	p := NewPreparer(st, t.TempDir(), nil, false)

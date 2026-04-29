@@ -30,11 +30,11 @@ Previous comments (including review feedback):
 Related PRs:
 {{.RelatedPRsText}}
 
-Read the issue body for a `## Acceptance Criteria` section.
+Read the issue body for an acceptance-criteria section.
 
-- If the section is missing or lists no verifiable criteria: add label
-  `status:blocked`, remove `status:developing`, post a comment explaining
-  exactly what acceptance criteria are needed, then stop.
+- If the section is missing or lists no verifiable criteria: post a comment
+  explaining exactly what acceptance criteria are needed, then transition the
+  issue to the blocked outcome (see the Transition footer below) and stop.
 - Otherwise: produce the artifact that satisfies every criterion — code,
   docs, dependency bump, investigation report, whatever fits. For any
   verifiable criterion, include tests or checks that demonstrate it holds.
@@ -49,9 +49,12 @@ When the artifact is ready:
    issue #{{.Issue.Number}}.
 2. Push the branch to origin: `git push -u origin workbuddy/issue-{{.Issue.Number}}`.
 3. You MUST have an open PR for this branch before proceeding. If no open PR
-   exists, create one with `gh pr create --title "..." --body "Fixes #{{.Issue.Number}}"`
+   exists, create one (`gh pr create --title "..." --body "Fixes #{{.Issue.Number}}"`)
    and capture the PR URL.
-4. ONLY after the PR exists: remove `status:developing`, add `status:reviewing`,
-   and post a comment including the PR URL. Do NOT change labels if there is no PR.
+4. Post a comment on the issue with the PR URL so the reviewer can find it.
+
+Once the PR exists and the comment is posted, follow the Transition footer
+below to move the issue to the reviewing outcome. Do NOT transition the issue
+if no PR exists.
 
 Use the repo's own CLAUDE.md / skills for project-specific dev-loop, PR conventions, and tooling.

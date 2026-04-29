@@ -111,6 +111,19 @@ func (w *DistributedWorker) ExecuteTask(ctx context.Context, task *workerclient.
 	}
 
 	launchCtx := BuildRemoteTaskContext(task, w.deps.Reader, w.deps.WorkDir)
+	// Attach workflow-state metadata so the runtime can synthesize the
+	// transition footer at prompt-render time. The remote Task does not carry
+	// the State definition over the wire, so the worker resolves it locally
+	// from its own config (issue #204 batch 3).
+	if w.deps.Config != nil {
+		if wf, ok := w.deps.Config.Workflows[task.Workflow]; ok && wf != nil {
+			if state, ok := wf.States[task.State]; ok && state != nil {
+				launchCtx.SetWorkflowState(task.State, state.EnterLabel, state.Transitions)
+			} else {
+				launchCtx.SetWorkflowState(task.State, "", nil)
+			}
+		}
+	}
 	sessionID := launchCtx.Session.ID
 
 	taskCtx, taskCancel := context.WithCancel(ctx)
