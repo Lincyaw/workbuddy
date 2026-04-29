@@ -2889,3 +2889,50 @@ requirements:
       - .github/workbuddy/workflows/default.md
       - CLAUDE.md
     deps: [REQ-021, REQ-085]
+
+  - id: REQ-087
+    title: Mandatory --report-base-url for non-loopback coordinator/serve binds
+    description: >
+      The Reporter writes session links into GitHub issue comments using a
+      configurable base URL. Historically the URL was silently derived from
+      the coordinator listen address, so a deploy that bound 0.0.0.0 (or a
+      reverse-proxied host) would post comments containing 127.0.0.1 links
+      that no operator could click. This requirement makes --report-base-url
+      an enforced contract: when --listen is non-loopback the flag (or the
+      WORKBUDDY_REPORT_BASE_URL env var) must be set and resolve to a
+      non-loopback host; when --listen is loopback the value remains optional
+      and defaults to http://<listen>. The same policy applies to the worker
+      management bind: a non-loopback --mgmt-addr now requires a
+      non-loopback --mgmt-public-url so coordinator-proxied session links
+      stay reachable. All failure modes return actionable errors that name
+      the missing flag and a fix-it example.
+    priority: P1
+    version: v0.4.0
+    status: tested
+    acceptance_criteria:
+      - "AC-087-1: workbuddy coordinator with non-loopback --listen and no --report-base-url (and no WORKBUDDY_REPORT_BASE_URL env var) fails fast with a message that names the missing flag and shows a --report-base-url=http://<your-host>:<port> fix-it"
+      - "AC-087-2: workbuddy coordinator with non-loopback --listen and a loopback --report-base-url fails fast with a message naming the loopback URL and the same fix-it"
+      - "AC-087-3: workbuddy coordinator with non-loopback --listen and a non-loopback --report-base-url succeeds and stores the value on coordinatorOpts so the Reporter sees it"
+      - "AC-087-4: workbuddy coordinator with loopback --listen and no --report-base-url succeeds, defaulting to http://<listen>"
+      - "AC-087-5: workbuddy serve with non-loopback --listen and no --report-base-url fails fast with the same diagnostic surface; loopback bind keeps working without the flag"
+      - "AC-087-6: workbuddy worker with non-loopback --mgmt-addr fails fast unless --mgmt-public-url is set to a non-loopback URL; the error names --mgmt-public-url=http://<your-worker-host>:<port> as the fix"
+      - "AC-087-7: WORKBUDDY_REPORT_BASE_URL is honored as a fallback for both coordinator and serve when the flag is unset"
+      - "AC-087-8: cmd/init.go config.yaml template carries a # report_base_url placeholder explaining the non-loopback requirement"
+      - "AC-087-9: cmd/deploy.go install Examples demonstrate --report-base-url and --env-file usage so systemd deployments wire the env var through"
+    code:
+      - cmd/coordinator.go
+      - cmd/deploy.go
+      - cmd/init.go
+      - cmd/report_base_url.go
+      - cmd/serve.go
+      - cmd/worker.go
+      - cmd/worker_repos.go
+    tests:
+      - cmd/coordinator_test.go
+      - cmd/report_base_url_test.go
+      - cmd/serve_test.go
+      - cmd/worker_repos_test.go
+      - cmd/worker_test.go
+    related_docs:
+      - docs/implemented/distributed-topology-and-cli.md
+    deps: [REQ-027, REQ-028, REQ-029, REQ-051]

@@ -145,9 +145,14 @@ var deployInstallCmd = &cobra.Command{
   # Single-process deploy (default command is "serve")
   workbuddy deploy install --name workbuddy --scope user --systemd
 
-  # Dedicated coordinator service
-  workbuddy deploy install --name workbuddy-coordinator --scope system --systemd -- \
-    coordinator --listen 0.0.0.0:8081 --db /srv/workbuddy/.workbuddy/workbuddy.db
+  # Dedicated coordinator service (non-loopback bind requires --report-base-url)
+  # Pair with --env-file pointing at a file that defines WORKBUDDY_REPORT_BASE_URL
+  # so session links posted to GitHub comments are clickable in a browser.
+  workbuddy deploy install --name workbuddy-coordinator --scope system --systemd \
+    --env-file /etc/workbuddy/coordinator.env -- \
+    coordinator --listen 0.0.0.0:8081 \
+      --report-base-url=https://workbuddy.example.com:8081 \
+      --auth --db /srv/workbuddy/.workbuddy/workbuddy.db
 
   # Dedicated worker service bound to a coordinator
   workbuddy deploy install --name workbuddy-worker-dev --scope system --systemd -- \
