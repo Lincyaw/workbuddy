@@ -83,8 +83,8 @@ func TestExecutorExecuteCapturesLabelsAndSessionArtifacts(t *testing.T) {
 	if exec.EventErr != nil {
 		t.Fatalf("EventErr = %v, want nil", exec.EventErr)
 	}
-	if got := exec.Task.Context.Session.ID; got != "session-task-1" {
-		t.Fatalf("Session.ID = %q, want session-task-1", got)
+	if got := exec.Task.Context.Session.ID; !strings.HasPrefix(got, "session-task-1") {
+		t.Fatalf("Session.ID = %q, want prefix session-task-1", got)
 	}
 	if got := exec.Task.Context.Session.TaskID; got != "task-1" {
 		t.Fatalf("Session.TaskID = %q, want task-1", got)
@@ -104,7 +104,7 @@ func TestExecutorExecuteCapturesLabelsAndSessionArtifacts(t *testing.T) {
 	if got, want := exec.CompletionLabels, []string{"status:done"}; len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("CompletionLabels = %v, want %v", got, want)
 	}
-	meta := readSessionMetadata(t, filepath.Join(repoRoot, ".workbuddy", "sessions", "session-task-1", "metadata.json"))
+	meta := readSessionMetadata(t, filepath.Join(repoRoot, ".workbuddy", "sessions", exec.Task.Context.Session.ID, "metadata.json"))
 	if got, want := meta["status"], store.TaskStatusCompleted; got != want {
 		t.Fatalf("metadata status = %v, want %q", got, want)
 	}
@@ -179,7 +179,7 @@ func TestExecutorExecuteClosesManagedSessionOnStartFailure(t *testing.T) {
 	if exec.Result == nil {
 		t.Fatal("Result = nil, want infra failure result")
 	}
-	meta := readSessionMetadata(t, filepath.Join(repoRoot, ".workbuddy", "sessions", "session-task-start-fail", "metadata.json"))
+	meta := readSessionMetadata(t, filepath.Join(repoRoot, ".workbuddy", "sessions", exec.Task.Context.Session.ID, "metadata.json"))
 	if got, want := meta["status"], store.TaskStatusFailed; got != want {
 		t.Fatalf("metadata status = %v, want %q", got, want)
 	}

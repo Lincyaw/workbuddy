@@ -169,7 +169,7 @@ func (p *Preparer) Prepare(ctx context.Context, d Decision) error {
 		RelatedPRs:     relatedPRs,
 		RelatedPRsText: FormatRelatedPRs(relatedPRs),
 		Session: runtimepkg.SessionContext{
-			ID: fmt.Sprintf("session-%s", taskID),
+			ID: fmt.Sprintf("session-%s-%s", taskID, uuid.New().String()[:8]),
 		},
 	}
 

@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 	"github.com/Lincyaw/workbuddy/internal/store"
@@ -68,7 +70,7 @@ func (e *Executor) Execute(ctx context.Context, task Task) Execution {
 		taskCtx = &runtimepkg.TaskContext{}
 	}
 	if taskCtx.Session.ID == "" && task.TaskID != "" {
-		taskCtx.Session.ID = fmt.Sprintf("session-%s", task.TaskID)
+		taskCtx.Session.ID = generateSessionID(task.TaskID)
 	}
 	taskCtx.Repo = task.Repo
 	taskCtx.Issue.Number = task.IssueNum
@@ -260,6 +262,10 @@ func closeManagedSession(taskCtx *runtimepkg.TaskContext, status string) error {
 // and callers that need the shared session layout behavior directly.
 func StreamSessionEvents(taskCtx *runtimepkg.TaskContext, eventsCh <-chan launcherevents.Event) (string, func() error) {
 	return workersession.Stream(taskCtx, eventsCh)
+}
+
+func generateSessionID(taskID string) string {
+	return fmt.Sprintf("session-%s-%s", taskID, uuid.New().String()[:8])
 }
 
 func snapshotIssueLabels(repo string, issueNum int, reader IssueLabelReader) ([]string, error) {

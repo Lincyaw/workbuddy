@@ -111,7 +111,7 @@ func (w *EmbeddedWorker) ExecuteTask(ctx context.Context, task router.WorkerTask
 		task.Context = taskCtx
 	}
 	if taskCtx.Session.ID == "" && task.TaskID != "" {
-		taskCtx.Session.ID = fmt.Sprintf("session-%s", task.TaskID)
+		taskCtx.Session.ID = generateSessionID(task.TaskID)
 	}
 
 	// Create a per-task context that can be cancelled independently (e.g., on issue close).
