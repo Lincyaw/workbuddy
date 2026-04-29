@@ -3013,7 +3013,6 @@ requirements:
       - web/src/main.tsx
       - web/src/App.tsx
       - web/src/api/client.ts
-      - web/src/pages/Placeholder.tsx
       - internal/webui/embed.go
       - internal/webui/spa.go
       - internal/webui/dist/index.html
@@ -3029,3 +3028,52 @@ requirements:
     related_docs:
       - web/README.md
     deps: []
+
+  - id: REQ-090
+    title: Dashboard SPA - landing page, in-flight table, issue detail
+    description: >
+      Land the dashboard's user-facing pages on top of the Preact SPA scaffold
+      (REQ-089) and the JSON dashboard API (REQ-088). The `/` route renders
+      four health cards (in-flight, stuck > 1h, done 24h, failed 24h) backed by
+      `/api/v1/status` plus an in-flight issue table backed by
+      `/api/v1/issues/in-flight`, polling every 30 seconds. Each row links to
+      `/issues/:owner/:repo/:num`, where the page renders meta, transitions
+      timeline, transition counts, and session refs from
+      `/api/v1/issues/{owner}/{repo}/{num}`. The top bar provides
+      Dashboard/Sessions navigation and a Logout button that POSTs `/logout`.
+      The state badge, stuck-cell colouring, and dev↔review cycle column give
+      operators a one-glance answer to "is the pipeline healthy?" without
+      tailing issue comments. No frontend unit tests; verification is manual
+      and documented in web/README.md.
+    priority: P0
+    version: v0.5.0
+    status: implemented
+    acceptance_criteria:
+      - "AC-090-1: `/` renders the four health cards plus the in-flight issue table; values come from /api/v1/status and /api/v1/issues/in-flight"
+      - "AC-090-2: The Dashboard refreshes via setInterval every 30 seconds; SSE is intentionally not used"
+      - "AC-090-3: Each in-flight row shows a colored State badge, a `dev↔review N / cap` cycle cell, a relative-time Last Transition cell, the worker id, and a session link"
+      - "AC-090-4: Last Transition cell turns red when stuck_for_seconds > 3600; cycle cell turns red when count exceeds DefaultMaxReviewCycles"
+      - "AC-090-5: Clicking a row navigates to `/issues/:owner/:repo/:num`, which renders meta, transitions timeline, cycle counts, and sessions"
+      - "AC-090-6: The api client redirects to `/login?next=…` on any 401 response (covers /api/v1/* fetches)"
+      - "AC-090-7: The Logout button POSTs /logout (cookie cleared) and lands on /login"
+      - "AC-090-8: `pnpm -C web build` succeeds and the JS+CSS gzipped bundle stays well under 200 KB"
+      - "AC-090-9: web/README.md documents the local manual-verification checklist (golden path, stuck row, 401 redirect, Lighthouse)"
+    code:
+      - web/src/App.tsx
+      - web/src/main.tsx
+      - web/src/styles.css
+      - web/src/api/client.ts
+      - web/src/api/types.ts
+      - web/src/components/Layout.tsx
+      - web/src/components/StateBadge.tsx
+      - web/src/utils/time.ts
+      - web/src/utils/cycle.ts
+      - web/src/pages/Dashboard.tsx
+      - web/src/pages/IssueDetail.tsx
+      - web/src/pages/Sessions.tsx
+      - web/src/pages/SessionDetail.tsx
+      - web/src/pages/NotFound.tsx
+    tests: []
+    related_docs:
+      - web/README.md
+    deps: [REQ-088, REQ-089]
