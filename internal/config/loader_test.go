@@ -31,8 +31,7 @@ func TestLoadConfig_IgnoresUnknownWorkflowStateKeys(t *testing.T) {
 		"    enter_label: \"status:reviewing\"\n" +
 		"    agent: review-agent\n" +
 		"    transitions:\n" +
-		"      - to: done\n" +
-		"        when: labeled \"status:done\"\n" +
+		"      \"status:done\": done\n" +
 		"  done:\n" +
 		"    enter_label: \"status:done\"\n" +
 		"    action: close_issue\n" +

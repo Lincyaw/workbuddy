@@ -523,13 +523,13 @@ func validateLabelTransition(task router.WorkerTask, deps EmbeddedDeps, preLabel
 	}
 
 	allowedSeen := make(map[string]bool)
-	for _, transition := range currentState.Transitions {
-		target, ok := wf.States[transition.To]
+	for _, targetName := range currentState.Transitions {
+		target, ok := wf.States[targetName]
 		if !ok || target == nil || target.EnterLabel == "" || allowedSeen[target.EnterLabel] {
 			continue
 		}
 		allowedSeen[target.EnterLabel] = true
-		input.AllowedTransitions = append(input.AllowedTransitions, labelcheck.State{Name: transition.To, Label: target.EnterLabel})
+		input.AllowedTransitions = append(input.AllowedTransitions, labelcheck.State{Name: targetName, Label: target.EnterLabel})
 	}
 
 	return labelcheck.Classify(input), true, nil

@@ -64,16 +64,16 @@ func testWorkflow() *config.WorkflowConfig {
 			"developing": {
 				EnterLabel: "status:developing",
 				Agent:      "dev-agent",
-				Transitions: []config.Transition{
-					{To: "reviewing", When: `labeled "status:reviewing"`},
+				Transitions: map[string]string{
+					"status:reviewing": "reviewing",
 				},
 			},
 			"reviewing": {
 				EnterLabel: "status:reviewing",
 				Agent:      "review-agent",
-				Transitions: []config.Transition{
-					{To: "developing", When: `labeled "status:developing"`},
-					{To: "done", When: `labeled "status:done"`},
+				Transitions: map[string]string{
+					"status:developing": "developing",
+					"status:done":       "done",
 				},
 			},
 			"done": {
@@ -126,8 +126,8 @@ func newParallelWorkflow(join string) *config.WorkflowConfig {
 				EnterLabel: "status:developing",
 				Agents:     []string{"dev-agent", "review-agent"},
 				Join:       join,
-				Transitions: []config.Transition{
-					{To: "done", When: `labeled "status:done"`},
+				Transitions: map[string]string{
+					"status:done": "done",
 				},
 			},
 			"done": {
@@ -651,126 +651,20 @@ func TestStuckDetection(t *testing.T) {
 }
 
 // =============================================
-// Rules engine tests (REQ-013)
+// Transition map tests (REQ-076 — issue #204 batch 2)
 // =============================================
 
-func TestConditionLabeled_Positive(t *testing.T) {
-	ctx := &EvalContext{
-		EventType:  poller.EventLabelAdded,
-		LabelAdded: "status:reviewing",
-		Labels:     []string{"status:reviewing"},
-	}
-	if !EvaluateCondition(`labeled "status:reviewing"`, ctx) {
-		t.Error("labeled condition should match")
-	}
-}
+// TestTransitionMapLookup confirms the simplified map-based transition picks
+// the correct target state for an arrived label and returns false otherwise.
+func TestTransitionMapLookup(t *testing.T) {
+	wf := testWorkflow()
+	dev := wf.States["developing"]
 
-func TestConditionLabeled_Negative(t *testing.T) {
-	ctx := &EvalContext{
-		EventType:  poller.EventLabelAdded,
-		LabelAdded: "status:developing",
-		Labels:     []string{"status:developing"},
+	if got := dev.Transitions["status:reviewing"]; got != "reviewing" {
+		t.Errorf("transition for status:reviewing = %q, want reviewing", got)
 	}
-	if EvaluateCondition(`labeled "status:reviewing"`, ctx) {
-		t.Error("labeled condition should not match different label")
-	}
-}
-
-func TestConditionPrOpened_Positive(t *testing.T) {
-	ctx := &EvalContext{EventType: poller.EventPRCreated}
-	if !EvaluateCondition("pr_opened", ctx) {
-		t.Error("pr_opened should match pr_created event")
-	}
-}
-
-func TestConditionPrOpened_Negative(t *testing.T) {
-	ctx := &EvalContext{EventType: poller.EventLabelAdded}
-	if EvaluateCondition("pr_opened", ctx) {
-		t.Error("pr_opened should not match label_added event")
-	}
-}
-
-func TestConditionChecksPassed_Positive(t *testing.T) {
-	ctx := &EvalContext{ChecksState: ChecksPassed}
-	if !EvaluateCondition("checks_passed", ctx) {
-		t.Error("checks_passed should match")
-	}
-}
-
-func TestConditionChecksPassed_Negative(t *testing.T) {
-	ctx := &EvalContext{ChecksState: ChecksFailed}
-	if EvaluateCondition("checks_passed", ctx) {
-		t.Error("checks_passed should not match failed")
-	}
-}
-
-func TestConditionChecksFailed_Positive(t *testing.T) {
-	ctx := &EvalContext{ChecksState: ChecksFailed}
-	if !EvaluateCondition("checks_failed", ctx) {
-		t.Error("checks_failed should match")
-	}
-}
-
-func TestConditionChecksFailed_Negative(t *testing.T) {
-	ctx := &EvalContext{ChecksState: ChecksPassed}
-	if EvaluateCondition("checks_failed", ctx) {
-		t.Error("checks_failed should not match passed")
-	}
-}
-
-func TestConditionApproved_Positive(t *testing.T) {
-	ctx := &EvalContext{EventType: EventApproved}
-	if !EvaluateCondition("approved", ctx) {
-		t.Error("approved should match")
-	}
-}
-
-func TestConditionApproved_Negative(t *testing.T) {
-	ctx := &EvalContext{EventType: EventChangesRequested}
-	if EvaluateCondition("approved", ctx) {
-		t.Error("approved should not match changes_requested")
-	}
-}
-
-func TestConditionChangesRequested_Positive(t *testing.T) {
-	ctx := &EvalContext{EventType: EventChangesRequested}
-	if !EvaluateCondition("changes_requested", ctx) {
-		t.Error("changes_requested should match")
-	}
-}
-
-func TestConditionChangesRequested_Negative(t *testing.T) {
-	ctx := &EvalContext{EventType: EventApproved}
-	if EvaluateCondition("changes_requested", ctx) {
-		t.Error("changes_requested should not match approved")
-	}
-}
-
-func TestConditionCommentCommand_Positive(t *testing.T) {
-	ctx := &EvalContext{LatestComment: "/approve this looks good"}
-	if !EvaluateCondition(`comment_command "/approve"`, ctx) {
-		t.Error("comment_command should match")
-	}
-}
-
-func TestConditionCommentCommand_Negative(t *testing.T) {
-	ctx := &EvalContext{LatestComment: "great job"}
-	if EvaluateCondition(`comment_command "/approve"`, ctx) {
-		t.Error("comment_command should not match when command absent")
-	}
-}
-
-func TestConditionUnknown(t *testing.T) {
-	ctx := &EvalContext{}
-	if EvaluateCondition("some_future_condition", ctx) {
-		t.Error("unknown condition should return false")
-	}
-}
-
-func TestConditionEmpty(t *testing.T) {
-	ctx := &EvalContext{}
-	if EvaluateCondition("", ctx) {
-		t.Error("empty condition should return false")
+	if _, ok := dev.Transitions["status:bogus"]; ok {
+		t.Errorf("unexpected transition for status:bogus")
 	}
 }
 

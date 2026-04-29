@@ -104,7 +104,7 @@ func TestValidateSemantics_AgentInTerminalState(t *testing.T) {
 		Name:       "x",
 		StateOrder: []string{"running", "done"},
 		States: map[string]*stateDoc{
-			"running": {Name: "running", EnterLabel: "status:running", Agent: "dev-agent", AgentLine: 10, Transitions: []transitionDoc{{To: "done"}}},
+			"running": {Name: "running", EnterLabel: "status:running", Agent: "dev-agent", AgentLine: 10, Transitions: []transitionDoc{{Label: "status:done", To: "done"}}},
 			"done":    {Name: "done", EnterLabel: "status:done", Agent: "dev-agent", AgentLine: 16},
 		},
 	}

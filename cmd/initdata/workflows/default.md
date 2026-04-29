@@ -22,19 +22,15 @@ states:
     enter_label: "status:developing"
     agent: dev-agent
     transitions:
-      - to: reviewing
-        when: labeled "status:reviewing"
-      - to: blocked
-        when: labeled "status:blocked"
+      "status:reviewing": reviewing
+      "status:blocked": blocked
 
   reviewing:
     enter_label: "status:reviewing"
     agent: review-agent
     transitions:
-      - to: done
-        when: labeled "status:done"
-      - to: developing
-        when: labeled "status:developing"
+      "status:done": done
+      "status:developing": developing
 
   blocked:
     enter_label: "status:blocked"
@@ -42,8 +38,7 @@ states:
     # (typically adding a proper `## Acceptance Criteria` section)
     # and flip the label back to status:developing.
     transitions:
-      - to: developing
-        when: labeled "status:developing"
+      "status:developing": developing
 
   done:
     enter_label: "status:done"

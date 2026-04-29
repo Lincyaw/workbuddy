@@ -217,17 +217,24 @@ func writeValidateFixture(t *testing.T, files validateFixtureFiles) string {
 	return configDir
 }
 
-func validateAgentFixture(name, label string) string {
+// validateAgentFixture emits a new-format agent file. The `triggerArg`
+// argument retains the legacy "status:foo" string for call-site compatibility
+// with existing tests; we strip the "status:" prefix so the trigger references
+// the workflow state name. The body is a tiny prompt referencing {{.Repo}} so
+// WB-CT002/WB-CT003 stay quiet.
+func validateAgentFixture(name, triggerArg string) string {
+	state := strings.TrimPrefix(triggerArg, "status:")
 	return `---
 name: ` + name + `
 description: test agent
 triggers:
-  - label: "` + label + `"
-    event: labeled
+  - state: ` + state + `
 role: dev
 command: echo run
+context:
+  - Repo
 ---
-## Agent
+Repo: {{.Repo}}
 `
 }
 
@@ -246,18 +253,18 @@ states:
     enter_label: "status:developing"
     agent: dev-agent
     transitions:
-      - to: reviewing
-      - to: blocked
+      "status:reviewing": reviewing
+      "status:blocked": blocked
   reviewing:
     enter_label: "status:reviewing"
     agent: review-agent
     transitions:
-      - to: done
-      - to: developing
+      "status:done": done
+      "status:developing": developing
   blocked:
     enter_label: "status:blocked"
     transitions:
-      - to: developing
+      "status:developing": developing
   done:
     enter_label: "status:done"
   failed:

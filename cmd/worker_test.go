@@ -91,18 +91,29 @@ func setupWorkerRepoConfigAtPath(t *testing.T, repoPath, repo, command, triggerL
 	if strings.TrimSpace(triggerLabel) == "" {
 		triggerLabel = "status:developing"
 	}
+
+	// Map the legacy label argument onto the new state-name based trigger.
+	// Tests that previously asserted "trigger label points at unknown state"
+	// (status:missing) are preserved by deriving an unknown state name.
+	triggerState := strings.TrimPrefix(triggerLabel, "status:")
+	if triggerLabel == "status:missing" {
+		triggerState = "missing"
+	}
+
 	agentMD := fmt.Sprintf(`---
 name: dev-agent
 description: Dev agent
 triggers:
-  - label: %q
+  - state: %s
 role: dev
 runtime: claude-code
 command: %s
 timeout: 30s
+context:
+  - Repo
 ---
-# Dev Agent
-`, triggerLabel, command)
+Repo: {{.Repo}}
+`, triggerState, command)
 	writeFile(t, filepath.Join(configDir, "agents", "dev-agent.md"), agentMD)
 
 	workflowLabel := triggerLabel
@@ -118,7 +129,7 @@ max_retries: 3
 ---
 # Dev Workflow
 
-`+"```yaml\nstates:\n  developing:\n    enter_label: %q\n    agent: dev-agent\n    transitions:\n      - to: done\n        when: 'labeled \"status:done\"'\n  done:\n    enter_label: \"status:done\"\n```\n", workflowLabel)
+`+"```yaml\nstates:\n  developing:\n    enter_label: %q\n    agent: dev-agent\n    transitions:\n      \"status:done\": done\n  done:\n    enter_label: \"status:done\"\n```\n", workflowLabel)
 	writeFile(t, filepath.Join(configDir, "workflows", "dev-workflow.md"), workflowMD)
 }
 

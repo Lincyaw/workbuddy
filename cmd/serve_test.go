@@ -48,13 +48,15 @@ func setupTestConfigDir(t *testing.T, repo string) string {
 name: dev-agent
 description: Dev agent
 triggers:
-  - label: "status:developing"
+  - state: developing
 role: dev
 runtime: claude-code
 command: echo "hello"
 timeout: 30s
+context:
+  - Repo
 ---
-# Dev Agent
+Repo: {{.Repo}}
 `
 	if err := os.MkdirAll(filepath.Join(dir, "agents"), 0o755); err != nil {
 		t.Fatal(err)
@@ -71,7 +73,7 @@ max_retries: 3
 ---
 # Dev Workflow
 
-` + "```yaml\nstates:\n  triage:\n    enter_label: \"status:triage\"\n    transitions:\n      - to: developing\n        when: 'labeled \"status:developing\"'\n  developing:\n    enter_label: \"status:developing\"\n    agent: dev-agent\n    transitions:\n      - to: done\n        when: 'labeled \"status:done\"'\n  done:\n    enter_label: \"status:done\"\n```\n"
+` + "```yaml\nstates:\n  triage:\n    enter_label: \"status:triage\"\n    transitions:\n      \"status:developing\": developing\n  developing:\n    enter_label: \"status:developing\"\n    agent: dev-agent\n    transitions:\n      \"status:done\": done\n  done:\n    enter_label: \"status:done\"\n```\n"
 
 	if err := os.MkdirAll(filepath.Join(dir, "workflows"), 0o755); err != nil {
 		t.Fatal(err)
@@ -1846,8 +1848,8 @@ func TestExecuteTask_LabelValidationAudit(t *testing.T) {
 					"developing": {
 						EnterLabel: "status:developing",
 						Agent:      "dev-agent",
-						Transitions: []config.Transition{
-							{To: "reviewing", When: `labeled "status:reviewing"`},
+						Transitions: map[string]string{
+							"status:reviewing": "reviewing",
 						},
 					},
 					"reviewing": {EnterLabel: "status:reviewing", Agent: "review-agent"},
@@ -1929,15 +1931,15 @@ func TestExecuteTask_LabelValidationUsesPreRunStateTransitions(t *testing.T) {
 			"developing": {
 				EnterLabel: "status:developing",
 				Agent:      "dev-agent",
-				Transitions: []config.Transition{
-					{To: "reviewing", When: `labeled "status:reviewing"`},
+				Transitions: map[string]string{
+					"status:reviewing": "reviewing",
 				},
 			},
 			"reviewing": {
 				EnterLabel: "status:reviewing",
 				Agent:      "review-agent",
-				Transitions: []config.Transition{
-					{To: "done", When: `labeled "status:done"`},
+				Transitions: map[string]string{
+					"status:done": "done",
 				},
 			},
 			"done":   {EnterLabel: "status:done"},

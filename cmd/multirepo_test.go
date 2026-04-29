@@ -75,13 +75,15 @@ func setupNamedConfigDir(t *testing.T, repo, agentName, workflowName string) str
 name: %s
 description: %s
 triggers:
-  - label: "status:developing"
+  - state: developing
 role: dev
 runtime: claude-code
 command: echo "hello"
 timeout: 30s
+context:
+  - Repo
 ---
-# Agent
+Repo: {{.Repo}}
 `, agentName, agentName))
 	writeFile(t, filepath.Join(dir, "workflows", workflowName+".md"), fmt.Sprintf(`---
 name: %s
@@ -92,7 +94,7 @@ max_retries: 3
 ---
 # Workflow
 
-`+"```yaml\nstates:\n  triage:\n    enter_label: \"status:triage\"\n    transitions:\n      - to: developing\n        when: 'labeled \"status:developing\"'\n  developing:\n    enter_label: \"status:developing\"\n    agent: %s\n    transitions:\n      - to: done\n        when: 'labeled \"status:done\"'\n  done:\n    enter_label: \"status:done\"\n```\n", workflowName, workflowName, agentName))
+`+"```yaml\nstates:\n  triage:\n    enter_label: \"status:triage\"\n    transitions:\n      \"status:developing\": developing\n  developing:\n    enter_label: \"status:developing\"\n    agent: %s\n    transitions:\n      \"status:done\": done\n  done:\n    enter_label: \"status:done\"\n```\n", workflowName, workflowName, agentName))
 	return dir
 }
 

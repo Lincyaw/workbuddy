@@ -74,7 +74,7 @@ type agentDoc struct {
 	Name         string
 	Path         string
 	NameLine     int
-	TriggerLines []labelRef
+	TriggerLines []stateRef
 
 	// Runtime, Role, Prompt are scalar fields drawn from the frontmatter.
 	// The corresponding *Line fields are absolute line numbers in the
@@ -85,8 +85,23 @@ type agentDoc struct {
 	Role     string
 	RoleLine int
 
+	// Prompt is the markdown body (issue #204 batch 2). PromptLine is the
+	// absolute file line where the body begins (after the closing `---`).
 	Prompt     string
-	PromptLine int // line where the literal prompt body begins (post-`prompt:` indicator)
+	PromptLine int
+
+	// Context is the declared list of TaskContext field paths the prompt
+	// references. ContextLines parallels Context with absolute line numbers
+	// for diagnostics. ContextDeclLine is the line where the `context:` key
+	// appears in frontmatter (used when the field is missing).
+	Context         []string
+	ContextLines    []int
+	ContextDeclLine int
+
+	// HasLegacyPromptField is set when the frontmatter still includes the
+	// removed `prompt:` field — used by the WB-F001 check.
+	HasLegacyPromptField bool
+	LegacyPromptLine     int
 
 	// Policy timeout (Go duration). 0 if unset/unparseable.
 	PolicyTimeout     time.Duration
@@ -94,8 +109,10 @@ type agentDoc struct {
 	PolicyTimeoutRaw  string
 }
 
-type labelRef struct {
-	Label string
+// stateRef is the new symbolic-state form for trigger references; replaces
+// the legacy label-string form.
+type stateRef struct {
+	State string
 	Line  int
 }
 
@@ -117,7 +134,11 @@ type stateDoc struct {
 	Transitions    []transitionDoc
 }
 
+// transitionDoc represents a single label→target edge from the new
+// transitions-map form. Label is the map key (issue label that drives the
+// transition); To is the target state name (map value).
 type transitionDoc struct {
+	Label  string
 	To     string
 	ToLine int
 }
@@ -162,12 +183,11 @@ func ValidateDirWithOptions(configDir string, opts Options) ([]Diagnostic, error
 	}
 	diags = append(diags, workflowDiags...)
 
-	enterLabels := make(map[string]struct{})
+	knownStates := make(map[string]struct{})
 	for _, wf := range workflows {
 		for _, stateName := range wf.StateOrder {
-			label := strings.TrimSpace(wf.States[stateName].EnterLabel)
-			if label != "" {
-				enterLabels[label] = struct{}{}
+			if stateName != "" {
+				knownStates[stateName] = struct{}{}
 			}
 		}
 	}
@@ -200,20 +220,26 @@ func ValidateDirWithOptions(configDir string, opts Options) ([]Diagnostic, error
 	sort.Strings(agentNames)
 	for _, name := range agentNames {
 		agent := agents[name]
+		// WB-X007: trigger references unknown workflow state name.
 		for _, trigger := range agent.TriggerLines {
-			if strings.TrimSpace(trigger.Label) == "" {
+			if strings.TrimSpace(trigger.State) == "" {
 				continue
 			}
-			if _, ok := enterLabels[trigger.Label]; !ok {
+			if _, ok := knownStates[trigger.State]; !ok {
 				diags = append(diags, Diagnostic{
 					Path:     agent.Path,
 					Line:     trigger.Line,
 					Severity: SeverityError,
-					Code:     CodeUnboundTriggerLabel,
-					Message:  fmt.Sprintf("agent %q trigger label %q does not match any workflow state label", agent.Name, trigger.Label),
+					Code:     CodeUnknownTriggerState,
+					Message:  fmt.Sprintf("agent %q trigger state %q is not declared in any workflow", agent.Name, trigger.State),
 				})
 			}
 		}
+	}
+
+	// Layer F — new-format structural checks (WB-F001, WB-F002, WB-CT001).
+	for _, name := range agentNames {
+		diags = append(diags, validateAgentFormat(agents[name])...)
 	}
 
 	// Layer 2 — cross-reference checks (WB-X002, WB-X003, WB-X004).
@@ -326,7 +352,7 @@ func parseAgentFile(path string) (*agentDoc, []Diagnostic) {
 		return nil, []Diagnostic{{Path: path, Line: 1, Message: err.Error()}}
 	}
 
-	fm, _, fmStartLine, _, splitErr := splitFrontmatter(string(data))
+	fm, body, fmStartLine, bodyStartLine, splitErr := splitFrontmatter(string(data))
 	if splitErr != nil {
 		return nil, []Diagnostic{{Path: path, Line: 1, Message: splitErr.Error()}}
 	}
@@ -345,16 +371,33 @@ func parseAgentFile(path string) (*agentDoc, []Diagnostic) {
 	agent.Runtime, agent.RuntimeLine = scalarValue(root, "runtime", fmStartLine)
 	agent.Role, agent.RoleLine = scalarValue(root, "role", fmStartLine)
 
-	if promptNode, _ := mappingValue(root, "prompt"); promptNode != nil && promptNode.Kind == yaml.ScalarNode {
-		agent.Prompt = promptNode.Value
-		// For block scalars (`prompt: |`), Node.Line points at the
-		// declaration line; the actual body begins on the next line.
-		// For flow scalars on the same line we keep the declaration line.
-		baseLine := absoluteLine(fmStartLine, promptNode.Line)
-		if promptNode.Style == yaml.LiteralStyle || promptNode.Style == yaml.FoldedStyle {
-			agent.PromptLine = baseLine + 1
-		} else {
-			agent.PromptLine = baseLine
+	// Detect the legacy `prompt:` frontmatter field for WB-F001. The
+	// validator accepts the file structurally so the diagnostic can fire
+	// instead of a fatal load error; the loader is the strict gate.
+	if promptNode, promptKeyLine := mappingValue(root, "prompt"); promptNode != nil {
+		agent.HasLegacyPromptField = true
+		agent.LegacyPromptLine = absoluteLine(fmStartLine, promptKeyLine)
+	}
+
+	// New format: prompt is the markdown body, captured as-is for WB-T001/T101
+	// parse + field checks. PromptLine is the first non-blank body line.
+	agent.Prompt = strings.TrimSpace(body)
+	agent.PromptLine = firstNonBlankLine(body, bodyStartLine)
+
+	if contextNode, contextKeyLine := mappingValue(root, "context"); contextNode != nil {
+		agent.ContextDeclLine = absoluteLine(fmStartLine, contextKeyLine)
+		if contextNode.Kind == yaml.SequenceNode {
+			for _, item := range contextNode.Content {
+				if item.Kind != yaml.ScalarNode {
+					continue
+				}
+				val := strings.TrimSpace(item.Value)
+				if val == "" {
+					continue
+				}
+				agent.Context = append(agent.Context, val)
+				agent.ContextLines = append(agent.ContextLines, absoluteLine(fmStartLine, item.Line))
+			}
 		}
 	}
 
@@ -372,9 +415,9 @@ func parseAgentFile(path string) (*agentDoc, []Diagnostic) {
 	triggersNode, _ := mappingValue(root, "triggers")
 	if triggersNode != nil && triggersNode.Kind == yaml.SequenceNode {
 		for _, item := range triggersNode.Content {
-			label, line := scalarValue(item, "label", fmStartLine)
-			if strings.TrimSpace(label) != "" {
-				agent.TriggerLines = append(agent.TriggerLines, labelRef{Label: label, Line: line})
+			state, line := scalarValue(item, "state", fmStartLine)
+			if strings.TrimSpace(state) != "" {
+				agent.TriggerLines = append(agent.TriggerLines, stateRef{State: state, Line: line})
 			}
 		}
 	}
@@ -384,6 +427,19 @@ func parseAgentFile(path string) (*agentDoc, []Diagnostic) {
 		diags = append(diags, Diagnostic{Path: path, Line: fmStartLine, Message: "missing agent name"})
 	}
 	return agent, diags
+}
+
+// firstNonBlankLine returns the absolute file line of the first non-blank
+// line in body, falling back to bodyStartLine when the body is entirely
+// whitespace or empty.
+func firstNonBlankLine(body string, bodyStartLine int) int {
+	lines := strings.Split(body, "\n")
+	for i, ln := range lines {
+		if strings.TrimSpace(ln) != "" {
+			return bodyStartLine + i
+		}
+	}
+	return bodyStartLine
 }
 
 func parseWorkflowFile(path string) (*workflowDoc, []Diagnostic) {
@@ -442,12 +498,19 @@ func parseWorkflowFile(path string) (*workflowDoc, []Diagnostic) {
 		state.Agent, state.AgentLine = scalarValue(valueNode, "agent", yamlStartLine)
 
 		transitionsNode, _ := mappingValue(valueNode, "transitions")
-		if transitionsNode != nil && transitionsNode.Kind == yaml.SequenceNode {
-			for _, item := range transitionsNode.Content {
-				toValue, toLine := scalarValue(item, "to", yamlStartLine)
+		if transitionsNode != nil && transitionsNode.Kind == yaml.MappingNode {
+			for j := 0; j+1 < len(transitionsNode.Content); j += 2 {
+				keyNode := transitionsNode.Content[j]
+				valNode := transitionsNode.Content[j+1]
+				if keyNode == nil || valNode == nil {
+					continue
+				}
+				label := strings.TrimSpace(keyNode.Value)
+				target := strings.TrimSpace(valNode.Value)
 				state.Transitions = append(state.Transitions, transitionDoc{
-					To:     toValue,
-					ToLine: toLine,
+					Label:  label,
+					To:     target,
+					ToLine: absoluteLine(yamlStartLine, valNode.Line),
 				})
 			}
 		}
@@ -478,26 +541,10 @@ func validateWorkflowGraph(wf *workflowDoc) []Diagnostic {
 		index[stateName] = i
 	}
 
-	seenEdges := make(map[string]transitionDoc)
 	hasFallbackEdge := false
 	for _, fromState := range wf.StateOrder {
 		state := wf.States[fromState]
 		for _, transition := range state.Transitions {
-			key := fromState + "\x00" + transition.To
-			if prev, ok := seenEdges[key]; ok {
-				line := transition.ToLine
-				if line <= 0 {
-					line = state.Line
-				}
-				diags = append(diags, Diagnostic{
-					Path:    wf.Path,
-					Line:    line,
-					Message: fmt.Sprintf("workflow %q has duplicate edge %q -> %q (first defined at line %d)", wf.Name, fromState, transition.To, prev.ToLine),
-				})
-			} else {
-				seenEdges[key] = transition
-			}
-
 			if toIndex, ok := index[transition.To]; ok && toIndex < index[fromState] {
 				hasFallbackEdge = true
 			}

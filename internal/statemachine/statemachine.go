@@ -317,104 +317,89 @@ func (sm *StateMachine) publishAlert(eventKind string, severity alertbus.Severit
 
 // evaluateTransitions evaluates transitions for the given state and event.
 // It returns true if any transition was taken, or an error if transition bookkeeping fails.
+//
+// Transitions are now a `label → target_state` map. We only fire on label_added
+// events, picking the target via direct map lookup keyed on the added label.
 func (sm *StateMachine) evaluateTransitions(ctx context.Context, wf *config.WorkflowConfig, event ChangeEvent, currentStateName string, currentState *config.State) (bool, error) {
-	// Build evaluation context.
-	evalCtx := &EvalContext{
-		EventType:     event.Type,
-		Labels:        event.Labels,
-		LabelAdded:    "",
-		LabelRemoved:  "",
-		LatestComment: event.Detail,
+	if event.Type != poller.EventLabelAdded {
+		return false, nil
 	}
-	switch event.Type {
-	case poller.EventLabelAdded:
-		evalCtx.LabelAdded = event.Detail
-	case poller.EventLabelRemoved:
-		evalCtx.LabelRemoved = event.Detail
+	addedLabel := event.Detail
+	if addedLabel == "" {
+		return false, nil
 	}
 
-	// Evaluate transitions.
-	for _, tr := range currentState.Transitions {
-		if !EvaluateCondition(tr.When, evalCtx) {
-			continue
-		}
-
-		targetStateName := tr.To
-		targetState, ok := wf.States[targetStateName]
-		if !ok {
-			log.Printf("[statemachine] warning: transition target %q not found in workflow %q", targetStateName, wf.Name)
-			continue
-		}
-
-		// Check if this is a back-edge (target state was visited before).
-		isBackEdge := sm.isBackEdge(event.Repo, event.IssueNum, targetStateName)
-
-		if isBackEdge {
-			count, err := sm.store.IncrementTransition(event.Repo, event.IssueNum, currentStateName, targetStateName)
-			if err != nil {
-				return false, fmt.Errorf("statemachine: increment transition: %w", err)
-			}
-
-			maxRetries := wf.MaxRetries
-			if maxRetries <= 0 {
-				maxRetries = 3 // sensible default
-			}
-
-			if count >= maxRetries {
-				// Reject back-edge, transition to failed.
-				sm.eventlog.Log(eventlog.TypeCycleLimitReached, event.Repo, event.IssueNum,
-					map[string]interface{}{"from": currentStateName, "to": targetStateName, "count": count, "max_retries": maxRetries})
-				sm.publishAlert(alertbus.KindCycleLimitReached, alertbus.SeverityError, event.Repo, event.IssueNum, "", map[string]any{
-					"from":        currentStateName,
-					"to":          targetStateName,
-					"count":       count,
-					"max_retries": maxRetries,
-				})
-
-				// Mark as failed — dispatch request not sent.
-				// The "failed" state and "needs-human" label would be applied
-				// by the system. Since Go code doesn't write labels (agents do),
-				// we record the event. In v0.1.0, we still record the intent.
-				sm.eventlog.Log(eventlog.TypeTransitionToFailed, event.Repo, event.IssueNum,
-					map[string]interface{}{"from": currentStateName, "rejected_to": targetStateName, "needs_human": true})
-				sm.publishAlert(alertbus.KindTransitionToFailed, alertbus.SeverityError, event.Repo, event.IssueNum, "", map[string]any{
-					"from":        currentStateName,
-					"rejected_to": targetStateName,
-					"needs_human": true,
-				})
-				return false, nil
-			}
-		} else {
-			// Not a back-edge, but still record the transition for history.
-			_, err := sm.store.IncrementTransition(event.Repo, event.IssueNum, currentStateName, targetStateName)
-			if err != nil {
-				return false, fmt.Errorf("statemachine: increment transition: %w", err)
-			}
-		}
-
-		// Persist the workflow state transition.
-		if sm.workflowManager != nil {
-			if err := sm.workflowManager.Advance(event.Repo, event.IssueNum, wf.Name, currentStateName, targetStateName, currentState.Agent); err != nil {
-				return false, fmt.Errorf("statemachine: persist workflow transition: %w", err)
-			}
-		}
-
-		// Log the transition.
-		sm.eventlog.Log(eventlog.TypeTransition, event.Repo, event.IssueNum,
-			map[string]string{"from": currentStateName, "to": targetStateName})
-
-		// If the target state has agents, dispatch them.
-		if sm.stateHasAgents(targetState) {
-			if err := sm.dispatchStateAgents(ctx, event.Repo, event.IssueNum, wf.Name, targetStateName, targetState); err != nil {
-				return true, err
-			}
-		}
-
-		// Only process the first matching transition.
-		return true, nil
+	targetStateName, ok := currentState.Transitions[addedLabel]
+	if !ok {
+		return false, nil
 	}
 
-	return false, nil
+	targetState, ok := wf.States[targetStateName]
+	if !ok {
+		log.Printf("[statemachine] warning: transition target %q not found in workflow %q", targetStateName, wf.Name)
+		return false, nil
+	}
+
+	// Check if this is a back-edge (target state was visited before).
+	if sm.isBackEdge(event.Repo, event.IssueNum, targetStateName) {
+		count, err := sm.store.IncrementTransition(event.Repo, event.IssueNum, currentStateName, targetStateName)
+		if err != nil {
+			return false, fmt.Errorf("statemachine: increment transition: %w", err)
+		}
+
+		maxRetries := wf.MaxRetries
+		if maxRetries <= 0 {
+			maxRetries = 3 // sensible default
+		}
+
+		if count >= maxRetries {
+			// Reject back-edge, transition to failed.
+			sm.eventlog.Log(eventlog.TypeCycleLimitReached, event.Repo, event.IssueNum,
+				map[string]interface{}{"from": currentStateName, "to": targetStateName, "count": count, "max_retries": maxRetries})
+			sm.publishAlert(alertbus.KindCycleLimitReached, alertbus.SeverityError, event.Repo, event.IssueNum, "", map[string]any{
+				"from":        currentStateName,
+				"to":          targetStateName,
+				"count":       count,
+				"max_retries": maxRetries,
+			})
+
+			// Mark as failed — dispatch request not sent. Go code doesn't
+			// write labels (agents do); we record the intent.
+			sm.eventlog.Log(eventlog.TypeTransitionToFailed, event.Repo, event.IssueNum,
+				map[string]interface{}{"from": currentStateName, "rejected_to": targetStateName, "needs_human": true})
+			sm.publishAlert(alertbus.KindTransitionToFailed, alertbus.SeverityError, event.Repo, event.IssueNum, "", map[string]any{
+				"from":        currentStateName,
+				"rejected_to": targetStateName,
+				"needs_human": true,
+			})
+			return false, nil
+		}
+	} else {
+		// Not a back-edge, but still record the transition for history.
+		if _, err := sm.store.IncrementTransition(event.Repo, event.IssueNum, currentStateName, targetStateName); err != nil {
+			return false, fmt.Errorf("statemachine: increment transition: %w", err)
+		}
+	}
+
+	// Persist the workflow state transition.
+	if sm.workflowManager != nil {
+		if err := sm.workflowManager.Advance(event.Repo, event.IssueNum, wf.Name, currentStateName, targetStateName, currentState.Agent); err != nil {
+			return false, fmt.Errorf("statemachine: persist workflow transition: %w", err)
+		}
+	}
+
+	// Log the transition.
+	sm.eventlog.Log(eventlog.TypeTransition, event.Repo, event.IssueNum,
+		map[string]string{"from": currentStateName, "to": targetStateName})
+
+	// If the target state has agents, dispatch them.
+	if sm.stateHasAgents(targetState) {
+		if err := sm.dispatchStateAgents(ctx, event.Repo, event.IssueNum, wf.Name, targetStateName, targetState); err != nil {
+			return true, err
+		}
+	}
+
+	return true, nil
 }
 
 func (sm *StateMachine) ensureWorkflowInstance(workflowName, repo string, issueNum int, currentState string) error {

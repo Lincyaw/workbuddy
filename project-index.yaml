@@ -368,7 +368,6 @@ requirements:
       - "AC-003-12: 单元测试：正常转换、回退计数、超过上限记录 retry/failure intent、无匹配跳过、多 workflow 匹配拒绝、幂等、执行互斥、stuck 检测 8 种场景"
     code:
       - internal/statemachine/statemachine.go
-      - internal/statemachine/rules.go
     tests:
       - internal/statemachine/statemachine_test.go
     related_docs:
@@ -718,22 +717,26 @@ requirements:
   # ============================================================
 
   - id: REQ-013
-    title: Transition Rules Engine
+    title: Transition Rules Engine (superseded by transitions map)
     description: >
-      Evaluate transition conditions defined in workflow configs.
-      Unchanged from original design.
+      Issue #204 batch 2 replaced the rule-string parser with a label→target
+      map lookup; rules.go was deleted. The acceptance criteria below
+      describe the original design (kept for historical traceability) but
+      the actual implementation is now O(1) map access on the added label
+      label, evaluated in statemachine.evaluateTransitions. See REQ-077.
     priority: P0
     version: v0.1.0
     status: tested
     acceptance_criteria:
-      - "AC-013-1: 解析 when 字段中的条件表达式字符串"
-      - "AC-013-2: 支持条件类型：labeled \"<label>\", pr_opened, checks_passed, checks_failed, approved, changes_requested, comment_command \"<cmd>\""
-      - "AC-013-3: 每种条件类型有对应的 evaluator 函数，接收 EvalContext 返回 bool"
-      - "AC-013-4: EvalContext 包含：当前事件类型、Issue 状态、关联 PR 状态、最新评论"
-      - "AC-013-5: 未知条件类型记录警告日志并返回 false（不崩溃）"
-      - "AC-013-6: 单元测试：每种条件类型至少 1 个正例 + 1 个反例"
+      - "AC-013-1: 旧设计——解析 when 字段中的条件表达式字符串（已删除）"
+      - "AC-013-2: 旧设计——支持 labeled / pr_opened / checks_* / approved / changes_requested / comment_command 等条件类型（已删除）"
+      - "AC-013-3: 新设计——transitions 是 label→state 的 map，O(1) 查找（statemachine.evaluateTransitions）"
+      - "AC-013-4: 新设计——只在 EventLabelAdded 上触发；event.Detail 即驱动 label"
+      - "AC-013-5: 未知 label 不命中 map 直接返回 false，不会崩溃"
+      - "AC-013-6: 单元测试覆盖 map 命中/未命中两种路径"
     code:
-      - internal/statemachine/rules.go
+      - internal/statemachine/statemachine.go
+      - internal/config/types.go
     tests:
       - internal/statemachine/statemachine_test.go
     deps: [REQ-003]
@@ -2474,4 +2477,138 @@ requirements:
     tests:
       - internal/validate/validate_codes_test.go
     deps: [REQ-071]
+
+  - id: REQ-076
+    title: New agent file format — body-as-prompt with required context
+    description: >
+      Hard-cut migration to the new agent layout (issue #204 batch 2). The
+      markdown body after the closing frontmatter `---` IS the prompt
+      template (rendered as a Go text/template against runtime.TaskContext);
+      the legacy `prompt:` frontmatter field is removed. `context:` is a
+      mandatory frontmatter field listing every TaskContext field path the
+      prompt references. `triggers[].state:` references workflow state
+      names symbolically (replaces `triggers[].label:`). The loader rejects
+      old-format files at load time with an actionable error.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-076-1: AgentConfig.Prompt is no longer YAML-parsed; loader populates it from the trimmed markdown body"
+      - "AC-076-2: AgentConfig.Context is required and non-empty; loader returns a load error otherwise"
+      - "AC-076-3: TriggerRule.State replaces TriggerRule.Label; old `label:` frontmatter is no longer accepted"
+      - "AC-076-4: Loader rejects legacy `prompt:` frontmatter with a clear error pointing at file:line"
+      - "AC-076-5: Repo's own .github/workbuddy/agents fixtures and workflows/default.md are migrated"
+    code:
+      - internal/config/types.go
+      - internal/config/loader.go
+      - .github/workbuddy/agents/dev-agent.md
+      - .github/workbuddy/agents/review-agent.md
+      - cmd/initdata/agents/dev-agent.md
+      - cmd/initdata/agents/review-agent.md
+    tests:
+      - internal/config/loader_test.go
+    deps: [REQ-075]
+
+  - id: REQ-077
+    title: Transitions map form — label → target state lookup
+    description: >
+      State.Transitions is now a `map[label]target_state_name` instead of a
+      list of `{to, when}` entries. The statemachine looks up the target
+      via O(1) map access on the added label; the legacy
+      `when: labeled "..."` parser is removed entirely. Empty map (or
+      omitted) marks a terminal state. Workflow YAML emits the new shape
+      directly in its embedded `states:` block.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-077-1: config.State.Transitions is map[string]string; the Transition struct is removed"
+      - "AC-077-2: statemachine.evaluateTransitions resolves the target via direct map lookup keyed on event.Detail (added label)"
+      - "AC-077-3: rules.go (EvaluateCondition + when-string parser) is deleted"
+      - "AC-077-4: Workflow loader rejects empty label keys or empty target values"
+      - "AC-077-5: .github/workbuddy/workflows/default.md uses the new map form"
+    code:
+      - internal/config/types.go
+      - internal/config/loader.go
+      - internal/statemachine/statemachine.go
+      - internal/worker/embedded.go
+      - .github/workbuddy/workflows/default.md
+      - cmd/initdata/workflows/default.md
+    tests:
+      - internal/statemachine/statemachine_test.go
+      - internal/config/loader_test.go
+    deps: [REQ-076]
+
+  - id: REQ-078
+    title: Mandatory context declaration with set-diff diagnostics
+    description: >
+      Agents must enumerate every TaskContext field path the prompt
+      references in `context:`. The validator computes the set diff between
+      declared paths and paths actually used by the parsed template tree.
+      Iterator scopes (`range .Issue.Comments`) resolve to `Path[].Sub`;
+      declaring the slice (`Issue.Comments`) covers any iterator-element
+      reference. WB-CT002 fires on used-but-not-declared (error); WB-CT003
+      fires on declared-but-never-used (warning).
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-078-1: WB-CT002 fires when the prompt references a TaskContext path not in context:"
+      - "AC-078-2: WB-CT003 fires (warning) when context: declares a path the prompt never uses"
+      - "AC-078-3: Slice declaration `Issue.Comments` covers `Issue.Comments[].Author` references inside `range`"
+      - "AC-078-4: WB-CT001 fires when context: is missing or empty in frontmatter"
+    code:
+      - internal/validate/template_check.go
+      - internal/validate/format_check.go
+    tests:
+      - internal/validate/template_check_test.go
+      - internal/validate/format_check_test.go
+      - internal/validate/validate_codes_test.go
+    deps: [REQ-076]
+
+  - id: REQ-079
+    title: New-format structural diagnostics (WB-F001, WB-F002, WB-CT001)
+    description: >
+      Layer-F structural checks for the issue #204 batch 2 hard-cut. WB-F001
+      flags any agent file that still carries the legacy `prompt:`
+      frontmatter field; WB-F002 flags an empty markdown body (the body IS
+      the prompt now); WB-CT001 flags missing/empty `context:` declaration.
+      All three are errors that fail the validator with a non-zero exit.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-079-1: WB-F001 fires with file:line of the legacy prompt: key"
+      - "AC-079-2: WB-F002 fires when the markdown body is empty or whitespace-only"
+      - "AC-079-3: WB-CT001 fires when context: is missing or empty"
+      - "AC-079-4: All three codes are tagged SeverityError"
+    code:
+      - internal/validate/format_check.go
+      - internal/validate/validate.go
+    tests:
+      - internal/validate/format_check_test.go
+      - internal/validate/validate_codes_test.go
+    deps: [REQ-076]
+
+  - id: REQ-080
+    title: Symbolic trigger-state diagnostic (WB-X007), WB-X006 retired
+    description: >
+      With agents referencing workflow state names (`triggers[].state:`)
+      instead of raw labels, the cross-reference check WB-X006 (unbound
+      label) is replaced by WB-X007 (unknown state name). The validator
+      walks every loaded workflow's state map and flags any agent trigger
+      that references a state name not present in any workflow.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-080-1: WB-X006 const + test case removed from cross-refs surface"
+      - "AC-080-2: WB-X007 fires when triggers[].state references an unknown workflow state"
+      - "AC-080-3: WB-X007 carries SeverityError and includes the offending state name in the message"
+    code:
+      - internal/validate/cross_refs.go
+      - internal/validate/validate.go
+    tests:
+      - internal/validate/validate_codes_test.go
+    deps: [REQ-072, REQ-076]
 
