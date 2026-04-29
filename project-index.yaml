@@ -2800,3 +2800,92 @@ requirements:
       - internal/app/coordinator_test.go
       - cmd/coordinator_audit_test.go
     deps: [REQ-019]
+
+  - id: REQ-086
+    title: Dev↔review cycle counter, cap, and long-flight stuck detector
+    description: >
+      Issue #210 ran 7 dev↔review cycles over ~2h15min with no built-in cap.
+      This requirement adds an orchestrator-level cycle counter, a workflow-
+      configurable cap, a rejection-trail digest comment on cap-hit, a long-
+      flight stuck signal independent of per-state dwell, and operator-visible
+      cycle counts in `workbuddy status` and the dashboard API.
+
+      `dev_review_cycle_count` increments on every developing→reviewing→
+      developing round-trip (detected at state-entry into developing when the
+      persisted workflow_instance.current_state is reviewing). On reaching
+      `max_review_cycles` (workflow frontmatter; default 3) the StateMachine
+      stops dispatching dev-agent / review-agent for the issue, emits
+      `dev_review_cycle_cap_reached` event + alert, and posts a needs-human
+      comment whose rejection-trail digest is assembled from existing
+      `completed` events (no agent re-invocation). At `cycles == cap-1` the
+      Coordinator publishes `dev_review_cycle_approaching` so the notifier
+      can fire a heads-up.
+
+      The audit and auditapi handlers expose `dev_review_cycle_count`,
+      `first_dispatch_at`, and a derived `long_flight` boolean (>4h since
+      first dispatch) so `workbuddy status --stuck` can surface dwell-time
+      and long-flight stuck signals independently. `workbuddy issue restart`
+      clears the per-issue cycle state so a human-resolved issue can be
+      requeued without manual SQL.
+
+      Per the maintainer override comment on issue #214, the cycle counter
+      uses Option A reset semantics: when a human flips status:blocked →
+      status:developing, the StateMachine clears `dev_review_cycle_count`
+      and `cap_hit_at` so the cap re-engages from zero. The
+      blocked→developing label transition itself does not count as a
+      round-trip. The reset is detected via the persisted
+      workflow_instance.current_state, which now advances through stateless
+      states (e.g. blocked, done) so the prior-state check is reliable.
+
+      Architectural note (deviation from literal AC-085-2): the Coordinator
+      does NOT auto-flip `status:blocked` from Go code, since the project's
+      GH call boundary forbids label writes from Coordinator. Instead, on
+      cap-hit the Coordinator (a) blocks all further dispatch for the issue,
+      (b) records `cap_hit_at`, and (c) posts a needs-human comment with
+      explicit instructions to flip the label or run `workbuddy issue
+      restart`. The dispatch block is enforced at the orchestration layer
+      regardless of label state, so the user-visible effect ("agent stops
+      retrying after the cap") is identical to an auto-flip.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-086-1: `dev_review_cycle_count` increments per developing→reviewing→developing round-trip and is visible at `/api/v1/issues/<repo>/<num>` and on the local audit /issues/.../state surface"
+      - "AC-086-2: `max_review_cycles` is read from workflow frontmatter (default 3); on cap-hit dispatch is blocked and a needs-human comment is posted with a rejection-trail digest assembled by Coordinator Go code"
+      - "AC-086-3: The needs-human comment uses FormatCycleCapReport and includes cycle count, cap, hit-time, and per-rejection digest entries"
+      - "AC-086-4: The audit IssueStateResponse exposes `long_flight` true when first_dispatch_at is older than 4h and the issue is open in an intermediate state, independent of per-state dwell"
+      - "AC-086-5: `workbuddy status` renders `cycles=N` inline with the CYCLES column for any issue with `dev_review_cycle_count > 0`"
+      - "AC-086-6: Notifier publishes `dev_review_cycle_approaching` at cycles == cap-1 so an operator heads-up notification can fire"
+      - "AC-086-7: Tests cover clean issue (no extra cycle), 1-cycle issue, cap-hit issue (auto-block + digest), long-flight issue without cycles"
+      - "AC-086-8: `workbuddy issue restart` clears the issue_cycle_state row and reports cycle_state_cleared"
+      - "AC-086-9: Cycle counter resets on a human-driven status:blocked → status:developing label transition (Option A reset), preserving the maintainer-stated 'give the agent another shot' semantic; the blocked→developing transition itself does not count as a round-trip"
+    code:
+      - internal/config/types.go
+      - internal/config/loader.go
+      - internal/store/store.go
+      - internal/store/queries.go
+      - internal/store/types.go
+      - internal/statemachine/statemachine.go
+      - internal/eventlog/eventlog.go
+      - internal/alertbus/alertbus.go
+      - internal/audit/http.go
+      - internal/auditapi/handler.go
+      - internal/reporter/reporter.go
+      - internal/reporter/format.go
+      - internal/app/cycle_cap.go
+      - internal/app/repo_runtime.go
+      - cmd/admin_restart_issue.go
+      - cmd/status.go
+      - .github/workbuddy/workflows/default.md
+      - schemas/workflow.schema.json
+      - CLAUDE.md
+    tests:
+      - internal/statemachine/cycle_cap_test.go
+      - internal/store/queries_cycle_state_test.go
+      - internal/audit/http_long_flight_test.go
+      - internal/reporter/cycle_cap_format_test.go
+      - cmd/admin_restart_issue_test.go
+    related_docs:
+      - .github/workbuddy/workflows/default.md
+      - CLAUDE.md
+    deps: [REQ-021, REQ-085]

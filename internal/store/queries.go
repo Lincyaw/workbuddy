@@ -640,3 +640,110 @@ func (s *Store) QueryWorkflowTransitions(instanceID string) ([]WorkflowTransitio
 	}
 	return out, rows.Err()
 }
+
+// ---------------------------------------------------------------------------
+// Issue cycle state — orchestrator-level dev↔review counter and timing
+// used by the max_review_cycles cap and the long-flight stuck detector.
+// ---------------------------------------------------------------------------
+
+// IncrementDevReviewCycleCount atomically increments the per-issue
+// dev_review_cycle_count and returns the new value. The row is created on
+// first call. updated_at is bumped to CURRENT_TIMESTAMP.
+func (s *Store) IncrementDevReviewCycleCount(repo string, issueNum int) (int, error) {
+	var count int
+	err := s.db.QueryRow(
+		`INSERT INTO issue_cycle_state (repo, issue_num, dev_review_cycle_count, updated_at)
+		 VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+		 ON CONFLICT (repo, issue_num)
+		 DO UPDATE SET dev_review_cycle_count = dev_review_cycle_count + 1,
+		               updated_at = CURRENT_TIMESTAMP
+		 RETURNING dev_review_cycle_count`,
+		repo, issueNum,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("store: increment dev_review_cycle_count: %w", err)
+	}
+	return count, nil
+}
+
+// TouchIssueFirstDispatch records the first time an agent was dispatched for
+// (repo, issueNum). Subsequent calls are no-ops. Used by the long-flight
+// stuck detector to measure total in-flight time independent of per-state
+// dwell time.
+func (s *Store) TouchIssueFirstDispatch(repo string, issueNum int) error {
+	_, err := s.db.Exec(
+		`INSERT INTO issue_cycle_state (repo, issue_num, first_dispatch_at, updated_at)
+		 VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		 ON CONFLICT (repo, issue_num)
+		 DO UPDATE SET first_dispatch_at = COALESCE(issue_cycle_state.first_dispatch_at, CURRENT_TIMESTAMP),
+		               updated_at = CURRENT_TIMESTAMP`,
+		repo, issueNum,
+	)
+	if err != nil {
+		return fmt.Errorf("store: touch issue first_dispatch_at: %w", err)
+	}
+	return nil
+}
+
+// MarkIssueCycleCapHit records the moment the issue tripped the
+// max_review_cycles cap. Idempotent.
+func (s *Store) MarkIssueCycleCapHit(repo string, issueNum int) error {
+	_, err := s.db.Exec(
+		`INSERT INTO issue_cycle_state (repo, issue_num, cap_hit_at, updated_at)
+		 VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		 ON CONFLICT (repo, issue_num)
+		 DO UPDATE SET cap_hit_at = COALESCE(issue_cycle_state.cap_hit_at, CURRENT_TIMESTAMP),
+		               updated_at = CURRENT_TIMESTAMP`,
+		repo, issueNum,
+	)
+	if err != nil {
+		return fmt.Errorf("store: mark issue cycle cap hit: %w", err)
+	}
+	return nil
+}
+
+// QueryIssueCycleState returns the per-issue cycle counter and timing. Returns
+// (nil, nil) when no row exists for the issue.
+func (s *Store) QueryIssueCycleState(repo string, issueNum int) (*IssueCycleState, error) {
+	row := s.db.QueryRow(
+		`SELECT repo, issue_num, dev_review_cycle_count,
+		        first_dispatch_at, cap_hit_at, updated_at
+		 FROM issue_cycle_state
+		 WHERE repo = ? AND issue_num = ?`,
+		repo, issueNum,
+	)
+	var rec IssueCycleState
+	var firstDispatch, capHit, updated sql.NullString
+	err := row.Scan(&rec.Repo, &rec.IssueNum, &rec.DevReviewCycleCount,
+		&firstDispatch, &capHit, &updated)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: query issue cycle state: %w", err)
+	}
+	if firstDispatch.Valid {
+		rec.FirstDispatchAt, _ = ParseTimestamp(firstDispatch.String, "issue_cycle_state.first_dispatch_at")
+	}
+	if capHit.Valid {
+		rec.CapHitAt, _ = ParseTimestamp(capHit.String, "issue_cycle_state.cap_hit_at")
+	}
+	if updated.Valid {
+		rec.UpdatedAt, _ = ParseTimestamp(updated.String, "issue_cycle_state.updated_at")
+	}
+	return &rec, nil
+}
+
+// ResetIssueCycleState removes the per-issue cycle counter row. Used by
+// `workbuddy issue restart` so that an explicit restart clears the cycle
+// counter alongside other recovery state.
+func (s *Store) ResetIssueCycleState(repo string, issueNum int) error {
+	_, err := s.db.Exec(
+		`DELETE FROM issue_cycle_state WHERE repo = ? AND issue_num = ?`,
+		repo, issueNum,
+	)
+	if err != nil {
+		return fmt.Errorf("store: reset issue cycle state: %w", err)
+	}
+	return nil
+}

@@ -60,13 +60,16 @@ type statusClient struct {
 }
 
 type statusIssue struct {
-	Repo              string     `json:"repo"`
-	IssueNum          int        `json:"issue_num"`
-	CurrentState      string     `json:"current_state"`
-	CycleCount        int        `json:"cycle_count"`
-	DependencyVerdict string     `json:"dependency_verdict"`
-	LastEventAt       *time.Time `json:"last_event_at,omitempty"`
-	Stuck             bool       `json:"stuck"`
+	Repo                string     `json:"repo"`
+	IssueNum            int        `json:"issue_num"`
+	CurrentState        string     `json:"current_state"`
+	CycleCount          int        `json:"cycle_count"`
+	DevReviewCycleCount int        `json:"dev_review_cycle_count"`
+	DependencyVerdict   string     `json:"dependency_verdict"`
+	LastEventAt         *time.Time `json:"last_event_at,omitempty"`
+	Stuck               bool       `json:"stuck"`
+	StuckReason         string     `json:"stuck_reason,omitempty"`
+	LongFlight          bool       `json:"long_flight"`
 }
 
 type statusResponse struct {
@@ -726,13 +729,16 @@ func runStatusSummary(ctx context.Context, opts *statusOpts, client *statusClien
 			continue
 		}
 		entry := statusIssue{
-			Repo:              issue.Repo,
-			IssueNum:          issue.IssueNum,
-			CurrentState:      issue.CurrentState,
-			CycleCount:        issue.CycleCount,
-			DependencyVerdict: issue.DependencyVerdict,
-			LastEventAt:       issue.LastEventAt,
-			Stuck:             issue.Stuck,
+			Repo:                issue.Repo,
+			IssueNum:            issue.IssueNum,
+			CurrentState:        issue.CurrentState,
+			CycleCount:          issue.CycleCount,
+			DevReviewCycleCount: issue.DevReviewCycleCount,
+			DependencyVerdict:   issue.DependencyVerdict,
+			LastEventAt:         issue.LastEventAt,
+			Stuck:               issue.Stuck,
+			StuckReason:         issue.StuckReason,
+			LongFlight:          issue.LongFlight,
 		}
 		if opts.stuck && !entry.Stuck {
 			continue
@@ -1173,16 +1179,29 @@ func renderStatusTable(w io.Writer, resp statusResponse) {
 		if issue.LastEventAt != nil {
 			lastEvent = issue.LastEventAt.UTC().Format(time.RFC3339)
 		}
+		// Render the dev↔review counter inline when > 0 so an issue cycling
+		// fast between developing and reviewing is visible at a glance.
+		// Format: "<transition_count>/cycles=N" — preserves the existing
+		// CYCLES column for transition counts and adds the new orchestrator
+		// counter without changing the column count.
+		cycles := fmt.Sprintf("%d", issue.CycleCount)
+		if issue.DevReviewCycleCount > 0 {
+			cycles = fmt.Sprintf("%d (cycles=%d)", issue.CycleCount, issue.DevReviewCycleCount)
+		}
+		stuck := fmt.Sprintf("%t", issue.Stuck)
+		if issue.Stuck && issue.StuckReason != "" {
+			stuck = fmt.Sprintf("true (%s)", issue.StuckReason)
+		}
 		_, _ = fmt.Fprintf(
 			tw,
-			"%s\t#%d\t%s\t%d\t%s\t%s\t%t\n",
+			"%s\t#%d\t%s\t%s\t%s\t%s\t%s\n",
 			issue.Repo,
 			issue.IssueNum,
 			issue.CurrentState,
-			issue.CycleCount,
+			cycles,
 			issue.DependencyVerdict,
 			lastEvent,
-			issue.Stuck,
+			stuck,
 		)
 	}
 	_ = tw.Flush()

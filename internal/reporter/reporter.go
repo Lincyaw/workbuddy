@@ -127,12 +127,13 @@ type EventRecorder interface {
 
 // Reporter writes execution reports as GitHub Issue comments.
 type Reporter struct {
-	gh        GHCommentWriter
-	reactions ReactionManager
-	baseURL   string // e.g. "http://localhost:8080", empty to omit session links
-	eventlog  EventRecorder
-	verifier  ClaimVerifier
-	now       func() time.Time
+	gh             GHCommentWriter
+	reactions      ReactionManager
+	baseURL        string // e.g. "http://localhost:8080", empty to omit session links
+	eventlog       EventRecorder
+	verifier       ClaimVerifier
+	now            func() time.Time
+	cycleCapLoader CycleCapTrailLoader
 }
 
 var (
@@ -224,6 +225,54 @@ func (r *Reporter) ReportNeedsHuman(ctx context.Context, repo string, issueNum i
 		Timestamp: time.Now(),
 	})
 	return r.writeWithRateLimitRetry(ctx, repo, issueNum, "needs_human", func() error {
+		return r.gh.WriteComment(repo, issueNum, body)
+	})
+}
+
+// CycleCapTrailLoader fetches the rejection-trail digest entries that are
+// rendered into the dev↔review cycle-cap needs-human comment. The Reporter
+// calls this when posting a cap-hit comment so digest assembly stays in
+// Coordinator Go code (no agent re-invocation, AC-3).
+type CycleCapTrailLoader interface {
+	LoadCycleCapTrail(ctx context.Context, repo string, issueNum int) ([]CycleRejectionEntry, string, string, error)
+}
+
+// SetCycleCapTrailLoader installs the loader used by ReportDevReviewCycleCap
+// to assemble the rejection-trail digest. When unset the comment is still
+// posted but with an empty trail.
+func (r *Reporter) SetCycleCapTrailLoader(l CycleCapTrailLoader) {
+	r.cycleCapLoader = l
+}
+
+// ReportDevReviewCycleCap posts the needs-human comment when an issue has
+// tripped the dev↔review cycle cap. The comment includes a rejection-trail
+// digest built from existing event metadata (no agent re-invocation, AC-3).
+//
+// info is the StateMachine's CycleCapInfo expressed locally so this package
+// does not depend on internal/statemachine. Callers in production wiring
+// translate at the boundary.
+func (r *Reporter) ReportDevReviewCycleCap(ctx context.Context, repo string, issueNum int, workflowName string, cycleCount, maxReviewCycles int, hitAt time.Time) error {
+	d := CycleCapData{
+		WorkflowName:    workflowName,
+		CycleCount:      cycleCount,
+		MaxReviewCycles: maxReviewCycles,
+		HitAt:           hitAt,
+	}
+	if r.cycleCapLoader != nil {
+		trail, prURL, branch, err := r.cycleCapLoader.LoadCycleCapTrail(ctx, repo, issueNum)
+		if err != nil {
+			// Non-fatal: post the comment with an empty trail rather than
+			// failing the cap notification because the digest source is
+			// unavailable.
+			fmt.Fprintf(os.Stderr, "reporter: load cycle-cap trail for %s#%d: %v\n", repo, issueNum, err)
+		} else {
+			d.RejectionTrail = trail
+			d.LatestPRURL = prURL
+			d.BranchName = branch
+		}
+	}
+	body := FormatCycleCapReport(d)
+	return r.writeWithRateLimitRetry(ctx, repo, issueNum, "dev_review_cycle_cap", func() error {
 		return r.gh.WriteComment(repo, issueNum, body)
 	})
 }

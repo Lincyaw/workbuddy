@@ -411,6 +411,9 @@ func parseWorkflowFile(path string) (*WorkflowConfig, error) {
 	if wf.MaxRetries == 0 {
 		wf.MaxRetries = 3
 	}
+	if wf.MaxReviewCycles == 0 {
+		wf.MaxReviewCycles = 3
+	}
 
 	fname := filepath.Base(path)
 	match := yamlCodeBlockRe.FindStringSubmatch(body)

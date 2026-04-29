@@ -69,9 +69,10 @@ One runtime topology: the Worker always talks to the Coordinator over HTTP.
    - v0.2.0 target: >= 80%
    - Measure: SQLite query on events table (completed vs dispatch counts)
 
-6. **State machine correctness** — 0 issues stuck in intermediate states > 1 hour
-   - v0.2.0 target: 0 stuck issues in 24h test run
-   - Measure: `workbuddy status --stuck`
+6. **State machine correctness** — 0 issues stuck in intermediate states > 1h **and** dev↔review cycle count ≤ configured cap
+   - v0.2.0 target: 0 stuck issues in 24h test run (per-state dwell-time signal)
+   - v0.5.0 addition: per-issue `dev_review_cycle_count ≤ max_review_cycles` (default 3); cap-hit auto-stops dispatch and posts a needs-human comment
+   - Measure: `workbuddy status --stuck` surfaces both per-state dwell and long-flight (>4h) signals; `cycles=N` is rendered for any issue with `dev_review_cycle_count > 0`
 
 7. **Retry effectiveness** — % of retried issues that eventually reach done (not failed)
    - v0.2.0 target: >= 60%

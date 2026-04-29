@@ -113,6 +113,17 @@ const (
 	DependencyVerdictNeedsHuman = "needs_human"
 )
 
+// IssueCycleState tracks per-issue dev↔review cycle counts and timing
+// for the orchestrator-level cycle-cap and long-flight stuck detector.
+type IssueCycleState struct {
+	Repo                string
+	IssueNum            int
+	DevReviewCycleCount int
+	FirstDispatchAt     time.Time
+	CapHitAt            time.Time
+	UpdatedAt           time.Time
+}
+
 type IssueDependency struct {
 	Repo              string
 	IssueNum          int

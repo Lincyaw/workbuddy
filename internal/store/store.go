@@ -290,6 +290,15 @@ func (s *Store) createTables() error {
 			expires_at DATETIME NOT NULL,
 			PRIMARY KEY (repo, issue_num)
 		)`,
+		`CREATE TABLE IF NOT EXISTS issue_cycle_state (
+			repo TEXT NOT NULL,
+			issue_num INTEGER NOT NULL,
+			dev_review_cycle_count INTEGER NOT NULL DEFAULT 0,
+			first_dispatch_at DATETIME,
+			cap_hit_at DATETIME,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (repo, issue_num)
+		)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
