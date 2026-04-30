@@ -3845,3 +3845,44 @@ requirements:
       - web/src/utils/sessionEvents.test.ts
     deps:
       - REQ-091
+
+  - id: REQ-110
+    title: "Surface aborted-before-start sessions as degraded in API + SPA (#275)"
+    description: >
+      The auditapi /api/v1/sessions/:id endpoint returns degraded=true +
+      degraded_reason when no agent_sessions DB row exists (response
+      synthesized from disk metadata.json) or when the events-v1.jsonl
+      artefact is missing on a session that is already in a terminal
+      status. Status is rewritten to `aborted_before_start` and exit_code
+      defaults to -1 when the session never reported a real exit. The
+      sessions list endpoint enumerates disk-only sessions with the same
+      degraded marker. The SPA shows a red warning card on SessionDetail
+      and a warning badge on the Sessions list so operators can tell apart
+      "ran-and-emitted-nothing" from "aborted-before-start".
+    rationale: >
+      Issue #275: a session whose runtime aborted before start was being
+      rendered identically to a normal-but-empty session (status:
+      completed, exit_code 0, empty timeline). Operators had to dig into
+      raw metadata.json by hand to see the truth. The degraded marker
+      makes the failure mode visible at a glance.
+    priority: P2
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-110-1: GET /api/v1/sessions/:id falls back to <sessionsDir>/<id>/metadata.json when no DB row exists, sets degraded=true and degraded_reason=no_db_row, status=aborted_before_start, exit_code=-1 (when metadata did not record a real exit)."
+      - "AC-110-2: GET /api/v1/sessions/:id flags an in-DB session degraded=true with degraded_reason=no_events_file when its events-v1.jsonl is missing/empty AND its status is terminal (completed/failed/timeout/aborted_before_start)."
+      - "AC-110-3: GET /api/v1/sessions enumerates disk-only sessions and returns them with degraded=true + degraded_reason=no_db_row + status=aborted_before_start so operators can see them in the list."
+      - "AC-110-4: SPA SessionDetail renders a red wb-degraded-card alert with the synthesized summary / stderr excerpt when the API flagged degraded=true OR when events.total === 0 on a finished session."
+      - "AC-110-5: SPA Sessions list shows a wb-degraded-marker plus a wb-badge-degraded pill for any row whose API response carried degraded=true."
+    code:
+      - internal/auditapi/handler.go
+      - web/src/api/sessions.ts
+      - web/src/components/DegradedSessionCard.tsx
+      - web/src/pages/SessionDetail.tsx
+      - web/src/pages/Sessions.tsx
+      - web/src/styles.css
+    tests:
+      - internal/auditapi/handler_test.go
+      - web/src/components/DegradedSessionCard.test.tsx
+    deps:
+      - REQ-105

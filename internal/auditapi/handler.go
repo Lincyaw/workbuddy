@@ -25,6 +25,19 @@ import (
 // HTTP handler's 1-hour rule.
 const stuckThresholdSeconds = int64(3600)
 
+// StatusAbortedBeforeStart is the synthesized status reported for sessions
+// where the runtime aborted before any events were recorded, so neither the
+// agent_sessions DB row nor the events-v1.jsonl file ever materialized. The
+// API surfaces it (instead of "completed"/"running") whenever degraded
+// fallback to disk metadata is the only available signal.
+const StatusAbortedBeforeStart = "aborted_before_start"
+
+// degradedReason values populate the SessionDetail.DegradedReason field.
+const (
+	degradedReasonNoDBRow      = "no_db_row"
+	degradedReasonNoEventsFile = "no_events_file"
+)
+
 // badRequestError wraps parameter-validation errors so callers can distinguish
 // them from backend/DB errors returned by queryEvents.
 type badRequestError struct {
@@ -218,6 +231,12 @@ type sessionListResponse struct {
 	CreatedAt    time.Time  `json:"created_at"`
 	FinishedAt   *time.Time `json:"finished_at"`
 	Summary      string     `json:"summary,omitempty"`
+	// Degraded marks rows whose persisted artefacts indicate the agent
+	// never produced a normal session: either no DB row at all (the response
+	// is synthesized from disk metadata.json) or the events-v1.jsonl file is
+	// missing/empty for a non-running status. Issue #275.
+	Degraded       bool   `json:"degraded,omitempty"`
+	DegradedReason string `json:"degraded_reason,omitempty"`
 }
 
 type sessionDetailResponse struct {
@@ -238,6 +257,14 @@ type sessionDetailResponse struct {
 	StdoutSummary string               `json:"stdout_summary,omitempty"`
 	StderrSummary string               `json:"stderr_summary,omitempty"`
 	ArtifactPaths SessionArtifactPaths `json:"artifact_paths"`
+	// Degraded is true when the API could not produce a fully-normal response
+	// for this session — typically because the agent_sessions DB row never
+	// got written (we fell back to disk metadata.json) or because no
+	// events-v1.jsonl file was ever produced. The frontend uses this to
+	// surface a "this session never produced any events" warning instead of
+	// rendering an empty-but-otherwise-normal-looking timeline. Issue #275.
+	Degraded       bool   `json:"degraded,omitempty"`
+	DegradedReason string `json:"degraded_reason,omitempty"`
 }
 
 type metricsResponse struct {
@@ -431,6 +458,15 @@ func (h *Handler) serveSessionDetail(w http.ResponseWriter, sessionID string) {
 		return
 	}
 	if record == nil {
+		// Issue #275: if no agent_sessions DB row exists, attempt to
+		// reconstruct a degraded response from the on-disk metadata.json
+		// so the operator can still see what happened. The response is
+		// flagged degraded=true so the SPA renders a "never produced any
+		// events" warning instead of an empty-looking normal session.
+		if resp, ok := h.buildDegradedFromDisk(sessionID); ok {
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
@@ -1030,8 +1066,10 @@ func (h *Handler) listSessions(p sessionListParams) ([]sessionListResponse, erro
 	}
 
 	out := make([]sessionListResponse, 0, len(records))
+	seen := make(map[string]struct{}, len(records))
 	for i := range records {
 		record := records[i]
+		seen[record.SessionID] = struct{}{}
 		exitCode, _, finishedAt, err := h.sessionTaskStats(record)
 		if err != nil {
 			return nil, err
@@ -1064,9 +1102,97 @@ func (h *Handler) listSessions(p sessionListParams) ([]sessionListResponse, erro
 				row.CurrentState = labelToState(currentLabel(decodeLabels(cache.Labels)))
 			}
 		}
+		// Issue #275: flag rows whose events-v1.jsonl artefact never
+		// materialized AND the session is already in a terminal-ish state.
+		// Running sessions are excluded — they may legitimately not have
+		// streamed any events yet.
+		if isTerminalSessionStatus(row.TaskStatus) || isTerminalSessionStatus(row.Status) {
+			eventsPath := record.Dir
+			if eventsPath == "" && h.sessionsDir != "" {
+				eventsPath = filepath.Join(h.sessionsDir, record.SessionID)
+			}
+			if eventsPath != "" {
+				eventsPath = filepath.Join(eventsPath, "events-v1.jsonl")
+			}
+			if eventsPath != "" && !eventsFileHasContent(eventsPath) {
+				row.Degraded = true
+				row.DegradedReason = degradedReasonNoEventsFile
+			}
+		}
 		out = append(out, row)
 	}
+	// Issue #275: surface disk-only sessions (metadata.json with no DB row)
+	// so the operator can find and drill into them. They are always tagged
+	// degraded=no_db_row. Skipped when sessionsDir is unset (tests / split
+	// deployments without a sessions directory) or when filters were used —
+	// disk-walk filtering would be lossy and surprising.
+	if h.sessionsDir != "" && p.Repo == "" && p.AgentName == "" && p.IssueNum == 0 {
+		out = append(out, h.listDiskOnlySessions(seen)...)
+	}
 	return out, nil
+}
+
+// listDiskOnlySessions enumerates sessionsDir for per-session metadata.json
+// files whose session_id is not present in `seen` (the DB-backed listing).
+// Each match becomes a degraded sessionListResponse row. Errors are
+// swallowed: a missing/unreadable directory simply returns no extra rows.
+func (h *Handler) listDiskOnlySessions(seen map[string]struct{}) []sessionListResponse {
+	if h.sessionsDir == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(h.sessionsDir)
+	if err != nil {
+		return nil
+	}
+	out := make([]sessionListResponse, 0)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		sessionID := entry.Name()
+		if !isValidSessionID(sessionID) {
+			continue
+		}
+		if _, ok := seen[sessionID]; ok {
+			continue
+		}
+		meta, ok := readDiskSessionMetadata(filepath.Join(h.sessionsDir, sessionID, "metadata.json"))
+		if !ok {
+			continue
+		}
+		row := sessionListResponse{
+			SessionID:      sessionID,
+			TaskID:         meta.TaskID,
+			Repo:           meta.Repo,
+			IssueNum:       meta.IssueNum,
+			AgentName:      meta.AgentName,
+			Runtime:        meta.Runtime,
+			WorkerID:       meta.WorkerID,
+			Attempt:        meta.Attempt,
+			Status:         StatusAbortedBeforeStart,
+			TaskStatus:     StatusAbortedBeforeStart,
+			ExitCode:       firstNonZeroExitCode(meta.ExitCode, -1),
+			Duration:       sessionDuration(meta.CreatedAt, nullableMetaTime(meta.ClosedAt)),
+			CreatedAt:      meta.CreatedAt,
+			FinishedAt:     nullableMetaTime(meta.ClosedAt),
+			Summary:        meta.Summary,
+			Degraded:       true,
+			DegradedReason: degradedReasonNoDBRow,
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// firstNonZeroExitCode returns `recorded` when it is non-zero (so an
+// explicitly-recorded -1 or other failure code wins) and falls back to
+// `fallback` otherwise. Used to default disk-only rows to -1 instead of a
+// misleading 0.
+func firstNonZeroExitCode(recorded, fallback int) int {
+	if recorded != 0 {
+		return recorded
+	}
+	return fallback
 }
 
 func (h *Handler) buildSessionDetail(record store.SessionRecord) (sessionDetailResponse, error) {
@@ -1087,7 +1213,7 @@ func (h *Handler) buildSessionDetail(record store.SessionRecord) (sessionDetailR
 	if artifactPaths.EventsV1 == "" && artifactPaths.SessionDir != "" {
 		artifactPaths.EventsV1 = filepath.Join(artifactPaths.SessionDir, "events-v1.jsonl")
 	}
-	return sessionDetailResponse{
+	resp := sessionDetailResponse{
 		SessionID:     record.SessionID,
 		TaskID:        record.TaskID,
 		Repo:          record.Repo,
@@ -1105,7 +1231,188 @@ func (h *Handler) buildSessionDetail(record store.SessionRecord) (sessionDetailR
 		StdoutSummary: readArtifactSummary(record.StdoutPath, 4096),
 		StderrSummary: readArtifactSummary(record.StderrPath, 4096),
 		ArtifactPaths: artifactPaths,
-	}, nil
+	}
+	// Issue #275: even when a DB row exists, mark the session degraded if
+	// the events-v1.jsonl artefact never materialized AND the session is
+	// already in a non-running terminal-ish state — that combination is the
+	// same "looks completed, actually aborted" failure mode operators have
+	// been hitting in production. Running/pending sessions are excluded
+	// because absence-of-events is normal for them.
+	if isTerminalSessionStatus(resp.Status) && !eventsFileHasContent(artifactPaths.EventsV1) {
+		resp.Degraded = true
+		resp.DegradedReason = degradedReasonNoEventsFile
+	}
+	return resp, nil
+}
+
+// buildDegradedFromDisk reconstructs a sessionDetailResponse from a
+// per-session metadata.json on disk when the agent_sessions DB row is
+// missing. Returns ok=false (so the caller can return 404) when the on-disk
+// metadata is unreadable or unusable. Issue #275.
+func (h *Handler) buildDegradedFromDisk(sessionID string) (sessionDetailResponse, bool) {
+	if h.sessionsDir == "" {
+		return sessionDetailResponse{}, false
+	}
+	dir := filepath.Join(h.sessionsDir, sessionID)
+	meta, ok := readDiskSessionMetadata(filepath.Join(dir, "metadata.json"))
+	if !ok {
+		return sessionDetailResponse{}, false
+	}
+	stdoutPath := meta.StdoutPath
+	if stdoutPath == "" {
+		stdoutPath = filepath.Join(dir, "stdout")
+	}
+	stderrPath := meta.StderrPath
+	if stderrPath == "" {
+		stderrPath = filepath.Join(dir, "stderr")
+	}
+	artifactPaths := SessionArtifactPaths{
+		SessionDir: dir,
+		EventsV1:   filepath.Join(dir, "events-v1.jsonl"),
+	}
+	stderrSummary := readArtifactSummary(stderrPath, 4096)
+	summary := strings.TrimSpace(meta.Summary)
+	if summary == "" {
+		summary = synthesizeDegradedSummary(meta, stderrSummary)
+	}
+	exitCode := meta.ExitCode
+	// When SessionManager.Create wrote metadata.json but Close() never ran,
+	// status remains "running" and exit_code defaults to zero. Surface a
+	// distinct -1 placeholder so the UI does not display a misleading
+	// "exit 0 / completed" pair.
+	if exitCode == 0 && !isTerminalSessionStatus(meta.Status) {
+		exitCode = -1
+	}
+	finishedAt := nullableMetaTime(meta.ClosedAt)
+	resp := sessionDetailResponse{
+		SessionID:      sessionID,
+		TaskID:         meta.TaskID,
+		Repo:           meta.Repo,
+		IssueNum:       meta.IssueNum,
+		AgentName:      meta.AgentName,
+		Runtime:        meta.Runtime,
+		WorkerID:       meta.WorkerID,
+		Attempt:        meta.Attempt,
+		Status:         StatusAbortedBeforeStart,
+		ExitCode:       exitCode,
+		Duration:       sessionDuration(meta.CreatedAt, finishedAt),
+		CreatedAt:      meta.CreatedAt,
+		FinishedAt:     finishedAt,
+		Summary:        summary,
+		StdoutSummary:  readArtifactSummary(stdoutPath, 4096),
+		StderrSummary:  stderrSummary,
+		ArtifactPaths:  artifactPaths,
+		Degraded:       true,
+		DegradedReason: degradedReasonNoDBRow,
+	}
+	return resp, true
+}
+
+// diskSessionMetadata mirrors the runtime SessionManager's metadata.json
+// schema. Defined locally to avoid an import cycle with internal/runtime
+// and to insulate the API from future schema changes.
+type diskSessionMetadata struct {
+	SessionID  string    `json:"session_id"`
+	TaskID     string    `json:"task_id,omitempty"`
+	Repo       string    `json:"repo"`
+	IssueNum   int       `json:"issue_num"`
+	AgentName  string    `json:"agent_name"`
+	Runtime    string    `json:"runtime,omitempty"`
+	WorkerID   string    `json:"worker_id,omitempty"`
+	Attempt    int       `json:"attempt"`
+	Status     string    `json:"status"`
+	CreatedAt  time.Time `json:"created_at"`
+	ClosedAt   time.Time `json:"closed_at,omitempty"`
+	StdoutPath string    `json:"stdout_path,omitempty"`
+	StderrPath string    `json:"stderr_path,omitempty"`
+	// ExitCode and Summary are not part of the canonical metadata schema
+	// today, but the fields are reserved here so writers (the supervisor /
+	// session manager) can populate them in the future and the API will
+	// surface them automatically.
+	ExitCode int    `json:"exit_code,omitempty"`
+	Summary  string `json:"summary,omitempty"`
+}
+
+func readDiskSessionMetadata(path string) (diskSessionMetadata, bool) {
+	if path == "" {
+		return diskSessionMetadata{}, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return diskSessionMetadata{}, false
+	}
+	var meta diskSessionMetadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return diskSessionMetadata{}, false
+	}
+	if meta.SessionID == "" && meta.Repo == "" && meta.AgentName == "" {
+		return diskSessionMetadata{}, false
+	}
+	return meta, true
+}
+
+func nullableMetaTime(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	ts := t.UTC()
+	return &ts
+}
+
+// synthesizeDegradedSummary builds a markdown summary mirroring the shape
+// produced by audit.buildMinimalSummary so the SPA's warning card has
+// something useful to render even when the metadata.json itself does not
+// carry an explicit summary field.
+func synthesizeDegradedSummary(meta diskSessionMetadata, stderrExcerpt string) string {
+	var b strings.Builder
+	b.WriteString("## Session Summary (no session file)\n\n")
+	b.WriteString("- DB row: missing — response synthesized from metadata.json\n")
+	if meta.Status != "" {
+		fmt.Fprintf(&b, "- Recorded status: %s\n", meta.Status)
+	}
+	if meta.ExitCode != 0 {
+		fmt.Fprintf(&b, "- Exit code: %d\n", meta.ExitCode)
+	} else {
+		b.WriteString("- Exit code: -1 (unknown — runtime aborted before reporting)\n")
+	}
+	if !meta.CreatedAt.IsZero() {
+		fmt.Fprintf(&b, "- Created at: %s\n", meta.CreatedAt.UTC().Format(time.RFC3339))
+	}
+	if !meta.ClosedAt.IsZero() {
+		fmt.Fprintf(&b, "- Closed at: %s\n", meta.ClosedAt.UTC().Format(time.RFC3339))
+	}
+	if stderrExcerpt != "" {
+		b.WriteString("\n### Stderr (excerpt)\n```\n")
+		b.WriteString(stderrExcerpt)
+		b.WriteString("\n```\n")
+	}
+	return b.String()
+}
+
+func isTerminalSessionStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case store.TaskStatusCompleted, store.TaskStatusFailed, store.TaskStatusTimeout, StatusAbortedBeforeStart:
+		return true
+	}
+	return false
+}
+
+// eventsFileHasContent reports whether the events-v1.jsonl artefact at
+// `path` exists and contains at least one byte. Missing files return false;
+// any other I/O error is treated as "no usable content" so the caller can
+// degrade gracefully.
+func eventsFileHasContent(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	if info.IsDir() {
+		return false
+	}
+	return info.Size() > 0
 }
 
 func (h *Handler) sessionTaskStats(record store.SessionRecord) (int, string, *time.Time, error) {

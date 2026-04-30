@@ -396,6 +396,50 @@ table.clickable tbody tr:hover {
 .wb-badge-failed, .wb-badge-error, .wb-badge-timeout { background: #ffe2e5; color: #a40e26; }
 .wb-badge-pending, .wb-badge-queued { background: #eef1f4; color: #57606a; }
 .wb-badge-default { background: #f0f3f6; color: #24292f; }
+.wb-badge-degraded, .wb-badge-aborted_before_start {
+  background: #ffe2e5;
+  color: #a40e26;
+  border: 1px solid #f4b9c0;
+}
+.wb-degraded-marker {
+  display: inline-block;
+  margin-right: 4px;
+  color: #a40e26;
+  font-weight: 700;
+}
+
+/* Issue #275: Degraded session warning card on the SessionDetail page. */
+.wb-degraded-card {
+  background: #fff5f5;
+  border: 1px solid #f4b9c0;
+  border-left: 4px solid #cf222e;
+  color: #57606a;
+  padding: 14px 18px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+}
+.wb-degraded-card h2 {
+  margin: 0 0 6px 0;
+  font-size: 15px;
+  color: #a40e26;
+  font-weight: 700;
+}
+.wb-degraded-card p {
+  margin: 6px 0;
+  font-size: 13px;
+}
+.wb-degraded-card pre {
+  background: #ffffff;
+  border: 1px solid #f0d0d4;
+  border-radius: 6px;
+  padding: 10px;
+  margin: 8px 0 0;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 280px;
+  overflow: auto;
+}
 
 .wb-empty { text-align: center; padding: 32px; color: #656d76; font-size: 14px; }
 .wb-error {

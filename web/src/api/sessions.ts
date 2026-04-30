@@ -18,6 +18,11 @@ export interface SessionListItem {
   created_at: string;
   finished_at?: string | null;
   summary?: string;
+  // Issue #275: degraded rows are sessions with no events file (or no DB
+  // row at all). The SPA renders a ⚠️ badge so operators can spot
+  // never-actually-ran sessions in the list at a glance.
+  degraded?: boolean;
+  degraded_reason?: string;
 }
 
 export interface SessionDetail {
@@ -42,6 +47,14 @@ export interface SessionDetail {
     events_v1?: string;
     raw?: string;
   };
+  // Issue #275: degraded === true means the API could not produce a normal
+  // response — typically because the agent_sessions DB row was missing
+  // (response synthesized from disk metadata.json) or because no
+  // events-v1.jsonl file was ever produced. The SPA surfaces a red warning
+  // card with the summary/stderr instead of an empty-but-otherwise-normal
+  // timeline.
+  degraded?: boolean;
+  degraded_reason?: string;
 }
 
 export interface SessionEvent {
