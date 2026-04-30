@@ -293,14 +293,14 @@ export function SessionDetail() {
 
   if (!sessionID) {
     return (
-      <Layout current="sessions">
+      <Layout>
         <div class="wb-error">Missing session id in URL.</div>
       </Layout>
     );
   }
 
   return (
-    <Layout current="sessions">
+    <Layout>
       <div class="wb-breadcrumb">
         <a href="/">Home</a>
         <span class="sep">/</span>

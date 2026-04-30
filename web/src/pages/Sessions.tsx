@@ -112,7 +112,7 @@ export function Sessions() {
   const pageEnd = filter.offset + rows.length;
 
   return (
-    <Layout current="sessions">
+    <Layout>
       <h1 style={{ fontSize: 22, marginBottom: 12 }}>Agent Sessions</h1>
 
       <form class="wb-filters" onSubmit={applyFilters}>
