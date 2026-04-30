@@ -3424,3 +3424,43 @@ requirements:
     tests:
       - cmd/deploy_bundle_test.go
     deps: [REQ-092, REQ-096, REQ-097]
+  - id: REQ-099
+    title: session detail Pretty/Raw view + structured stream-json renderer (#258)
+    description: >
+      The session detail page (`/sessions/:id`) historically rendered each
+      `kind=log` event by dumping `payload.line` as a raw string. Those lines
+      are stream-json messages emitted by the Claude Code CLI or the Codex
+      app-server and contain structured types (`system`, `user`, `assistant`,
+      `tool_use`, `tool_result`, `result`, plus codex `method` envelopes).
+      A small frontend parser (`web/src/lib/streamMessages.ts`) normalises
+      both runtimes onto a discriminated union and a renderer
+      (`web/src/components/StreamMessage.tsx`) draws each message kind:
+      system events collapse to a chip, assistant content blocks are split
+      into Markdown/text + tool_use cards, tool_result bodies preview the
+      first ~10 lines with an Expand toggle, `result` lines render as a
+      summary card, and unparsed lines fall back to the raw string with an
+      `unparsed` badge. The page gains a Pretty/Raw toolbar toggle so
+      operators can still copy raw JSON for diffing, and consecutive events
+      that share a `turn_id` are grouped under a left-rail turn boundary.
+      The codex runtime hint comes from `meta.runtime` so codex JSON-RPC
+      lines route through their own renderer.
+    priority: P2
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-099-1: `kind=log` events with a JSON-parseable `payload.line` render structurally — system→chip, user/assistant→bubble, assistant `tool_use`/`tool_result`→cards, top-level `result`→summary card."
+      - "AC-099-2: lines that fail to parse are shown verbatim with an `unparsed` badge."
+      - "AC-099-3: the toolbar exposes a Pretty | Raw toggle; Raw mode falls back to the prior plain-text/JSON timeline."
+      - "AC-099-4: long tool_use input or tool_result bodies are collapsed to a ~10-line preview with an Expand control."
+      - "AC-099-5: codex worker output (`{method, params}` JSON-RPC) routes to a codex-specific renderer when `meta.runtime === 'codex'`."
+      - "AC-099-6: consecutive timeline events that share a `turn_id` are grouped under a single turn boundary."
+      - "AC-099-7: vitest covers the parser (system / user / assistant / tool_result / result / codex / malformed) and the renderer (each message kind + collapsed long body + ERROR badge)."
+    code:
+      - web/src/lib/streamMessages.ts
+      - web/src/components/StreamMessage.tsx
+      - web/src/pages/SessionDetail.tsx
+      - web/src/styles.css
+    tests:
+      - web/src/lib/streamMessages.test.ts
+      - web/src/components/StreamMessage.test.tsx
+    deps: [REQ-093]

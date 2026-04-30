@@ -1,3 +1,4 @@
+import type { JSX } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { useRoute } from 'preact-iso';
 import { Layout } from '../components/Layout';
@@ -11,8 +12,11 @@ import {
   type SessionEvent,
 } from '../api/sessions';
 import { copyText, formatTimestamp, shortID, statusBadgeClass } from '../lib/format';
+import { parseLine, type ParsedMessage, type Runtime } from '../lib/streamMessages';
+import { StreamMessageView } from '../components/StreamMessage';
 
 const KIND_OPTIONS = ['tool_call', 'tool_result', 'message', 'system'] as const;
+type ViewMode = 'pretty' | 'raw';
 type KindOption = (typeof KIND_OPTIONS)[number];
 
 const INITIAL_LIMIT = 200;
@@ -119,6 +123,7 @@ export function SessionDetail() {
     other: true,
   });
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
+  const [viewMode, setViewMode] = useState<ViewMode>('pretty');
 
   const lastIndexRef = useRef(-1);
   const esRef = useRef<EventSource | null>(null);
@@ -376,6 +381,24 @@ export function SessionDetail() {
 
       <div class="wb-toolbar">
         <strong style={{ fontSize: 13 }}>Timeline</strong>
+        <div class="wb-view-toggle" role="tablist" aria-label="View mode">
+          <button
+            type="button"
+            class={viewMode === 'pretty' ? 'active' : ''}
+            onClick={() => setViewMode('pretty')}
+            aria-pressed={viewMode === 'pretty'}
+          >
+            Pretty
+          </button>
+          <button
+            type="button"
+            class={viewMode === 'raw' ? 'active' : ''}
+            onClick={() => setViewMode('raw')}
+            aria-pressed={viewMode === 'raw'}
+          >
+            Raw
+          </button>
+        </div>
         <div class="kinds">
           {(['tool_call', 'tool_result', 'message', 'system'] as const).map((k) => (
             <label key={k} class={enabledKinds[k] ? 'checked' : ''}>
@@ -412,12 +435,12 @@ export function SessionDetail() {
 
       {loadError && <div class="wb-error">Events: {loadError}</div>}
 
-      <div class="wb-timeline" ref={timelineRef}>
+      <div class={`wb-timeline${viewMode === 'pretty' ? ' wb-timeline-pretty' : ''}`} ref={timelineRef}>
         {filteredEvents.length === 0 ? (
           <div class="wb-empty">
             {events.length === 0 ? 'No events yet.' : 'No events match the filters.'}
           </div>
-        ) : (
+        ) : viewMode === 'raw' ? (
           filteredEvents.map((ev) => (
             <Event
               key={ev.index}
@@ -426,6 +449,8 @@ export function SessionDetail() {
               onToggle={() => toggleExpanded(ev.index)}
             />
           ))
+        ) : (
+          renderPretty(filteredEvents, (meta?.runtime as Runtime | undefined) ?? 'unknown', expanded, toggleExpanded)
         )}
       </div>
 
@@ -467,6 +492,81 @@ function Event({
       )}
     </div>
   );
+}
+
+function renderPretty(
+  events: SessionEvent[],
+  runtime: Runtime,
+  expanded: Record<number, boolean>,
+  toggleExpanded: (idx: number) => void,
+): JSX.Element[] {
+  // Group consecutive events that share a turn_id.
+  const groups: { turnId: string; events: SessionEvent[] }[] = [];
+  for (const ev of events) {
+    const tid = ev.turn_id || '';
+    const last = groups[groups.length - 1];
+    if (!last || last.turnId !== tid) {
+      groups.push({ turnId: tid, events: [ev] });
+    } else {
+      last.events.push(ev);
+    }
+  }
+  return groups.map((g, gi) => (
+    <div key={`turn-${gi}-${g.turnId}`} class="wb-turn-group">
+      <div class="wb-turn-boundary">
+        <span class="wb-turn-label">turn{g.turnId ? ` · ${shortID(g.turnId, 12)}` : ''}</span>
+      </div>
+      <div class="wb-turn-body">
+        {g.events.map((ev) => (
+          <PrettyEvent
+            key={ev.index}
+            ev={ev}
+            runtime={runtime}
+            expanded={expanded[ev.index] ?? defaultExpanded(ev.kind)}
+            onToggle={() => toggleExpanded(ev.index)}
+          />
+        ))}
+      </div>
+    </div>
+  ));
+}
+
+function PrettyEvent({
+  ev,
+  runtime,
+  expanded,
+  onToggle,
+}: {
+  ev: SessionEvent;
+  runtime: Runtime;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  // Only `kind=log` events with a JSON `payload.line` get the structured
+  // renderer; all other event kinds keep the existing Event view (which
+  // already renders the typed launcher payload nicely).
+  if ((ev.kind || '').toLowerCase() === 'log') {
+    const line = extractLine(ev.payload);
+    if (line) {
+      const parsed: ParsedMessage = parseLine(line, { runtime });
+      return (
+        <div class={`wb-event k-pretty pretty-${parsed.kind}`}>
+          <div class="wb-event-time-row">
+            <span class="wb-event-time">{eventTime(ev)}</span>
+          </div>
+          <StreamMessageView msg={parsed} />
+        </div>
+      );
+    }
+  }
+  return <Event ev={ev} expanded={expanded} onToggle={onToggle} />;
+}
+
+function extractLine(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const p = payload as Record<string, unknown>;
+  const line = p.line;
+  return typeof line === 'string' ? line : null;
 }
 
 export default SessionDetail;

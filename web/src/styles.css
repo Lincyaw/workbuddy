@@ -669,3 +669,163 @@ table.clickable tbody tr:hover {
 .wb-role-review { background: #efe2fa; color: #5a32a3; }
 .wb-role-other { background: #eef1f4; color: #57606a; }
 .wb-cycle { color: #57606a; font-size: 12px; }
+
+/* Pretty stream-message rendering */
+.wb-view-toggle {
+  display: inline-flex;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.wb-view-toggle button {
+  border: 0 !important;
+  border-radius: 0 !important;
+  padding: 4px 10px;
+  background: #fff;
+  font-size: 12px;
+}
+.wb-view-toggle button.active {
+  background: #0969da;
+  color: #fff;
+}
+
+.wb-timeline-pretty { gap: 0; }
+.wb-turn-group {
+  border-left: 2px solid #d0d7de;
+  margin: 12px 0 0;
+  padding-left: 12px;
+  position: relative;
+}
+.wb-turn-boundary {
+  font-size: 11px;
+  color: #57606a;
+  margin: 0 0 6px -14px;
+  padding: 2px 8px;
+  background: #f6f8fa;
+  border: 1px solid #d0d7de;
+  border-radius: 12px;
+  display: inline-block;
+}
+.wb-turn-body { display: flex; flex-direction: column; gap: 6px; }
+
+.wb-event.k-pretty {
+  border-left: 3px solid #d0d7de;
+  background: #fff;
+  padding: 8px 10px;
+}
+.wb-event.k-pretty.pretty-system { border-left-color: #afb8c1; background: #fafbfc; padding: 4px 8px; }
+.wb-event.k-pretty.pretty-user { border-left-color: #1f883d; }
+.wb-event.k-pretty.pretty-assistant { border-left-color: #6f42c1; }
+.wb-event.k-pretty.pretty-tool_result { border-left-color: #1f883d; }
+.wb-event.k-pretty.pretty-codex { border-left-color: #bf8700; }
+.wb-event.k-pretty.pretty-result { border-left-color: #0969da; background: #f6fbff; }
+.wb-event.k-pretty.pretty-unparsed { border-left-color: #d29922; background: #fff8e6; }
+
+.wb-event-time-row { font-size: 11px; color: #8c959f; margin-bottom: 4px; }
+
+.wb-sm { font-size: 13px; line-height: 1.5; }
+.wb-sm-role {
+  font-size: 11px;
+  font-weight: 600;
+  color: #57606a;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+.wb-sm-text { white-space: pre-wrap; word-break: break-word; }
+.wb-sm-chip {
+  display: inline-block;
+  font-size: 12px;
+  padding: 2px 8px;
+  background: #eef1f4;
+  border-radius: 12px;
+  color: #57606a;
+}
+.wb-sm-tag {
+  display: inline-block;
+  font-size: 10px;
+  text-transform: uppercase;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-right: 6px;
+  background: #eef1f4;
+  color: #57606a;
+}
+.wb-sm-tag.tool { background: #ddf4ff; color: #0550a0; }
+.wb-sm-tag.result { background: #dcffe4; color: #116329; }
+.wb-sm-tag.codex { background: #fff1d1; color: #7c4d00; }
+.wb-sm-tag.warn { background: #fff1d1; color: #7c4d00; }
+
+.wb-sm-tool-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; flex-wrap: wrap; }
+.wb-sm-tool-head strong { font-size: 13px; }
+.wb-sm-id {
+  font-size: 11px;
+  color: #57606a;
+  background: #f6f8fa;
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+.wb-sm-err { color: #cf222e; font-weight: 600; font-size: 11px; }
+
+.wb-sm-thinking, .wb-sm-tool-use, .wb-sm-tool-result, .wb-sm-codex {
+  margin: 6px 0;
+  padding: 6px 8px;
+  background: #f6f8fa;
+  border-radius: 6px;
+}
+.wb-sm-tool-result.is-error { background: #fff5f5; }
+
+.wb-sm-collapsible { position: relative; }
+.wb-sm-collapsible pre {
+  margin: 0;
+  padding: 6px 8px;
+  background: #fff;
+  border: 1px solid #eaeef2;
+  border-radius: 4px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 480px;
+  overflow: auto;
+}
+.wb-sm-toggle {
+  margin-top: 4px;
+  font-size: 11px;
+  background: transparent;
+  border: 1px solid #d0d7de;
+  border-radius: 4px;
+  padding: 1px 8px;
+  cursor: pointer;
+  color: #0969da;
+}
+.wb-sm-toggle:hover { background: #f3f5f7; }
+
+.wb-sm-result-card {
+  background: #f6fbff;
+  padding: 8px 10px;
+  border-radius: 6px;
+}
+.wb-sm-usage {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+}
+.wb-sm-usage li {
+  background: #fff;
+  border: 1px solid #d0d7de;
+  border-radius: 4px;
+  padding: 2px 8px;
+  display: flex;
+  gap: 4px;
+}
+.wb-sm-usage li span { color: #57606a; }
+
+.wb-sm-unparsed pre {
+  background: #fff8e6;
+  border: 1px solid #f5d68a;
+}
