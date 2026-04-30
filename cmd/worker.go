@@ -20,6 +20,8 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/reporter"
 	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 	"github.com/Lincyaw/workbuddy/internal/store"
+	"github.com/Lincyaw/workbuddy/internal/supervisor"
+	supclient "github.com/Lincyaw/workbuddy/internal/supervisor/client"
 	workerexec "github.com/Lincyaw/workbuddy/internal/worker"
 	workersession "github.com/Lincyaw/workbuddy/internal/worker/session"
 	"github.com/Lincyaw/workbuddy/internal/workerclient"
@@ -62,6 +64,7 @@ type workerOpts struct {
 	heartbeatInterval time.Duration
 	shutdownTimeout   time.Duration
 	concurrency       int
+	supervisorSocket  string
 }
 
 type workerIssueReader interface {
@@ -89,6 +92,7 @@ func init() {
 	workerCmd.Flags().String("mgmt-public-url", "", "Coordinator-reachable base URL for the worker management/session viewer surface")
 	workerCmd.Flags().String("mgmt-auth-token", "", "Optional bearer token for worker management and session-viewer endpoints")
 	workerCmd.Flags().Int("concurrency", 1, "Maximum concurrent tasks per worker")
+	workerCmd.Flags().String("supervisor-socket", "", "Unix socket of the local agent supervisor (default: $XDG_RUNTIME_DIR/workbuddy-supervisor.sock)")
 	_ = workerCmd.MarkFlagRequired("coordinator")
 
 	workerUnregisterCmd.Flags().String("coordinator", "", "Coordinator base URL")
@@ -159,6 +163,7 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	mgmtPublicURL, _ := cmd.Flags().GetString("mgmt-public-url")
 	mgmtAuthToken, _ := cmd.Flags().GetString("mgmt-auth-token")
 	concurrency, _ := cmd.Flags().GetInt("concurrency")
+	supervisorSocket, _ := cmd.Flags().GetString("supervisor-socket")
 	if concurrency < 1 {
 		concurrency = 1
 	}
@@ -199,6 +204,7 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 		heartbeatInterval: defaultWorkerHeartbeat,
 		shutdownTimeout:   defaultWorkerShutdownDeadline,
 		concurrency:       concurrency,
+		supervisorSocket:  strings.TrimSpace(supervisorSocket),
 	}, nil
 }
 
@@ -298,18 +304,48 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 		workerID = hostname
 	}
 
-	if lnch == nil {
-		lnch = launcher.NewLauncher()
-	}
-	if reader == nil {
-		reader = &GHCLIReader{}
-	}
-
 	localStore, err := store.NewStore(opts.dbPath)
 	if err != nil {
 		return fmt.Errorf("worker: init local store: %w", err)
 	}
 	defer func() { _ = localStore.Close() }()
+
+	hook := func(taskID, agentID string) {
+		if err := localStore.UpdateTaskSupervisorAgentID(taskID, agentID); err != nil {
+			log.Printf("[worker] persist supervisor_agent_id for task %s: %v", taskID, err)
+		}
+	}
+	var supShutdown func()
+	if lnch == nil {
+		socket := opts.supervisorSocket
+		if socket == "" {
+			socket = supervisor.DefaultSocketPath()
+		}
+		// External supervisor when the socket exists (operator-managed, the
+		// canonical deployment); fall back to an in-process supervisor for
+		// `workbuddy serve` and other one-process invocations.
+		if _, statErr := os.Stat(socket); statErr == nil {
+			lnch = launcher.NewLauncher(supclient.NewUnix(socket), hook)
+		} else {
+			stateDir := filepath.Join(workDir, ".workbuddy", "supervisor")
+			if mkErr := os.MkdirAll(stateDir, 0o755); mkErr != nil {
+				return fmt.Errorf("worker: state dir for in-process supervisor: %w", mkErr)
+			}
+			supClient, shutdown, supErr := launcher.NewInProcessSupervisor(stateDir, supervisor.DefaultCancelGrace)
+			if supErr != nil {
+				return fmt.Errorf("worker: %w", supErr)
+			}
+			supShutdown = shutdown
+			lnch = launcher.NewLauncher(supClient, hook)
+			log.Printf("[worker] no supervisor socket at %s; running in-process supervisor (state %s)", socket, stateDir)
+		}
+	}
+	if supShutdown != nil {
+		defer supShutdown()
+	}
+	if reader == nil {
+		reader = &GHCLIReader{}
+	}
 
 	// Wire the session manager so the runtime registry creates a ManagedSession
 	// per task and populates taskCtx.SessionHandle(). Without this, the bridge

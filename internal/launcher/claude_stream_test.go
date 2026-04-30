@@ -92,7 +92,7 @@ func TestProcessSessionRun_ClaudePromptEmitsStructuredEvents(t *testing.T) {
 	})
 	defer restore()
 
-	launcher := NewLauncher()
+	launcher := newTestLauncher(t)
 	task := newTestTask(t)
 	agent := &config.AgentConfig{
 		Name:    "claude-agent",

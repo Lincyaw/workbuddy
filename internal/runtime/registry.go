@@ -8,20 +8,63 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/config"
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
+	supclient "github.com/Lincyaw/workbuddy/internal/supervisor/client"
 )
 
 // Registry dispatches agent execution to the appropriate Runtime implementation.
 type Registry struct {
-	runtimes map[string]Runtime
-	manager  *SessionManager
-	starter  func(ctx context.Context, agent *config.AgentConfig, task *TaskContext) (Session, error, bool)
+	runtimes         map[string]Runtime
+	manager          *SessionManager
+	starter          func(ctx context.Context, agent *config.AgentConfig, task *TaskContext) (Session, error, bool)
+	supervisorClient *supclient.Client
+	onAgentStarted   AgentStartedHook
 }
 
 func NewRegistry() *Registry {
 	return &Registry{runtimes: make(map[string]Runtime)}
 }
 
+// SetSupervisorClient configures the IPC client every supervisor-backed
+// runtime (currently the claude family) uses to launch and observe agent
+// subprocesses. Must be called before the first Start. Re-applies to any
+// already-registered ClaudeRuntime so registration order does not matter.
+func (l *Registry) SetSupervisorClient(c *supclient.Client) {
+	l.supervisorClient = c
+	for _, rt := range l.runtimes {
+		if cr, ok := rt.(*ClaudeRuntime); ok {
+			cr.SupervisorClient = c
+		}
+	}
+}
+
+// SetAgentStartedHook installs a callback fired exactly once after the
+// supervisor returns an agent_id for a session — the worker uses this to
+// persist task_queue.supervisor_agent_id so a worker restart can adopt the
+// running agent without orphaning it.
+func (l *Registry) SetAgentStartedHook(h AgentStartedHook) {
+	l.onAgentStarted = h
+	for _, rt := range l.runtimes {
+		if cr, ok := rt.(*ClaudeRuntime); ok {
+			cr.OnAgentStarted = h
+		}
+	}
+}
+
+// SupervisorClient returns the configured client (nil before SetSupervisorClient).
+func (l *Registry) SupervisorClient() *supclient.Client { return l.supervisorClient }
+
+// OnAgentStarted returns the configured hook (may be nil).
+func (l *Registry) OnAgentStarted() AgentStartedHook { return l.onAgentStarted }
+
 func (l *Registry) Register(rt Runtime, aliases ...string) {
+	if cr, ok := rt.(*ClaudeRuntime); ok {
+		if cr.SupervisorClient == nil {
+			cr.SupervisorClient = l.supervisorClient
+		}
+		if cr.OnAgentStarted == nil {
+			cr.OnAgentStarted = l.onAgentStarted
+		}
+	}
 	l.runtimes[rt.Name()] = rt
 	for _, alias := range aliases {
 		l.runtimes[alias] = rt

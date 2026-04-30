@@ -1,8 +1,6 @@
 package launcher
 
 import (
-	"context"
-	"io"
 	"strings"
 	"testing"
 
@@ -10,7 +8,7 @@ import (
 	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 )
 
-func TestProcessSessionBuildCommand_UsesPromptForClaude(t *testing.T) {
+func TestProcessSessionBuildSpec_UsesPromptForClaude(t *testing.T) {
 	task := newTestTask(t)
 	sess := &runtimepkg.ProcessSession{
 		RuntimeName: config.RuntimeClaudeCode,
@@ -25,25 +23,21 @@ func TestProcessSessionBuildCommand_UsesPromptForClaude(t *testing.T) {
 		Task: task,
 	}
 
-	cmd, err := sess.BuildCommand(context.Background())
+	spec, err := sess.BuildSpec()
 	if err != nil {
-		t.Fatalf("buildCommand: %v", err)
+		t.Fatalf("BuildSpec: %v", err)
 	}
-	if got := cmd.Args[0]; got != "claude" && !strings.HasSuffix(got, "/claude") {
-		t.Fatalf("command path = %q", got)
+	if spec.Binary != "claude" {
+		t.Fatalf("binary = %q, want claude", spec.Binary)
 	}
-	joined := strings.Join(cmd.Args[1:], " ")
+	joined := strings.Join(spec.Args, " ")
 	for _, want := range []string{"--dangerously-skip-permissions", "--output-format stream-json", "--verbose"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("args %q missing %q", joined, want)
 		}
 	}
-	data, err := io.ReadAll(cmd.Stdin)
-	if err != nil {
-		t.Fatalf("read stdin: %v", err)
-	}
-	if got := string(data); got != "review issue 42" {
-		t.Fatalf("stdin = %q", got)
+	if spec.Stdin != "review issue 42" {
+		t.Fatalf("stdin = %q", spec.Stdin)
 	}
 }
 

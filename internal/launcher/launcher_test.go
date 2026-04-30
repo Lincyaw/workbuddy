@@ -109,7 +109,7 @@ func eventErrorCodes(t *testing.T, events []launcherevents.Event) []string {
 
 // Test 1: Normal execution — command runs and returns stdout, stderr, exit code 0
 func TestLaunch_NormalExec(t *testing.T) {
-	launcher := NewLauncher()
+	launcher := newTestLauncher(t)
 	task := newTestTask(t)
 
 	agent := &config.AgentConfig{
@@ -136,7 +136,7 @@ func TestLaunch_NormalExec(t *testing.T) {
 
 // Test 2: Timeout — subprocess killed after timeout
 func TestLaunch_Timeout(t *testing.T) {
-	launcher := NewLauncher()
+	launcher := newTestLauncher(t)
 	task := newTestTask(t)
 
 	agent := &config.AgentConfig{
@@ -157,7 +157,7 @@ func TestLaunch_Timeout(t *testing.T) {
 
 // Test 3: Template rendering — variables are expanded in command
 func TestLaunch_TemplateRender(t *testing.T) {
-	launcher := NewLauncher()
+	launcher := newTestLauncher(t)
 	task := newTestTask(t)
 
 	agent := &config.AgentConfig{
@@ -191,7 +191,7 @@ func TestLaunch_TemplateRender(t *testing.T) {
 
 // Test 4: Context cancellation — subprocess killed when context is cancelled
 func TestLaunch_Cancel(t *testing.T) {
-	launcher := NewLauncher()
+	launcher := newTestLauncher(t)
 	task := newTestTask(t)
 
 	agent := &config.AgentConfig{
@@ -217,7 +217,7 @@ func TestLaunch_Cancel(t *testing.T) {
 }
 
 func TestStart_GitHubActionsRunnerUsesRemoteSession(t *testing.T) {
-	launcher := NewLauncher()
+	launcher := newTestLauncher(t)
 	task := newTestTask(t)
 	agent := &config.AgentConfig{
 		Name:    "remote-agent",
@@ -248,7 +248,7 @@ func TestStart_GitHubActionsRunnerUsesRemoteSession(t *testing.T) {
 
 // Test 5: Meta parse success — WORKBUDDY_META block is extracted from stdout
 func TestLaunch_MetaParseSuccess(t *testing.T) {
-	launcher := NewLauncher()
+	launcher := newTestLauncher(t)
 	task := newTestTask(t)
 
 	agent := &config.AgentConfig{
@@ -281,7 +281,7 @@ func TestLaunch_MetaParseSuccess(t *testing.T) {
 
 // Test 6: Meta missing — no WORKBUDDY_META block, Meta should be nil (no error)
 func TestLaunch_MetaMissing(t *testing.T) {
-	launcher := NewLauncher()
+	launcher := newTestLauncher(t)
 	task := newTestTask(t)
 
 	agent := &config.AgentConfig{
@@ -302,7 +302,7 @@ func TestLaunch_MetaMissing(t *testing.T) {
 
 // Test 7: claude-code runtime — verify the runtime is registered and works
 func TestLaunch_ClaudeCodeRuntime(t *testing.T) {
-	launcher := NewLauncher()
+	launcher := newTestLauncher(t)
 	task := newTestTask(t)
 
 	agent := &config.AgentConfig{
@@ -326,7 +326,7 @@ func TestLaunch_CodexRuntime(t *testing.T) {
 	restore := installFakeCodex(t)
 	defer restore()
 
-	launcher := NewLauncher()
+	launcher := newTestLauncher(t)
 	task := newTestTask(t)
 
 	agent := &config.AgentConfig{
@@ -350,7 +350,7 @@ func TestLaunch_CodexRuntime(t *testing.T) {
 }
 
 func TestLaunch_OutputContractValidatesProcessOutput(t *testing.T) {
-	launcher := NewLauncher()
+	launcher := newTestLauncher(t)
 	task := newTestTask(t)
 	agentDir := t.TempDir()
 	schemaPath := writeOutputSchema(t, agentDir)
@@ -379,7 +379,7 @@ func TestLaunch_OutputContractValidatesProcessOutput(t *testing.T) {
 }
 
 func TestLaunch_OutputContractRejectsInvalidProcessOutput(t *testing.T) {
-	launcher := NewLauncher()
+	launcher := newTestLauncher(t)
 	task := newTestTask(t)
 	agentDir := t.TempDir()
 	writeOutputSchema(t, agentDir)
@@ -412,7 +412,7 @@ func TestProcessSessionRun_EmitsErrorTerminalEventOnOutputContractFailure(t *tes
 	agentDir := t.TempDir()
 	writeOutputSchema(t, agentDir)
 
-	session := newProcessSession(config.RuntimeClaudeCode, &config.AgentConfig{
+	session := newTestProcessSession(t, config.RuntimeClaudeCode, &config.AgentConfig{
 		Name:    "structured-agent",
 		Runtime: config.RuntimeClaudeCode,
 		Command: `printf '{"missing":"status"}'`,
@@ -440,7 +440,7 @@ func TestProcessSessionRun_EmitsErrorTerminalEventOnOutputContractFailure(t *tes
 
 // Test 9: Unknown runtime — clear error message
 func TestLaunch_UnknownRuntime(t *testing.T) {
-	launcher := NewLauncher()
+	launcher := newTestLauncher(t)
 	task := newTestTask(t)
 
 	agent := &config.AgentConfig{
@@ -464,7 +464,7 @@ func TestLaunch_UnknownRuntime(t *testing.T) {
 
 // Test: default runtime is claude-code when not specified
 func TestLaunch_DefaultRuntime(t *testing.T) {
-	launcher := NewLauncher()
+	launcher := newTestLauncher(t)
 	task := newTestTask(t)
 
 	agent := &config.AgentConfig{
@@ -485,7 +485,7 @@ func TestLaunch_DefaultRuntime(t *testing.T) {
 
 // Test: environment variables are set correctly
 func TestLaunch_EnvVars(t *testing.T) {
-	launcher := NewLauncher()
+	launcher := newTestLauncher(t)
 	task := newTestTask(t)
 
 	agent := &config.AgentConfig{
@@ -516,7 +516,7 @@ func TestLaunch_EnvVars(t *testing.T) {
 
 // Test: non-zero exit code is captured
 func TestLaunch_NonZeroExit(t *testing.T) {
-	launcher := NewLauncher()
+	launcher := newTestLauncher(t)
 	task := newTestTask(t)
 
 	agent := &config.AgentConfig{
@@ -537,7 +537,7 @@ func TestLaunch_NonZeroExit(t *testing.T) {
 
 // Test: command working directory is set to task.Repo
 func TestLaunch_WorkingDirectory(t *testing.T) {
-	launcher := NewLauncher()
+	launcher := newTestLauncher(t)
 	task := newTestTask(t)
 
 	// Create a marker file in the temp dir
@@ -780,7 +780,7 @@ func TestRenderCommand_AutoEscapesIssueFields(t *testing.T) {
 
 // Test: shell injection via issue title is neutralized end-to-end
 func TestLaunch_ShellInjectionTitle(t *testing.T) {
-	launcher := NewLauncher()
+	launcher := newTestLauncher(t)
 	dir := t.TempDir()
 
 	// A malicious title that tries to create a file via command injection
@@ -823,7 +823,7 @@ func TestLaunch_ShellInjectionTitle(t *testing.T) {
 
 // Test: shell injection via issue body is neutralized end-to-end
 func TestLaunch_ShellInjectionBody(t *testing.T) {
-	launcher := NewLauncher()
+	launcher := newTestLauncher(t)
 	dir := t.TempDir()
 
 	markerFile := filepath.Join(dir, "pwned_body.txt")

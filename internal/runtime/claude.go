@@ -6,14 +6,22 @@ import (
 	"path/filepath"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
+	supclient "github.com/Lincyaw/workbuddy/internal/supervisor/client"
 )
 
-type ClaudeRuntime struct{}
+// ClaudeRuntime executes claude (and the generic shell-style claude-code
+// runtime) by handing the spec off to the local supervisor over IPC. Both
+// SupervisorClient and the registry-level OnAgentStarted hook are populated
+// when the runtime is registered (see RegisterBuiltins / Registry.attach).
+type ClaudeRuntime struct {
+	SupervisorClient *supclient.Client
+	OnAgentStarted   AgentStartedHook
+}
 
 func (r *ClaudeRuntime) Name() string { return config.RuntimeClaudeShot }
 
 func (r *ClaudeRuntime) Start(_ context.Context, agent *config.AgentConfig, task *TaskContext) (Session, error) {
-	return NewProcessSession(r.Name(), agent, task, FindClaudeSessionPath), nil
+	return NewProcessSession(r.SupervisorClient, r.OnAgentStarted, r.Name(), agent, task, FindClaudeSessionPath), nil
 }
 
 func (r *ClaudeRuntime) Launch(ctx context.Context, agent *config.AgentConfig, task *TaskContext) (*Result, error) {

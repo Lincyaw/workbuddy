@@ -231,6 +231,12 @@ type StartAgentRequest struct {
 	Workdir   string            `json:"workdir,omitempty"`
 	Env       map[string]string `json:"env,omitempty"`
 	SessionID string            `json:"session_id,omitempty"`
+	// Stdin, when non-empty, is fed to the child process's stdin. The
+	// supervisor closes stdin once the bytes are drained so callers don't
+	// need to send EOF separately. This is required by the workbuddy
+	// claude runtime, which passes the rendered prompt over stdin instead
+	// of as an argument to avoid shell-metachar concerns.
+	Stdin string `json:"stdin,omitempty"`
 }
 
 // StartAgentResponse is returned by POST /agents.
@@ -241,14 +247,16 @@ type StartAgentResponse struct {
 
 // AgentStatus is the response shape for GET /agents/:id.
 type AgentStatus struct {
-	AgentID   string    `json:"agent_id"`
-	Status    string    `json:"status"`
-	ExitCode  *int      `json:"exit_code,omitempty"`
-	SessionID string    `json:"session_id"`
-	PID       int       `json:"pid"`
-	Runtime   string    `json:"runtime,omitempty"`
-	Workdir   string    `json:"workdir,omitempty"`
-	StartedAt time.Time `json:"started_at"`
+	AgentID    string    `json:"agent_id"`
+	Status     string    `json:"status"`
+	ExitCode   *int      `json:"exit_code,omitempty"`
+	SessionID  string    `json:"session_id"`
+	PID        int       `json:"pid"`
+	Runtime    string    `json:"runtime,omitempty"`
+	Workdir    string    `json:"workdir,omitempty"`
+	StartedAt  time.Time `json:"started_at"`
+	StdoutPath string    `json:"stdout_path,omitempty"`
+	StderrPath string    `json:"stderr_path,omitempty"`
 }
 
 // StartAgent launches a new subprocess. The runtime+args are exec'd as-is;
@@ -276,6 +284,9 @@ func (s *Supervisor) StartAgent(req StartAgentRequest) (*Agent, error) {
 	cmd.Dir = req.Workdir
 	cmd.Stdout = stdoutF
 	cmd.Stderr = stderrF
+	if req.Stdin != "" {
+		cmd.Stdin = strings.NewReader(req.Stdin)
+	}
 	if len(req.Env) > 0 {
 		envv := os.Environ()
 		for k, v := range req.Env {
@@ -367,14 +378,16 @@ func (s *Supervisor) Status(id string) (AgentStatus, bool) {
 	}
 	status, exitCode := a.snapshotStatus()
 	return AgentStatus{
-		AgentID:   a.ID,
-		Status:    status,
-		ExitCode:  exitCode,
-		SessionID: a.SessionID,
-		PID:       a.pid,
-		Runtime:   a.Runtime,
-		Workdir:   a.Workdir,
-		StartedAt: a.StartedAt,
+		AgentID:    a.ID,
+		Status:     status,
+		ExitCode:   exitCode,
+		SessionID:  a.SessionID,
+		PID:        a.pid,
+		Runtime:    a.Runtime,
+		Workdir:    a.Workdir,
+		StartedAt:  a.StartedAt,
+		StdoutPath: a.StdoutPath,
+		StderrPath: a.StderrPath,
 	}, true
 }
 
@@ -389,6 +402,7 @@ func (s *Supervisor) List() []AgentStatus {
 			AgentID: a.ID, Status: status, ExitCode: exitCode,
 			SessionID: a.SessionID, PID: a.pid, Runtime: a.Runtime,
 			Workdir: a.Workdir, StartedAt: a.StartedAt,
+			StdoutPath: a.StdoutPath, StderrPath: a.StderrPath,
 		})
 	}
 	return out

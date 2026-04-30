@@ -59,7 +59,17 @@ func runRuntimeCmd(cmd *cobra.Command, _ []string) error {
 	if err := requireWritable(cmd, "run"); err != nil {
 		return err
 	}
-	return runRuntimeWithOpts(cmd.Context(), opts, launcher.NewLauncher(), cmdStdout(cmd), cmdStderr(cmd))
+	stateDir, err := os.MkdirTemp("", "workbuddy-run-supervisor-")
+	if err != nil {
+		return fmt.Errorf("run: state dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(stateDir) }()
+	supClient, supShutdown, err := launcher.NewInProcessSupervisor(stateDir, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("run: %w", err)
+	}
+	defer supShutdown()
+	return runRuntimeWithOpts(cmd.Context(), opts, launcher.NewLauncher(supClient, nil), cmdStdout(cmd), cmdStderr(cmd))
 }
 
 func parseRunFlags(cmd *cobra.Command) (*runOpts, error) {

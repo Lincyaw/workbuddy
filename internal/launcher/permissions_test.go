@@ -141,7 +141,7 @@ func TestProcessSessionRun_EmitsPermissionEvent(t *testing.T) {
 		Policy:  config.PolicyConfig{Sandbox: "read-only"},
 	}
 
-	session := newProcessSession(config.RuntimeClaudeCode, agent, task, nil)
+	session := newTestProcessSession(t, config.RuntimeClaudeCode, agent, task, nil)
 	events, result, err := collectSessionEvents(t, session)
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -178,7 +178,7 @@ func TestCodexSessionRun_EmitsPermissionEvent(t *testing.T) {
 		Policy:  config.PolicyConfig{Sandbox: "read-only", Approval: "never"},
 		Timeout: 10 * time.Second,
 	}
-	session, err := NewLauncher().Start(context.Background(), agent, task)
+	session, err := newTestLauncher(t).Start(context.Background(), agent, task)
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestCodexSessionRun_DangerBypassesSandboxThroughLauncher(t *testing.T) {
 		Policy:  config.PolicyConfig{Sandbox: "danger-full-access", Approval: "never"},
 		Timeout: 10 * time.Second,
 	}
-	session, err := NewLauncher().Start(context.Background(), agent, task)
+	session, err := newTestLauncher(t).Start(context.Background(), agent, task)
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -292,7 +292,7 @@ func TestCodexSessionRun_DangerFullAccessE2E_FileWrite(t *testing.T) {
 		Policy:  config.PolicyConfig{Sandbox: "danger-full-access", Approval: "never"},
 		Timeout: 2 * time.Minute,
 	}
-	session, err := NewLauncher().Start(context.Background(), agent, task)
+	session, err := newTestLauncher(t).Start(context.Background(), agent, task)
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestClaudeStreamSessionRun_EmitsPermissionEvent(t *testing.T) {
 		Policy:  config.PolicyConfig{Sandbox: "read-only"},
 		Timeout: 10 * time.Second,
 	}
-	session, err := NewLauncher().Start(context.Background(), agent, task)
+	session, err := newTestLauncher(t).Start(context.Background(), agent, task)
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}

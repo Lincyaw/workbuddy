@@ -17,7 +17,7 @@ import (
 // signature, the process runtime must mark Meta[infra_failure] so the
 // reporter renders "Infra Error" instead of "Failure".
 func TestProcessRuntime_RuntimePanicSignatureMarksInfraFailure(t *testing.T) {
-	launcher := NewLauncher()
+	launcher := newTestLauncher(t)
 	task := newTestTask(t)
 
 	// The command emits a Rust-style panic to stderr and exits 101 with
@@ -47,7 +47,7 @@ func TestProcessRuntime_RuntimePanicSignatureMarksInfraFailure(t *testing.T) {
 // downstream. Without this guard, we would over-report infra errors and
 // lose the original FAIL verdict semantics. See AC-5.
 func TestProcessRuntime_GenuineExitNoInfraFailure(t *testing.T) {
-	launcher := NewLauncher()
+	launcher := newTestLauncher(t)
 	task := newTestTask(t)
 
 	agent := &config.AgentConfig{
