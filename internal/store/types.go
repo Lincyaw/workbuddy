@@ -32,8 +32,12 @@ type TaskRecord struct {
 	CompletedAt    time.Time
 	ExitCode       int
 	SessionRefs    string // JSON
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	// SupervisorAgentID links the task to a subprocess managed by the local
+	// supervisor IPC service (issue #234). Empty string means the task does
+	// not (yet) have a supervisor-tracked agent.
+	SupervisorAgentID string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 // WorkerRecord represents a registered worker.

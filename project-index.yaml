@@ -3253,3 +3253,42 @@ requirements:
     tests:
       - cmd/deploy_watch_test.go
     deps: [REQ-062]
+  - id: REQ-096
+    title: Supervisor IPC client + task supervisor_agent_id wiring (foundational slice for #234)
+    description: >
+      Foundational slice toward making the worker stateless w.r.t. agent
+      subprocesses (issue #234). Adds a typed Go client for the supervisor
+      IPC API (`internal/supervisor/client`) covering POST /agents, GET
+      /agents/:id, POST /agents/:id/cancel, and the SSE `/agents/:id/events`
+      stream with from_offset resume semantics. Adds a nullable
+      `supervisor_agent_id` column to the coordinator `task_queue` schema
+      plus an `UpdateTaskSupervisorAgentID` setter so the worker can
+      persist the agent id immediately after a successful POST. Hardens the
+      supervisor events handler so an unknown agent id returns a real HTTP
+      404 (the client maps this to a sentinel ErrAgentNotFound, which the
+      future worker resume path uses to mark the task failed rather than
+      retrying transport errors). The actual worker rewire (replacing
+      `runtime.ProcessSession.Run`'s exec.Cmd path with the IPC client and
+      streaming SSE lines through the existing claude_stream parser) and
+      the codex app-server migration are deferred to follow-up slices so
+      this lands cleanly without two parallel launch paths.
+    priority: P1
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-096-1: `internal/supervisor/client` package exposes StartAgent, Status, Cancel, and StreamEvents; the latter parses SSE `data:` lines into `{offset,line}` and supports `from_offset` resume."
+      - "AC-096-2: client maps a 404 from /agents/:id, /agents/:id/cancel, and /agents/:id/events to a single sentinel ErrAgentNotFound so callers can distinguish 'agent gone' from transport errors."
+      - "AC-096-3: supervisor `/agents/:id/events` returns HTTP 404 when the agent id is unknown rather than an empty 200 SSE stream."
+      - "AC-096-4: coordinator schema migration adds `supervisor_agent_id TEXT NULL` to `task_queue`; existing rows read back as the empty string so older workers writing NULL stay valid."
+      - "AC-096-5: `Store.UpdateTaskSupervisorAgentID(taskID, agentID)` writes the new column and round-trips through GetTask / QueryTasks."
+      - "AC-096-6: client tests cover (a) start + full SSE stream with monotonic offsets, (b) resume from a non-zero from_offset producing only later lines (no duplicates), (c) 404 mapping for Status/Cancel/StreamEvents, (d) Cancel ending a long-sleeping subprocess."
+    code:
+      - internal/supervisor/client/client.go
+      - internal/supervisor/supervisor.go
+      - internal/store/store.go
+      - internal/store/types.go
+    tests:
+      - internal/supervisor/client/client_test.go
+      - internal/store/store_supervisor_agent_id_test.go
+    deps:
+      - REQ-092

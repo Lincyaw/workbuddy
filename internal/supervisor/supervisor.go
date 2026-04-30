@@ -192,8 +192,8 @@ func (s *Supervisor) watchRecovered(a *Agent) {
 	defer ticker.Stop()
 	for range ticker.C {
 		if !s.pidIsAlive(a.pid, a.startTicks) {
-			a.markExited(-1)
 			_ = updateAgentExit(s.db, a.ID, -1)
+			a.markExited(-1)
 			return
 		}
 	}
@@ -343,8 +343,8 @@ func (s *Supervisor) StartAgent(req StartAgentRequest) (*Agent, error) {
 				exitCode = -1
 			}
 		}
-		a.markExited(exitCode)
 		_ = updateAgentExit(s.db, a.ID, exitCode)
+		a.markExited(exitCode)
 	}()
 
 	return a, nil
@@ -566,6 +566,14 @@ func (s *Supervisor) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			fromOffset = n
+		}
+		// Resolve the agent before flipping to streaming response so the
+		// client gets a real 404 rather than an empty 200 stream when the
+		// supervisor doesn't know the id (issue #234 worker resume relies
+		// on this to mark tasks failed instead of pretending in-flight).
+		if _, ok := s.Status(id); !ok {
+			http.Error(w, "agent not found", http.StatusNotFound)
+			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
