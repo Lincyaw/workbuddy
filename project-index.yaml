@@ -3886,3 +3886,35 @@ requirements:
       - web/src/components/DegradedSessionCard.test.tsx
     deps:
       - REQ-105
+
+  - id: REQ-111
+    title: "Live no-DB-row sessions are not flagged degraded (#282)"
+    description: >
+      The auditapi /api/v1/sessions/:id and /api/v1/sessions endpoints
+      distinguish a still-running session whose agent_sessions DB row has
+      not been inserted yet from a real aborted-before-start session by
+      checking metadata.json.Status together with events-v1.jsonl content.
+      When meta.Status == "running" AND events-v1.jsonl is non-empty, the
+      synthesized response carries status="running", degraded=false,
+      exit_code=0. The empty-events / terminal-status cases keep the
+      degraded behavior introduced for REQ-110.
+    rationale: >
+      Issue #282: REQ-110's buildDegradedFromDisk() unconditionally flagged
+      every disk-only session as degraded with status=aborted_before_start,
+      so operators viewing a healthy in-flight session detail page saw a
+      red warning card despite events streaming live to disk. The fix is a
+      pure file-system heuristic so the endpoint stays cheap and testable.
+    priority: P2
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-111-1: GET /api/v1/sessions/:id returns status=running + degraded=false when metadata.json.Status==\"running\" AND events-v1.jsonl is non-empty."
+      - "AC-111-2: GET /api/v1/sessions/:id keeps degraded=true + degraded_reason=no_db_row + status=aborted_before_start when metadata.json.Status==\"running\" AND events-v1.jsonl is empty/missing (the original REQ-110 case)."
+      - "AC-111-3: GET /api/v1/sessions/:id keeps the REQ-110 degraded behavior when metadata.json.Status is terminal (completed/failed/timeout/aborted_before_start)."
+      - "AC-111-4: GET /api/v1/sessions applies the same heuristic when enumerating disk-only sessions — a live in-flight row carries status=running + degraded=false."
+    code:
+      - internal/auditapi/handler.go
+    tests:
+      - internal/auditapi/handler_test.go
+    deps:
+      - REQ-110

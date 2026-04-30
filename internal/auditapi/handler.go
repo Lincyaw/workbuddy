@@ -1160,6 +1160,30 @@ func (h *Handler) listDiskOnlySessions(seen map[string]struct{}) []sessionListRe
 		if !ok {
 			continue
 		}
+		// Issue #282: a session whose DB row hasn't been written yet but is
+		// actively streaming events is *live*, not aborted. Surface it as a
+		// running row so the SPA does not paint a misleading degraded badge.
+		eventsPath := filepath.Join(h.sessionsDir, sessionID, "events-v1.jsonl")
+		if metaStatusRunning(meta.Status) && eventsFileHasContent(eventsPath) {
+			out = append(out, sessionListResponse{
+				SessionID:  sessionID,
+				TaskID:     meta.TaskID,
+				Repo:       meta.Repo,
+				IssueNum:   meta.IssueNum,
+				AgentName:  meta.AgentName,
+				Runtime:    meta.Runtime,
+				WorkerID:   meta.WorkerID,
+				Attempt:    meta.Attempt,
+				Status:     store.TaskStatusRunning,
+				TaskStatus: store.TaskStatusRunning,
+				ExitCode:   0,
+				Duration:   sessionDuration(meta.CreatedAt, nullableMetaTime(meta.ClosedAt)),
+				CreatedAt:  meta.CreatedAt,
+				FinishedAt: nullableMetaTime(meta.ClosedAt),
+				Summary:    meta.Summary,
+			})
+			continue
+		}
 		row := sessionListResponse{
 			SessionID:      sessionID,
 			TaskID:         meta.TaskID,
@@ -1271,6 +1295,31 @@ func (h *Handler) buildDegradedFromDisk(sessionID string) (sessionDetailResponse
 		EventsV1:   filepath.Join(dir, "events-v1.jsonl"),
 	}
 	stderrSummary := readArtifactSummary(stderrPath, 4096)
+	// Issue #282: a session whose DB row hasn't been written yet but is
+	// actively streaming events to events-v1.jsonl is still live. Surface
+	// it as running/non-degraded so the SPA renders the timeline normally
+	// instead of the red "aborted_before_start" warning card.
+	if metaStatusRunning(meta.Status) && eventsFileHasContent(artifactPaths.EventsV1) {
+		return sessionDetailResponse{
+			SessionID:     sessionID,
+			TaskID:        meta.TaskID,
+			Repo:          meta.Repo,
+			IssueNum:      meta.IssueNum,
+			AgentName:     meta.AgentName,
+			Runtime:       meta.Runtime,
+			WorkerID:      meta.WorkerID,
+			Attempt:       meta.Attempt,
+			Status:        store.TaskStatusRunning,
+			ExitCode:      0,
+			Duration:      sessionDuration(meta.CreatedAt, nullableMetaTime(meta.ClosedAt)),
+			CreatedAt:     meta.CreatedAt,
+			FinishedAt:    nullableMetaTime(meta.ClosedAt),
+			Summary:       strings.TrimSpace(meta.Summary),
+			StdoutSummary: readArtifactSummary(stdoutPath, 4096),
+			StderrSummary: stderrSummary,
+			ArtifactPaths: artifactPaths,
+		}, true
+	}
 	summary := strings.TrimSpace(meta.Summary)
 	if summary == "" {
 		summary = synthesizeDegradedSummary(meta, stderrSummary)
@@ -1395,6 +1444,14 @@ func isTerminalSessionStatus(status string) bool {
 		return true
 	}
 	return false
+}
+
+// metaStatusRunning reports whether a metadata.json status field marks the
+// session as still in flight. Issue #282: used together with
+// eventsFileHasContent to distinguish a live no-DB-row session from a real
+// aborted-before-start one.
+func metaStatusRunning(status string) bool {
+	return strings.ToLower(strings.TrimSpace(status)) == store.TaskStatusRunning
 }
 
 // eventsFileHasContent reports whether the events-v1.jsonl artefact at
