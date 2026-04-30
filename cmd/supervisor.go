@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -52,10 +54,30 @@ func runSupervisor(cmd *cobra.Command, _ []string) error {
 
 	log.Printf("supervisor: listening on %s (state %s, grace %s)",
 		sup.SocketPath(), sup.AgentsDir(), grace.Round(time.Millisecond))
+	notifySystemdReady()
 	if err := sup.Serve(ctx); err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}
 	return nil
+}
+
+// notifySystemdReady sends READY=1 to $NOTIFY_SOCKET when running under a
+// Type=notify systemd unit. No-op when NOTIFY_SOCKET is unset (e.g. running
+// directly from a shell or under Type=simple).
+func notifySystemdReady() {
+	sock := os.Getenv("NOTIFY_SOCKET")
+	if sock == "" {
+		return
+	}
+	conn, err := net.Dial("unixgram", sock)
+	if err != nil {
+		log.Printf("supervisor: sd_notify dial %s: %v", sock, err)
+		return
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("READY=1\n")); err != nil {
+		log.Printf("supervisor: sd_notify write: %v", err)
+	}
 }
 
 // supervisorContextWithCancel exposes a context.WithCancel for tests.
