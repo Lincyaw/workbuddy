@@ -14,14 +14,17 @@ var loginPageTemplate = template.Must(template.New("login").Parse(`<!doctype htm
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>workbuddy login</title>
 <style>
-body{font-family:system-ui,sans-serif;max-width:24rem;margin:4rem auto;padding:0 1rem}
+body{font-family:system-ui,sans-serif;max-width:24rem;margin:4rem auto;padding:0 1rem;font-size:16px}
 h1{font-size:1.25rem;margin:0 0 1rem}
 label{display:block;margin:.5rem 0 .25rem}
-input[type=password]{width:100%;padding:.5rem;font:inherit;box-sizing:border-box}
+/* font-size:16px keeps iOS Safari from auto-zooming on focus */
+input[type=password]{width:100%;padding:.5rem;font:inherit;font-size:16px;box-sizing:border-box}
 button{margin-top:1rem;padding:.5rem 1rem;font:inherit;cursor:pointer}
 .error{color:#b00;margin:.5rem 0;font-size:.9rem}
+@media (max-width:480px){body{margin:2rem auto}}
 </style>
 </head>
 <body>
