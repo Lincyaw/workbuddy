@@ -3698,3 +3698,57 @@ requirements:
     deps:
       - REQ-101
       - REQ-104
+  - id: REQ-106
+    title: hook system phase 2 webui — list / detail / invocation timeline / reload (#267)
+    description: >
+      Surface the operator-owned hook system in the dashboard. Adds
+      `/hooks` and `/hooks/:name` SPA routes, a Hooks tab in the top
+      nav, a Reload control with confirm dialog, and a per-hook
+      invocation timeline backed by a new dispatcher ring buffer.
+      Backend exposes `GET /api/v1/hooks` (list), `GET /api/v1/hooks/{name}/invocations`,
+      and `GET /api/v1/hooks/{name}/config` alongside the existing
+      `/status` and `/reload` endpoints.
+    rationale: >
+      Phase 1c (#266) shipped a CLI for `hooks status` / `hooks reload`,
+      but operators running workbuddy through the dashboard had no way
+      to see whether their paging hooks were firing, what they were
+      returning, or why one auto-disabled. The webui surface closes
+      that gap without unlocking online editing — the hooks YAML stays
+      the source of truth.
+    priority: P2
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-106-1: GET /api/v1/hooks returns the same shape as /api/v1/hooks/status (list view + lifetime counters + config_path)."
+      - "AC-106-2: GET /api/v1/hooks/{name}/invocations?limit=N returns the last N (default 20, capped at 100) invocations with started/finished/duration_ms/result/error/event_type/repo/issue_num/stdout/stderr previews; unknown hook returns 404."
+      - "AC-106-3: GET /api/v1/hooks/{name}/config returns the bound hooks YAML so the operator can read the source-of-truth config alongside the runtime view."
+      - "AC-106-4: The dispatcher records every executed invocation (success / failure) and per-hook overflow drops in a 100-entry ring buffer; stdout/stderr previews are truncated at 4096 bytes; previews populate via an optional CapturingAction interface satisfied by both command and webhook actions."
+      - "AC-106-5: SPA route /hooks lists registered hooks with name / events / action type / total calls / failures / error rate / state badge, and offers a Reload button that pops a confirm dialog before POSTing /api/v1/hooks/reload."
+      - "AC-106-6: SPA route /hooks/{name} renders a configuration card, the raw hooks YAML, and the most recent 20 invocations as a collapsible timeline (each row toggles a stdout/stderr preview)."
+      - "AC-106-7: Layout's primary nav exposes a Hooks tab; styles.css carries dedicated responsive overrides so the timeline grid collapses to a stack on narrow screens (≤768px)."
+      - "AC-106-8: vitest covers the HookList component (rows, error rate, click→onSelect) and the HookInvocationTimeline component (empty state, success/failure/overflow chips, expand/collapse, error/no-output hints)."
+    code:
+      - internal/hooks/dispatcher.go
+      - internal/hooks/command.go
+      - internal/hooks/webhook.go
+      - internal/app/hooks_api.go
+      - cmd/coordinator.go
+      - web/src/App.tsx
+      - web/src/components/Layout.tsx
+      - web/src/api/hooks.ts
+      - web/src/components/HookList.tsx
+      - web/src/components/HookInvocationTimeline.tsx
+      - web/src/components/ReloadButton.tsx
+      - web/src/pages/Hooks.tsx
+      - web/src/pages/HookDetail.tsx
+      - web/src/styles.css
+    tests:
+      - internal/hooks/invocations_test.go
+      - internal/app/hooks_api_test.go
+      - web/src/components/HookList.test.tsx
+      - web/src/components/HookInvocationTimeline.test.tsx
+      - web/src/components/Layout.test.tsx
+    deps:
+      - REQ-101
+      - REQ-104
+      - REQ-105

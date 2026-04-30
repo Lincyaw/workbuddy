@@ -142,3 +142,149 @@ func TestHooksAPIStatusReturns503WhenDispatcherMissing(t *testing.T) {
 		t.Fatalf("status=%d want 503", rr.Code)
 	}
 }
+
+func TestHooksAPIInvocationsReturnsRecentEntries(t *testing.T) {
+	enabled := true
+	cfg := &hooks.Config{
+		SchemaVersion: 1,
+		Hooks: []hooks.Hook{{
+			Name:    "h",
+			Enabled: &enabled,
+			Events:  []string{"alert"},
+			Action:  hooks.ActionConfig{Type: "webhook", URL: "https://example.invalid/hook"},
+		}},
+	}
+	d, _, err := hooks.NewDispatcher(cfg, hooks.DefaultActionRegistry())
+	if err != nil {
+		t.Fatalf("dispatcher: %v", err)
+	}
+	api := NewHooksAPI(d, nil, "")
+	// The dispatcher hasn't run anything, so the buffer is empty — we still
+	// expect 200 with an empty invocations array (stable contract for the UI).
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/hooks/h/invocations?limit=5", nil)
+	rr := httptest.NewRecorder()
+	api.HandleInvocations(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp HookInvocationsResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Hook != "h" {
+		t.Fatalf("hook=%q", resp.Hook)
+	}
+	if resp.Limit != 5 {
+		t.Fatalf("limit=%d want 5", resp.Limit)
+	}
+	if resp.Invocations == nil {
+		t.Fatalf("invocations should be a non-nil empty slice for stable JSON shape")
+	}
+}
+
+func TestHooksAPIInvocationsUnknownHookReturns404(t *testing.T) {
+	cfg := &hooks.Config{SchemaVersion: 1}
+	d, _, err := hooks.NewDispatcher(cfg, hooks.DefaultActionRegistry())
+	if err != nil {
+		t.Fatalf("dispatcher: %v", err)
+	}
+	api := NewHooksAPI(d, nil, "")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/hooks/missing/invocations", nil)
+	rr := httptest.NewRecorder()
+	api.HandleInvocations(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status=%d want 404", rr.Code)
+	}
+}
+
+func TestHooksAPIInvocationsLimitValidation(t *testing.T) {
+	enabled := true
+	cfg := &hooks.Config{
+		SchemaVersion: 1,
+		Hooks: []hooks.Hook{{
+			Name:    "h",
+			Enabled: &enabled,
+			Events:  []string{"alert"},
+			Action:  hooks.ActionConfig{Type: "webhook", URL: "https://example.invalid/hook"},
+		}},
+	}
+	d, _, _ := hooks.NewDispatcher(cfg, hooks.DefaultActionRegistry())
+	api := NewHooksAPI(d, nil, "")
+	for _, bad := range []string{"abc", "0", "-1"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/hooks/h/invocations?limit="+bad, nil)
+		rr := httptest.NewRecorder()
+		api.HandleInvocations(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("limit=%q status=%d want 400", bad, rr.Code)
+		}
+	}
+}
+
+func TestHooksAPIConfigReturnsYAMLContents(t *testing.T) {
+	enabled := true
+	yaml := []byte("hooks:\n  - name: h\n    events: [alert]\n    action:\n      type: webhook\n      url: https://example.invalid/hook\n")
+	cfgPath := filepath.Join(t.TempDir(), "hooks.yaml")
+	if err := os.WriteFile(cfgPath, yaml, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg := &hooks.Config{
+		SchemaVersion: 1,
+		Hooks: []hooks.Hook{{
+			Name:    "h",
+			Enabled: &enabled,
+			Events:  []string{"alert"},
+			Action:  hooks.ActionConfig{Type: "webhook", URL: "https://example.invalid/hook"},
+		}},
+	}
+	d, _, _ := hooks.NewDispatcher(cfg, hooks.DefaultActionRegistry())
+	api := NewHooksAPI(d, nil, cfgPath)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/hooks/h/config", nil)
+	rr := httptest.NewRecorder()
+	api.HandleConfig(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp HookConfigResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.Contains(resp.YAML, "name: h") {
+		t.Fatalf("yaml not echoed back: %q", resp.YAML)
+	}
+	if resp.ConfigPath != cfgPath {
+		t.Fatalf("config_path=%q", resp.ConfigPath)
+	}
+}
+
+func TestHooksAPISubtreeRoutesPerHookResource(t *testing.T) {
+	enabled := true
+	cfg := &hooks.Config{
+		SchemaVersion: 1,
+		Hooks: []hooks.Hook{{
+			Name:    "h",
+			Enabled: &enabled,
+			Events:  []string{"alert"},
+			Action:  hooks.ActionConfig{Type: "webhook", URL: "https://example.invalid/hook"},
+		}},
+	}
+	d, _, _ := hooks.NewDispatcher(cfg, hooks.DefaultActionRegistry())
+	api := NewHooksAPI(d, nil, "")
+
+	// /api/v1/hooks/h/invocations must reach HandleInvocations through the
+	// subtree dispatcher (HandleHookSubtree).
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/hooks/h/invocations", nil)
+	rr := httptest.NewRecorder()
+	api.HandleHookSubtree(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("invocations: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// Unknown subresource → 404.
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/hooks/h/garbage", nil)
+	rr = httptest.NewRecorder()
+	api.HandleHookSubtree(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown subresource: status=%d", rr.Code)
+	}
+}

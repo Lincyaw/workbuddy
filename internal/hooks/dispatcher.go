@@ -16,6 +16,23 @@ const channelCapacity = 1024
 // DefaultHookTimeout is applied to actions that don't override `timeout:`.
 const DefaultHookTimeout = 5 * time.Second
 
+// invocationBufferSize bounds the per-hook invocation history. 100 is enough
+// to comfortably span a typical 24h window for the webui timeline view while
+// keeping the worst-case footprint trivial (each Invocation is at most ~8KB
+// with two preview slices).
+const invocationBufferSize = 100
+
+// invocationPreviewLimit caps the bytes copied into Invocation.Stdout/Stderr
+// so a chatty hook can't bloat the in-memory ring buffer.
+const invocationPreviewLimit = 4096
+
+// Invocation result codes used in the per-hook history surface.
+const (
+	InvocationResultSuccess  = "success"
+	InvocationResultFailure  = "failure"
+	InvocationResultOverflow = "overflow"
+)
+
 // AutoDisableThreshold is the consecutive failure count that trips a hook
 // into the disabled state. Per design (docs/decisions/2026-04-30-hook-system.md)
 // no half-open probing — operator must `workbuddy hooks reload` to re-enable.
@@ -41,10 +58,50 @@ type boundHook struct {
 	failureCount    uint64
 	filteredCount   uint64
 	disabledDrops   uint64
+	overflowCount   uint64
 	durationSumNs   uint64
 	durationCount   uint64
 	durationBuckets [hookDurationBucketCount]uint64
 	lastInvokedAt   time.Time
+
+	invocations    []Invocation // ring buffer, oldest first
+	invocationsLen int          // populated entries (≤ cap)
+	invocationsIdx int          // next write slot
+}
+
+// Invocation is a single execution attempt against a hook, retained in the
+// per-hook ring buffer and surfaced through the webui timeline. For overflow
+// drops StartedAt == FinishedAt and no action runs — the entry is recorded
+// purely so operators can see "we lost an event here".
+type Invocation struct {
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at"`
+	DurationNs int64     `json:"duration_ns"`
+	Result     string    `json:"result"` // success | failure | overflow
+	Error      string    `json:"error,omitempty"`
+	EventType  string    `json:"event_type,omitempty"`
+	Repo       string    `json:"repo,omitempty"`
+	IssueNum   int       `json:"issue_num,omitempty"`
+	Stdout     string    `json:"stdout,omitempty"`
+	Stderr     string    `json:"stderr,omitempty"`
+}
+
+// CapturingAction is the optional Action extension the dispatcher uses to
+// populate Invocation.Stdout / Invocation.Stderr. Actions that don't
+// implement it (or that return empty captures) just leave the previews
+// blank; the dispatcher falls back to plain Execute.
+type CapturingAction interface {
+	Action
+	Capture(ctx context.Context, ev Event, payload []byte) ActionCapture
+}
+
+// ActionCapture is the textual view of one action invocation. Stdout/Stderr
+// are truncated to invocationPreviewLimit bytes by the dispatcher before
+// landing in the ring buffer.
+type ActionCapture struct {
+	Stdout []byte
+	Stderr []byte
+	Err    error
 }
 
 // hookDurationBuckets defines the histogram bucket upper bounds (seconds).
@@ -285,6 +342,19 @@ func (d *Dispatcher) fanOut(ev Event) {
 		default:
 			d.dropped.Add(1)
 			d.logger.Printf("hooks: hook %q queue full, dropping event %s", b.hook.Name, ev.Type)
+			now := time.Now()
+			b.mu.Lock()
+			b.overflowCount++
+			b.appendInvocationLocked(Invocation{
+				StartedAt:  now,
+				FinishedAt: now,
+				Result:     InvocationResultOverflow,
+				Error:      "per-hook queue full; event dropped",
+				EventType:  ev.Type,
+				Repo:       ev.Repo,
+				IssueNum:   ev.IssueNum,
+			})
+			b.mu.Unlock()
 		}
 	}
 }
@@ -317,30 +387,55 @@ func (d *Dispatcher) executeOne(ctx context.Context, b *boundHook, ev Event) {
 	}
 	start := time.Now()
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	err = b.action.Execute(runCtx, ev, payload)
+	var stdoutPreview, stderrPreview []byte
+	if capturing, ok := b.action.(CapturingAction); ok {
+		captured := capturing.Capture(runCtx, ev, payload)
+		err = captured.Err
+		stdoutPreview = truncateBytes(captured.Stdout, invocationPreviewLimit)
+		stderrPreview = truncateBytes(captured.Stderr, invocationPreviewLimit)
+	} else {
+		err = b.action.Execute(runCtx, ev, payload)
+	}
 	cancel()
-	elapsed := time.Since(start)
+	finishedAt := time.Now()
+	elapsed := finishedAt.Sub(start)
+
+	inv := Invocation{
+		StartedAt:  start,
+		FinishedAt: finishedAt,
+		DurationNs: elapsed.Nanoseconds(),
+		EventType:  ev.Type,
+		Repo:       ev.Repo,
+		IssueNum:   ev.IssueNum,
+		Stdout:     string(stdoutPreview),
+		Stderr:     string(stderrPreview),
+	}
 
 	if err == nil {
+		inv.Result = InvocationResultSuccess
 		b.mu.Lock()
 		b.failures = 0
 		b.lastErr = ""
 		b.successCount++
-		b.lastInvokedAt = time.Now()
+		b.lastInvokedAt = finishedAt
 		b.observeDurationLocked(elapsed)
+		b.appendInvocationLocked(inv)
 		b.mu.Unlock()
 		return
 	}
 
 	d.logger.Printf("hooks: hook %q action %s failed: %v", b.hook.Name, b.action.Type(), err)
 
+	inv.Result = InvocationResultFailure
+	inv.Error = err.Error()
 	b.mu.Lock()
 	b.failures++
 	b.lastErr = err.Error()
 	b.failureCount++
-	b.lastFailureAt = time.Now()
-	b.lastInvokedAt = b.lastFailureAt
+	b.lastFailureAt = finishedAt
+	b.lastInvokedAt = finishedAt
 	b.observeDurationLocked(elapsed)
+	b.appendInvocationLocked(inv)
 	tripped := false
 	if !b.disabled && b.failures >= AutoDisableThreshold {
 		b.disabled = true
@@ -352,6 +447,48 @@ func (d *Dispatcher) executeOne(ctx context.Context, b *boundHook, ev Event) {
 	if tripped {
 		d.emitDisabled(b.hook.Name, lastErr)
 	}
+}
+
+// truncateBytes copies up to limit bytes from src and returns nil for empty
+// inputs so JSON omitempty actually kicks in.
+func truncateBytes(src []byte, limit int) []byte {
+	if len(src) == 0 {
+		return nil
+	}
+	if len(src) > limit {
+		out := make([]byte, limit)
+		copy(out, src[:limit])
+		return out
+	}
+	out := make([]byte, len(src))
+	copy(out, src)
+	return out
+}
+
+// appendInvocationLocked appends inv to the ring buffer. Caller must hold b.mu.
+func (b *boundHook) appendInvocationLocked(inv Invocation) {
+	if b.invocations == nil {
+		b.invocations = make([]Invocation, invocationBufferSize)
+	}
+	b.invocations[b.invocationsIdx] = inv
+	b.invocationsIdx = (b.invocationsIdx + 1) % invocationBufferSize
+	if b.invocationsLen < invocationBufferSize {
+		b.invocationsLen++
+	}
+}
+
+// snapshotInvocationsLocked copies the ring buffer in oldest→newest order.
+// Caller must hold b.mu.
+func (b *boundHook) snapshotInvocationsLocked() []Invocation {
+	if b.invocationsLen == 0 {
+		return nil
+	}
+	out := make([]Invocation, 0, b.invocationsLen)
+	start := (b.invocationsIdx - b.invocationsLen + invocationBufferSize) % invocationBufferSize
+	for i := 0; i < b.invocationsLen; i++ {
+		out = append(out, b.invocations[(start+i)%invocationBufferSize])
+	}
+	return out
 }
 
 // emitDisabled forwards a hook_disabled event to the eventlog (if an emitter
@@ -394,6 +531,7 @@ type HookStats struct {
 	Failures        uint64
 	Filtered        uint64
 	DisabledDrops   uint64
+	Overflow        uint64
 	ConsecutiveFail int
 	LastError       string
 	LastFailureAt   time.Time
@@ -430,6 +568,7 @@ func (d *Dispatcher) Stats() []HookStats {
 			Failures:        b.failureCount,
 			Filtered:        b.filteredCount,
 			DisabledDrops:   b.disabledDrops,
+			Overflow:        b.overflowCount,
 			ConsecutiveFail: b.failures,
 			LastError:       b.lastErr,
 			LastFailureAt:   b.lastFailureAt,
@@ -442,6 +581,34 @@ func (d *Dispatcher) Stats() []HookStats {
 		out = append(out, stats)
 	}
 	return out
+}
+
+// Invocations returns the recorded executions for hookName in newest-first
+// order, capped at limit (≤ invocationBufferSize). limit ≤ 0 returns the
+// full retained history. The second return value reports whether a hook
+// with that name is currently bound — distinguishes "empty history" from
+// "hook not registered" for HTTP 404s.
+func (d *Dispatcher) Invocations(hookName string, limit int) ([]Invocation, bool) {
+	if d == nil {
+		return nil, false
+	}
+	for _, b := range d.hooks {
+		if b.hook.Name != hookName {
+			continue
+		}
+		b.mu.Lock()
+		snap := b.snapshotInvocationsLocked()
+		b.mu.Unlock()
+		// Reverse to newest-first.
+		for i, j := 0, len(snap)-1; i < j; i, j = i+1, j-1 {
+			snap[i], snap[j] = snap[j], snap[i]
+		}
+		if limit > 0 && len(snap) > limit {
+			snap = snap[:limit]
+		}
+		return snap, true
+	}
+	return nil, false
 }
 
 // Reload swaps the dispatcher's hook bindings. Called by `workbuddy hooks
@@ -518,4 +685,3 @@ func (d *Dispatcher) PublishFromRaw(eventType, repo string, issueNum int, payloa
 		Payload:  []byte(payloadJSON),
 	})
 }
-

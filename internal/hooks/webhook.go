@@ -4,11 +4,17 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"regexp"
 	"strings"
 )
+
+// webhookCaptureLimit caps how many response-body bytes the dispatcher
+// retains for the invocation timeline. 4 KiB is enough to render a JSON
+// error and short-circuit on overly chatty endpoints.
+const webhookCaptureLimit = 4096
 
 // httpClientFactory exists so tests can swap in an httptest-backed client.
 var httpClientFactory = func() *http.Client { return http.DefaultClient }
@@ -27,10 +33,17 @@ func (w *WebhookAction) Type() string { return ActionTypeWebhook }
 
 // Execute sends the HTTP request and returns an error for non-2xx responses
 // or transport-level failures (including context cancellation).
-func (w *WebhookAction) Execute(ctx context.Context, _ Event, payload []byte) error {
+func (w *WebhookAction) Execute(ctx context.Context, ev Event, payload []byte) error {
+	return w.Capture(ctx, ev, payload).Err
+}
+
+// Capture implements CapturingAction so the dispatcher records the HTTP
+// status line + a short response-body preview in the invocation timeline.
+// Stdout receives "HTTP <status>\n<body>"; Stderr is unused.
+func (w *WebhookAction) Capture(ctx context.Context, _ Event, payload []byte) ActionCapture {
 	req, err := http.NewRequestWithContext(ctx, w.method, w.url, bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("hooks: webhook build request: %w", err)
+		return ActionCapture{Err: fmt.Errorf("hooks: webhook build request: %w", err)}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range w.headers {
@@ -38,13 +51,24 @@ func (w *WebhookAction) Execute(ctx context.Context, _ Event, payload []byte) er
 	}
 	resp, err := w.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("hooks: webhook %s: %w", w.url, err)
+		return ActionCapture{Err: fmt.Errorf("hooks: webhook %s: %w", w.url, err)}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, webhookCaptureLimit+1))
+	truncated := false
+	if len(body) > webhookCaptureLimit {
+		body = body[:webhookCaptureLimit]
+		truncated = true
+	}
+	stdout := append([]byte(fmt.Sprintf("HTTP %d %s\n", resp.StatusCode, resp.Status)), body...)
+	if truncated {
+		stdout = append(stdout, []byte("\n... (truncated)")...)
+	}
+	out := ActionCapture{Stdout: stdout}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("hooks: webhook %s: status %d", w.url, resp.StatusCode)
+		out.Err = fmt.Errorf("hooks: webhook %s: status %d", w.url, resp.StatusCode)
 	}
-	return nil
+	return out
 }
 
 func buildWebhookAction(h *Hook) (Action, []string, error) {
