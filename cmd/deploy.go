@@ -46,17 +46,22 @@ var (
 )
 
 type deployInstallOpts struct {
-	name             string
-	scope            string
-	binaryPath       string
-	workingDirectory string
-	systemd          bool
-	description      string
-	env              []string
-	envFiles         []string
-	enable           bool
-	start            bool
-	commandArgs      []string
+	name                string
+	scope               string
+	binaryPath          string
+	workingDirectory    string
+	systemd             bool
+	description         string
+	env                 []string
+	envFiles            []string
+	enable              bool
+	start               bool
+	commandArgs         []string
+	enableUpdater       bool
+	updaterRepo         string
+	updaterInterval     string
+	updaterRestartUnits []string
+	updaterName         string
 }
 
 type deployLookupOpts struct {
@@ -209,6 +214,11 @@ func init() {
 	deployInstallCmd.Flags().StringArray("env-file", nil, "Environment file for the service (repeatable)")
 	deployInstallCmd.Flags().Bool("enable", true, "Enable the systemd unit after writing it")
 	deployInstallCmd.Flags().Bool("start", true, "Start the systemd unit after writing it")
+	deployInstallCmd.Flags().Bool("enable-updater", false, "Also install and enable the workbuddy-updater.service systemd user unit that runs `deploy watch` to pull releases from GitHub")
+	deployInstallCmd.Flags().String("updater-repo", defaultUpgradeRepo, "GitHub repository in OWNER/NAME form used by the updater unit (only consulted with --enable-updater)")
+	deployInstallCmd.Flags().String("updater-interval", "5m", "Poll interval used by the updater unit (only consulted with --enable-updater)")
+	deployInstallCmd.Flags().StringSlice("updater-restart-units", []string{"workbuddy-coordinator.service", "workbuddy-worker.service"}, "systemd unit name(s) the updater should restart after a successful upgrade (only consulted with --enable-updater)")
+	deployInstallCmd.Flags().String("updater-name", "workbuddy-updater", "Service name used for the updater unit (only consulted with --enable-updater)")
 
 	deployListCmd.Flags().String("scope", defaultDeployListScope, "Deployment scope: all, user, or system")
 	addOutputFormatFlag(deployListCmd)
@@ -352,19 +362,29 @@ func parseDeployInstallFlags(cmd *cobra.Command, args []string) (*deployInstallO
 	envFiles, _ := cmd.Flags().GetStringArray("env-file")
 	enable, _ := cmd.Flags().GetBool("enable")
 	start, _ := cmd.Flags().GetBool("start")
+	enableUpdater, _ := cmd.Flags().GetBool("enable-updater")
+	updaterRepo, _ := cmd.Flags().GetString("updater-repo")
+	updaterInterval, _ := cmd.Flags().GetString("updater-interval")
+	updaterRestartUnits, _ := cmd.Flags().GetStringSlice("updater-restart-units")
+	updaterName, _ := cmd.Flags().GetString("updater-name")
 
 	return &deployInstallOpts{
-		name:             strings.TrimSpace(name),
-		scope:            strings.TrimSpace(scope),
-		binaryPath:       strings.TrimSpace(binaryPath),
-		workingDirectory: strings.TrimSpace(workingDir),
-		systemd:          systemd,
-		description:      strings.TrimSpace(description),
-		env:              envVars,
-		envFiles:         trimStringSlice(envFiles),
-		enable:           enable,
-		start:            start,
-		commandArgs:      append([]string(nil), args...),
+		name:                strings.TrimSpace(name),
+		scope:               strings.TrimSpace(scope),
+		binaryPath:          strings.TrimSpace(binaryPath),
+		workingDirectory:    strings.TrimSpace(workingDir),
+		systemd:             systemd,
+		description:         strings.TrimSpace(description),
+		env:                 envVars,
+		envFiles:            trimStringSlice(envFiles),
+		enable:              enable,
+		start:               start,
+		commandArgs:         append([]string(nil), args...),
+		enableUpdater:       enableUpdater,
+		updaterRepo:         strings.TrimSpace(updaterRepo),
+		updaterInterval:     strings.TrimSpace(updaterInterval),
+		updaterRestartUnits: trimStringSlice(updaterRestartUnits),
+		updaterName:         strings.TrimSpace(updaterName),
 	}, nil
 }
 
@@ -476,6 +496,11 @@ func runDeployInstallWithOpts(ctx context.Context, opts *deployInstallOpts, stdo
 	}
 
 	if manifest.Systemd == nil {
+		if opts.enableUpdater {
+			if err := installUpdaterUnit(ctx, opts, scope, scopePaths, binaryPath, workingDir, stdout); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 
@@ -501,6 +526,113 @@ func runDeployInstallWithOpts(ctx context.Context, opts *deployInstallOpts, stdo
 		if _, err := fmt.Fprintf(stdout, "started %s\n", serviceName); err != nil {
 			return fmt.Errorf("deploy install: write output: %w", err)
 		}
+	}
+	if opts.enableUpdater {
+		if err := installUpdaterUnit(ctx, opts, scope, scopePaths, binaryPath, workingDir, stdout); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// installUpdaterUnit writes the workbuddy-updater.service systemd unit, runs
+// daemon-reload, and enables + starts it. The updater runs `workbuddy deploy
+// watch` so it pulls new releases on a schedule (Phase 2.3 of #224). It
+// reuses the same scope/EnvironmentFile as the main install so the user can
+// keep a single env file containing the GitHub token used for release reads.
+func installUpdaterUnit(
+	ctx context.Context,
+	opts *deployInstallOpts,
+	scope string,
+	scopePaths *deployScopePaths,
+	binaryPath, workingDir string,
+	stdout io.Writer,
+) error {
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("deploy install: --enable-updater requires Linux")
+	}
+	updaterName := opts.updaterName
+	if updaterName == "" {
+		updaterName = "workbuddy-updater"
+	}
+	if !deployNamePattern.MatchString(updaterName) {
+		return fmt.Errorf("deploy install: invalid --updater-name %q", updaterName)
+	}
+	repo := opts.updaterRepo
+	if repo == "" {
+		repo = defaultUpgradeRepo
+	}
+	if !strings.Contains(repo, "/") {
+		return fmt.Errorf("deploy install: --updater-repo must be owner/name, got %q", repo)
+	}
+	interval := opts.updaterInterval
+	if interval == "" {
+		interval = "5m"
+	}
+	if _, err := time.ParseDuration(interval); err != nil {
+		return fmt.Errorf("deploy install: invalid --updater-interval %q: %w", interval, err)
+	}
+	restartUnits := trimStringSlice(opts.updaterRestartUnits)
+
+	watchArgs := []string{
+		"deploy", "watch",
+		"--repo", repo,
+		"--interval", interval,
+		"--systemctl-scope", scope,
+	}
+	if len(restartUnits) > 0 {
+		watchArgs = append(watchArgs, "--restart-units", strings.Join(restartUnits, ","))
+	}
+	execArgs := append([]string{binaryPath}, watchArgs...)
+	for _, arg := range execArgs {
+		if strings.ContainsRune(arg, '\n') {
+			return fmt.Errorf("deploy install: updater command arguments may not contain newlines")
+		}
+	}
+
+	unitPath := filepath.Join(scopePaths.unitDir, updaterName+".service")
+	description := fmt.Sprintf("Workbuddy %s (deploy watch)", updaterName)
+
+	var b strings.Builder
+	b.WriteString("[Unit]\n")
+	fmt.Fprintf(&b, "Description=%s\n", escapeUnitValue(description))
+	b.WriteString("After=network-online.target\n")
+	b.WriteString("Wants=network-online.target\n\n")
+
+	b.WriteString("[Service]\n")
+	b.WriteString("Type=simple\n")
+	fmt.Fprintf(&b, "WorkingDirectory=%s\n", systemdSingleValue(workingDir))
+	fmt.Fprintf(&b, "ExecStart=%s\n", joinSystemdCommand(execArgs))
+	b.WriteString("Restart=always\n")
+	b.WriteString("RestartSec=30s\n")
+	for _, envFile := range trimStringSlice(opts.envFiles) {
+		fmt.Fprintf(&b, "EnvironmentFile=%s\n", systemdSingleValue(envFile))
+	}
+
+	b.WriteString("\n[Install]\n")
+	fmt.Fprintf(&b, "WantedBy=%s\n", scopePaths.wantedBy)
+
+	if err := writeTextFileAtomic(unitPath, b.String(), 0o644); err != nil {
+		return fmt.Errorf("deploy install: write updater unit: %w", err)
+	}
+	if _, err := fmt.Fprintf(stdout, "wrote updater unit %s\n", unitPath); err != nil {
+		return fmt.Errorf("deploy install: write output: %w", err)
+	}
+	if err := deployRunSystemctl(ctx, scope, "daemon-reload"); err != nil {
+		return fmt.Errorf("deploy install: %w", err)
+	}
+	updaterServiceName := updaterName + ".service"
+	if err := deployRunSystemctl(ctx, scope, "enable", updaterServiceName); err != nil {
+		return fmt.Errorf("deploy install: %w", err)
+	}
+	if _, err := fmt.Fprintf(stdout, "enabled %s\n", updaterServiceName); err != nil {
+		return fmt.Errorf("deploy install: write output: %w", err)
+	}
+	if err := deployRunSystemctl(ctx, scope, "start", updaterServiceName); err != nil {
+		return fmt.Errorf("deploy install: %w", err)
+	}
+	if _, err := fmt.Fprintf(stdout, "started %s\n", updaterServiceName); err != nil {
+		return fmt.Errorf("deploy install: write output: %w", err)
 	}
 	return nil
 }

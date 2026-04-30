@@ -14,3 +14,4 @@
 ## Compatibility
 
 - [ ] schema/API 兼容（只加列、加端点，不删/不改字段）
+- [ ] 涉及 systemd unit / deploy 命令的改动已更新对应文档

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -1616,4 +1617,140 @@ func buildReleaseArchive(t *testing.T, binaryContent string) []byte {
 		t.Fatalf("close gzip writer: %v", err)
 	}
 	return archive.Bytes()
+}
+
+func TestRunDeployInstallEnableUpdaterWritesUnitAndEnables(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd deployment is only supported on Linux")
+	}
+
+	tempDir := t.TempDir()
+	homeDir := filepath.Join(tempDir, "home")
+	configDir := filepath.Join(tempDir, "xdg")
+	repoDir := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	t.Chdir(repoDir)
+
+	sourceBinary := filepath.Join(tempDir, "current-workbuddy")
+	if err := os.WriteFile(sourceBinary, []byte("binary-v1"), 0o755); err != nil {
+		t.Fatalf("write source binary: %v", err)
+	}
+
+	restore := overrideDeployGlobals(t, sourceBinary)
+	defer restore()
+
+	var systemctlCalls []string
+	deployRunSystemctl = func(_ context.Context, scope string, args ...string) error {
+		systemctlCalls = append(systemctlCalls, scope+":"+strings.Join(args, " "))
+		return nil
+	}
+
+	var stdout bytes.Buffer
+	err := runDeployInstallWithOpts(context.Background(), &deployInstallOpts{
+		name:                "workbuddy",
+		scope:               "user",
+		systemd:             false,
+		envFiles:            []string{"/home/ddq/.config/workbuddy/worker.env"},
+		enableUpdater:       true,
+		updaterRepo:         "Lincyaw/workbuddy",
+		updaterInterval:     "5m",
+		updaterRestartUnits: []string{"workbuddy-coordinator.service", "workbuddy-worker.service"},
+		updaterName:         "workbuddy-updater",
+	}, &stdout)
+	if err != nil {
+		t.Fatalf("runDeployInstallWithOpts: %v", err)
+	}
+
+	updaterPath := filepath.Join(configDir, "systemd", "user", "workbuddy-updater.service")
+	unitBytes, err := os.ReadFile(updaterPath)
+	if err != nil {
+		t.Fatalf("read updater unit: %v", err)
+	}
+	unit := string(unitBytes)
+	for _, want := range []string{
+		"Type=simple\n",
+		"Restart=always\n",
+		"RestartSec=30s\n",
+		"WantedBy=default.target\n",
+		"EnvironmentFile=/home/ddq/.config/workbuddy/worker.env\n",
+		`"deploy" "watch" "--repo" "Lincyaw/workbuddy" "--interval" "5m" "--systemctl-scope" "user" "--restart-units" "workbuddy-coordinator.service,workbuddy-worker.service"`,
+	} {
+		if !strings.Contains(unit, want) {
+			t.Fatalf("updater unit missing %q:\n%s", want, unit)
+		}
+	}
+
+	gotCalls := strings.Join(systemctlCalls, " | ")
+	wantCalls := "user:daemon-reload | user:enable workbuddy-updater.service | user:start workbuddy-updater.service"
+	if gotCalls != wantCalls {
+		t.Fatalf("systemctl calls = %q, want %q", gotCalls, wantCalls)
+	}
+	if !strings.Contains(stdout.String(), "wrote updater unit ") {
+		t.Fatalf("stdout missing updater unit message: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "enabled workbuddy-updater.service") {
+		t.Fatalf("stdout missing enabled message: %q", stdout.String())
+	}
+}
+
+func TestParseDeployInstallFlagsEnableUpdaterDefaults(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.Flags().AddFlagSet(deployInstallCmd.Flags())
+	if err := cmd.ParseFlags([]string{"--enable-updater"}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	opts, err := parseDeployInstallFlags(cmd, nil)
+	if err != nil {
+		t.Fatalf("parseDeployInstallFlags: %v", err)
+	}
+	if !opts.enableUpdater {
+		t.Fatal("expected enableUpdater true")
+	}
+	if got, want := opts.updaterRepo, "Lincyaw/workbuddy"; got != want {
+		t.Fatalf("updaterRepo = %q, want %q", got, want)
+	}
+	if got, want := opts.updaterInterval, "5m"; got != want {
+		t.Fatalf("updaterInterval = %q, want %q", got, want)
+	}
+	wantUnits := []string{"workbuddy-coordinator.service", "workbuddy-worker.service"}
+	if !reflect.DeepEqual(opts.updaterRestartUnits, wantUnits) {
+		t.Fatalf("updaterRestartUnits = %v, want %v", opts.updaterRestartUnits, wantUnits)
+	}
+	if got, want := opts.updaterName, "workbuddy-updater"; got != want {
+		t.Fatalf("updaterName = %q, want %q", got, want)
+	}
+}
+
+func TestRunDeployInstallEnableUpdaterRejectsBadInterval(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd deployment is only supported on Linux")
+	}
+	tempDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tempDir, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "xdg"))
+	t.Chdir(tempDir)
+
+	sourceBinary := filepath.Join(tempDir, "current-workbuddy")
+	if err := os.WriteFile(sourceBinary, []byte("x"), 0o755); err != nil {
+		t.Fatalf("write source binary: %v", err)
+	}
+	restore := overrideDeployGlobals(t, sourceBinary)
+	defer restore()
+	deployRunSystemctl = func(_ context.Context, _ string, _ ...string) error { return nil }
+
+	err := runDeployInstallWithOpts(context.Background(), &deployInstallOpts{
+		name:            "workbuddy",
+		scope:           "user",
+		enableUpdater:   true,
+		updaterRepo:     "Lincyaw/workbuddy",
+		updaterInterval: "bogus",
+		updaterName:     "workbuddy-updater",
+	}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "invalid --updater-interval") {
+		t.Fatalf("expected invalid --updater-interval error, got %v", err)
+	}
 }
