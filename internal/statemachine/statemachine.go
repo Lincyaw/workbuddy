@@ -322,6 +322,7 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 	if err := sm.ensureWorkflowInstance(wf.Name, event.Repo, event.IssueNum, currentStateName); err != nil {
 		return fmt.Errorf("statemachine: ensure workflow instance: %w", err)
 	}
+	priorStateName := sm.queryPriorWorkflowState(wf.Name, event.Repo, event.IssueNum)
 	if currentState == nil {
 		// REQ #255 scenario B: workflow trigger label is present but no
 		// state label matched. If the issue body declares a depends_on
@@ -388,7 +389,7 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 			}
 		}
 
-		return sm.dispatchStateAgents(ctx, event.Repo, event.IssueNum, wf.Name, currentStateName, currentState, event.Labels)
+		return sm.dispatchStateAgents(ctx, event.Repo, event.IssueNum, wf, priorStateName, currentStateName, currentState, event.Labels)
 	}
 
 	if stateEntryDetected {
@@ -498,7 +499,7 @@ func (sm *StateMachine) evaluateTransitions(ctx context.Context, wf *config.Work
 
 	// If the target state has agents, dispatch them.
 	if sm.stateHasAgents(targetState) {
-		if err := sm.dispatchStateAgents(ctx, event.Repo, event.IssueNum, wf.Name, targetStateName, targetState, event.Labels); err != nil {
+		if err := sm.dispatchStateAgents(ctx, event.Repo, event.IssueNum, wf, currentStateName, targetStateName, targetState, event.Labels); err != nil {
 			return true, err
 		}
 	}
@@ -973,11 +974,12 @@ func (sm *StateMachine) dispatchSingleAgent(ctx context.Context, req DispatchReq
 	return nil
 }
 
-func (sm *StateMachine) dispatchStateAgents(ctx context.Context, repo string, issueNum int, wfName, state string, stateDef *config.State, labels []string) error {
+func (sm *StateMachine) dispatchStateAgents(ctx context.Context, repo string, issueNum int, wf *config.WorkflowConfig, sourceState, state string, stateDef *config.State, labels []string) error {
 	agents := sm.stateAgents(stateDef)
 	if len(agents) == 0 {
 		return nil
 	}
+	wfName := wf.Name
 
 	// Check dependency once for all agents in this state.
 	if blocked, err := sm.isBlockedByDependency(repo, issueNum, agents[0]); err != nil {
@@ -1023,6 +1025,13 @@ func (sm *StateMachine) dispatchStateAgents(ctx context.Context, repo string, is
 			slots[dispatchSlotKey(req)] = req.AgentName
 			requests = append(requests, req)
 		}
+	} else if inherited, err := sm.inheritedRolloutRequests(repo, issueNum, wf, sourceState, state, agents[0]); err != nil {
+		return err
+	} else if len(inherited) > 0 {
+		for _, req := range inherited {
+			slots[dispatchSlotKey(req)] = req.AgentName
+			requests = append(requests, req)
+		}
 	} else {
 		for _, agent := range agents {
 			req := DispatchRequest{
@@ -1063,6 +1072,43 @@ func (sm *StateMachine) dispatchStateAgents(ctx context.Context, repo string, is
 		}
 	}
 	return nil
+}
+
+func (sm *StateMachine) inheritedRolloutRequests(repo string, issueNum int, wf *config.WorkflowConfig, sourceState, targetState, agentName string) ([]DispatchRequest, error) {
+	if sm.store == nil || wf == nil || sourceState == "" || sourceState == targetState {
+		return nil, nil
+	}
+	sourceDef := wf.States[sourceState]
+	if sourceDef == nil || strings.TrimSpace(sourceDef.Join.Strategy) != config.JoinRollouts {
+		return nil, nil
+	}
+	summary, err := sm.store.LatestRolloutGroupSummaryForIssueState(repo, issueNum, wf.Name, sourceState)
+	if err != nil {
+		return nil, fmt.Errorf("statemachine: summarize inherited rollout group: %w", err)
+	}
+	if summary == nil || summary.SuccessCount == 0 {
+		return nil, nil
+	}
+	requests := make([]DispatchRequest, 0, summary.SuccessCount)
+	for _, task := range summary.Tasks {
+		if task.Status != store.TaskStatusCompleted || task.RolloutIndex <= 0 {
+			continue
+		}
+		requests = append(requests, DispatchRequest{
+			Repo:           repo,
+			IssueNum:       issueNum,
+			AgentName:      agentName,
+			Workflow:       wf.Name,
+			State:          targetState,
+			RolloutIndex:   task.RolloutIndex,
+			RolloutsTotal:  task.RolloutsTotal,
+			RolloutGroupID: task.RolloutGroupID,
+		})
+	}
+	sort.Slice(requests, func(i, j int) bool {
+		return requests[i].RolloutIndex < requests[j].RolloutIndex
+	})
+	return requests, nil
 }
 
 // findCurrentState returns the state name and State whose enter_label matches
@@ -1258,6 +1304,9 @@ func (sm *StateMachine) MarkAgentCompleted(repo string, issueNum int, taskID, ag
 				map[string]any{"state": group.state, "issue": issueNum, "join": join, "needs_human": join == config.JoinRollouts})
 			if join == config.JoinRollouts {
 				log.Printf("[statemachine] rollout join failed for %s#%d state=%s group=%s", repo, issueNum, group.state, rolloutGroupID)
+				if err := sm.advanceRolloutFailureToBlocked(repo, issueNum, group.workflow, group.state); err != nil {
+					log.Printf("[statemachine] rollout join needs-human transition failed for %s#%d: %v", repo, issueNum, err)
+				}
 			}
 			sm.publishAlert(alertbus.KindTransitionToFailed, alertbus.SeverityError, repo, issueNum, "", map[string]any{
 				"state":       group.state,
@@ -1267,6 +1316,28 @@ func (sm *StateMachine) MarkAgentCompleted(repo string, issueNum int, taskID, ag
 			sm.recordStuckCandidate(issueKey, currentLabels)
 		}
 	}
+}
+
+func (sm *StateMachine) advanceRolloutFailureToBlocked(repo string, issueNum int, workflowName, sourceState string) error {
+	if sm.workflowManager == nil {
+		return nil
+	}
+	wf, ok := sm.workflows[workflowName]
+	if !ok || wf == nil {
+		return nil
+	}
+	blockedState, ok := wf.States[stateNameBlocked]
+	if !ok || blockedState == nil {
+		return nil
+	}
+	if err := sm.workflowManager.Advance(repo, issueNum, workflowName, sourceState, stateNameBlocked, ""); err != nil {
+		return fmt.Errorf("advance workflow state to blocked: %w", err)
+	}
+	if _, err := sm.store.IncrementTransition(repo, issueNum, sourceState, stateNameBlocked); err != nil {
+		return fmt.Errorf("increment blocked transition: %w", err)
+	}
+	sm.eventlog.Log(eventlog.TypeTransition, repo, issueNum, map[string]string{"from": sourceState, "to": stateNameBlocked})
+	return nil
 }
 
 // evaluateCompletionTransitions replays transition evaluation using current labels

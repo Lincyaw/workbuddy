@@ -2288,6 +2288,22 @@ type RolloutGroupSummary struct {
 	Tasks          []TaskRecord
 }
 
+func (s *Store) LatestRolloutGroupSummaryForIssueState(repo string, issueNum int, workflow, state string) (*RolloutGroupSummary, error) {
+	var groupID string
+	err := s.db.QueryRow(`SELECT rollout_group_id
+		FROM task_queue
+		WHERE repo = ? AND issue_num = ? AND workflow = ? AND state = ? AND rollout_group_id <> ''
+		ORDER BY created_at DESC, rowid DESC
+		LIMIT 1`, repo, issueNum, workflow, state).Scan(&groupID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("store: latest rollout group for issue state: %w", err)
+	}
+	return s.SummarizeRolloutGroup(groupID)
+}
+
 func (s *Store) ListTasksByRolloutGroup(groupID string) ([]TaskRecord, error) {
 	groupID = strings.TrimSpace(groupID)
 	if groupID == "" {

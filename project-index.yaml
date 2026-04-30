@@ -4138,8 +4138,10 @@ requirements:
     tests:
       - internal/store/store_test.go
       - internal/config/loader_test.go
+      - internal/runtime/dev_agent_template_test.go
       - internal/runtime/footer_test.go
       - internal/statemachine/statemachine_test.go
+      - internal/worker/distributed_test.go
       - internal/workspace/workspace_test.go
       - internal/recover/recover_test.go
       - web/src/utils/sessionGroups.test.ts

@@ -82,6 +82,9 @@ func testWorkflow() *config.WorkflowConfig {
 			"done": {
 				EnterLabel: "status:done",
 			},
+			"blocked": {
+				EnterLabel: "status:blocked",
+			},
 			"failed": {
 				EnterLabel: "status:failed",
 			},
@@ -1424,7 +1427,70 @@ func TestRolloutCompletion_TransitionsAfterMinSuccessesAndTerminalSiblings(t *te
 	}
 }
 
-func TestRolloutCompletion_FailedThresholdLogsNeedsHumanIntent(t *testing.T) {
+func TestRolloutCompletion_FansOutReviewTasksPerSuccessfulRollout(t *testing.T) {
+	sm, _, dispatch := newTestSM(t)
+	sm.workflows["dev-flow"].States["developing"].Rollouts = 3
+	sm.workflows["dev-flow"].States["developing"].Join = config.JoinConfig{Strategy: config.JoinRollouts, MinSuccesses: 2}
+
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
+		Type:     poller.EventIssueCreated,
+		Repo:     "test/repo",
+		IssueNum: 178,
+		Labels:   []string{"workbuddy", "status:developing"},
+	}); err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+
+	devReqs := make([]DispatchRequest, 0, 3)
+	for i := 0; i < 3; i++ {
+		devReqs = append(devReqs, <-dispatch)
+	}
+
+	for i, req := range devReqs {
+		taskID := fmt.Sprintf("dev-rollout-%d", i+1)
+		if err := sm.store.InsertTask(store.TaskRecord{
+			ID:             taskID,
+			Repo:           req.Repo,
+			IssueNum:       req.IssueNum,
+			AgentName:      req.AgentName,
+			Workflow:       req.Workflow,
+			State:          req.State,
+			RolloutIndex:   req.RolloutIndex,
+			RolloutsTotal:  req.RolloutsTotal,
+			RolloutGroupID: req.RolloutGroupID,
+			Status:         store.TaskStatusCompleted,
+		}); err != nil {
+			t.Fatalf("InsertTask %d: %v", i+1, err)
+		}
+		sm.MarkAgentCompleted("test/repo", 178, taskID, "dev-agent", 0, []string{"workbuddy", "status:reviewing"})
+	}
+
+	reviewReqs := make([]DispatchRequest, 0, 3)
+	for i := 0; i < 3; i++ {
+		select {
+		case req := <-dispatch:
+			reviewReqs = append(reviewReqs, req)
+		default:
+			t.Fatalf("expected review rollout dispatch %d", i+1)
+		}
+	}
+	for i, req := range reviewReqs {
+		if req.AgentName != "review-agent" {
+			t.Fatalf("review dispatch %d agent = %q, want review-agent", i+1, req.AgentName)
+		}
+		if req.RolloutIndex != i+1 {
+			t.Fatalf("review dispatch %d rollout_index = %d, want %d", i+1, req.RolloutIndex, i+1)
+		}
+		if req.RolloutsTotal != 3 {
+			t.Fatalf("review dispatch %d rollouts_total = %d, want 3", i+1, req.RolloutsTotal)
+		}
+		if req.RolloutGroupID != devReqs[0].RolloutGroupID {
+			t.Fatalf("review dispatch %d group_id = %q, want %q", i+1, req.RolloutGroupID, devReqs[0].RolloutGroupID)
+		}
+	}
+}
+
+func TestRolloutCompletion_FailedThresholdTransitionsWorkflowToBlocked(t *testing.T) {
 	sm, rec, dispatch := newTestSM(t)
 	sm.workflows["dev-flow"].States["developing"].Rollouts = 3
 	sm.workflows["dev-flow"].States["developing"].Join = config.JoinConfig{Strategy: config.JoinRollouts, MinSuccesses: 3}
@@ -1464,8 +1530,8 @@ func TestRolloutCompletion_FailedThresholdLogsNeedsHumanIntent(t *testing.T) {
 		sm.MarkAgentCompleted("test/repo", 79, taskID, "dev-agent", exitCode, []string{"workbuddy", "status:developing"})
 	}
 
-	if got := len(rec.find(eventlog.TypeTransition)); got != 0 {
-		t.Fatalf("transitions = %d, want 0", got)
+	if got := len(rec.find(eventlog.TypeTransition)); got != 1 {
+		t.Fatalf("transitions = %d, want 1 blocked transition", got)
 	}
 	failed := rec.find(eventlog.TypeTransitionToFailed)
 	if len(failed) != 1 {
@@ -1473,6 +1539,16 @@ func TestRolloutCompletion_FailedThresholdLogsNeedsHumanIntent(t *testing.T) {
 	}
 	if payload := fmt.Sprint(failed[0].Payload); !strings.Contains(payload, "needs_human:true") {
 		t.Fatalf("transition_to_failed payload = %s, want needs_human=true", payload)
+	}
+	instances, err := sm.workflowManager.QueryByRepoIssue("test/repo", 79)
+	if err != nil {
+		t.Fatalf("QueryByRepoIssue: %v", err)
+	}
+	if len(instances) != 1 {
+		t.Fatalf("workflow instances = %d, want 1", len(instances))
+	}
+	if instances[0].CurrentState != stateNameBlocked {
+		t.Fatalf("current_state = %q, want %q", instances[0].CurrentState, stateNameBlocked)
 	}
 }
 
