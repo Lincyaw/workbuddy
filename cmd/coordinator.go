@@ -601,8 +601,14 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 	mux.Handle("/metrics", api.WrapAuth(metricsMux))
 
 	hooksAPI := app.NewHooksAPI(hooksDispatcher, evlog, hooksConfigPath)
+	// /api/v1/hooks (list view) and /status both return the same JSON; status
+	// is kept for the existing `workbuddy hooks status` CLI client.
+	mux.Handle("/api/v1/hooks", api.WrapAuth(http.HandlerFunc(hooksAPI.HandleStatus)))
 	mux.Handle("/api/v1/hooks/status", api.WrapAuth(http.HandlerFunc(hooksAPI.HandleStatus)))
 	mux.Handle("/api/v1/hooks/reload", api.WrapAuth(http.HandlerFunc(hooksAPI.HandleReload)))
+	// Per-hook routes (must be registered as a subtree so {name} is path-decoded
+	// inside the handler — Go 1.22 mux patterns don't compose with WrapAuth here).
+	mux.Handle("/api/v1/hooks/", api.WrapAuth(http.HandlerFunc(hooksAPI.HandleHookSubtree)))
 
 	dashboardAPI := auditapi.NewHandler(st)
 	sessionsDir := filepath.Join(filepath.Dir(dbPath), "sessions")

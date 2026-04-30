@@ -830,6 +830,210 @@ table.clickable tbody tr:hover {
   border: 1px solid #f5d68a;
 }
 
+/* Hooks page (issue #267) */
+.wb-hooks-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+.wb-hooks-header h1 { margin: 0; }
+
+.wb-reload-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.4rem 0.9rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  font-weight: 500;
+}
+.wb-reload-btn:hover:not(:disabled) {
+  background: var(--bg);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.wb-reload-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.wb-reload-dialog {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 22, 36, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 1rem;
+}
+.wb-reload-dialog-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.25rem;
+  max-width: 28rem;
+  width: 100%;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+}
+.wb-reload-dialog-card h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+}
+.wb-reload-dialog-card p { margin: 0 0 1rem; }
+.wb-reload-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+.wb-reload-dialog-actions button {
+  padding: 0.4rem 0.9rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.wb-reload-dialog-actions button:hover:not(:disabled) { background: var(--bg); }
+.wb-reload-dialog-actions button.primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.wb-reload-dialog-actions button.primary:hover:not(:disabled) { background: #0860c4; }
+
+.wb-hooks-status {
+  background: #ddf4ff;
+  border: 1px solid #54aeff;
+  color: #0550ae;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+}
+
+.wb-event-chip {
+  display: inline-block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  margin-right: 0.25rem;
+}
+
+.wb-hooks-table th,
+.wb-hooks-table td {
+  vertical-align: middle;
+}
+
+.wb-hook-config-yaml {
+  margin: 0;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.wb-hook-last-error {
+  font-size: 12px;
+  color: var(--danger);
+  word-break: break-word;
+}
+
+/* Hook invocation timeline */
+.wb-hook-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.wb-hook-inv {
+  border-bottom: 1px solid var(--border);
+}
+.wb-hook-inv:last-child { border-bottom: 0; }
+
+.wb-hook-inv-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 6.5rem 11rem 6rem 1fr;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.6rem 0.9rem;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--text);
+}
+.wb-hook-inv-row:hover { background: var(--bg); }
+.wb-hook-inv-row[aria-expanded="true"] { background: var(--bg); }
+
+.wb-hook-result {
+  display: inline-block;
+  text-transform: uppercase;
+  font-weight: 600;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  text-align: center;
+}
+.wb-hook-result-success {
+  background: #dafbe1;
+  color: #0c5d28;
+  border-color: #4ac26b;
+}
+.wb-hook-result-failure {
+  background: #ffebe9;
+  color: #82071e;
+  border-color: #ff8182;
+}
+.wb-hook-result-overflow {
+  background: #fff8c5;
+  color: #7d4e00;
+  border-color: #d4a72c;
+}
+
+.wb-hook-inv-row .ts {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.78rem;
+}
+.wb-hook-inv-row .dur {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.wb-hook-inv-row .evt { overflow: hidden; text-overflow: ellipsis; }
+
+.wb-hook-inv-body {
+  padding: 0 0.9rem 0.9rem 0.9rem;
+  font-size: 0.85rem;
+  background: var(--bg);
+}
+.wb-hook-inv-error {
+  margin-bottom: 0.5rem;
+  color: var(--danger);
+}
+.wb-hook-inv-output { margin-top: 0.5rem; }
+.wb-hook-inv-output pre {
+  margin: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 18rem;
+  overflow: auto;
+}
+
 /* ---------------------------------------------------------------------------
  * Responsive: tablets (481–768px) and phones (≤480px).
  *
@@ -933,6 +1137,17 @@ table.clickable tbody tr:hover {
   .wb-toolbar input { min-width: 0 !important; flex: 1 1 140px; }
 
   .wb-shell { padding: 14px 12px 80px; }
+
+  /* Hooks invocation timeline: collapse the 4-column grid to a stack so
+   * timestamps and metadata don't truncate awkwardly on narrow screens. */
+  .wb-hook-inv-row {
+    grid-template-columns: 5.5rem 1fr;
+    grid-row-gap: 0.25rem;
+  }
+  .wb-hook-inv-row .ts { grid-column: 2; }
+  .wb-hook-inv-row .dur { grid-column: 2; }
+  .wb-hook-inv-row .evt { grid-column: 1 / -1; }
+  .wb-hook-inv-output pre { max-height: 12rem; font-size: 11px; }
 
   /* Login/form inputs: 16px stops iOS Safari from zooming on focus. */
   input[type="text"],

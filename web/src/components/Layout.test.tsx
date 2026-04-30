@@ -44,6 +44,7 @@ describe('Layout responsive shell', () => {
     const labels = Array.from(nav?.querySelectorAll('a') ?? []).map((a) => a.textContent);
     expect(labels).toContain('Dashboard');
     expect(labels).toContain('Sessions');
+    expect(labels).toContain('Hooks');
   });
 });
 

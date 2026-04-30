@@ -11,6 +11,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { href: '/', label: 'Dashboard' },
   { href: '/sessions', label: 'Sessions' },
+  { href: '/hooks', label: 'Hooks' },
 ];
 
 function isActive(currentPath: string, href: string): boolean {

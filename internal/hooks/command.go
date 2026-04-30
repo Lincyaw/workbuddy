@@ -61,6 +61,17 @@ func (c *CommandAction) Run(ctx context.Context, ev Event, payload []byte) Comma
 	return res
 }
 
+// Capture implements CapturingAction so the dispatcher can record stdout /
+// stderr previews in the per-hook invocation timeline.
+func (c *CommandAction) Capture(ctx context.Context, ev Event, payload []byte) ActionCapture {
+	res := c.Run(ctx, ev, payload)
+	return ActionCapture{
+		Stdout: res.Stdout,
+		Stderr: res.Stderr,
+		Err:    res.Err,
+	}
+}
+
 func (c *CommandAction) run(ctx context.Context, ev Event, payload []byte, stdout, stderr io.Writer) CommandResult {
 	start := time.Now()
 	if len(c.argv) == 0 {
