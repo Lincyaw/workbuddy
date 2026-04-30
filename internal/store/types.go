@@ -32,6 +32,9 @@ type TaskRecord struct {
 	CompletedAt    time.Time
 	ExitCode       int
 	SessionRefs    string // JSON
+	RolloutIndex   int
+	RolloutsTotal  int
+	RolloutGroupID string
 	// SupervisorAgentID links the task to a subprocess managed by the local
 	// supervisor IPC service (issue #234). Empty string means the task does
 	// not (yet) have a supervisor-tracked agent.

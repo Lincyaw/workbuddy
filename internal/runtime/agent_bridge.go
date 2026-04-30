@@ -77,6 +77,7 @@ func (r *AgentBridgeRuntime) Start(ctx context.Context, agentCfg *config.AgentCo
 		Backend:  agentCfg.Runtime,
 		Workdir:  task.WorkDir,
 		Prompt:   prompt,
+		Args:     rolloutInvocationArgs(task),
 		Model:    agentCfg.Policy.Model,
 		Sandbox:  agentCfg.Policy.Sandbox,
 		Approval: agentCfg.Policy.Approval,

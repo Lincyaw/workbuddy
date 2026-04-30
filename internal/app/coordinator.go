@@ -61,13 +61,16 @@ type WorkerRegisterRequest struct {
 // TaskPollResponse is returned from GET /api/v1/tasks/poll when a task is
 // claimable.
 type TaskPollResponse struct {
-	TaskID    string   `json:"task_id"`
-	Repo      string   `json:"repo"`
-	IssueNum  int      `json:"issue_num"`
-	AgentName string   `json:"agent_name"`
-	Workflow  string   `json:"workflow,omitempty"`
-	State     string   `json:"state,omitempty"`
-	Roles     []string `json:"roles,omitempty"`
+	TaskID         string   `json:"task_id"`
+	Repo           string   `json:"repo"`
+	IssueNum       int      `json:"issue_num"`
+	AgentName      string   `json:"agent_name"`
+	Workflow       string   `json:"workflow,omitempty"`
+	State          string   `json:"state,omitempty"`
+	RolloutIndex   int      `json:"rollout_index,omitempty"`
+	RolloutsTotal  int      `json:"rollouts_total,omitempty"`
+	RolloutGroupID string   `json:"rollout_group_id,omitempty"`
+	Roles          []string `json:"roles,omitempty"`
 }
 
 // RepoRegisterRequest is the body of POST /api/v1/repos/register.
@@ -638,13 +641,16 @@ func (s *FullCoordinatorServer) claimNextTask(worker *store.WorkerRecord) (*Task
 		"agent_name": task.AgentName,
 	})
 	return &TaskPollResponse{
-		TaskID:    task.ID,
-		Repo:      task.Repo,
-		IssueNum:  task.IssueNum,
-		AgentName: task.AgentName,
-		Workflow:  task.Workflow,
-		State:     task.State,
-		Roles:     append([]string(nil), roles...),
+		TaskID:         task.ID,
+		Repo:           task.Repo,
+		IssueNum:       task.IssueNum,
+		AgentName:      task.AgentName,
+		Workflow:       task.Workflow,
+		State:          task.State,
+		RolloutIndex:   task.RolloutIndex,
+		RolloutsTotal:  task.RolloutsTotal,
+		RolloutGroupID: task.RolloutGroupID,
+		Roles:          append([]string(nil), roles...),
 	}, nil
 }
 

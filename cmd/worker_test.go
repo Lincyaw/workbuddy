@@ -33,7 +33,7 @@ type failingWorkspaceManager struct {
 	err error
 }
 
-func (m *failingWorkspaceManager) Create(_ int, _ string) (string, error) {
+func (m *failingWorkspaceManager) Create(_ int, _ string, _ int) (string, error) {
 	return "", m.err
 }
 

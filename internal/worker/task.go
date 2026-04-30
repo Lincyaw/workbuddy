@@ -13,7 +13,7 @@ type SessionRunner func(ctx context.Context, session runtimepkg.Session, eventsC
 
 // WorkspaceManager owns per-task worktree setup and teardown.
 type WorkspaceManager interface {
-	Create(issueNum int, taskID string) (string, error)
+	Create(issueNum int, taskID string, rolloutIndex int) (string, error)
 	Remove(worktreePath string) error
 }
 
@@ -27,6 +27,9 @@ type Task struct {
 	Context           *runtimepkg.TaskContext
 	Workflow          string
 	State             string
+	RolloutIndex      int
+	RolloutsTotal     int
+	RolloutGroupID    string
 	WorkerID          string
 	Attempt           int
 	Cleanup           func() error

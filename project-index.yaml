@@ -4086,3 +4086,62 @@ requirements:
       - REQ-106
       - REQ-108
       - REQ-110
+
+  - id: REQ-115
+    title: "Coordinator rollout fan-out creates isolated candidate PRs (#292)"
+    description: >
+      Issue #292 phase 1 adds the rollout/map layer to the coordinator:
+      workflow states may fan out a single dev dispatch into 2..5 sibling
+      rollout tasks, each with its own task_queue row, worktree path,
+      branch, and PR suffix/label, while preserving byte-identical
+      single-task behavior when no rollout signal is present. Rollout
+      membership is persisted on task_queue rows (`rollout_index`,
+      `rollouts_total`, `rollout_group_id`), issue labels may override the
+      workflow default via strict literal `rollouts:N`, rollout joins wait
+      on store-backed sibling terminal status, and the minimal sessions UI
+      groups rollout siblings under the parent issue.
+    rationale: >
+      Some tasks benefit from parallel independent attempts before review.
+      Persisting rollout membership in the coordinator layer gives the
+      existing dev→review loop a safe fan-out primitive without inventing a
+      new agent role or synthesis step yet.
+    priority: P1
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-115-1: task_queue migration adds rollout_index, rollouts_total, and rollout_group_id with defaults preserving single-task semantics."
+      - "AC-115-2: workflow state config accepts rollouts plus join.strategy=rollouts/min_successes, and strict issue labels rollouts:2..5 override the workflow default."
+      - "AC-115-3: rollout tasks use isolated worktrees/branches (`.workbuddy/worktrees/issue-N/rollout-K`, `workbuddy/issue-N/rollout-K`) while non-rollout tasks keep the legacy path."
+      - "AC-115-4: runtime prompt synthesis prepends the canonical rollout prelude exactly once for rollout tasks only."
+      - "AC-115-5: rollout joins are store-backed, emit rollout_dispatched/rollout_completed alongside legacy dispatch/completed events, and only advance once all siblings are terminal and the success threshold is met."
+      - "AC-115-6: recover prune-worktrees and the sessions UI understand rollout-specific nested paths / grouping without redesigning the rest of the flow."
+    code:
+      - internal/store/store.go
+      - internal/store/types.go
+      - internal/config/loader.go
+      - internal/config/types.go
+      - internal/config/state_join.go
+      - internal/statemachine/statemachine.go
+      - internal/taskprep/taskprep.go
+      - internal/workspace/workspace.go
+      - internal/recover/recover.go
+      - internal/runtime/template.go
+      - internal/runtime/types.go
+      - internal/worker/distributed.go
+      - internal/worker/task.go
+      - internal/workerclient/client.go
+      - internal/app/coordinator.go
+      - internal/eventlog/eventlog.go
+      - internal/auditapi/handler.go
+      - web/src/utils/sessionGroups.ts
+      - .github/workbuddy/agents/dev-agent.md
+    tests:
+      - internal/store/store_test.go
+      - internal/config/loader_test.go
+      - internal/runtime/dev_agent_template_test.go
+      - internal/runtime/footer_test.go
+      - internal/statemachine/statemachine_test.go
+      - internal/worker/distributed_test.go
+      - internal/workspace/workspace_test.go
+      - internal/recover/recover_test.go
+      - web/src/utils/sessionGroups.test.ts

@@ -227,12 +227,13 @@ func (s *ProcessSession) startRequestFor(spec *CommandSpec) supervisor.StartAgen
 // BuildSpec is the IPC-shaped replacement for the previous BuildCommand:
 // it returns the binary, argv, and optional stdin to hand to the supervisor.
 func (s *ProcessSession) BuildSpec() (*CommandSpec, error) {
+	rolloutArgs := rolloutInvocationArgs(s.Task)
 	if IsClaudeRuntime(s.RuntimeName) && strings.TrimSpace(s.Agent.Prompt) != "" {
 		prompt, err := RenderAgentPrompt(s.Agent.Prompt, s.Task)
 		if err != nil {
 			return nil, err
 		}
-		return claudePromptSpec(prompt, nil, s.Agent.Policy), nil
+		return claudePromptSpec(prompt, rolloutArgs, s.Agent.Policy), nil
 	}
 
 	rendered, err := RenderCommand(s.Agent.Command, s.Task)
@@ -246,7 +247,8 @@ func (s *ProcessSession) BuildSpec() (*CommandSpec, error) {
 				return nil, rawErr
 			}
 			rawPrompt, _, _ := ExtractPrompt(rawRendered)
-			return claudePromptSpec(rawPrompt, args, s.Agent.Policy), nil
+			mergedArgs := append(append([]string{}, rolloutArgs...), args...)
+			return claudePromptSpec(rawPrompt, mergedArgs, s.Agent.Policy), nil
 		}
 	}
 	return &CommandSpec{Binary: "sh", Args: []string{"-c", rendered}}, nil

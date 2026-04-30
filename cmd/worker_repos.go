@@ -95,7 +95,7 @@ type workerWorkspaceSet struct {
 }
 
 type workspaceManager interface {
-	Create(issueNum int, taskID string) (string, error)
+	Create(issueNum int, taskID string, rolloutIndex int) (string, error)
 	Remove(wtPath string) error
 	Prune() error
 }

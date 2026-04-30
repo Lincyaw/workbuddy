@@ -12,6 +12,7 @@ export type SessionRole = 'dev' | 'review' | 'other';
 export interface DecoratedSession extends SessionListItem {
   role: SessionRole;
   cycle: number;
+  rolloutLabel?: string;
 }
 
 export interface SessionGroup {
@@ -42,25 +43,42 @@ function compareCreatedAsc(a: SessionListItem, b: SessionListItem): number {
   return at < bt ? -1 : 1;
 }
 
-// groupSessionsByIssue groups sessions by issue_num and labels each session
-// with a (role, cycle) pair derived from chronological order within the
-// group. Cycle counting per role: the Nth session of a given role is cycle
-// N (1-indexed). This matches the operator UI ordering
+// groupSessionsByIssue groups sessions by (repo, issue_num) and labels each
+// session with a (role, cycle) pair derived from chronological order within
+// the group. Cycle counting per role: the Nth session of a given role is
+// cycle N (1-indexed). This matches the operator UI ordering
 // `dev (cycle 1) → review (cycle 1) → dev (cycle 2) → review (cycle 2)`.
+//
+// Keying on the composite `${repo}#${issue_num}` is required so two repos
+// that happen to share an issue number (e.g. `owner/a#10` vs `owner/b#10`)
+// stay in independent buckets — collapsing them would mis-attribute
+// sessions across repos and break rollout grouping.
 export function groupSessionsByIssue(sessions: SessionListItem[]): SessionGroup[] {
-  const byIssue = new Map<number, SessionListItem[]>();
+  const byIssue = new Map<string, SessionListItem[]>();
   for (const s of sessions) {
-    const arr = byIssue.get(s.issue_num) || [];
+    const key = `${s.repo || ''}#${s.issue_num}`;
+    const arr = byIssue.get(key) || [];
     arr.push(s);
-    byIssue.set(s.issue_num, arr);
+    byIssue.set(key, arr);
   }
 
   const groups: SessionGroup[] = [];
-  for (const [issueNum, items] of byIssue) {
+  for (const [, items] of byIssue) {
+    const issueNum = items[0]?.issue_num ?? 0;
     const sorted = [...items].sort(compareCreatedAsc);
     const roleCounts: Record<SessionRole, number> = { dev: 0, review: 0, other: 0 };
     const decorated: DecoratedSession[] = sorted.map((s) => {
       const role = inferRole(s.agent_name);
+      const rolloutIndex = s.rollout_index || 0;
+      const rolloutsTotal = s.rollouts_total || 0;
+      if (rolloutIndex > 0 && rolloutsTotal > 1) {
+        return {
+          ...s,
+          role,
+          cycle: rolloutIndex,
+          rolloutLabel: `rollout ${rolloutIndex}/${rolloutsTotal}`,
+        };
+      }
       roleCounts[role] += 1;
       return { ...s, role, cycle: roleCounts[role] };
     });

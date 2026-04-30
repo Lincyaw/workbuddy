@@ -188,6 +188,10 @@ func (w *DistributedWorker) ExecuteTask(ctx context.Context, task *workerclient.
 		Agent:            &agentCopy,
 		Context:          launchCtx,
 		Workflow:         task.Workflow,
+		State:            task.State,
+		RolloutIndex:     task.RolloutIndex,
+		RolloutsTotal:    task.RolloutsTotal,
+		RolloutGroupID:   task.RolloutGroupID,
 		WorkerID:         w.deps.WorkerID,
 		WorkspaceManager: w.deps.WorkspaceManager,
 		OnPrepared: func(ctx context.Context, _ Task) {
@@ -380,7 +384,18 @@ func BuildRemoteTaskContext(task *workerclient.Task, reader DistributedIssueRead
 			issue.Labels = append([]string(nil), details.Labels...)
 		}
 	}
-	return &runtimepkg.TaskContext{Issue: issue, Repo: task.Repo, RepoRoot: workDir, WorkDir: workDir, Session: runtimepkg.SessionContext{ID: generateSessionID(task.TaskID)}}
+	return &runtimepkg.TaskContext{
+		Issue:    issue,
+		Repo:     task.Repo,
+		RepoRoot: workDir,
+		WorkDir:  workDir,
+		Rollout: runtimepkg.RolloutContext{
+			Index:   task.RolloutIndex,
+			Total:   task.RolloutsTotal,
+			GroupID: task.RolloutGroupID,
+		},
+		Session: runtimepkg.SessionContext{ID: generateSessionID(task.TaskID)},
+	}
 }
 
 func runRemoteSessionWithWatchdog(

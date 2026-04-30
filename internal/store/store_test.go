@@ -304,6 +304,75 @@ func TestCreateAndReadWrite(t *testing.T) {
 	}
 }
 
+func TestInsertTask_DefaultRolloutColumnsPreserveSingleTaskSemantics(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.InsertTask(TaskRecord{
+		ID:        "task-single",
+		Repo:      "org/repo",
+		IssueNum:  41,
+		AgentName: "dev-agent",
+		Status:    TaskStatusPending,
+	}); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+
+	task, err := s.GetTask("task-single")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if task.RolloutIndex != 0 {
+		t.Fatalf("rollout_index = %d, want 0", task.RolloutIndex)
+	}
+	if task.RolloutsTotal != 1 {
+		t.Fatalf("rollouts_total = %d, want 1", task.RolloutsTotal)
+	}
+	if task.RolloutGroupID != "" {
+		t.Fatalf("rollout_group_id = %q, want empty", task.RolloutGroupID)
+	}
+}
+
+func TestLatestRolloutGroupSummaryForIssueState_ReturnsNewestMatchingGroup(t *testing.T) {
+	s := newTestStore(t)
+
+	insert := func(id, groupID string, rolloutIndex int, status string) {
+		t.Helper()
+		if err := s.InsertTask(TaskRecord{
+			ID:             id,
+			Repo:           "org/repo",
+			IssueNum:       55,
+			AgentName:      "dev-agent",
+			Workflow:       "default",
+			State:          "developing",
+			RolloutIndex:   rolloutIndex,
+			RolloutsTotal:  3,
+			RolloutGroupID: groupID,
+			Status:         status,
+		}); err != nil {
+			t.Fatalf("InsertTask(%s): %v", id, err)
+		}
+	}
+
+	insert("older-1", "group-older", 1, TaskStatusCompleted)
+	insert("older-2", "group-older", 2, TaskStatusFailed)
+	insert("newer-1", "group-newer", 1, TaskStatusCompleted)
+	insert("newer-2", "group-newer", 2, TaskStatusCompleted)
+
+	summary, err := s.LatestRolloutGroupSummaryForIssueState("org/repo", 55, "default", "developing")
+	if err != nil {
+		t.Fatalf("LatestRolloutGroupSummaryForIssueState: %v", err)
+	}
+	if summary == nil {
+		t.Fatal("expected rollout group summary")
+	}
+	if summary.RolloutGroupID != "group-newer" {
+		t.Fatalf("group_id = %q, want group-newer", summary.RolloutGroupID)
+	}
+	if summary.SuccessCount != 2 {
+		t.Fatalf("success_count = %d, want 2", summary.SuccessCount)
+	}
+}
+
 // TestIncrementTransitionAtomic verifies that concurrent IncrementTransition
 // calls produce the correct final count (no lost updates).
 func TestIncrementTransitionAtomic(t *testing.T) {

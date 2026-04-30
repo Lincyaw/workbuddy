@@ -36,13 +36,16 @@ type RegisterRequest struct {
 }
 
 type Task struct {
-	TaskID    string   `json:"task_id"`
-	Repo      string   `json:"repo"`
-	IssueNum  int      `json:"issue_num"`
-	AgentName string   `json:"agent_name"`
-	Workflow  string   `json:"workflow,omitempty"`
-	State     string   `json:"state,omitempty"`
-	Roles     []string `json:"roles,omitempty"`
+	TaskID         string   `json:"task_id"`
+	Repo           string   `json:"repo"`
+	IssueNum       int      `json:"issue_num"`
+	AgentName      string   `json:"agent_name"`
+	Workflow       string   `json:"workflow,omitempty"`
+	State          string   `json:"state,omitempty"`
+	RolloutIndex   int      `json:"rollout_index,omitempty"`
+	RolloutsTotal  int      `json:"rollouts_total,omitempty"`
+	RolloutGroupID string   `json:"rollout_group_id,omitempty"`
+	Roles          []string `json:"roles,omitempty"`
 }
 
 type ResultRequest struct {

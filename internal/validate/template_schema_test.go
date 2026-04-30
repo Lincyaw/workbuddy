@@ -49,6 +49,9 @@ func TestBuildTaskContextSchema_KnownPaths(t *testing.T) {
 		{"RelatedPRs[].Number", FieldKindScalar},
 		{"PR", FieldKindStruct},
 		{"PR.URL", FieldKindScalar},
+		{"Rollout", FieldKindStruct},
+		{"Rollout.Index", FieldKindScalar},
+		{"Rollout.Total", FieldKindScalar},
 		{"Session", FieldKindStruct},
 		{"Session.ID", FieldKindScalar},
 	} {

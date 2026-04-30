@@ -235,6 +235,46 @@ func TestPreparer_AttachesWorkflowStateMetadata(t *testing.T) {
 	}
 }
 
+func TestPreparer_AttachesRolloutMetadata(t *testing.T) {
+	st := newTestStore(t)
+	repoRoot := initGitRepo(t)
+	taskCh := make(chan WorkerTask, 1)
+	p := NewPreparer(st, repoRoot, taskCh, true)
+	p.SetIssueDataReader(fakeReader{})
+
+	agent := &config.AgentConfig{Name: "dev-agent", Role: "dev", Runtime: "codex", Command: "echo"}
+	d := newDecision(agent, 123)
+	d.RolloutIndex = 2
+	d.RolloutsTotal = 3
+	d.RolloutGroupID = "rollout-group-123"
+	if err := p.Prepare(context.Background(), d); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+
+	task := <-taskCh
+	if task.RolloutIndex != 2 || task.RolloutsTotal != 3 || task.RolloutGroupID != "rollout-group-123" {
+		t.Fatalf("worker task rollout metadata = %+v", task)
+	}
+	if task.Context == nil {
+		t.Fatal("expected task context")
+	}
+	if task.Context.Rollout.Index != 2 || task.Context.Rollout.Total != 3 || task.Context.Rollout.GroupID != "rollout-group-123" {
+		t.Fatalf("task context rollout = %+v", task.Context.Rollout)
+	}
+
+	tasks, err := st.QueryTasks(store.TaskStatusPending)
+	if err != nil {
+		t.Fatalf("QueryTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("pending tasks = %d, want 1", len(tasks))
+	}
+	got := tasks[0]
+	if got.RolloutIndex != 2 || got.RolloutsTotal != 3 || got.RolloutGroupID != "rollout-group-123" {
+		t.Fatalf("persisted rollout metadata = %+v", got)
+	}
+}
+
 func TestPreparer_NilAgentReturnsError(t *testing.T) {
 	st := newTestStore(t)
 	p := NewPreparer(st, t.TempDir(), nil, false)

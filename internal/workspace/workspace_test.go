@@ -78,7 +78,7 @@ func TestCreateAndRemove(t *testing.T) {
 	repoDir := initTestRepo(t)
 	mgr := NewManager(repoDir)
 
-	wtPath, err := mgr.Create(42, "task-abc12345-def")
+	wtPath, err := mgr.Create(42, "task-abc12345-def", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -125,11 +125,11 @@ func TestMultipleWorktrees(t *testing.T) {
 	repoDir := initTestRepo(t)
 	mgr := NewManager(repoDir)
 
-	wt1, err := mgr.Create(1, "task-aaaa1111")
+	wt1, err := mgr.Create(1, "task-aaaa1111", 0)
 	if err != nil {
 		t.Fatalf("Create wt1: %v", err)
 	}
-	wt2, err := mgr.Create(2, "task-bbbb2222")
+	wt2, err := mgr.Create(2, "task-bbbb2222", 0)
 	if err != nil {
 		t.Fatalf("Create wt2: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestCreate_StaleMetadataPruneRescue(t *testing.T) {
 	mgr := NewManager(repoDir)
 
 	// Create a worktree.
-	wtPath, err := mgr.Create(1, "task-1")
+	wtPath, err := mgr.Create(1, "task-1", 0)
 	if err != nil {
 		t.Fatalf("Create first: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestCreate_StaleMetadataPruneRescue(t *testing.T) {
 	}
 
 	// Re-create should succeed because prune cleans stale metadata.
-	wtPath2, err := mgr.Create(1, "task-2")
+	wtPath2, err := mgr.Create(1, "task-2", 0)
 	if err != nil {
 		t.Fatalf("Create after stale metadata: %v", err)
 	}
@@ -191,13 +191,13 @@ func TestCreate_ExistingCleanReuse(t *testing.T) {
 	repoDir := initTestRepo(t)
 	mgr := NewManager(repoDir)
 
-	wtPath, err := mgr.Create(1, "task-1")
+	wtPath, err := mgr.Create(1, "task-1", 0)
 	if err != nil {
 		t.Fatalf("Create first: %v", err)
 	}
 
 	// Re-create for the same issue should reuse the existing worktree.
-	wtPath2, err := mgr.Create(1, "task-2")
+	wtPath2, err := mgr.Create(1, "task-2", 0)
 	if err != nil {
 		t.Fatalf("Create reuse: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestCreate_ExistingCleanReuseFastForwardsFromOrigin(t *testing.T) {
 	gitRun(t, repoDir, "push", "-u", "origin", gitCurrentBranch(t, repoDir))
 
 	mgr := NewManager(repoDir)
-	wtPath, err := mgr.Create(1, "task-1")
+	wtPath, err := mgr.Create(1, "task-1", 0)
 	if err != nil {
 		t.Fatalf("Create first: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestCreate_ExistingCleanReuseFastForwardsFromOrigin(t *testing.T) {
 	gitRun(t, cloneDir, "commit", "-am", "update upstream")
 	gitRun(t, cloneDir, "push", "origin", "workbuddy/issue-1")
 
-	wtPath2, err := mgr.Create(1, "task-2")
+	wtPath2, err := mgr.Create(1, "task-2", 0)
 	if err != nil {
 		t.Fatalf("Create reuse: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestCreate_ExistingDirtyRefuse(t *testing.T) {
 	repoDir := initTestRepo(t)
 	mgr := NewManager(repoDir)
 
-	wtPath, err := mgr.Create(1, "task-1")
+	wtPath, err := mgr.Create(1, "task-1", 0)
 	if err != nil {
 		t.Fatalf("Create first: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestCreate_ExistingDirtyRefuse(t *testing.T) {
 	}
 
 	// Re-create should fail because the worktree has uncommitted changes.
-	_, err = mgr.Create(1, "task-2")
+	_, err = mgr.Create(1, "task-2", 0)
 	if err == nil {
 		t.Fatal("expected error for dirty worktree, got nil")
 	}
@@ -281,7 +281,7 @@ func TestCreate_ExistingWrongBranchRefuse(t *testing.T) {
 	repoDir := initTestRepo(t)
 	mgr := NewManager(repoDir)
 
-	wtPath, err := mgr.Create(1, "task-1")
+	wtPath, err := mgr.Create(1, "task-1", 0)
 	if err != nil {
 		t.Fatalf("Create first: %v", err)
 	}
@@ -292,7 +292,7 @@ func TestCreate_ExistingWrongBranchRefuse(t *testing.T) {
 		t.Fatalf("git checkout -b: %s: %v", out, err)
 	}
 
-	_, err = mgr.Create(1, "task-2")
+	_, err = mgr.Create(1, "task-2", 0)
 	if err == nil {
 		t.Fatal("expected error for wrong-branch worktree, got nil")
 	}
@@ -317,7 +317,7 @@ func TestCreate_StaleAddFailure(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	_, err := mgr.Create(1, "task-1")
+	_, err := mgr.Create(1, "task-1", 0)
 	if err == nil {
 		t.Fatal("expected error for invalid existing path, got nil")
 	}
@@ -344,7 +344,7 @@ func TestCreate_ExistingGitRepoButNotRegisteredWorktreeRefuse(t *testing.T) {
 	gitRun(t, wtPath, "commit", "-m", "init nested")
 	gitRun(t, wtPath, "checkout", "-b", "workbuddy/issue-1")
 
-	_, err := mgr.Create(1, "task-1")
+	_, err := mgr.Create(1, "task-1", 0)
 	if err == nil {
 		t.Fatal("expected error for unregistered nested repo, got nil")
 	}
@@ -363,7 +363,7 @@ func TestRemove_RetainsWorktreeWhileSecondSessionActive(t *testing.T) {
 	mgr := NewManager(repoDir)
 
 	// dev-agent acquires
-	wtPath, err := mgr.Create(42, "dev-task")
+	wtPath, err := mgr.Create(42, "dev-task", 0)
 	if err != nil {
 		t.Fatalf("Create (dev): %v", err)
 	}
@@ -372,7 +372,7 @@ func TestRemove_RetainsWorktreeWhileSecondSessionActive(t *testing.T) {
 	}
 
 	// review-agent acquires the same worktree (reuse path)
-	wtPath2, err := mgr.Create(42, "review-task")
+	wtPath2, err := mgr.Create(42, "review-task", 0)
 	if err != nil {
 		t.Fatalf("Create (review): %v", err)
 	}
@@ -414,7 +414,7 @@ func TestRemove_UntrackedPathProceeds(t *testing.T) {
 
 	// First manager creates the worktree.
 	mgrA := NewManager(repoDir)
-	wtPath, err := mgrA.Create(7, "task-a")
+	wtPath, err := mgrA.Create(7, "task-a", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -427,5 +427,26 @@ func TestRemove_UntrackedPathProceeds(t *testing.T) {
 	}
 	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
 		t.Fatalf("worktree not removed by recovery-path Remove: stat err=%v", err)
+	}
+}
+
+func TestCreate_RolloutUsesNestedWorktreeAndBranch(t *testing.T) {
+	repoDir := initTestRepo(t)
+	mgr := NewManager(repoDir)
+
+	wtPath, err := mgr.Create(9, "task-rollout", 2)
+	if err != nil {
+		t.Fatalf("Create rollout: %v", err)
+	}
+	wantPath := filepath.Join(repoDir, ".workbuddy", "worktrees", "issue-9", "rollout-2")
+	if wtPath != wantPath {
+		t.Fatalf("worktree path = %q, want %q", wtPath, wantPath)
+	}
+	branch, err := mgr.gitCurrentBranch(wtPath)
+	if err != nil {
+		t.Fatalf("gitCurrentBranch: %v", err)
+	}
+	if branch != "workbuddy/issue-9/rollout-2" {
+		t.Fatalf("branch = %q, want %q", branch, "workbuddy/issue-9/rollout-2")
 	}
 }

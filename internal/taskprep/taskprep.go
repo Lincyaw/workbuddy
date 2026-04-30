@@ -25,15 +25,18 @@ import (
 // it is the preparer's responsibility. internal/router re-exports it as a
 // type alias so existing consumers keep compiling.
 type WorkerTask struct {
-	TaskID       string
-	Repo         string
-	IssueNum     int
-	AgentName    string
-	Agent        *config.AgentConfig
-	Context      *runtimepkg.TaskContext
-	Workflow     string
-	State        string
-	WorktreePath string // path to isolated worktree, empty if isolation disabled
+	TaskID         string
+	Repo           string
+	IssueNum       int
+	AgentName      string
+	Agent          *config.AgentConfig
+	Context        *runtimepkg.TaskContext
+	Workflow       string
+	State          string
+	RolloutIndex   int
+	RolloutsTotal  int
+	RolloutGroupID string
+	WorktreePath   string // path to isolated worktree, empty if isolation disabled
 }
 
 // IssueDataReader loads the minimal GitHub context needed to render an agent
@@ -48,12 +51,15 @@ type IssueDataReader interface {
 // enough identity to persist a task row and render an agent prompt, but has
 // no GitHub or filesystem side-effects of its own.
 type Decision struct {
-	Repo      string
-	IssueNum  int
-	AgentName string
-	Agent     *config.AgentConfig
-	Workflow  string
-	State     string
+	Repo           string
+	IssueNum       int
+	AgentName      string
+	Agent          *config.AgentConfig
+	Workflow       string
+	State          string
+	RolloutIndex   int
+	RolloutsTotal  int
+	RolloutGroupID string
 	// StateDef is the workflow state object, attached so the preparer can
 	// synthesize the transition footer (issue #204 batch 3) without reaching
 	// back into the state-machine. May be nil for legacy callers; the
@@ -125,15 +131,18 @@ func (p *Preparer) Prepare(ctx context.Context, d Decision) error {
 	taskID := uuid.New().String()
 
 	if err := p.store.InsertTask(store.TaskRecord{
-		ID:        taskID,
-		Repo:      d.Repo,
-		IssueNum:  d.IssueNum,
-		AgentName: d.AgentName,
-		Role:      d.Agent.Role,
-		Runtime:   d.Agent.Runtime,
-		Workflow:  d.Workflow,
-		State:     d.State,
-		Status:    store.TaskStatusPending,
+		ID:             taskID,
+		Repo:           d.Repo,
+		IssueNum:       d.IssueNum,
+		AgentName:      d.AgentName,
+		Role:           d.Agent.Role,
+		Runtime:        d.Agent.Runtime,
+		Workflow:       d.Workflow,
+		State:          d.State,
+		RolloutIndex:   d.RolloutIndex,
+		RolloutsTotal:  d.RolloutsTotal,
+		RolloutGroupID: d.RolloutGroupID,
+		Status:         store.TaskStatusPending,
 	}); err != nil {
 		return fmt.Errorf("taskprep: insert task: %w", err)
 	}
@@ -173,6 +182,11 @@ func (p *Preparer) Prepare(ctx context.Context, d Decision) error {
 		WorkDir:        p.repoRoot,
 		RelatedPRs:     relatedPRs,
 		RelatedPRsText: FormatRelatedPRs(relatedPRs),
+		Rollout: runtimepkg.RolloutContext{
+			Index:   d.RolloutIndex,
+			Total:   d.RolloutsTotal,
+			GroupID: d.RolloutGroupID,
+		},
 		Session: runtimepkg.SessionContext{
 			ID: fmt.Sprintf("session-%s-%s", taskID, uuid.New().String()[:8]),
 		},
@@ -187,14 +201,17 @@ func (p *Preparer) Prepare(ctx context.Context, d Decision) error {
 	}
 
 	task := WorkerTask{
-		TaskID:    taskID,
-		Repo:      d.Repo,
-		IssueNum:  d.IssueNum,
-		AgentName: d.AgentName,
-		Agent:     d.Agent,
-		Context:   taskCtx,
-		Workflow:  d.Workflow,
-		State:     d.State,
+		TaskID:         taskID,
+		Repo:           d.Repo,
+		IssueNum:       d.IssueNum,
+		AgentName:      d.AgentName,
+		Agent:          d.Agent,
+		Context:        taskCtx,
+		Workflow:       d.Workflow,
+		State:          d.State,
+		RolloutIndex:   d.RolloutIndex,
+		RolloutsTotal:  d.RolloutsTotal,
+		RolloutGroupID: d.RolloutGroupID,
 	}
 
 	select {

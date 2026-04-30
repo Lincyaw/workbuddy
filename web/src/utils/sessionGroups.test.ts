@@ -87,6 +87,74 @@ describe('groupSessionsByIssue', () => {
     expect(g.sessions[0].role).toBe('dev');
     expect(g.sessions[1].role).toBe('other');
   });
+
+  it('keeps same issue_num across different repos in separate buckets', () => {
+    const sessions: SessionListItem[] = [
+      mk({
+        session_id: 'a-d',
+        repo: 'owner/a',
+        issue_num: 42,
+        agent_name: 'dev-agent',
+        created_at: '2026-04-29T10:00:00Z',
+      }),
+      mk({
+        session_id: 'a-r',
+        repo: 'owner/a',
+        issue_num: 42,
+        agent_name: 'review-agent',
+        created_at: '2026-04-29T11:00:00Z',
+      }),
+      mk({
+        session_id: 'b-d',
+        repo: 'owner/b',
+        issue_num: 42,
+        agent_name: 'dev-agent',
+        created_at: '2026-04-29T12:00:00Z',
+      }),
+    ];
+
+    const groups = groupSessionsByIssue(sessions);
+    // Two distinct buckets even though both have issue_num=42.
+    expect(groups).toHaveLength(2);
+    const byRepo = new Map(groups.map((g) => [g.repo, g]));
+    const a = byRepo.get('owner/a');
+    const b = byRepo.get('owner/b');
+    expect(a).toBeDefined();
+    expect(b).toBeDefined();
+    expect(a!.sessions.map((s) => s.session_id)).toEqual(['a-d', 'a-r']);
+    expect(b!.sessions.map((s) => s.session_id)).toEqual(['b-d']);
+    // Both buckets must report the shared issue number unchanged.
+    expect(a!.issueNum).toBe(42);
+    expect(b!.issueNum).toBe(42);
+  });
+
+  it('uses rollout numbering when rollout metadata is present', () => {
+    const sessions: SessionListItem[] = [
+      mk({
+        session_id: 'r2',
+        issue_num: 12,
+        agent_name: 'dev-agent',
+        rollout_index: 2,
+        rollouts_total: 3,
+        created_at: '2026-04-29T10:00:00Z',
+      }),
+      mk({
+        session_id: 'r1',
+        issue_num: 12,
+        agent_name: 'dev-agent',
+        rollout_index: 1,
+        rollouts_total: 3,
+        created_at: '2026-04-29T09:00:00Z',
+      }),
+    ];
+
+    const [group] = groupSessionsByIssue(sessions);
+    expect(group.sessions.map((s) => s.cycle)).toEqual([1, 2]);
+    expect(group.sessions.map((s) => s.rolloutLabel)).toEqual([
+      'rollout 1/3',
+      'rollout 2/3',
+    ]);
+  });
 });
 
 describe('distinctValues', () => {
