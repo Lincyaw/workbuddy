@@ -3483,6 +3483,7 @@ requirements:
       - "AC-100-1: `Store.InsertWorker` ON CONFLICT updates `last_heartbeat = CURRENT_TIMESTAMP` so re-registration on restart counts as a heartbeat."
       - "AC-100-2: `HandlePollTask` calls `Registry.Heartbeat` on every poll (not only when a task is returned), so an idle worker's heartbeat refreshes at the long-poll cadence."
       - "AC-100-3: Unit test asserts that a stale heartbeat advances after re-registration."
+    priority: P1
     code:
       - internal/store/store.go
       - internal/app/coordinator.go
