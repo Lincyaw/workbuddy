@@ -64,6 +64,18 @@ const (
 	// gate cannot release downstream work. Idempotent per (labels+depends_on)
 	// fingerprint. See REQ #255.
 	TypeIssueDependencyUnentered = "issue_dependency_unentered"
+	// TypeCoordinatorStarted is emitted at the tail of coordinator/serve startup
+	// (after the HTTP listener is reserved). Payload carries listen address,
+	// pid, and version so operator hook actions can detect process restarts.
+	// See issue #266.
+	TypeCoordinatorStarted = "coordinator_started"
+	// TypeCoordinatorStopping is emitted at the head of the graceful-shutdown
+	// handler so hooks can react before workers/pollers drain. See issue #266.
+	TypeCoordinatorStopping = "coordinator_stopping"
+	// TypeHooksReloaded is emitted by `workbuddy hooks reload` so operator
+	// dashboards can correlate auto-disable resets with the reload action.
+	// See issue #266.
+	TypeHooksReloaded = "hooks_reloaded"
 )
 
 // AllEventTypes lists every recognised event type.
@@ -108,6 +120,9 @@ var AllEventTypes = []string{
 	TypeLongFlightStuck,
 	TypeIssueNoWorkflowMatch,
 	TypeIssueDependencyUnentered,
+	TypeCoordinatorStarted,
+	TypeCoordinatorStopping,
+	TypeHooksReloaded,
 }
 
 // EventFilter specifies optional criteria for querying events.

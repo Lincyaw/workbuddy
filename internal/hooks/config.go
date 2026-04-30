@@ -10,6 +10,7 @@ package hooks
 import (
 	"fmt"
 	"os"
+	"path"
 	"regexp"
 	"strings"
 	"time"
@@ -37,7 +38,13 @@ type Hook struct {
 	Action  ActionConfig  `yaml:"action"`
 }
 
-// MatchFilter is parsed but not enforced in Phase 1a.
+// MatchFilter narrows the events a hook receives. Filters AND together: an
+// event must satisfy every set filter to be delivered.
+//
+//   - Severity is honoured only when the event_type is `alert`. Configuring it
+//     for any other event surfaces a startup warning (see ParseConfig).
+//   - Repo is a glob (path.Match syntax) tested against the event's repo
+//     field. Empty/missing repo filter is match-all.
 type MatchFilter struct {
 	Severity []string `yaml:"severity,omitempty"`
 	Repo     string   `yaml:"repo,omitempty"`
@@ -115,8 +122,102 @@ func ParseConfig(raw []byte) (*Config, []string, error) {
 			return nil, nil, err
 		}
 		warnings = append(warnings, w...)
+		if mw, err := validateMatchFilter(h); err != nil {
+			return nil, nil, err
+		} else {
+			warnings = append(warnings, mw...)
+		}
 	}
 	return &cfg, warnings, nil
+}
+
+// validateMatchFilter returns startup warnings (e.g. severity on non-alert
+// events) and an error if the filter is structurally invalid (e.g. malformed
+// repo glob).
+func validateMatchFilter(h *Hook) ([]string, error) {
+	if h == nil || h.Match == nil {
+		return nil, nil
+	}
+	var warnings []string
+	if len(h.Match.Severity) > 0 {
+		// severity only applies when the hook subscribes solely to alert
+		// events. If the event list contains anything non-alert (or `*`),
+		// the filter cannot be enforced for those — surface a warning.
+		nonAlert := false
+		for _, ev := range h.Events {
+			if ev != "alert" {
+				nonAlert = true
+				break
+			}
+		}
+		if nonAlert {
+			warnings = append(warnings, fmt.Sprintf("hook %q: match.severity only applies to event_type=alert; ignored for other events", h.Name))
+		}
+	}
+	if strings.TrimSpace(h.Match.Repo) != "" {
+		// Validate the glob early — path.Match returns ErrBadPattern only when
+		// the pattern is matched, so probe with an arbitrary input.
+		if _, err := path.Match(h.Match.Repo, "owner/repo"); err != nil {
+			return nil, fmt.Errorf("hooks: hook %q: invalid match.repo glob %q: %w", h.Name, h.Match.Repo, err)
+		}
+	}
+	return warnings, nil
+}
+
+// MatchesEvelope reports whether the hook's match filter accepts the event.
+// The dispatcher calls this after the event-type subscription check; the
+// filter is the second-stage gate.
+//
+// Semantics:
+//   - severity: applies only to event_type=alert. The payload must carry a
+//     top-level `severity` JSON string and it must appear in the allow-list
+//     (case-insensitive). On non-alert events this filter is a no-op (with a
+//     startup warning surfaced via ParseConfig).
+//   - repo: glob via path.Match against the event's Repo field. Empty filter
+//     matches everything (including events with no repo).
+func (h *Hook) MatchesFilter(ev Event) bool {
+	if h == nil || h.Match == nil {
+		return true
+	}
+	if h.Match.Repo != "" {
+		ok, err := path.Match(h.Match.Repo, ev.Repo)
+		if err != nil || !ok {
+			return false
+		}
+	}
+	if len(h.Match.Severity) > 0 && ev.Type == "alert" {
+		sev := extractSeverity(ev.Payload)
+		if sev == "" {
+			return false
+		}
+		matched := false
+		for _, allowed := range h.Match.Severity {
+			if strings.EqualFold(strings.TrimSpace(allowed), sev) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+// extractSeverity pulls the `severity` string from a JSON payload using a
+// shallow regex so we don't need to fully unmarshal every event. Returns
+// the empty string when the field is absent or malformed.
+var severityFieldPattern = regexp.MustCompile(`"severity"\s*:\s*"([^"]*)"`)
+
+func extractSeverity(payload []byte) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	m := severityFieldPattern.FindSubmatch(payload)
+	if len(m) < 2 {
+		return ""
+	}
+	return string(m[1])
 }
 
 var hookNamePattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)

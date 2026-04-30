@@ -436,9 +436,10 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 		return err
 	}
 
+	hooksConfigPath := ResolveHooksConfigPath(opts.hooksConfig)
 	srv := &http.Server{
 		Addr:    resolveListenAddr(opts.listenAddr, port),
-		Handler: buildCoordinatorMux(api, st, evlog, opts.dbPath, taskHub),
+		Handler: buildCoordinatorMux(api, st, evlog, opts.dbPath, taskHub, hooksDispatcher, hooksConfigPath),
 	}
 
 	var wg sync.WaitGroup
@@ -450,6 +451,8 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 		}
 	}()
 
+	emitCoordinatorStarted(evlog, "coordinator", srv.Addr)
+
 	if sigCh != nil {
 		select {
 		case sig := <-sigCh:
@@ -459,6 +462,8 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	} else {
 		<-ctx.Done()
 	}
+
+	emitCoordinatorStopping(evlog, "coordinator", srv.Addr)
 
 	cancel()
 	api.Pollers.Shutdown()
@@ -569,7 +574,7 @@ func resolveListenAddr(listenAddr string, port int) string {
 	return listenAddr
 }
 
-func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog *eventlog.EventLogger, dbPath string, taskHub *tasknotify.Hub) *http.ServeMux {
+func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog *eventlog.EventLogger, dbPath string, taskHub *tasknotify.Hub, hooksDispatcher *hooks.Dispatcher, hooksConfigPath string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", api.HandleHealth)
 
@@ -588,8 +593,16 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 	mux.Handle("/issues/{owner}/{repo}/{num}/state", api.WrapAuth(readOnlyAuditMux))
 
 	metricsMux := http.NewServeMux()
-	metrics.NewHandler(st).WithEventLogger(evlog).Register(metricsMux)
+	metricsHandler := metrics.NewHandler(st).WithEventLogger(evlog)
+	if hooksDispatcher != nil {
+		metricsHandler = metricsHandler.WithHooks(hooksDispatcher)
+	}
+	metricsHandler.Register(metricsMux)
 	mux.Handle("/metrics", api.WrapAuth(metricsMux))
+
+	hooksAPI := app.NewHooksAPI(hooksDispatcher, evlog, hooksConfigPath)
+	mux.Handle("/api/v1/hooks/status", api.WrapAuth(http.HandlerFunc(hooksAPI.HandleStatus)))
+	mux.Handle("/api/v1/hooks/reload", api.WrapAuth(http.HandlerFunc(hooksAPI.HandleReload)))
 
 	dashboardAPI := auditapi.NewHandler(st)
 	sessionsDir := filepath.Join(filepath.Dir(dbPath), "sessions")
