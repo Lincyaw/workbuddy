@@ -604,3 +604,18 @@ table.clickable tbody tr:hover {
   cursor: pointer;
 }
 .wb-nav form button:hover { background: #f6f8fa; }
+
+.gh-issue-link {
+  font-size: 0.85rem;
+  text-decoration: none;
+  color: #0969da;
+  white-space: nowrap;
+}
+.gh-issue-link:hover { text-decoration: underline; }
+.gh-issue-link-icon {
+  display: inline-block;
+  font-size: 0.9rem;
+  padding: 0 0.25rem;
+  color: #57606a;
+}
+.gh-issue-link-icon:hover { color: #0969da; }

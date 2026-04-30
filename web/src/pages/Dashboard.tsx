@@ -2,6 +2,7 @@ import { useEffect, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso';
 import { Layout } from '../components/Layout';
 import { StateBadge } from '../components/StateBadge';
+import { GitHubIssueLink } from '../components/GitHubIssueLink';
 import { getInFlightIssues, getStatus } from '../api/client';
 import type { ApiError } from '../api/client';
 import type { InFlightIssue, StatusResponse } from '../api/types';
@@ -160,7 +161,13 @@ function IssueRow({ row, onOpen }: IssueRowProps) {
       <td>
         <a href={issueHref} class="code-chip">
           {row.repo}#{row.issue_num}
-        </a>
+        </a>{' '}
+        <GitHubIssueLink
+          owner={splitRepo(row.repo).owner}
+          repo={splitRepo(row.repo).name}
+          num={row.issue_num}
+          variant="icon"
+        />
       </td>
       <td>{row.title || <span class="muted">(no title)</span>}</td>
       <td>

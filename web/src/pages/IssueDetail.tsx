@@ -2,10 +2,12 @@ import { useEffect, useState } from 'preact/hooks';
 import { useRoute } from 'preact-iso';
 import { Layout } from '../components/Layout';
 import { StateBadge } from '../components/StateBadge';
+import { GitHubIssueLink } from '../components/GitHubIssueLink';
 import { getIssueDetail } from '../api/client';
 import type { ApiError } from '../api/client';
 import type { IssueDetail as IssueDetailDTO } from '../api/types';
 import { formatRelative } from '../utils/time';
+import { splitRepoSlug } from '../utils/github';
 
 interface FetchState {
   detail: IssueDetailDTO | null;
@@ -64,11 +66,13 @@ export function IssueDetail() {
 }
 
 function IssueDetailBody({ detail }: { detail: IssueDetailDTO }) {
+  const { owner, name } = splitRepoSlug(detail.repo);
   return (
     <>
       <h1>
         <span class="code-chip">{detail.repo}#{detail.issue_num}</span>{' '}
-        {detail.title || <span class="muted">(no title)</span>}
+        {detail.title || <span class="muted">(no title)</span>}{' '}
+        <GitHubIssueLink owner={owner} repo={name} num={detail.issue_num} />
       </h1>
 
       <dl class="kv">
