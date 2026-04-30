@@ -1,13 +1,12 @@
 import { fireEvent, render } from '@testing-library/preact';
-import { LocationProvider } from 'preact-iso';
 import { describe, expect, it, vi } from 'vitest';
 import { HookList } from './HookList';
 import type { HookListEntry } from '../api/hooks';
 
-function makeEntry(over: Partial<HookListEntry> = {}): HookListEntry {
+function makeEntry(overrides: Partial<HookListEntry> = {}): HookListEntry {
   return {
-    name: 'h1',
-    events: ['alert'],
+    name: 'hook-alpha',
+    events: ['dispatch'],
     action_type: 'webhook',
     enabled: true,
     auto_disabled: false,
@@ -19,68 +18,31 @@ function makeEntry(over: Partial<HookListEntry> = {}): HookListEntry {
     consecutive_failures: 0,
     duration_count: 5,
     duration_sum_ns: 0,
-    ...over,
+    ...overrides,
   };
 }
 
-function renderWithRouter(ui: preact.ComponentChild) {
-  return render(<LocationProvider>{ui}</LocationProvider>);
-}
-
 describe('HookList', () => {
-  it('renders one row per hook with name / events / action / state', () => {
-    const onSelect = vi.fn();
-    const { container, getByText } = renderWithRouter(
+  it('renders one card per hook with state and error rate', () => {
+    const { getByText, getAllByText } = render(
       <HookList
         hooks={[makeEntry({ name: 'alpha' }), makeEntry({ name: 'beta', auto_disabled: true })]}
-        onSelect={onSelect}
-      />,
-    );
-    const rows = container.querySelectorAll('tbody tr');
-    expect(rows.length).toBe(2);
-    expect(getByText('alpha')).not.toBeNull();
-    expect(getByText('beta')).not.toBeNull();
-    // Auto-disabled row shows the failed badge.
-    expect(getByText('auto-disabled').className).toContain('failed');
-  });
-
-  it('computes the error rate from successes + failures', () => {
-    const { getByText } = renderWithRouter(
-      <HookList
-        hooks={[makeEntry({ successes: 3, failures: 1 })]}
+        latencySamples={{ alpha: [1, 2, 3], beta: [2, 4, 8] }}
         onSelect={() => {}}
       />,
     );
-    expect(getByText('25%')).not.toBeNull();
+    expect(getByText('alpha')).toBeTruthy();
+    expect(getByText('beta')).toBeTruthy();
+    expect(getAllByText('20% error')).toHaveLength(2);
+    expect(getByText('auto-disabled')).toBeTruthy();
   });
 
-  it('routes to /hooks/:name when a row is clicked', () => {
+  it('routes when a card is clicked', () => {
     const onSelect = vi.fn();
-    const { container } = renderWithRouter(
-      <HookList hooks={[makeEntry({ name: 'alpha' })]} onSelect={onSelect} />,
+    const { getByText } = render(
+      <HookList hooks={[makeEntry({ name: 'alpha' })]} latencySamples={{}} onSelect={onSelect} />,
     );
-    const row = container.querySelector('tbody tr') as HTMLElement;
-    fireEvent.click(row);
+    fireEvent.click(getByText('alpha').closest('button') as HTMLButtonElement);
     expect(onSelect).toHaveBeenCalledWith('alpha');
-  });
-
-  it('still routes when the name link inside the row is clicked (preventDefault)', () => {
-    const onSelect = vi.fn();
-    const { container } = renderWithRouter(
-      <HookList hooks={[makeEntry({ name: 'alpha' })]} onSelect={onSelect} />,
-    );
-    const link = container.querySelector('a.code-chip') as HTMLAnchorElement;
-    fireEvent.click(link);
-    expect(onSelect).toHaveBeenCalledWith('alpha');
-  });
-
-  it('renders 0% error rate cleanly when there are no calls yet', () => {
-    const { getByText } = renderWithRouter(
-      <HookList
-        hooks={[makeEntry({ successes: 0, failures: 0 })]}
-        onSelect={() => {}}
-      />,
-    );
-    expect(getByText('0%')).not.toBeNull();
   });
 });

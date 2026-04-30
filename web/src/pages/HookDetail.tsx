@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'preact/hooks';
-import { useLocation, useRoute } from 'preact-iso';
+import { useRoute } from 'preact-iso';
 import { Layout } from '../components/Layout';
 import { ReloadButton } from '../components/ReloadButton';
 import { HookInvocationTimeline } from '../components/HookInvocationTimeline';
+import { EmptyState } from '../components/EmptyState';
 import {
   errorRatePercent,
   fetchHookConfig,
@@ -37,7 +38,6 @@ const INITIAL: DetailState = {
 
 export function HookDetail() {
   const { params } = useRoute();
-  const location = useLocation();
   const name = decodeURIComponent(params.name || '');
   const [state, setState] = useState<DetailState>(INITIAL);
 
@@ -47,136 +47,133 @@ export function HookDetail() {
       return;
     }
     try {
-      const [list, invs, cfg] = await Promise.all([
+      const [list, invocations, config] = await Promise.all([
         fetchHooks(),
-        fetchHookInvocations(name, 20),
+        fetchHookInvocations(name, 50),
         fetchHookConfig(name).catch(() => null),
       ]);
-      const entry = list.hooks.find((h) => h.name === name) || null;
+      const entry = list.hooks.find((hook) => hook.name === name) || null;
       setState((prev) => ({
         ...prev,
         entry,
-        invocations: invs,
-        config: cfg,
+        invocations,
+        config,
         error: entry ? null : `hook ${name} is not registered`,
         loading: false,
       }));
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'failed to load hook';
-      setState((prev) => ({ ...prev, error: msg, loading: false }));
+      setState((prev) => ({
+        ...prev,
+        error: err instanceof Error ? err.message : 'failed to load hook',
+        loading: false,
+      }));
     }
   }
 
   useEffect(() => {
     void load();
-    const timer = setInterval(() => void load(), POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
+    const timer = window.setInterval(() => {
+      void load();
+    }, POLL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name]);
 
   async function handleReload() {
-    setState((prev) => ({ ...prev, reloadStatus: 'reloading…' }));
+    setState((prev) => ({ ...prev, reloadStatus: 'reloading hook registry…' }));
     try {
-      const resp = await reloadHooks();
+      const response = await reloadHooks();
       setState((prev) => ({
         ...prev,
-        reloadStatus: `reloaded ${resp.hook_count} hook(s)`,
+        reloadStatus: response.reloaded
+          ? `reloaded ${response.hook_count} hook(s)`
+          : `nothing to reload — ${response.reason ?? 'no config detected'}`,
       }));
       await load();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'reload failed';
-      setState((prev) => ({ ...prev, reloadStatus: `reload failed: ${msg}` }));
+      setState((prev) => ({
+        ...prev,
+        reloadStatus: `reload failed: ${err instanceof Error ? err.message : 'unknown error'}`,
+      }));
     }
   }
 
   return (
     <Layout>
-      <div class="wb-hooks-header">
-        <h1>
-          <a href="/hooks" onClick={(e) => { e.preventDefault(); location.route('/hooks'); }}>
-            Hooks
-          </a>
-          <span class="muted"> / </span>
-          <code>{name}</code>
-        </h1>
-        <ReloadButton onConfirm={handleReload} disabled={state.loading} />
-      </div>
-      {state.reloadStatus && <div class="wb-hooks-status">{state.reloadStatus}</div>}
-      {state.error && <div class="error-banner">{state.error}</div>}
+      <section class="page-header">
+        <div>
+          <p class="page-eyebrow">hook detail</p>
+          <h1>{name}</h1>
+        </div>
+        <div class="page-header-actions">
+          <a href="/hooks" class="wb-button">All hooks</a>
+          <ReloadButton onConfirm={handleReload} disabled={state.loading} />
+        </div>
+      </section>
+
+      {state.reloadStatus ? <div class="notice-banner">{state.reloadStatus}</div> : null}
+      {state.error ? <div class="error-banner">{state.error}</div> : null}
+
       {state.loading && !state.entry ? (
-        <div class="empty">Loading…</div>
+        <div class="loading-copy">Loading hook detail…</div>
       ) : state.entry ? (
-        <HookSummary entry={state.entry} />
+        <div class="hook-detail-grid">
+          <section class="surface-card hook-detail-summary">
+            <h2>Registry status</h2>
+            <dl class="meta-list">
+              <dt>State</dt>
+              <dd>
+                <span class={state.entry.auto_disabled ? 'wb-badge wb-badge-failed' : state.entry.enabled ? 'wb-badge wb-badge-completed' : 'wb-badge wb-badge-default'}>
+                  {state.entry.auto_disabled ? 'auto-disabled' : state.entry.enabled ? 'enabled' : 'disabled'}
+                </span>
+              </dd>
+              <dt>Events</dt>
+              <dd><span class="mono-copy">{state.entry.events.join(' · ') || 'manual dispatch only'}</span></dd>
+              <dt>Action</dt>
+              <dd><span class="mono-chip">{state.entry.action_type}</span></dd>
+              <dt>Error rate</dt>
+              <dd>{errorRatePercent(state.entry.successes, state.entry.failures)}%</dd>
+              <dt>Last invoked</dt>
+              <dd>{state.entry.last_invoked_at ? formatTimestamp(state.entry.last_invoked_at, true) : 'never'}</dd>
+            </dl>
+          </section>
+
+          <section class="surface-card hook-config-card">
+            <div class="section-heading compact-heading">
+              <div>
+                <p class="section-kicker">configuration</p>
+                <h2>YAML</h2>
+              </div>
+            </div>
+            {state.config?.yaml ? (
+              <pre class="code-panel">{state.config.yaml}</pre>
+            ) : state.config?.note ? (
+              <p class="muted">{state.config.note}</p>
+            ) : (
+              <EmptyState
+                title="no config materialized"
+                detail="reload the registry after updating the coordinator hook config path."
+                inline
+              />
+            )}
+          </section>
+        </div>
       ) : null}
 
-      <h2>Configuration</h2>
-      <div class="panel" style={{ padding: '0.75rem 1rem' }}>
-        {state.config?.yaml ? (
-          <pre class="wb-hook-config-yaml">{state.config.yaml}</pre>
-        ) : state.config?.note ? (
-          <div class="muted">{state.config.note}</div>
-        ) : (
-          <div class="muted">No config available.</div>
-        )}
-      </div>
-
-      <h2>Recent invocations</h2>
-      <div class="panel" style={{ padding: 0 }}>
+      <section class="surface-card hook-detail-timeline">
+        <div class="section-heading compact-heading">
+          <div>
+            <p class="section-kicker">invocation history</p>
+            <h2>Chronological timeline</h2>
+          </div>
+        </div>
         {state.invocations ? (
           <HookInvocationTimeline invocations={state.invocations.invocations} />
         ) : (
-          <div class="empty">Loading…</div>
+          <div class="loading-copy">Loading invocation history…</div>
         )}
-      </div>
+      </section>
     </Layout>
-  );
-}
-
-function HookSummary({ entry }: { entry: HookListEntry }) {
-  const total = entry.successes + entry.failures;
-  const rate = errorRatePercent(entry.successes, entry.failures);
-  const stateLabel = entry.auto_disabled
-    ? 'auto-disabled (operator must reload)'
-    : entry.enabled
-    ? 'enabled'
-    : 'disabled';
-  return (
-    <div class="wb-card">
-      <dl class="kv">
-        <dt>State</dt>
-        <dd>
-          <span
-            class={`badge ${entry.auto_disabled ? 'failed' : entry.enabled ? 'done' : 'queued'}`}
-          >
-            {stateLabel}
-          </span>
-        </dd>
-        <dt>Events</dt>
-        <dd>
-          {entry.events.length === 0
-            ? '—'
-            : entry.events.map((ev) => (
-                <span class="wb-event-chip" key={ev}>{ev}</span>
-              ))}
-        </dd>
-        <dt>Action</dt>
-        <dd><span class="code-chip">{entry.action_type}</span></dd>
-        <dt>Calls</dt>
-        <dd>{total} total · {entry.successes} success · {entry.failures} failure · {entry.filtered} filtered · {entry.overflow} overflow</dd>
-        <dt>Error rate</dt>
-        <dd>{rate}%</dd>
-        <dt>Last invoked</dt>
-        <dd>{entry.last_invoked_at ? formatTimestamp(entry.last_invoked_at) : <span class="muted">never</span>}</dd>
-        <dt>Last error</dt>
-        <dd>
-          {entry.last_error ? (
-            <code class="wb-hook-last-error">{entry.last_error}</code>
-          ) : (
-            <span class="muted">none</span>
-          )}
-        </dd>
-      </dl>
-    </div>
   );
 }
 

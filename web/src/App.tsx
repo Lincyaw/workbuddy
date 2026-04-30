@@ -19,6 +19,7 @@ export function App() {
       <ErrorBoundary>
         <Router>
           <Route path="/" component={Dashboard} />
+          <Route path="/dashboard" component={Dashboard} />
           <Route path="/sessions" component={Sessions} />
           <Route path="/sessions/:id" component={SessionDetail} />
           <Route path="/issues/:owner/:repo/:num" component={IssueDetail} />

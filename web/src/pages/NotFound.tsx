@@ -1,13 +1,17 @@
 import { Layout } from '../components/Layout';
+import { EmptyState } from '../components/EmptyState';
 
 export function NotFound() {
   return (
     <Layout>
-      <h1>Not found</h1>
-      <p class="muted">
-        That route doesn't match any page. Head back to the{' '}
-        <a href="/">dashboard</a>.
-      </p>
+      <section class="surface-card">
+        <EmptyState
+          title="this route doesn't exist"
+          detail="you might be looking for /sessions or /dashboard."
+          ctaHref="/dashboard"
+          ctaLabel="return to dashboard →"
+        />
+      </section>
     </Layout>
   );
 }

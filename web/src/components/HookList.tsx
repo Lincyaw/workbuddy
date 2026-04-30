@@ -1,87 +1,55 @@
 import type { HookListEntry } from '../api/hooks';
 import { errorRatePercent } from '../api/hooks';
+import { HookLatencySparkline } from './HookLatencySparkline';
 
 interface HookListProps {
   hooks: HookListEntry[];
+  latencySamples: Record<string, number[]>;
   onSelect: (name: string) => void;
 }
 
-// HookList renders the registered-hooks table used by /hooks. The rows are
-// clickable and route to /hooks/:name; an explicit View link gives keyboard
-// users a focusable target.
-export function HookList({ hooks, onSelect }: HookListProps) {
+export function HookList({ hooks, latencySamples, onSelect }: HookListProps) {
   return (
-    <table class="clickable wb-hooks-table">
-      <thead>
-        <tr>
-          <th>Name</th>
-          <th>Events</th>
-          <th>Action</th>
-          <th>Calls</th>
-          <th>Errors</th>
-          <th>Error rate</th>
-          <th>State</th>
-        </tr>
-      </thead>
-      <tbody>
-        {hooks.map((h) => {
-          const total = h.successes + h.failures;
-          const rate = errorRatePercent(h.successes, h.failures);
-          const stateLabel = h.auto_disabled
-            ? 'auto-disabled'
-            : h.enabled
-            ? 'enabled'
+    <div class="hooks-grid">
+      {hooks.map((hook) => {
+        const total = hook.successes + hook.failures;
+        const rate = errorRatePercent(hook.successes, hook.failures);
+        const stateLabel = hook.auto_disabled
+          ? 'auto-disabled'
+          : hook.enabled
+            ? 'ready'
             : 'disabled';
-          const stateClass = h.auto_disabled
-            ? 'badge failed'
-            : h.enabled
-            ? 'badge done'
-            : 'badge queued';
-          return (
-            <tr
-              key={h.name}
-              onClick={(e) => {
-                if ((e.target as HTMLElement).closest('a, button')) return;
-                onSelect(h.name);
-              }}
-            >
-              <td>
-                <a
-                  href={`/hooks/${encodeURIComponent(h.name)}`}
-                  class="code-chip"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    onSelect(h.name);
-                  }}
-                >
-                  {h.name}
-                </a>
-              </td>
-              <td>
-                {h.events.length === 0 ? (
-                  <span class="muted">—</span>
-                ) : (
-                  h.events.map((ev) => (
-                    <span class="wb-event-chip" key={ev}>
-                      {ev}
-                    </span>
-                  ))
-                )}
-              </td>
-              <td><span class="code-chip">{h.action_type}</span></td>
-              <td title="Total invocations since dispatcher start (or last reload)">
-                {total}
-              </td>
-              <td class={h.failures > 0 ? 'cell-stuck' : ''}>{h.failures}</td>
-              <td class={rate > 50 ? 'cell-stuck' : ''}>{rate}%</td>
-              <td>
-                <span class={stateClass}>{stateLabel}</span>
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+        const badgeClass = hook.auto_disabled
+          ? 'wb-badge wb-badge-failed'
+          : hook.enabled
+            ? 'wb-badge wb-badge-completed'
+            : 'wb-badge wb-badge-default';
+        return (
+          <button
+            type="button"
+            key={hook.name}
+            class="surface-card hook-card"
+            onClick={() => onSelect(hook.name)}
+          >
+            <div class="hook-card-top">
+              <div>
+                <h2>{hook.name}</h2>
+                <p class="mono-copy">{hook.events.join(' · ') || 'manual dispatch only'}</p>
+              </div>
+              <span class={badgeClass}>{stateLabel}</span>
+            </div>
+            <div class="hook-card-meta">
+              <span class="mono-chip">{hook.action_type}</span>
+              <span>{total} calls</span>
+              <span>{rate}% error</span>
+            </div>
+            <div class="hook-card-sparkline">
+              <HookLatencySparkline samples={latencySamples[hook.name] || []} />
+            </div>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

@@ -4009,3 +4009,80 @@ requirements:
       - internal/worker/distributed_test.go
       - internal/validate/validate_codes_test.go
       - cmd/validate_test.go
+
+  - id: REQ-114
+    title: "Mission-control web UI redesign with dark-first operator console ticker (#291)"
+    description: >
+      Issue #291 replaces the existing GitHub-blue SPA shell with a dark-first
+      operator-console aesthetic built around vendored Geist + JetBrains Mono,
+      a fixed topbar + live dispatch ticker, responsive mission-control layouts
+      for Dashboard / Sessions / SessionDetail / Hooks / HookDetail / IssueDetail,
+      a persisted system/light/dark theme toggle, and a frontend-only
+      verification workflow that keeps the implementation confined to web/ + the
+      generated embedded bundle.
+    rationale: >
+      Operators stare at this UI during incidents and agent runs; the old SaaS
+      treatment was forgettable and visually weak. The redesign makes the web UI
+      feel alive, information-dense, and unmistakably workbuddy without changing
+      the backend API surface.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-114-1: Geist and JetBrains Mono are vendored under web/public/fonts/, referenced via @font-face with font-display: swap, and the SPA performs zero third-party font requests at runtime."
+      - "AC-114-2: --font-sans starts with Geist, --font-mono starts with JetBrains Mono, and Inter is absent from web/src + web/public aside from vendored license text."
+      - "AC-114-3: web/src/styles.css defines the canonical mission-control token palette in :root (light) and [data-theme=dark] (dark), with the exact dark values from the issue brief."
+      - "AC-114-4: dark theme is the first paint default via html[data-theme=dark], with localStorage wb:theme and system light preference able to flip the resolved theme before hydration."
+      - "AC-114-5: the topbar theme toggle cycles system → light → dark, persists wb:theme, and the mobile shell collapses into a drawer at small widths."
+      - "AC-114-6: web/src/components/DispatchTicker.tsx mounts between the topbar and page content, polls /api/v1/sessions every 5s, scrolls a full-bleed ticker in JetBrains Mono, pauses on hover/focus, resumes on Escape, and dims while retaining the last good batch on fetch errors."
+      - "AC-114-7: web/src/components/DispatchTicker.test.tsx covers polling debounce, hover pause, and error-dim fallback."
+      - "AC-114-8: the redesign intentionally stays CSS-variable-first with no Tailwind dependency; the PR body documents that no-Tailwind decision while keeping the palette centralized in styles.css."
+      - "AC-114-9: Dashboard hero counters + in-flight table reveal with one staggered fade-up animation (60ms steps) and the motion is disabled under prefers-reduced-motion."
+      - "AC-114-10: the Sessions list uses SSE from /tasks/watch to refresh live completions and flashes only the status cell for 400ms when a row status changes."
+      - "AC-114-11: web/scripts/lint-aesthetic.sh greps for banned fonts/gradients/raw TSX hex colors and is wired into pnpm -C web lint."
+      - "AC-114-12: web/src/styles.css documents the contrast ratios for mission-control token pairings and keeps body/badge text within WCAG AA across themes."
+      - "AC-114-13: 360px layouts preserve parity via a drawer topbar, compact/expandable mobile ticker, card-stacked tables, and tap targets at or above the requested sizes."
+      - "AC-114-14: SessionDetail uses a two-column sticky metadata/timeline split with compact 28px collapsed rows and JetBrains Mono payload blocks on expand."
+      - "AC-114-15: the PR body includes before/after screenshots for Dashboard, Sessions, SessionDetail, Hooks, and HookDetail in both light and dark themes (Login explicitly excluded)."
+      - "AC-114-16: the PR body includes the verification checklist, bundle-size delta vs main, and which gates were run locally versus deferred to CI."
+      - "AC-114-18: all code changes remain confined to web/, internal/webui/dist/, project-index.yaml, and the aesthetic lint script; no Go API behavior changes are introduced."
+    code:
+      - web/index.html
+      - web/package.json
+      - web/public/fonts/Geist-Variable.woff2
+      - web/public/fonts/JetBrainsMono-Regular.woff2
+      - web/public/fonts/Geist-LICENSE.txt
+      - web/public/fonts/JetBrainsMono-LICENSE.txt
+      - web/scripts/lint-aesthetic.sh
+      - web/src/App.tsx
+      - web/src/api/hooks.ts
+      - web/src/api/sessions.ts
+      - web/src/components/DispatchTicker.tsx
+      - web/src/components/EmptyState.tsx
+      - web/src/components/HookInvocationTimeline.tsx
+      - web/src/components/HookLatencySparkline.tsx
+      - web/src/components/HookList.tsx
+      - web/src/components/Layout.tsx
+      - web/src/lib/format.ts
+      - web/src/pages/Dashboard.tsx
+      - web/src/pages/HookDetail.tsx
+      - web/src/pages/Hooks.tsx
+      - web/src/pages/IssueDetail.tsx
+      - web/src/pages/NotFound.tsx
+      - web/src/pages/SessionDetail.tsx
+      - web/src/pages/Sessions.tsx
+      - web/src/styles.css
+      - web/src/theme.ts
+    tests:
+      - web/src/components/DispatchTicker.test.tsx
+      - web/src/components/HookInvocationTimeline.test.tsx
+      - web/src/components/HookList.test.tsx
+      - web/src/components/Layout.test.tsx
+      - web/src/components/DegradedSessionCard.test.tsx
+      - web/src/lib/streamMessages.test.ts
+      - web/src/utils/sessionEvents.test.ts
+    deps:
+      - REQ-091
+      - REQ-106
+      - REQ-108
+      - REQ-110

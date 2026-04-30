@@ -3,64 +3,60 @@ import { useRoute } from 'preact-iso';
 import { Layout } from '../components/Layout';
 import { StateBadge } from '../components/StateBadge';
 import { GitHubIssueLink } from '../components/GitHubIssueLink';
+import { EmptyState } from '../components/EmptyState';
 import { getIssueDetail } from '../api/client';
-import type { ApiError } from '../api/client';
 import type { IssueDetail as IssueDetailDTO } from '../api/types';
-import { formatRelative } from '../utils/time';
+import { formatTimestamp } from '../lib/format';
 import { splitRepoSlug } from '../utils/github';
-
-interface FetchState {
-  detail: IssueDetailDTO | null;
-  error: string | null;
-  loading: boolean;
-}
 
 export function IssueDetail() {
   const { params } = useRoute();
   const owner = params.owner;
   const repo = params.repo;
-  const numRaw = params.num;
-
-  const [state, setState] = useState<FetchState>({
-    detail: null,
-    error: null,
-    loading: true,
-  });
+  const num = Number(params.num || '0');
+  const [detail, setDetail] = useState<IssueDetailDTO | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    let cancelled = false;
-    async function load(): Promise<void> {
-      const num = Number(numRaw);
-      if (!owner || !repo || !numRaw || !Number.isFinite(num) || num <= 0) {
-        setState({ detail: null, error: 'invalid issue path', loading: false });
-        return;
-      }
-      try {
-        const detail = await getIssueDetail(owner, repo, num);
-        if (cancelled) return;
-        setState({ detail, error: null, loading: false });
-      } catch (err) {
-        if (cancelled) return;
-        const apiErr = err as ApiError;
-        if (apiErr.status === 401) return;
-        const message = err instanceof Error ? err.message : 'failed to load issue';
-        setState({ detail: null, error: message, loading: false });
-      }
+    if (!owner || !repo || !Number.isFinite(num) || num <= 0) {
+      setError('invalid issue path');
+      setLoading(false);
+      return;
     }
-    void load();
+    let cancelled = false;
+    getIssueDetail(owner, repo, num)
+      .then((response) => {
+        if (!cancelled) {
+          setDetail(response);
+          setError(null);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'failed to load issue');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
     return () => {
       cancelled = true;
     };
-  }, [owner, repo, numRaw]);
+  }, [num, owner, repo]);
 
   return (
     <Layout>
-      <a href="/" class="muted" style="display: inline-block; margin-bottom: 0.6rem;">
-        ← Dashboard
-      </a>
-      {state.error && <div class="error-banner">{state.error}</div>}
-      {state.loading && state.detail === null && <div class="empty">Loading…</div>}
-      {state.detail && <IssueDetailBody detail={state.detail} />}
+      <section class="page-header page-header-tight">
+        <div>
+          <p class="page-eyebrow">issue audit</p>
+          <h1>{detail ? `${detail.repo}#${detail.issue_num}` : 'Issue detail'}</h1>
+        </div>
+      </section>
+      {error ? <div class="error-banner">{error}</div> : null}
+      {loading && !detail ? (
+        <div class="loading-copy">Loading issue telemetry…</div>
+      ) : detail ? (
+        <IssueDetailBody detail={detail} />
+      ) : null}
     </Layout>
   );
 }
@@ -68,113 +64,93 @@ export function IssueDetail() {
 function IssueDetailBody({ detail }: { detail: IssueDetailDTO }) {
   const { owner, name } = splitRepoSlug(detail.repo);
   return (
-    <>
-      <h1>
-        <span class="code-chip">{detail.repo}#{detail.issue_num}</span>{' '}
-        {detail.title || <span class="muted">(no title)</span>}{' '}
-        <GitHubIssueLink owner={owner} repo={name} num={detail.issue_num} />
-      </h1>
+    <div class="issue-detail-grid">
+      <section class="surface-card">
+        <div class="section-heading compact-heading">
+          <div>
+            <p class="section-kicker">current state</p>
+            <h2>{detail.title || '(untitled issue)'}</h2>
+          </div>
+          <GitHubIssueLink owner={owner} repo={name} num={detail.issue_num} />
+        </div>
+        <dl class="meta-list">
+          <dt>State</dt>
+          <dd><StateBadge state={detail.current_state} /></dd>
+          <dt>Labels</dt>
+          <dd class="meta-flow">
+            {detail.labels.length > 0 ? detail.labels.map((label) => <span class="mono-chip">{label}</span>) : '—'}
+          </dd>
+        </dl>
+      </section>
 
-      <dl class="kv">
-        <dt>State</dt>
-        <dd><StateBadge state={detail.current_state} /></dd>
-        <dt>Labels</dt>
-        <dd>
-          {detail.labels.length === 0
-            ? <span class="muted">—</span>
-            : detail.labels.map((label) => (
-                <span class="code-chip" style="margin-right: 0.3rem;">{label}</span>
-              ))}
-        </dd>
-      </dl>
-
-      <h2>Cycle counts</h2>
-      <div class="panel">
-        {detail.transition_counts.length === 0 ? (
-          <div class="empty">No transitions recorded yet.</div>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>From</th>
-                <th>To</th>
-                <th>Count</th>
-              </tr>
-            </thead>
-            <tbody>
-              {detail.transition_counts.map((tc) => (
-                <tr key={`${tc.from_state}->${tc.to_state}`}>
-                  <td><StateBadge state={tc.from_state} /></td>
-                  <td><StateBadge state={tc.to_state} /></td>
-                  <td>{tc.count}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-
-      <h2>Transitions</h2>
-      <div class="panel">
+      <section class="surface-card">
+        <div class="section-heading compact-heading">
+          <div>
+            <p class="section-kicker">transition history</p>
+            <h2>Timeline</h2>
+          </div>
+        </div>
         {detail.transitions.length === 0 ? (
-          <div class="empty">No transitions recorded yet.</div>
+          <EmptyState
+            title="no transitions recorded yet"
+            detail="once the coordinator moves this issue through a workflow, entries land here."
+            inline
+          />
         ) : (
-          <ol class="timeline">
-            {detail.transitions.map((t, i) => (
-              <li key={`${t.at}-${i}`}>
-                <span class="ts">
-                  {formatRelative(t.at)}
-                  <span class="muted" style="display: block; font-size: 0.75rem;">{t.at}</span>
-                </span>
-                <span>
-                  <StateBadge state={t.from} />
-                  <span class="transition-arrow">→</span>
-                  <StateBadge state={t.to} />
-                </span>
-                <span class="muted">{t.by || '—'}</span>
-              </li>
+          <div class="timeline-list compact-timeline-list">
+            {detail.transitions.map((transition, index) => (
+              <article key={`${transition.at}:${index}`} class="timeline-event kind-system">
+                <button type="button" class="timeline-row timeline-row-static">
+                  <span class="timeline-kind">◦</span>
+                  <span class="timeline-title">{transition.from} → {transition.to}</span>
+                  <span class="timeline-time">{formatTimestamp(transition.at, true)}</span>
+                </button>
+              </article>
             ))}
-          </ol>
+          </div>
         )}
-      </div>
+      </section>
 
-      <h2>Sessions</h2>
-      <div class="panel">
+      <section class="surface-card issue-sessions-card">
+        <div class="section-heading compact-heading">
+          <div>
+            <p class="section-kicker">sessions</p>
+            <h2>Execution trail</h2>
+          </div>
+        </div>
         {detail.sessions.length === 0 ? (
-          <div class="empty">No sessions recorded yet.</div>
+          <EmptyState
+            title="no sessions recorded yet"
+            detail="the first dispatch will populate this execution trail."
+            inline
+          />
         ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>Session</th>
-                <th>Agent</th>
-                <th>Started</th>
-                <th>Finished</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {detail.sessions.map((s) => (
-                <tr key={s.session_id}>
-                  <td>
-                    <a href={`/sessions/${encodeURIComponent(s.session_id)}`} class="code-chip">
-                      {s.session_id}
-                    </a>
-                  </td>
-                  <td>{s.agent}</td>
-                  <td>{formatRelative(s.started_at)}</td>
-                  <td>
-                    {s.finished_at
-                      ? formatRelative(s.finished_at)
-                      : <span class="muted">—</span>}
-                  </td>
-                  <td>{s.status || <span class="muted">—</span>}</td>
+          <div class="table-shell">
+            <table class="mission-table">
+              <thead>
+                <tr>
+                  <th>Session</th>
+                  <th>Agent</th>
+                  <th>Started</th>
+                  <th>Finished</th>
+                  <th>Status</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {detail.sessions.map((session) => (
+                  <tr key={session.session_id}>
+                    <td data-label="Session"><a href={`/sessions/${encodeURIComponent(session.session_id)}`} class="mono-link">{session.session_id.slice(0, 16)}</a></td>
+                    <td data-label="Agent">{session.agent}</td>
+                    <td data-label="Started">{formatTimestamp(session.started_at, true)}</td>
+                    <td data-label="Finished">{session.finished_at ? formatTimestamp(session.finished_at, true) : '—'}</td>
+                    <td data-label="Status">{session.status || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
-      </div>
-    </>
+      </section>
+    </div>
   );
 }

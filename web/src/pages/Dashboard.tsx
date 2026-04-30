@@ -1,26 +1,27 @@
-import { useEffect, useState } from 'preact/hooks';
-import { useLocation } from 'preact-iso';
+import { useEffect, useMemo, useState } from 'preact/hooks';
 import { Layout } from '../components/Layout';
 import { StateBadge } from '../components/StateBadge';
 import { GitHubIssueLink } from '../components/GitHubIssueLink';
+import { EmptyState } from '../components/EmptyState';
 import { getInFlightIssues, getStatus } from '../api/client';
-import type { ApiError } from '../api/client';
 import type { InFlightIssue, StatusResponse } from '../api/types';
-import { ONE_HOUR_SECONDS, formatRelative } from '../utils/time';
-import { DEFAULT_MAX_REVIEW_CYCLES, devReviewCycleCount } from '../utils/cycle';
+import { fetchSessions, type SessionListItem } from '../api/sessions';
+import { copyText, formatClock, formatTimestamp, isToday } from '../lib/format';
 
 const POLL_INTERVAL_MS = 30_000;
 
 interface FetchState {
   status: StatusResponse | null;
-  rows: InFlightIssue[] | null;
+  rows: InFlightIssue[];
+  sessions: SessionListItem[];
   error: string | null;
   loading: boolean;
 }
 
 const INITIAL_STATE: FetchState = {
   status: null,
-  rows: null,
+  rows: [],
+  sessions: [],
   error: null,
   loading: true,
 };
@@ -37,162 +38,227 @@ function issueDetailHref(row: InFlightIssue): string {
 }
 
 export function Dashboard() {
-  const { route } = useLocation();
   const [state, setState] = useState<FetchState>(INITIAL_STATE);
 
   useEffect(() => {
     let cancelled = false;
-    let timer: ReturnType<typeof setInterval> | null = null;
 
     async function load(): Promise<void> {
       try {
-        const [status, rows] = await Promise.all([getStatus(), getInFlightIssues()]);
+        const [status, rows, sessions] = await Promise.all([
+          getStatus(),
+          getInFlightIssues(),
+          fetchSessions({ limit: 80 }),
+        ]);
         if (cancelled) return;
-        setState({ status, rows, error: null, loading: false });
+        setState({
+          status,
+          rows: rows || [],
+          sessions: sessions || [],
+          error: null,
+          loading: false,
+        });
       } catch (err) {
         if (cancelled) return;
-        const apiErr = err as ApiError;
-        if (apiErr.status === 401) return; // client.ts already redirected to /login
-        const message = err instanceof Error ? err.message : 'failed to load dashboard';
-        setState((prev) => ({ ...prev, error: message, loading: false }));
+        setState((prev) => ({
+          ...prev,
+          error: err instanceof Error ? err.message : 'failed to load dashboard',
+          loading: false,
+        }));
       }
     }
 
     void load();
-    timer = setInterval(load, POLL_INTERVAL_MS);
+    const timer = window.setInterval(() => {
+      void load();
+    }, POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
-      if (timer !== null) clearInterval(timer);
+      window.clearInterval(timer);
     };
   }, []);
 
+  const dispatchesToday = useMemo(
+    () => state.sessions.filter((session) => isToday(session.created_at)).length,
+    [state.sessions],
+  );
+  const failedBeforeStart = useMemo(
+    () =>
+      state.sessions.filter(
+        (session) =>
+          session.status === 'aborted_before_start' ||
+          (session.degraded === true && (session.duration ?? 0) === 0),
+      ).length,
+    [state.sessions],
+  );
+  const recentTransitions = useMemo(
+    () =>
+      [...state.rows]
+        .filter((row) => row.last_transition_at)
+        .sort((a, b) => (b.last_transition_at || '').localeCompare(a.last_transition_at || ''))
+        .slice(0, 8),
+    [state.rows],
+  );
+
   return (
     <Layout>
-      <h1>Dashboard</h1>
-      {state.error && <div class="error-banner">{state.error}</div>}
-
-      <section class="cards" aria-label="Pipeline health">
-        <Card label="In-flight issues" value={state.status?.in_flight_issues} />
-        <Card
-          label="Stuck > 1h"
-          value={state.status?.stuck_issues_over_1h}
-          tone={(state.status?.stuck_issues_over_1h ?? 0) > 0 ? 'danger' : undefined}
-        />
-        <Card label="Done (24h)" value={state.status?.done_24h} tone="good" />
-        <Card
-          label="Failed (24h)"
-          value={state.status?.failed_24h}
-          tone={(state.status?.failed_24h ?? 0) > 0 ? 'warn' : undefined}
-        />
+      <section class="page-header">
+        <div>
+          <p class="page-eyebrow">operator console</p>
+          <h1>Mission control</h1>
+        </div>
       </section>
 
-      <h2>In-flight issues</h2>
-      <div class="panel">
-        {state.loading && state.rows === null ? (
-          <div class="empty">Loading…</div>
-        ) : !state.rows || state.rows.length === 0 ? (
-          <div class="empty">No in-flight issues right now.</div>
-        ) : (
-          <table class="clickable">
-            <thead>
-              <tr>
-                <th>Repo#Num</th>
-                <th>Title</th>
-                <th>State</th>
-                <th>Cycle</th>
-                <th>Last Transition</th>
-                <th>Worker</th>
-                <th>Session</th>
-              </tr>
-            </thead>
-            <tbody>
-              {state.rows.map((row) => (
-                <IssueRow
-                  key={`${row.repo}#${row.issue_num}`}
-                  row={row}
-                  onOpen={() => route(issueDetailHref(row))}
-                />
+      {state.error ? <div class="error-banner">{state.error}</div> : null}
+
+      <section class="hero-grid">
+        <LiveCounterCard index={0} label="in-flight sessions" value={state.status?.active_sessions ?? 0} />
+        <LiveCounterCard index={1} label="dispatches today" value={dispatchesToday} />
+        <LiveCounterCard index={2} label="failed before start" value={failedBeforeStart} href="/sessions" />
+      </section>
+
+      <section class="dashboard-grid">
+        <article class="surface-card reveal-card" style="--i: 3">
+          <div class="section-heading">
+            <div>
+              <p class="section-kicker">in-flight issues</p>
+              <h2>Hot queue</h2>
+            </div>
+          </div>
+
+          {state.loading && state.rows.length === 0 ? (
+            <div class="loading-copy">Syncing coordinator telemetry…</div>
+          ) : state.rows.length === 0 ? (
+            <EmptyState
+              title="no issues moving — coordinator is idle"
+              detail="view recent runs or open an issue with a live status label to wake the board."
+              ctaHref="/sessions"
+              ctaLabel="view recent runs →"
+              inline
+            />
+          ) : (
+            <div class="table-shell sticky-shell">
+              <table class="mission-table mission-table-dashboard">
+                <thead>
+                  <tr>
+                    <th>Issue</th>
+                    <th>State</th>
+                    <th>Worker</th>
+                    <th>Last transition</th>
+                    <th>Session</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {state.rows.map((row) => (
+                    <tr key={`${row.repo}#${row.issue_num}`}>
+                      <td data-label="Issue">
+                        <div class="issue-id-cell">
+                          <a href={issueDetailHref(row)} class="mono-link issue-link">
+                            {row.repo}#{row.issue_num}
+                          </a>
+                          <button
+                            type="button"
+                            class="icon-copy"
+                            onClick={() => copyText(`${row.repo}#${row.issue_num}`)}
+                            aria-label={`Copy ${row.repo}#${row.issue_num}`}
+                          >
+                            ⧉
+                          </button>
+                        </div>
+                        <div class="issue-title-row">
+                          <span>{row.title || '(untitled issue)'}</span>
+                          <GitHubIssueLink
+                            owner={splitRepo(row.repo).owner}
+                            repo={splitRepo(row.repo).name}
+                            num={row.issue_num}
+                            variant="icon"
+                          />
+                        </div>
+                      </td>
+                      <td data-label="State">
+                        <StateBadge state={row.current_state} />
+                      </td>
+                      <td data-label="Worker">
+                        <span class="mono-chip">{row.claimed_worker_id || 'unclaimed'}</span>
+                      </td>
+                      <td data-label="Last transition">
+                        <div class="table-time">{formatClock(row.last_transition_at)}</div>
+                        <div class="table-time-detail">{formatTimestamp(row.last_transition_at)}</div>
+                      </td>
+                      <td data-label="Session">
+                        {row.last_session_id ? (
+                          <a href={`/sessions/${encodeURIComponent(row.last_session_id)}`} class="mono-link">
+                            {row.last_session_id.slice(0, 12)}
+                          </a>
+                        ) : (
+                          <span class="muted">pending</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </article>
+
+        <aside class="surface-card dashboard-rail">
+          <div class="section-heading compact-heading">
+            <div>
+              <p class="section-kicker">recent transitions</p>
+              <h2>Last 8</h2>
+            </div>
+          </div>
+          {recentTransitions.length === 0 ? (
+            <EmptyState
+              title="nothing has transitioned yet"
+              detail="once the coordinator advances an issue, the latest state entries land here."
+              inline
+            />
+          ) : (
+            <ol class="compact-transition-list">
+              {recentTransitions.map((row) => (
+                <li key={`${row.repo}:${row.issue_num}:${row.last_transition_at}`}>
+                  <span class="compact-transition-time">{formatClock(row.last_transition_at)}</span>
+                  <div>
+                    <strong>{row.repo}#{row.issue_num}</strong>
+                    <div class="muted">entered {row.current_state}</div>
+                  </div>
+                </li>
               ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+            </ol>
+          )}
+        </aside>
+      </section>
     </Layout>
   );
 }
 
-interface CardProps {
+function LiveCounterCard({
+  index,
+  label,
+  value,
+  href,
+}: {
+  index: number;
   label: string;
-  value: number | undefined;
-  tone?: 'warn' | 'danger' | 'good';
-}
-
-function Card({ label, value, tone }: CardProps) {
-  const cls = tone ? `card ${tone}` : 'card';
-  return (
-    <div class={cls}>
-      <div class="label">{label}</div>
-      <div class="value">{value ?? '—'}</div>
-    </div>
+  value: number;
+  href?: string;
+}) {
+  const body = (
+    <>
+      <div class="live-counter-value">{value}</div>
+      <div class="live-counter-label">{label}</div>
+    </>
   );
-}
 
-interface IssueRowProps {
-  row: InFlightIssue;
-  onOpen: () => void;
-}
-
-function IssueRow({ row, onOpen }: IssueRowProps) {
-  const cycleCount = devReviewCycleCount(row.cycle_counts);
-  const cap = DEFAULT_MAX_REVIEW_CYCLES;
-  const cycleClass = cycleCount > cap ? 'cell-cap-hit' : '';
-  const stuck = row.stuck_for_seconds > ONE_HOUR_SECONDS;
-  const issueHref = issueDetailHref(row);
-
-  function handleRowClick(e: MouseEvent) {
-    // Avoid hijacking explicit clicks on links/buttons inside the row.
-    const target = e.target as HTMLElement;
-    if (target.closest('a, button')) return;
-    onOpen();
-  }
-
-  return (
-    <tr onClick={handleRowClick}>
-      <td>
-        <a href={issueHref} class="code-chip">
-          {row.repo}#{row.issue_num}
-        </a>{' '}
-        <GitHubIssueLink
-          owner={splitRepo(row.repo).owner}
-          repo={splitRepo(row.repo).name}
-          num={row.issue_num}
-          variant="icon"
-        />
-      </td>
-      <td>{row.title || <span class="muted">(no title)</span>}</td>
-      <td>
-        <StateBadge state={row.current_state} />
-      </td>
-      <td>
-        <span class={cycleClass} title="dev↔review cycle count / orchestrator cap">
-          {cycleCount} / {cap}
-        </span>
-      </td>
-      <td class={stuck ? 'cell-stuck' : ''}>
-        {row.last_transition_at
-          ? formatRelative(row.last_transition_at)
-          : <span class="muted">never</span>}
-      </td>
-      <td>
-        {row.claimed_worker_id
-          ? <span class="code-chip">{row.claimed_worker_id}</span>
-          : <span class="muted">—</span>}
-      </td>
-      <td>
-        {row.last_session_id
-          ? <a href={`/sessions/${encodeURIComponent(row.last_session_id)}`}>view</a>
-          : <span class="muted">—</span>}
-      </td>
-    </tr>
+  return href ? (
+    <a href={href} class="surface-card reveal-card live-counter-card" style={`--i: ${index}`}>
+      {body}
+    </a>
+  ) : (
+    <div class="surface-card reveal-card live-counter-card" style={`--i: ${index}`}>
+      {body}
+    </div>
   );
 }
