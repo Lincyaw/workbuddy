@@ -295,6 +295,11 @@ func (p *Poller) poll(ctx context.Context) {
 					log.Printf("[poller] error deleting cache for closed issue %s#%d: %v", p.repo, closedNum, err)
 					return err
 				}
+				// Best-effort: clear any pipeline hazard so a closed
+				// issue doesn't stay in `workbuddy diagnose`.
+				if err := p.store.ClearIssuePipelineHazard(p.repo, closedNum); err != nil {
+					log.Printf("[poller] error clearing pipeline hazard for closed issue %s#%d: %v", p.repo, closedNum, err)
+				}
 				return nil
 			})
 		}

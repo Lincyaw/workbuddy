@@ -274,6 +274,12 @@ type inFlightIssueResponse struct {
 	ClaimedWorkerID  string         `json:"claimed_worker_id,omitempty"`
 	LastSessionID    string         `json:"last_session_id,omitempty"`
 	LastSessionURL   string         `json:"last_session_url,omitempty"`
+	// Hazard, when non-empty, names a configuration-incompleteness condition
+	// that prevents the issue from making progress. Set by the coordinator
+	// from issue_pipeline_hazards (REQ #255). Possible values:
+	//   "no-workflow-match"      — issue has status:* but no workflow trigger
+	//   "awaiting-status-label"  — workflow trigger + depends_on but no status:*
+	Hazard string `json:"hazard,omitempty"`
 }
 
 // issueTransitionResponse is one transition row in the issue-detail endpoint.
@@ -499,6 +505,9 @@ func (h *Handler) buildInFlightRow(ic store.IssueCache, now time.Time) (inFlight
 	if session, err := h.store.LatestSessionForIssue(ic.Repo, ic.IssueNum); err == nil && session != nil {
 		row.LastSessionID = session.SessionID
 		row.LastSessionURL = sessionref.BuildURL(h.reportBaseURL, session.WorkerID, session.SessionID)
+	}
+	if hazard, err := h.store.QueryIssuePipelineHazard(ic.Repo, ic.IssueNum); err == nil && hazard != nil {
+		row.Hazard = hazard.Kind
 	}
 	return row, nil
 }
@@ -762,6 +771,12 @@ func (h *Handler) handleIssueState(w http.ResponseWriter, r *http.Request) {
 			LastReactionBlocked: depState.LastReactionBlocked,
 			LastEvaluatedAt:     depState.LastEvaluatedAt,
 		}
+	}
+	// REQ #255: surface pipeline-incompleteness hazards by overriding the
+	// DependencyVerdict string. The DependencyState block keeps the real
+	// verdict for clients that need both signals.
+	if hazard, err := h.store.QueryIssuePipelineHazard(repo, issueNum); err == nil && hazard != nil {
+		resp.DependencyVerdict = hazard.Kind
 	}
 
 	writeJSON(w, http.StatusOK, resp)

@@ -53,6 +53,17 @@ const (
 	TypeDevReviewCycleCapReached    = "dev_review_cycle_cap_reached"
 	TypeDevReviewCycleCountReset    = "dev_review_cycle_count_reset"
 	TypeLongFlightStuck             = "long_flight_stuck_detected"
+	// TypeIssueNoWorkflowMatch fires when poller observes an issue carrying a
+	// status:* label but none of the configured workflow trigger labels match,
+	// i.e. the issue cannot enter the state machine. Idempotent per
+	// (labels) fingerprint via the issue_pipeline_hazards table. See REQ #255.
+	TypeIssueNoWorkflowMatch = "issue_no_workflow_match"
+	// TypeIssueDependencyUnentered fires when an issue carries a workflow
+	// trigger label and a workbuddy.depends_on declaration but no status:*
+	// label, so the state machine cannot enter the issue and the dependency
+	// gate cannot release downstream work. Idempotent per (labels+depends_on)
+	// fingerprint. See REQ #255.
+	TypeIssueDependencyUnentered = "issue_dependency_unentered"
 )
 
 // AllEventTypes lists every recognised event type.
@@ -95,6 +106,8 @@ var AllEventTypes = []string{
 	TypeDevReviewCycleCapReached,
 	TypeDevReviewCycleCountReset,
 	TypeLongFlightStuck,
+	TypeIssueNoWorkflowMatch,
+	TypeIssueDependencyUnentered,
 }
 
 // EventFilter specifies optional criteria for querying events.

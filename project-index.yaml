@@ -3571,3 +3571,46 @@ requirements:
     tests:
       - web/src/components/Layout.test.tsx
     deps: []
+
+  - id: REQ-103
+    title: surface silent state-machine skips as pipeline hazards (#255)
+    description: >
+      Two coordinator skip paths used to be invisible: an issue carrying a
+      status:* label without any workflow trigger label match
+      (findMatchingWorkflows = empty), and an issue carrying a workflow
+      trigger label and depends_on YAML but no status:* label
+      (currentState = nil in processWorkflowEvent). Both produced no log,
+      no event, and no surface in `workbuddy status` / `diagnose`. The
+      state machine now records both conditions as persistent hazards in
+      a new `issue_pipeline_hazards` table, emits INFO eventlog entries
+      (`issue_no_workflow_match`, `issue_dependency_unentered`) idempotent
+      per labels/body fingerprint, and overrides the DependencyVerdict
+      surface in audit/auditapi so `workbuddy status` shows
+      `no-workflow-match` / `awaiting-status-label` in the DEPENDENCY
+      column. `workbuddy diagnose` adds a `pipeline_hazard` finding kind
+      with the user-facing remediation hint. The opt-in nature of the
+      trigger label and status label is preserved — coordinator never
+      auto-adds either.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-103-1: HandleEvent records an INFO `issue_no_workflow_match` event + persistent hazard when an issue has any status:* label, workflows are configured, and findMatchingWorkflows returned empty; a second event with identical labels does not duplicate the event (idempotent per labels fingerprint)."
+      - "AC-103-2: processWorkflowEvent records an INFO `issue_dependency_unentered` event + persistent hazard when currentState is nil and the issue body parses a workbuddy.depends_on block; idempotent per (labels + depends_on source-hash) fingerprint."
+      - "AC-103-3: audit `IssueStateResponse.DependencyVerdict` and auditapi `issueStateResponse.DependencyVerdict` both report the hazard kind (`no-workflow-match` / `awaiting-status-label`) when a hazard is recorded, so `workbuddy status` renders it in the DEPENDENCY column."
+      - "AC-103-4: auditapi `inFlightIssueResponse.Hazard` is populated from issue_pipeline_hazards so the webui in-flight view can render the condition."
+      - "AC-103-5: `workbuddy diagnose` emits a `pipeline_hazard` finding with user-facing fix text (`add the workflow trigger label, e.g. workbuddy` / `add status:blocked so the gate can evaluate, or status:developing if the deps are already satisfied`)."
+      - "AC-103-6: hazards clear automatically when the user adds the missing label (workflow trigger or status:*); the row also clears on issue close so closed issues do not linger in the diagnose feed."
+      - "AC-103-7: Two unit tests cover scenario A (status:* without workbuddy trigger) and scenario B (workbuddy + depends_on without status:*); both assert event + hazard creation and idempotent re-emission, plus auto-clear on label fix."
+    code:
+      - internal/eventlog/eventlog.go
+      - internal/store/store.go
+      - internal/store/pipeline_hazards.go
+      - internal/statemachine/statemachine.go
+      - internal/audit/http.go
+      - internal/auditapi/handler.go
+      - internal/diagnose/diagnose.go
+      - internal/poller/poller.go
+    tests:
+      - internal/statemachine/pipeline_hazards_test.go
+    deps: []

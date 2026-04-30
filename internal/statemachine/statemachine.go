@@ -2,10 +2,13 @@ package statemachine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,6 +16,7 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/alertbus"
 	"github.com/Lincyaw/workbuddy/internal/config"
+	"github.com/Lincyaw/workbuddy/internal/dependency"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/store"
@@ -254,8 +258,21 @@ func (sm *StateMachine) HandleEvent(ctx context.Context, event ChangeEvent) erro
 	matched := sm.findMatchingWorkflows(event)
 
 	if len(matched) == 0 {
-		// No match — skip silently.
+		// REQ #255 scenario A: no workflow trigger label matched. If the
+		// issue carries a status:* label, the user has configured "this
+		// issue should be in a state" but the trigger label is missing,
+		// so the state machine would silently skip it. Surface the
+		// condition as an INFO event + persistent hazard so it shows up
+		// in `workbuddy status` and `workbuddy diagnose`.
+		if event.IssueNum > 0 && event.Type != poller.EventPollCycleDone {
+			sm.detectNoWorkflowMatchHazard(event)
+		}
 		return nil
+	}
+	// A workflow trigger label matched — clear any prior scenario A
+	// hazard for this issue so cleared conditions don't linger.
+	if event.IssueNum > 0 {
+		sm.clearHazardIfKind(event.Repo, event.IssueNum, store.HazardKindNoWorkflowMatch)
 	}
 	if len(matched) > 1 {
 		// Multiple workflows match — log error, skip.
@@ -301,9 +318,21 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 		return fmt.Errorf("statemachine: ensure workflow instance: %w", err)
 	}
 	if currentState == nil {
-		// Issue has the workflow trigger but no status label matching any state.
-		// Could be initial state or misconfigured. Skip silently.
+		// REQ #255 scenario B: workflow trigger label is present but no
+		// state label matched. If the issue body declares a depends_on
+		// block, the state machine cannot enter the issue and the
+		// dependency gate cannot release downstream work. Surface as a
+		// persistent hazard so the user sees they need to add a status:*
+		// label (or status:blocked) for the gate to evaluate.
+		if event.IssueNum > 0 {
+			sm.detectDependencyUnenteredHazard(wf, event)
+		}
 		return nil
+	}
+	// State label is present — clear any prior scenario B hazard so the
+	// cleared condition doesn't linger in `workbuddy status`.
+	if event.IssueNum > 0 {
+		sm.clearHazardIfKind(event.Repo, event.IssueNum, store.HazardKindAwaitingStatusLabel)
 	}
 
 	// State-entry detection: dispatch the state agents if:
@@ -1269,6 +1298,168 @@ func (sm *StateMachine) stateHasAgents(state *config.State) bool {
 
 func (sm *StateMachine) issueKey(repo string, issueNum int) string {
 	return fmt.Sprintf("%s#%d", repo, issueNum)
+}
+
+// detectNoWorkflowMatchHazard records the scenario A hazard (issue has a
+// status:* label but no workflow trigger label matched) idempotently per
+// labels fingerprint. Caller must already have established len(matched) == 0.
+func (sm *StateMachine) detectNoWorkflowMatchHazard(event ChangeEvent) {
+	if sm.store == nil {
+		return
+	}
+	if !hasStatusLabel(event.Labels) {
+		// No status label → user hasn't asked the issue to enter the
+		// pipeline yet. Not a hazard.
+		return
+	}
+	if !sm.hasAnyWorkflow() {
+		// No workflows configured at all (e.g. tests, fresh deploy
+		// without configs). Treating this as a hazard would just be
+		// noise.
+		return
+	}
+	fingerprint := labelsFingerprint(event.Labels)
+	hazard := store.PipelineHazard{
+		Repo:        event.Repo,
+		IssueNum:    event.IssueNum,
+		Kind:        store.HazardKindNoWorkflowMatch,
+		Fingerprint: fingerprint,
+	}
+	changed, err := sm.store.UpsertIssuePipelineHazard(hazard)
+	if err != nil {
+		log.Printf("[statemachine] upsert no-workflow-match hazard for %s#%d: %v", event.Repo, event.IssueNum, err)
+		return
+	}
+	if !changed {
+		return
+	}
+	triggers := sm.workflowTriggerLabels()
+	sm.eventlog.Log(eventlog.TypeIssueNoWorkflowMatch, event.Repo, event.IssueNum, map[string]any{
+		"labels":             append([]string(nil), event.Labels...),
+		"workflow_triggers":  triggers,
+		"hint":               "add one of the workflow trigger labels (e.g. workbuddy) to opt this issue into the pipeline",
+	})
+}
+
+// detectDependencyUnenteredHazard records the scenario B hazard (workflow
+// trigger label present, depends_on declared in body, but no status:* label
+// so the state machine cannot enter). Idempotent per (labels+depends_on)
+// fingerprint.
+func (sm *StateMachine) detectDependencyUnenteredHazard(wf *config.WorkflowConfig, event ChangeEvent) {
+	if sm.store == nil {
+		return
+	}
+	cache, err := sm.store.QueryIssueCache(event.Repo, event.IssueNum)
+	if err != nil || cache == nil {
+		return
+	}
+	decl := dependency.ParseDeclaration(event.Repo, cache.Body)
+	if !decl.HasBlock {
+		return
+	}
+	deps := make([]string, 0, len(decl.Dependencies))
+	for _, d := range decl.Dependencies {
+		ref := d.Normalized
+		if ref == "" {
+			ref = d.Raw
+		}
+		deps = append(deps, ref)
+	}
+	fingerprint := hazardFingerprint(labelsFingerprint(event.Labels), decl.SourceHash)
+	hazard := store.PipelineHazard{
+		Repo:        event.Repo,
+		IssueNum:    event.IssueNum,
+		Kind:        store.HazardKindAwaitingStatusLabel,
+		Fingerprint: fingerprint,
+	}
+	changed, err := sm.store.UpsertIssuePipelineHazard(hazard)
+	if err != nil {
+		log.Printf("[statemachine] upsert awaiting-status-label hazard for %s#%d: %v", event.Repo, event.IssueNum, err)
+		return
+	}
+	if !changed {
+		return
+	}
+	sm.eventlog.Log(eventlog.TypeIssueDependencyUnentered, event.Repo, event.IssueNum, map[string]any{
+		"workflow":    wf.Name,
+		"labels":      append([]string(nil), event.Labels...),
+		"depends_on":  deps,
+		"hint":        "add status:blocked so the dependency gate can evaluate, or status:developing if the deps are already satisfied",
+	})
+}
+
+// clearHazardIfKind removes a prior hazard row when its kind matches. We do
+// not unconditionally delete: a different hazard kind may legitimately be
+// present (e.g. a still-open scenario B even after a workflow trigger label
+// match for an unrelated workflow), and clearing it would lose state.
+func (sm *StateMachine) clearHazardIfKind(repo string, issueNum int, kind string) {
+	if sm.store == nil {
+		return
+	}
+	prev, err := sm.store.QueryIssuePipelineHazard(repo, issueNum)
+	if err != nil || prev == nil {
+		return
+	}
+	if prev.Kind != kind {
+		return
+	}
+	if err := sm.store.ClearIssuePipelineHazard(repo, issueNum); err != nil {
+		log.Printf("[statemachine] clear pipeline hazard for %s#%d: %v", repo, issueNum, err)
+	}
+}
+
+func (sm *StateMachine) hasAnyWorkflow() bool {
+	for _, wf := range sm.workflows {
+		if wf != nil && strings.TrimSpace(wf.Trigger.IssueLabel) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (sm *StateMachine) workflowTriggerLabels() []string {
+	out := make([]string, 0, len(sm.workflows))
+	for _, wf := range sm.workflows {
+		if wf == nil {
+			continue
+		}
+		label := strings.TrimSpace(wf.Trigger.IssueLabel)
+		if label == "" {
+			continue
+		}
+		out = append(out, label)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func hasStatusLabel(labels []string) bool {
+	for _, l := range labels {
+		if strings.HasPrefix(l, "status:") {
+			return true
+		}
+	}
+	return false
+}
+
+func labelsFingerprint(labels []string) string {
+	sorted := append([]string(nil), labels...)
+	sort.Strings(sorted)
+	h := sha256.New()
+	for _, l := range sorted {
+		_, _ = h.Write([]byte(l))
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func hazardFingerprint(parts ...string) string {
+	h := sha256.New()
+	for _, p := range parts {
+		_, _ = h.Write([]byte(p))
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func parseIssueKey(raw string) (string, int, bool) {
