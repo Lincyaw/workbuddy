@@ -461,6 +461,17 @@ func TestExecutionMutex(t *testing.T) {
 		t.Fatalf("HandleEvent 1: %v", err)
 	}
 	<-dispatch // drain; agent is now inflight
+	if err := sm.store.InsertTask(store.TaskRecord{
+		ID:        "task-review-live",
+		Repo:      "r",
+		IssueNum:  7,
+		AgentName: "review-agent",
+		Workflow:  "dev-flow",
+		State:     "reviewing",
+		Status:    store.TaskStatusRunning,
+	}); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
 
 	// Don't mark complete — agent still running.
 	sm.ResetDedup() // simulate new poll cycle
@@ -482,8 +493,168 @@ func TestExecutionMutex(t *testing.T) {
 	}
 
 	// Should have logged the skip.
-	if len(rec.find(eventlog.TypeDispatchSkippedInflight)) == 0 {
+	skips := rec.find(eventlog.TypeDispatchSkippedInflight)
+	if len(skips) == 0 {
 		t.Error("expected dispatch_skipped_inflight event")
+	}
+	payload, ok := skips[len(skips)-1].Payload.(map[string]string)
+	if !ok {
+		t.Fatalf("skip payload type = %T", skips[len(skips)-1].Payload)
+	}
+	if got := payload["task_status"]; got != store.TaskStatusRunning {
+		t.Fatalf("task_status = %q, want %q", got, store.TaskStatusRunning)
+	}
+}
+
+func TestDispatchSelfHealsDeletedInflightTask(t *testing.T) {
+	sm, _, dispatch := newTestSM(t)
+
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
+		Type:     poller.EventLabelAdded,
+		Repo:     "test/repo",
+		IssueNum: 207,
+		Labels:   []string{"workbuddy", "status:developing"},
+		Detail:   "status:reviewing",
+	}); err != nil {
+		t.Fatalf("HandleEvent 1: %v", err)
+	}
+	<-dispatch
+	if err := sm.store.InsertTask(store.TaskRecord{
+		ID:        "task-review-deleted",
+		Repo:      "test/repo",
+		IssueNum:  207,
+		AgentName: "review-agent",
+		Workflow:  "dev-flow",
+		State:     "reviewing",
+		Status:    store.TaskStatusRunning,
+	}); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+	if _, err := sm.store.DB().Exec(`DELETE FROM task_queue WHERE id = ?`, "task-review-deleted"); err != nil {
+		t.Fatalf("delete task: %v", err)
+	}
+
+	sm.ResetDedup()
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
+		Type:     poller.EventLabelAdded,
+		Repo:     "test/repo",
+		IssueNum: 207,
+		Labels:   []string{"workbuddy", "status:reviewing"},
+		Detail:   "status:developing",
+	}); err != nil {
+		t.Fatalf("HandleEvent 2: %v", err)
+	}
+
+	select {
+	case req := <-dispatch:
+		if req.AgentName != "dev-agent" || req.State != "developing" {
+			t.Fatalf("unexpected redispatch: %+v", req)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected redispatch after stale inflight task row was deleted")
+	}
+}
+
+func TestDispatchSelfHealsFailedInflightTask(t *testing.T) {
+	sm, _, dispatch := newTestSM(t)
+
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
+		Type:     poller.EventLabelAdded,
+		Repo:     "test/repo",
+		IssueNum: 208,
+		Labels:   []string{"workbuddy", "status:developing"},
+		Detail:   "status:reviewing",
+	}); err != nil {
+		t.Fatalf("HandleEvent 1: %v", err)
+	}
+	<-dispatch
+	if err := sm.store.InsertTask(store.TaskRecord{
+		ID:        "task-review-failed",
+		Repo:      "test/repo",
+		IssueNum:  208,
+		AgentName: "review-agent",
+		Workflow:  "dev-flow",
+		State:     "reviewing",
+		Status:    store.TaskStatusFailed,
+	}); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+
+	sm.ResetDedup()
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
+		Type:     poller.EventLabelAdded,
+		Repo:     "test/repo",
+		IssueNum: 208,
+		Labels:   []string{"workbuddy", "status:reviewing"},
+		Detail:   "status:developing",
+	}); err != nil {
+		t.Fatalf("HandleEvent 2: %v", err)
+	}
+
+	select {
+	case req := <-dispatch:
+		if req.AgentName != "dev-agent" || req.State != "developing" {
+			t.Fatalf("unexpected redispatch: %+v", req)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected redispatch after inflight task failed")
+	}
+}
+
+func TestDispatchSelfHealsExpiredInflightLease(t *testing.T) {
+	sm, _, dispatch := newTestSM(t)
+
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
+		Type:     poller.EventLabelAdded,
+		Repo:     "test/repo",
+		IssueNum: 209,
+		Labels:   []string{"workbuddy", "status:developing"},
+		Detail:   "status:reviewing",
+	}); err != nil {
+		t.Fatalf("HandleEvent 1: %v", err)
+	}
+	<-dispatch
+	if err := sm.store.InsertTask(store.TaskRecord{
+		ID:        "task-review-expired",
+		Repo:      "test/repo",
+		IssueNum:  209,
+		AgentName: "review-agent",
+		Workflow:  "dev-flow",
+		State:     "reviewing",
+		Status:    store.TaskStatusRunning,
+	}); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+	now := time.Now().UTC()
+	leaseStart := now.Add(-7 * defaultTaskLease)
+	leaseExpiry := leaseStart.Add(defaultTaskLease)
+	if _, err := sm.store.DB().Exec(
+		`UPDATE task_queue SET heartbeat_at = ?, lease_expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		leaseStart.Format("2006-01-02 15:04:05"),
+		leaseExpiry.Format("2006-01-02 15:04:05"),
+		"task-review-expired",
+	); err != nil {
+		t.Fatalf("expire lease: %v", err)
+	}
+
+	sm.ResetDedup()
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
+		Type:     poller.EventLabelAdded,
+		Repo:     "test/repo",
+		IssueNum: 209,
+		Labels:   []string{"workbuddy", "status:reviewing"},
+		Detail:   "status:developing",
+	}); err != nil {
+		t.Fatalf("HandleEvent 2: %v", err)
+	}
+
+	select {
+	case req := <-dispatch:
+		if req.AgentName != "dev-agent" || req.State != "developing" {
+			t.Fatalf("unexpected redispatch: %+v", req)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected redispatch after inflight lease expired beyond grace window")
 	}
 }
 

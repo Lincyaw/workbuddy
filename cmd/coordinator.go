@@ -652,6 +652,7 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 	mux.Handle("/api/v1/workers/", api.WrapAuth(http.HandlerFunc(api.HandleWorkerByPath)))
 	mux.Handle("/workers/", api.WrapAuth(newCoordinatorSessionProxy(st, api.AuthToken)))
 	mux.Handle("/api/v1/config/reload", api.WrapAuth(http.HandlerFunc(api.HandleConfigReload)))
+	mux.Handle("/api/v1/admin/issues/", api.WrapAuth(http.HandlerFunc(api.HandleClearIssueInflight)))
 	mux.Handle("/api/v1/tasks/poll", api.WrapAuth(http.HandlerFunc(api.HandlePollTask)))
 	mux.Handle("/api/v1/tasks/", api.WrapAuth(http.HandlerFunc(api.HandleTaskAction)))
 

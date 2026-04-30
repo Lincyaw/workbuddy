@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -131,6 +133,65 @@ func TestRunRestartIssueStoreClearsCacheClaimAndLogsEvent(t *testing.T) {
 	}
 	if latest == nil || latest.Type != eventlog.TypeIssueRestarted {
 		t.Fatalf("latest event = %+v, want %q", latest, eventlog.TypeIssueRestarted)
+	}
+}
+
+func TestRunRestartIssueWithOptsClearsCoordinatorInflight(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "restart-coordinator.db")
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	const (
+		repo     = "owner/repo"
+		issueNum = 218
+	)
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     repo,
+		IssueNum: issueNum,
+		Labels:   `["workbuddy","status:developing"]`,
+		State:    "open",
+	}); err != nil {
+		t.Fatalf("UpsertIssueCache: %v", err)
+	}
+	_ = st.Close()
+
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if got, want := r.URL.Path, "/api/v1/admin/issues/owner/repo/218/clear-inflight"; got != want {
+			t.Fatalf("path = %q, want %q", got, want)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer shared-secret" {
+			t.Fatalf("authorization = %q, want Bearer shared-secret", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"repo":"owner/repo","issue_num":218}`))
+	}))
+	defer srv.Close()
+
+	var out bytes.Buffer
+	err = runRestartIssueWithOpts(context.Background(), &restartIssueOpts{
+		repo:        repo,
+		issue:       issueNum,
+		dbPath:      dbPath,
+		coordinator: srv.URL,
+		token:       "shared-secret",
+		source:      "test",
+		force:       true,
+		interactive: false,
+	}, &out)
+	if err != nil {
+		t.Fatalf("runRestartIssueWithOpts: %v", err)
+	}
+	if !called {
+		t.Fatal("expected coordinator clear-inflight request")
+	}
+	if !strings.Contains(out.String(), "inflight=true") {
+		t.Fatalf("output missing inflight=true: %q", out.String())
 	}
 }
 

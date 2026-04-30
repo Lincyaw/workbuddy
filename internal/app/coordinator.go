@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -111,6 +112,51 @@ type TaskHeartbeatRequest struct {
 type TaskReleaseRequest struct {
 	WorkerID string `json:"worker_id"`
 	Reason   string `json:"reason,omitempty"`
+}
+
+// HandleClearIssueInflight serves
+// POST /api/v1/admin/issues/{owner}/{repo}/{issue_num}/clear-inflight.
+func (s *FullCoordinatorServer) HandleClearIssueInflight(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		CoordWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	repo, issueNum, ok := parseClearIssueInflightPath(r.URL.Path)
+	if !ok {
+		CoordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid issue path; expect /api/v1/admin/issues/<owner>/<repo>/<num>/clear-inflight"})
+		return
+	}
+	if s.Pollers == nil {
+		CoordWriteJSON(w, http.StatusNotFound, map[string]string{"error": "poller manager unavailable"})
+		return
+	}
+	snapshot, cleared := s.Pollers.ClearInflight(repo, issueNum)
+	if !cleared || snapshot == nil {
+		CoordWriteJSON(w, http.StatusNotFound, map[string]string{"error": "no inflight entry for issue"})
+		return
+	}
+	CoordWriteJSON(w, http.StatusOK, map[string]any{
+		"repo":      repo,
+		"issue_num": issueNum,
+		"group":     snapshot,
+	})
+}
+
+func parseClearIssueInflightPath(path string) (string, int, bool) {
+	trimmed := strings.TrimPrefix(path, "/api/v1/admin/issues/")
+	parts := strings.Split(strings.Trim(trimmed, "/"), "/")
+	if len(parts) < 4 || parts[len(parts)-1] != "clear-inflight" {
+		return "", 0, false
+	}
+	issueNum, err := strconv.Atoi(parts[len(parts)-2])
+	if err != nil || issueNum <= 0 {
+		return "", 0, false
+	}
+	repo := strings.Join(parts[:len(parts)-2], "/")
+	if strings.TrimSpace(repo) == "" {
+		return "", 0, false
+	}
+	return repo, issueNum, true
 }
 
 // HandleConfigReload serves POST /api/v1/config/reload.

@@ -6,8 +6,15 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/Lincyaw/workbuddy/internal/config"
+	"github.com/Lincyaw/workbuddy/internal/poller"
+	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
+
+type noopEventRecorder struct{}
+
+func (noopEventRecorder) Log(string, string, int, interface{}) {}
 
 func newCoordinatorTestStore(t *testing.T) *store.Store {
 	t.Helper()
@@ -111,5 +118,73 @@ func TestWrapAuthRejectsRevokedAndUnregisteredWorkerTokens(t *testing.T) {
 				t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
 			}
 		})
+	}
+}
+
+func TestHandleClearIssueInflight(t *testing.T) {
+	st := newCoordinatorTestStore(t)
+	dispatchCh := make(chan statemachine.DispatchRequest, 1)
+	sm := statemachine.NewStateMachine(
+		map[string]*config.WorkflowConfig{"dev-flow": testWorkflowConfig()},
+		st,
+		dispatchCh,
+		noopEventRecorder{},
+		nil,
+	)
+	if err := sm.HandleEvent(t.Context(), statemachine.ChangeEvent{
+		Type:     poller.EventIssueCreated,
+		Repo:     "owner/repo",
+		IssueNum: 41,
+		Labels:   []string{"workbuddy", "status:developing"},
+	}); err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+	select {
+	case <-dispatchCh:
+	case <-t.Context().Done():
+		t.Fatal("expected dispatch to create inflight state")
+	}
+
+	pm := &PollerManager{
+		rootCtx:  t.Context(),
+		store:    st,
+		runtimes: map[string]*RepoRuntime{"owner/repo": {StateMachine: sm}},
+	}
+	server := &FullCoordinatorServer{
+		Store:       st,
+		Pollers:     pm,
+		AuthEnabled: true,
+		AuthToken:   "shared-secret",
+	}
+	protected := server.WrapAuth(http.HandlerFunc(server.HandleClearIssueInflight))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/issues/owner/repo/41/clear-inflight", nil)
+	req.Header.Set("Authorization", "Bearer shared-secret")
+	rec := httptest.NewRecorder()
+	protected.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if sm.IsInflight("owner/repo", 41) {
+		t.Fatal("inflight entry should be cleared")
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/admin/issues/owner/repo/41/clear-inflight", nil)
+	req.Header.Set("Authorization", "Bearer shared-secret")
+	rec = httptest.NewRecorder()
+	protected.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("second clear status = %d, want %d body=%s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+}
+
+func testWorkflowConfig() *config.WorkflowConfig {
+	return &config.WorkflowConfig{
+		Name:    "dev-flow",
+		Trigger: config.WorkflowTrigger{IssueLabel: "workbuddy"},
+		States: map[string]*config.State{
+			"developing": {EnterLabel: "status:developing", Agent: "dev-agent"},
+		},
 	}
 }
