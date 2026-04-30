@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -233,6 +234,66 @@ func (s *Store) CountTerminalSessionsSince(status string, since time.Time) (int,
 		return 0, fmt.Errorf("store: count terminal sessions: %w", err)
 	}
 	return n, nil
+}
+
+// InFlightTaskForWorker is a compact view of a running task that a stateless
+// worker needs in order to resume tracking of its supervisor-managed
+// subprocess after a worker restart. EventsV1Path is the on-disk events file
+// the resume goroutine appends to; SupervisorAgentID identifies the agent
+// inside the local supervisor's IPC service. SessionID is convenience for
+// logging — it lets the resumer name what it's resuming without a separate
+// query.
+type InFlightTaskForWorker struct {
+	TaskID            string
+	SessionID         string
+	SupervisorAgentID string
+	EventsV1Path      string
+}
+
+// InFlightTasksForWorker returns every running task currently claimed by
+// workerID together with the latest session row so the worker can rebuild
+// its event-stream tail on boot. Tasks without a recorded
+// supervisor_agent_id (the foundational #234 slice landed before all
+// dispatch paths were wired) are omitted: the worker resume path needs the
+// agent id to call the supervisor IPC. Issue #245.
+func (s *Store) InFlightTasksForWorker(workerID string) ([]InFlightTaskForWorker, error) {
+	rows, err := s.db.Query(
+		`SELECT tq.id,
+		        COALESCE(tq.supervisor_agent_id, ''),
+		        COALESCE(s.session_id, ''),
+		        COALESCE(s.dir, '')
+		 FROM task_queue tq
+		 LEFT JOIN sessions s
+		        ON s.id = (
+		           SELECT s2.id FROM sessions s2
+		           WHERE s2.task_id = tq.id
+		           ORDER BY s2.id DESC LIMIT 1)
+		 WHERE tq.status = ? AND tq.worker_id = ?
+		 ORDER BY tq.updated_at`,
+		TaskStatusRunning, workerID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: in-flight tasks for worker: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []InFlightTaskForWorker
+	for rows.Next() {
+		var rec InFlightTaskForWorker
+		var dir string
+		if err := rows.Scan(&rec.TaskID, &rec.SupervisorAgentID, &rec.SessionID, &dir); err != nil {
+			return nil, fmt.Errorf("store: scan in-flight task: %w", err)
+		}
+		if rec.SupervisorAgentID == "" {
+			// Pre-supervisor task rows: nothing for the resumer to attach to.
+			continue
+		}
+		if dir != "" {
+			rec.EventsV1Path = filepath.Join(dir, "events-v1.jsonl")
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
 }
 
 // WorkerCurrentTaskID returns the running task ID currently owned by the
