@@ -82,11 +82,6 @@ func init() {
 	deployCmd.AddCommand(deployUninstallCmd)
 }
 
-func bundleEnabled(cmd *cobra.Command) bool {
-	v, _ := cmd.Flags().GetBool("bundle")
-	return v
-}
-
 func parseBundleInstallFlags(cmd *cobra.Command) (*bundleInstallOpts, error) {
 	scope, _ := cmd.Flags().GetString("scope")
 	binaryPath, _ := cmd.Flags().GetString("binary")

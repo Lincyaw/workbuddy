@@ -4,8 +4,12 @@ GitHub Issue-driven agent orchestration platform. Workbuddy watches GitHub Issue
 
 Today the repository implements two runtime shapes over one shared core:
 
-- `workbuddy serve` for single-process deployment
-- `workbuddy coordinator` + `workbuddy worker` for distributed deployment
+- `workbuddy coordinator` + `workbuddy worker` (+ `workbuddy supervisor`) for the
+  recommended distributed deployment, installed via `workbuddy deploy install`
+  as the supervisor + coordinator + worker bundle.
+- `workbuddy serve` for legacy single-process / local-dev convenience only —
+  it does **not** preserve in-flight agent runs across restart and is kept
+  for one migration window. New deployments should use the bundle layout.
 
 ## Architecture
 
@@ -117,77 +121,73 @@ Or build from source:
 go build -o workbuddy .
 ```
 
-### Deploy as a service
+### Deploy as a service (recommended: bundle layout)
 
-Install the current `workbuddy` binary into a managed location and optionally
-write a systemd unit in one step:
+`workbuddy deploy install` installs three systemd user units in one step:
 
-```bash
-workbuddy deploy install \
-  --name workbuddy \
-  --scope user \
-  --systemd \
-  --working-directory "$PWD"
-```
+- `workbuddy-supervisor.service` (`Type=notify`, `KillMode=process`, `Restart=always`)
+- `workbuddy-coordinator.service` (`Type=simple`, `After=workbuddy-supervisor.service`)
+- `workbuddy-worker.service` (`Type=simple`, `After=workbuddy-supervisor.service`)
 
-That writes a deployment manifest under the selected scope, so you can later
-redeploy the current binary or upgrade to the latest GitHub release without
-retyping the service definition:
+The supervisor owns the agent subprocesses behind a unix-socket IPC, so
+restarting the worker (e.g. for a binary upgrade) does **not** kill in-flight
+agent runs — the worker re-attaches over the supervisor socket and continues
+the events log from the right offset. This is the rolling-restart property
+you actually want in production.
 
 ```bash
-workbuddy deploy redeploy --name workbuddy --scope user
-workbuddy deploy upgrade --name workbuddy --scope user --version latest
+workbuddy deploy install --scope user \
+  --working-directory "$PWD" \
+  --env-file /home/<you>/.config/workbuddy/worker.env \
+  --coordinator-args=--listen=127.0.0.1:8081 --coordinator-args=--auth \
+  --worker-args=--coordinator=http://127.0.0.1:8081 \
+  --worker-args=--token-file=/home/<you>/.config/workbuddy/auth-token \
+  --worker-args=--repos=owner/repo=$PWD
 ```
 
-Managed deployments can also be paused, resumed, or removed in place:
+The `--bundle` flag is no longer required (the bundle layout became the
+default). It is accepted as a no-op alias so existing automation keeps
+working. Trailing `-- args` are not allowed in bundle mode — use the
+per-unit `--supervisor-args` / `--coordinator-args` / `--worker-args`
+flags (each repeatable).
+
+Upgrade and lifecycle commands operate on the recorded manifests:
 
 ```bash
-workbuddy deploy stop --name workbuddy --scope user
-workbuddy deploy start --name workbuddy --scope user
-workbuddy deploy delete --name workbuddy --scope user
+workbuddy deploy upgrade                                # upgrades binaries; backfills supervisor unit if missing
+workbuddy deploy upgrade --name workbuddy-worker        # rolling upgrade of just the worker
+workbuddy deploy uninstall --scope user --force         # remove the bundle (keeps the binary on disk)
 ```
 
-`deploy delete` removes the recorded manifest and systemd unit, but leaves the
-installed binary in place.
-
-`deploy install` defaults to `workbuddy serve`, but you can record dedicated
-distributed roles by passing the runtime command after `--`.
-
-Coordinator service example:
-
-```bash
-sudo workbuddy deploy install \
-  --name workbuddy-coordinator \
-  --scope system \
-  --systemd \
-  --working-directory /srv/workbuddy \
-  -- coordinator --listen 0.0.0.0:8081 --db /srv/workbuddy/.workbuddy/workbuddy.db
-```
-
-Worker service example:
-
-```bash
-sudo workbuddy deploy install \
-  --name workbuddy-worker-dev \
-  --scope system \
-  --systemd \
-  --working-directory /srv/workbuddy-worker \
-  -- worker \
-     --coordinator http://127.0.0.1:8081 \
-     --token-file /etc/workbuddy/auth-token \
-     --role dev \
-     --repos owner/repo=/srv/workbuddy-worker
-```
+`workbuddy deploy upgrade` (with no flags) refuses to silently upgrade a
+legacy single-process `serve` install — it errors with a migration hint.
+Pass `--legacy-serve` if you genuinely want to keep the legacy layout
+during the migration window.
 
 Prefer `--token-file` (or `WORKBUDDY_AUTH_TOKEN` in the service env) over the
 plain `--token` flag — the plain form leaks into `ps` and shell history and
 now prints a deprecation warning.
 
-This makes the split explicit:
+#### Legacy single-process `serve` install (deprecated)
 
-- `workbuddy deploy install ...` with no trailing command => installs `serve`
-- `workbuddy deploy install ... -- coordinator ...` => installs a coordinator
-- `workbuddy deploy install ... -- worker ...` => installs a worker
+The single-process layout is preserved for one migration window only and
+**does not preserve in-flight agent runs across restart**. Prefer the bundle
+layout for any new deployment.
+
+```bash
+# Single-process serve unit (legacy):
+workbuddy deploy install --legacy-serve \
+  --name workbuddy --scope user --systemd --working-directory "$PWD"
+
+# Dedicated coordinator / worker units (legacy):
+sudo workbuddy deploy install --legacy-serve \
+  --name workbuddy-coordinator --scope system --systemd \
+  --working-directory /srv/workbuddy \
+  -- coordinator --listen 0.0.0.0:8081 --db /srv/workbuddy/.workbuddy/workbuddy.db
+```
+
+See `docs/upgrade-v0.4-to-v0.5.md` for the migration walkthrough and the
+`deploy` skill (Claude Code plugin) for a concise topology briefing.
 
 ### Claude Code Plugin
 

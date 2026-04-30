@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 func TestRunDeployInstallWithSystemdWritesManifestAndUnit(t *testing.T) {
@@ -1722,6 +1723,242 @@ func TestParseDeployInstallFlagsEnableUpdaterDefaults(t *testing.T) {
 	}
 	if got, want := opts.updaterName, "workbuddy-updater"; got != want {
 		t.Fatalf("updaterName = %q, want %q", got, want)
+	}
+}
+
+// newDeployInstallTestCmd builds a fresh cobra.Command with an independent
+// flag set that mirrors the production `deploy install` flag schema, so tests
+// can drive runDeployInstallCmd without mutating the global deployInstallCmd
+// flag state across cases. (pflag's AddFlagSet shares Flag pointers, which
+// causes value bleed between tests.)
+func newDeployInstallTestCmd() *cobra.Command {
+	c := &cobra.Command{Use: "install", RunE: runDeployInstallCmd}
+	deployInstallCmd.Flags().VisitAll(func(f *pflag.Flag) {
+		switch f.Value.Type() {
+		case "bool":
+			c.Flags().Bool(f.Name, f.DefValue == "true", f.Usage)
+		case "string":
+			c.Flags().String(f.Name, f.DefValue, f.Usage)
+		case "stringArray":
+			c.Flags().StringArray(f.Name, nil, f.Usage)
+		case "stringSlice":
+			c.Flags().StringSlice(f.Name, nil, f.Usage)
+		default:
+			c.Flags().String(f.Name, f.DefValue, f.Usage)
+		}
+	})
+	return c
+}
+
+func newDeployUpgradeTestCmd() *cobra.Command {
+	c := &cobra.Command{Use: "upgrade", RunE: runDeployUpgradeCmd}
+	deployUpgradeCmd.Flags().VisitAll(func(f *pflag.Flag) {
+		switch f.Value.Type() {
+		case "bool":
+			c.Flags().Bool(f.Name, f.DefValue == "true", f.Usage)
+		case "string":
+			c.Flags().String(f.Name, f.DefValue, f.Usage)
+		case "stringArray":
+			c.Flags().StringArray(f.Name, nil, f.Usage)
+		case "stringSlice":
+			c.Flags().StringSlice(f.Name, nil, f.Usage)
+		default:
+			c.Flags().String(f.Name, f.DefValue, f.Usage)
+		}
+	})
+	return c
+}
+
+// TestRunDeployInstallCmdDefaultsToBundle verifies that `workbuddy deploy
+// install` with no flags installs the supervisor + coordinator + worker
+// bundle layout, satisfying issue #281's AC-1 (bundle is the default and
+// the headline path).
+func TestRunDeployInstallCmdDefaultsToBundle(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd deployment is only supported on Linux")
+	}
+
+	tempDir := t.TempDir()
+	homeDir := filepath.Join(tempDir, "home")
+	configDir := filepath.Join(tempDir, "xdg")
+	repoDir := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	t.Chdir(repoDir)
+
+	sourceBinary := filepath.Join(tempDir, "current-workbuddy")
+	if err := os.WriteFile(sourceBinary, []byte("binary-default"), 0o755); err != nil {
+		t.Fatalf("write source binary: %v", err)
+	}
+	restore := overrideDeployGlobals(t, sourceBinary)
+	defer restore()
+	deployRunSystemctl = func(_ context.Context, _ string, _ ...string) error { return nil }
+
+	c := newDeployInstallTestCmd()
+	if err := c.ParseFlags([]string{"--scope=user"}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	var stdout bytes.Buffer
+	c.SetOut(&stdout)
+	if err := runDeployInstallCmd(c, c.Flags().Args()); err != nil {
+		t.Fatalf("runDeployInstallCmd: %v", err)
+	}
+
+	for _, name := range []string{bundleSupervisorName, bundleCoordinatorName, bundleWorkerName} {
+		manifestPath := filepath.Join(configDir, "workbuddy", "deployments", name+".json")
+		if _, err := os.Stat(manifestPath); err != nil {
+			t.Errorf("expected bundle manifest %s, got: %v", manifestPath, err)
+		}
+		unitPath := filepath.Join(configDir, "systemd", "user", name+".service")
+		if _, err := os.Stat(unitPath); err != nil {
+			t.Errorf("expected bundle unit %s, got: %v", unitPath, err)
+		}
+	}
+	if !strings.Contains(stdout.String(), "bundle install complete") {
+		t.Errorf("stdout missing bundle summary: %q", stdout.String())
+	}
+	// And the legacy single-process unit must NOT have been written.
+	if _, err := os.Stat(filepath.Join(configDir, "workbuddy", "deployments", "workbuddy.json")); !os.IsNotExist(err) {
+		t.Errorf("legacy serve manifest should not exist by default: err=%v", err)
+	}
+}
+
+// TestRunDeployInstallCmdLegacyServeOptOut covers AC-1's opt-out path:
+// `--legacy-serve` keeps the old single-process install reachable and emits a
+// `serve` ExecStart, while honoring the explicit `--name`.
+func TestRunDeployInstallCmdLegacyServeOptOut(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd deployment is only supported on Linux")
+	}
+
+	tempDir := t.TempDir()
+	homeDir := filepath.Join(tempDir, "home")
+	configDir := filepath.Join(tempDir, "xdg")
+	repoDir := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	t.Chdir(repoDir)
+
+	sourceBinary := filepath.Join(tempDir, "current-workbuddy")
+	if err := os.WriteFile(sourceBinary, []byte("binary-legacy"), 0o755); err != nil {
+		t.Fatalf("write source binary: %v", err)
+	}
+	restore := overrideDeployGlobals(t, sourceBinary)
+	defer restore()
+	deployRunSystemctl = func(_ context.Context, _ string, _ ...string) error { return nil }
+
+	c := newDeployInstallTestCmd()
+	if err := c.ParseFlags([]string{"--legacy-serve", "--scope=user", "--systemd", "--name=workbuddy"}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	var stdout bytes.Buffer
+	c.SetOut(&stdout)
+	if err := runDeployInstallCmd(c, c.Flags().Args()); err != nil {
+		t.Fatalf("runDeployInstallCmd: %v", err)
+	}
+
+	manifestPath := filepath.Join(configDir, "workbuddy", "deployments", "workbuddy.json")
+	if _, err := os.Stat(manifestPath); err != nil {
+		t.Fatalf("expected legacy manifest %s, err=%v", manifestPath, err)
+	}
+	unitPath := filepath.Join(configDir, "systemd", "user", "workbuddy.service")
+	unitBytes, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatalf("read legacy unit: %v", err)
+	}
+	if !strings.Contains(string(unitBytes), `"serve"`) {
+		t.Errorf("legacy unit missing serve ExecStart fragment:\n%s", string(unitBytes))
+	}
+	// And the bundle units must NOT exist.
+	for _, name := range []string{bundleSupervisorName, bundleCoordinatorName, bundleWorkerName} {
+		manifestPath := filepath.Join(configDir, "workbuddy", "deployments", name+".json")
+		if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
+			t.Errorf("bundle manifest %s should not exist with --legacy-serve: err=%v", manifestPath, err)
+		}
+	}
+}
+
+// TestRunDeployInstallCmdRejectsTrailingArgsByDefault makes sure that the new
+// default install path refuses trailing -- args (which only made sense for
+// the legacy single-process install) instead of silently ignoring them.
+func TestRunDeployInstallCmdRejectsTrailingArgsByDefault(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd deployment is only supported on Linux")
+	}
+	tempDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tempDir, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "xdg"))
+	t.Chdir(tempDir)
+
+	sourceBinary := filepath.Join(tempDir, "current-workbuddy")
+	if err := os.WriteFile(sourceBinary, []byte("x"), 0o755); err != nil {
+		t.Fatalf("write source binary: %v", err)
+	}
+	restore := overrideDeployGlobals(t, sourceBinary)
+	defer restore()
+	deployRunSystemctl = func(_ context.Context, _ string, _ ...string) error { return nil }
+
+	c := newDeployInstallTestCmd()
+	if err := c.ParseFlags([]string{"--scope=user"}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	// runDeployInstallCmd takes trailing -- args as the second argument
+	// directly (cobra normally extracts them via Args). Pass them in
+	// explicitly to exercise the trailing-args guard.
+	err := runDeployInstallCmd(c, []string{"coordinator", "--listen", "127.0.0.1:8081"})
+	if err == nil || !strings.Contains(err.Error(), "trailing -- args are not supported") {
+		t.Fatalf("expected trailing-args error, got %v", err)
+	}
+}
+
+// TestRunDeployUpgradeCmdRefusesLegacyServeWithoutOptIn covers AC-4: deploy
+// upgrade against a legacy single-process serve install must error out unless
+// the caller passes --legacy-serve, so layout drift is always explicit.
+func TestRunDeployUpgradeCmdRefusesLegacyServeWithoutOptIn(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd deployment is only supported on Linux")
+	}
+	tempDir := t.TempDir()
+	homeDir := filepath.Join(tempDir, "home")
+	configDir := filepath.Join(tempDir, "xdg")
+	repoDir := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	t.Chdir(repoDir)
+
+	deployedBinary := filepath.Join(homeDir, ".local", "bin", "workbuddy")
+	if err := os.MkdirAll(filepath.Dir(deployedBinary), 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	if err := os.WriteFile(deployedBinary, []byte("legacy"), 0o755); err != nil {
+		t.Fatalf("write deployed binary: %v", err)
+	}
+	writeScopedManifest(t, "user", "workbuddy", &deploymentManifest{
+		BinaryPath:       deployedBinary,
+		WorkingDirectory: repoDir,
+		Command:          []string{"serve"},
+		Systemd: &deploymentSystemd{
+			ServiceName: "workbuddy",
+			Description: "legacy serve",
+		},
+	})
+
+	c := newDeployUpgradeTestCmd()
+	if err := c.ParseFlags([]string{"--name=workbuddy", "--scope=user", "--version=v0.5.0"}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	err := runDeployUpgradeCmd(c, nil)
+	if err == nil || !strings.Contains(err.Error(), "legacy single-process") {
+		t.Fatalf("expected legacy-serve refusal, got %v", err)
 	}
 }
 
