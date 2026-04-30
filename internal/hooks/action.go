@@ -14,11 +14,13 @@ const (
 
 // Action is the runtime contract every action implementation satisfies. The
 // payload is a stable v1 envelope (see eventpayload.go); already JSON-encoded.
+// The raw Event is passed alongside for actions (notably command) that need
+// the structured fields without re-parsing the envelope JSON.
 type Action interface {
 	// Type returns the action type identifier (e.g. "webhook").
 	Type() string
 	// Execute runs the action. ctx cancellation must be respected.
-	Execute(ctx context.Context, payload []byte) error
+	Execute(ctx context.Context, ev Event, payload []byte) error
 }
 
 // ActionRegistry registers concrete Action implementations bound to a Hook.
@@ -63,5 +65,6 @@ func (r *ActionRegistry) Build(h *Hook) (Action, []string, error) {
 func DefaultActionRegistry() *ActionRegistry {
 	r := NewActionRegistry()
 	r.Register(ActionTypeWebhook, buildWebhookAction)
+	r.Register(ActionTypeCommand, buildCommandAction)
 	return r
 }

@@ -2,21 +2,45 @@ package hooks
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // channelCapacity is the dispatcher's bounded buffer per design doc.
 const channelCapacity = 1024
 
-// boundHook pairs a parsed Hook with its constructed Action.
+// DefaultHookTimeout is applied to actions that don't override `timeout:`.
+const DefaultHookTimeout = 5 * time.Second
+
+// AutoDisableThreshold is the consecutive failure count that trips a hook
+// into the disabled state. Per design (docs/decisions/2026-04-30-hook-system.md)
+// no half-open probing — operator must `workbuddy hooks reload` to re-enable.
+const AutoDisableThreshold = 5
+
+// HookDisabledEvent is the eventlog type emitted when a hook trips
+// auto-disable. Lives under HookEventPrefix so it does not re-enter the
+// dispatcher (self-amplification guard).
+const HookDisabledEvent = HookEventPrefix + "disabled"
+
+// boundHook pairs a parsed Hook with its constructed Action and tracks the
+// per-hook auto-disable state.
 type boundHook struct {
 	hook   *Hook
 	action Action
+
+	mu       sync.Mutex
+	failures int
+	disabled bool
+	lastErr  string
 }
+
+// EventEmitter is the optional callback the dispatcher uses to surface
+// hook-system self-events (notably hook_disabled) back into the eventlog.
+// Signature matches eventlog.EventLogger.Log so wiring is `WithEventEmitter(evlog.Log)`.
+type EventEmitter func(eventType, repo string, issueNum int, payload interface{})
 
 // Dispatcher fans event-log entries out to declarative hooks.
 //
@@ -28,8 +52,12 @@ type boundHook struct {
 //     hook cannot starve other hooks.
 //   - Events with a `hook_` prefix are filtered out (see IsHookSelfEvent)
 //     so a failing hook bound to `*` does not amplify itself.
+//   - Per-hook timeout (default 5s); command actions are SIGTERMed then
+//     SIGKILLed after a 2s grace.
+//   - 5 consecutive failures auto-disable a hook in memory; a `hook_disabled`
+//     eventlog entry is emitted via EventEmitter (no half-open probing).
 type Dispatcher struct {
-	hooks  []boundHook
+	hooks  []*boundHook
 	in     chan Event
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -37,6 +65,8 @@ type Dispatcher struct {
 
 	overflow atomic.Uint64
 	dropped  atomic.Uint64
+
+	emitter EventEmitter
 
 	mu       sync.Mutex
 	started  bool
@@ -54,6 +84,12 @@ func WithLogger(l *log.Logger) DispatcherOption {
 			d.logger = l
 		}
 	}
+}
+
+// WithEventEmitter installs a callback used to push hook self-events back
+// into the eventlog. nil disables emission (useful in tests).
+func WithEventEmitter(e EventEmitter) DispatcherOption {
+	return func(d *Dispatcher) { d.emitter = e }
 }
 
 // NewDispatcher binds the parsed config to actions via the registry.
@@ -84,7 +120,7 @@ func NewDispatcher(cfg *Config, registry *ActionRegistry, opts ...DispatcherOpti
 				return nil, nil, err
 			}
 			warnings = append(warnings, w...)
-			d.hooks = append(d.hooks, boundHook{hook: h, action: action})
+			d.hooks = append(d.hooks, &boundHook{hook: h, action: action})
 		}
 	}
 	return d, warnings, nil
@@ -97,11 +133,14 @@ func (d *Dispatcher) Hooks() []HookSummary {
 	}
 	out := make([]HookSummary, 0, len(d.hooks))
 	for _, b := range d.hooks {
+		b.mu.Lock()
+		disabled := b.disabled
+		b.mu.Unlock()
 		out = append(out, HookSummary{
 			Name:       b.hook.Name,
 			Events:     append([]string(nil), b.hook.Events...),
 			ActionType: b.hook.Action.Type,
-			Enabled:    b.hook.IsEnabled(),
+			Enabled:    b.hook.IsEnabled() && !disabled,
 		})
 	}
 	return out
@@ -173,6 +212,19 @@ func (d *Dispatcher) OverflowCount() uint64 { return d.overflow.Load() }
 // DroppedCount is the cumulative count of per-hook slot drops (slow hook).
 func (d *Dispatcher) DroppedCount() uint64 { return d.dropped.Load() }
 
+// IsDisabled reports whether a hook has been auto-disabled. Exposed for the
+// `hooks list` / `hooks status` surfaces and tests.
+func (d *Dispatcher) IsDisabled(hookName string) bool {
+	for _, b := range d.hooks {
+		if b.hook.Name == hookName {
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			return b.disabled
+		}
+	}
+	return false
+}
+
 func (d *Dispatcher) runFanIn(ctx context.Context) {
 	defer d.wg.Done()
 	for {
@@ -189,6 +241,12 @@ func (d *Dispatcher) runFanIn(ctx context.Context) {
 
 func (d *Dispatcher) fanOut(ev Event) {
 	for _, b := range d.hooks {
+		b.mu.Lock()
+		disabled := b.disabled
+		b.mu.Unlock()
+		if disabled {
+			continue
+		}
 		if !b.hook.MatchesEvent(ev.Type) {
 			continue
 		}
@@ -205,7 +263,7 @@ func (d *Dispatcher) fanOut(ev Event) {
 	}
 }
 
-func (d *Dispatcher) runHook(ctx context.Context, b boundHook, ch chan Event) {
+func (d *Dispatcher) runHook(ctx context.Context, b *boundHook, ch chan Event) {
 	defer d.wg.Done()
 	for {
 		select {
@@ -219,17 +277,62 @@ func (d *Dispatcher) runHook(ctx context.Context, b boundHook, ch chan Event) {
 	}
 }
 
-func (d *Dispatcher) executeOne(ctx context.Context, b boundHook, ev Event) {
+func (d *Dispatcher) executeOne(ctx context.Context, b *boundHook, ev Event) {
 	envelope := BuildEnvelope(ev)
 	payload, err := MarshalEnvelope(envelope)
 	if err != nil {
 		d.logger.Printf("hooks: hook %q: marshal envelope: %v", b.hook.Name, err)
 		return
 	}
-	if err := b.action.Execute(ctx, payload); err != nil {
-		d.logger.Printf("hooks: hook %q action %s failed: %v", b.hook.Name, b.action.Type(), err)
+
+	timeout := b.hook.Timeout
+	if timeout <= 0 {
+		timeout = DefaultHookTimeout
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	err = b.action.Execute(runCtx, ev, payload)
+	cancel()
+
+	if err == nil {
+		b.mu.Lock()
+		b.failures = 0
+		b.lastErr = ""
+		b.mu.Unlock()
 		return
 	}
+
+	d.logger.Printf("hooks: hook %q action %s failed: %v", b.hook.Name, b.action.Type(), err)
+
+	b.mu.Lock()
+	b.failures++
+	b.lastErr = err.Error()
+	tripped := false
+	if !b.disabled && b.failures >= AutoDisableThreshold {
+		b.disabled = true
+		tripped = true
+	}
+	lastErr := b.lastErr
+	b.mu.Unlock()
+
+	if tripped {
+		d.emitDisabled(b.hook.Name, lastErr)
+	}
+}
+
+// emitDisabled forwards a hook_disabled event to the eventlog (if an emitter
+// is wired). The dispatcher's Publish itself filters hook_* events, so even
+// without the emitter this never re-enters the dispatcher.
+func (d *Dispatcher) emitDisabled(hookName, lastErr string) {
+	d.logger.Printf("hooks: hook %q auto-disabled after %d consecutive failures: %s", hookName, AutoDisableThreshold, lastErr)
+	if d.emitter == nil {
+		return
+	}
+	d.emitter(HookDisabledEvent, "", 0, map[string]interface{}{
+		"hook":            hookName,
+		"failures":        AutoDisableThreshold,
+		"last_error":      lastErr,
+		"requires_reload": true,
+	})
 }
 
 // PublishFromRaw is a convenience for callers that already have a JSON-encoded
@@ -243,5 +346,3 @@ func (d *Dispatcher) PublishFromRaw(eventType, repo string, issueNum int, payloa
 	})
 }
 
-// Ensure fmt is used (no-op import shield against re-org churn).
-var _ = fmt.Sprintf

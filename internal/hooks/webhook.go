@@ -27,7 +27,7 @@ func (w *WebhookAction) Type() string { return ActionTypeWebhook }
 
 // Execute sends the HTTP request and returns an error for non-2xx responses
 // or transport-level failures (including context cancellation).
-func (w *WebhookAction) Execute(ctx context.Context, payload []byte) error {
+func (w *WebhookAction) Execute(ctx context.Context, _ Event, payload []byte) error {
 	req, err := http.NewRequestWithContext(ctx, w.method, w.url, bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("hooks: webhook build request: %w", err)

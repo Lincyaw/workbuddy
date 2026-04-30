@@ -88,11 +88,22 @@ func TestParseConfigUnknownActionType(t *testing.T) {
 	}
 }
 
-func TestParseConfigCommandTypeRejectedInPhase1a(t *testing.T) {
+func TestParseConfigCommandActionAccepted(t *testing.T) {
 	yaml := []byte(`hooks: [{name: x, events: [alert], action: {type: command, cmd: ["/bin/true"]}}]`)
-	_, _, err := ParseConfig([]byte(yaml))
-	if err == nil || !strings.Contains(err.Error(), "Phase 1b") {
-		t.Fatalf("expected Phase 1b rejection, got %v", err)
+	cfg, _, err := ParseConfig([]byte(yaml))
+	if err != nil {
+		t.Fatalf("expected command to be accepted, got %v", err)
+	}
+	if cfg.Hooks[0].Action.Type != ActionTypeCommand {
+		t.Fatalf("expected command action, got %q", cfg.Hooks[0].Action.Type)
+	}
+}
+
+func TestParseConfigCommandRequiresCmd(t *testing.T) {
+	yaml := []byte(`hooks: [{name: x, events: [alert], action: {type: command}}]`)
+	_, _, err := ParseConfig(yaml)
+	if err == nil || !strings.Contains(err.Error(), "command.cmd") {
+		t.Fatalf("expected command.cmd error, got %v", err)
 	}
 }
 

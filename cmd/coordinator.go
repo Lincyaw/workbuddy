@@ -658,7 +658,11 @@ func initHooksDispatcher(configFlag string, evlog *eventlog.EventLogger) (*hooks
 		log.Printf("[coordinator] hooks: no hooks configured (looked at %s)", path)
 		return nil, nil
 	}
-	dispatcher, dispatchWarnings, err := hooks.NewDispatcher(cfg, hooks.DefaultActionRegistry(), hooks.WithLogger(log.Default()))
+	opts := []hooks.DispatcherOption{hooks.WithLogger(log.Default())}
+	if evlog != nil {
+		opts = append(opts, hooks.WithEventEmitter(evlog.Log))
+	}
+	dispatcher, dispatchWarnings, err := hooks.NewDispatcher(cfg, hooks.DefaultActionRegistry(), opts...)
 	if err != nil {
 		return nil, fmt.Errorf("coordinator: build hooks dispatcher: %w", err)
 	}

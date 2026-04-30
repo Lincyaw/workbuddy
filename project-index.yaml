@@ -3614,3 +3614,41 @@ requirements:
     tests:
       - internal/statemachine/pipeline_hazards_test.go
     deps: []
+  - id: REQ-104
+    title: hook system phase 1b — command action + timeout + auto-disable + hooks test
+    description: >
+      Phase 1b of the operator-owned hook system (#262). Adds the local-script
+      action type, per-hook timeout with SIGTERM→SIGKILL escalation, automatic
+      disable after 5 consecutive failures, and the `workbuddy hooks test`
+      CLI for fixture-based dry runs that do NOT touch the eventlog. See
+      docs/decisions/2026-04-30-hook-system.md.
+    rationale: >
+      Phase 1a ships webhook delivery only; without command actions, hooks
+      cannot drive operator-local scripts (paging, ticket creation, log
+      shipping) — the original motivation for the system. Timeouts and
+      auto-disable are required before exposing the system to broken user
+      scripts that would otherwise hang or amplify failures.
+    status: tested
+    acceptance:
+      - "AC-104-1: internal/hooks/command.go runs argv via exec.CommandContext (no shell), writes the v1 payload to stdin, and adds WORKBUDDY_EVENT_TYPE / _REPO / _ISSUE_NUM / _HOOK_NAME to the child env. Non-zero exit (including kill-by-signal) is failure."
+      - "AC-104-2: Default timeout is 5s, configurable per hook via `timeout: 10s`. Webhook cancels the request via context; command sends SIGTERM and force-kills after a 2s grace via cmd.WaitDelay (matches internal/supervisor/agent.go cancel path)."
+      - "AC-104-3: 5 consecutive failures auto-disable a hook in memory; subsequent matching events skip dispatch. A `hook_disabled` eventlog entry is emitted via the configured EventEmitter (payload includes hook name + last failure reason). No half-open probing."
+      - "AC-104-4: The dispatcher's Publish path filters all event types prefixed `hook_` (hook_disabled / hook_failed / hook_overflow), so self-events never re-trigger hooks."
+      - "AC-104-5: `workbuddy hooks test --hook NAME --event-fixture path/to/event.json` parses the fixture, builds the v1 payload, calls the action's Execute directly, and prints stdout / stderr / exit code / duration. The test path does not write to the eventlog."
+      - "AC-104-6: Unit tests cover command success (env + stdin), non-zero exit, timeout SIGTERM→SIGKILL escalation, auto-disable trigger + skip-after-disable, and the hooks test CLI path with a fake fixture and echo command."
+    priority: P1
+    code:
+      - internal/hooks/command.go
+      - internal/hooks/dispatcher.go
+      - internal/hooks/config.go
+      - internal/hooks/action.go
+      - internal/hooks/webhook.go
+      - cmd/hooks.go
+      - cmd/coordinator.go
+    tests:
+      - internal/hooks/command_test.go
+      - internal/hooks/dispatcher_test.go
+      - internal/hooks/config_test.go
+      - cmd/hooks_test.go
+    deps:
+      - REQ-101
