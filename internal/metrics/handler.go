@@ -9,8 +9,18 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/hooks"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
+
+// HookStatsSource is satisfied by *hooks.Dispatcher and exposes the
+// per-hook counters needed for `workbuddy_hook_*` metrics. Defining it
+// here keeps the metrics package decoupled from a concrete dispatcher.
+type HookStatsSource interface {
+	Stats() []hooks.HookStats
+	OverflowCount() uint64
+	DroppedCount() uint64
+}
 
 const stuckThreshold = time.Hour
 
@@ -31,6 +41,7 @@ type Source interface {
 type Handler struct {
 	src   Source
 	evlog *eventlog.EventLogger
+	hooks HookStatsSource
 	now   func() time.Time
 }
 
@@ -48,6 +59,14 @@ func NewHandler(src Source) *Handler {
 // metrics. Passing nil is a no-op. Returns the receiver for chaining.
 func (h *Handler) WithEventLogger(ev *eventlog.EventLogger) *Handler {
 	h.evlog = ev
+	return h
+}
+
+// WithHooks attaches a hooks dispatcher whose per-hook stats are exposed as
+// `workbuddy_hook_invocations_total`, `workbuddy_hook_duration_seconds`, and
+// `workbuddy_hook_overflow_total`. Passing nil is a no-op.
+func (h *Handler) WithHooks(src HookStatsSource) *Handler {
+	h.hooks = src
 	return h
 }
 
@@ -86,7 +105,78 @@ func (h *Handler) writeMetrics(b *strings.Builder, now time.Time) error {
 		return err
 	}
 	h.writeEventlogHealth(b)
+	h.writeHookMetrics(b)
 	return h.writeIssueCounters(b, now)
+}
+
+func (h *Handler) writeHookMetrics(b *strings.Builder) {
+	if h.hooks == nil {
+		return
+	}
+	stats := h.hooks.Stats()
+
+	_, _ = b.WriteString("# HELP workbuddy_hook_invocations_total Hook invocations by hook and result (success/failure/filtered/disabled/overflow).\n")
+	_, _ = b.WriteString("# TYPE workbuddy_hook_invocations_total counter\n")
+
+	type pair struct {
+		hook   string
+		result string
+		count  uint64
+	}
+	var rows []pair
+	for _, s := range stats {
+		rows = append(rows,
+			pair{s.Name, "success", s.Successes},
+			pair{s.Name, "failure", s.Failures},
+			pair{s.Name, "filtered", s.Filtered},
+			pair{s.Name, "disabled", s.DisabledDrops},
+		)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].hook == rows[j].hook {
+			return rows[i].result < rows[j].result
+		}
+		return rows[i].hook < rows[j].hook
+	})
+	for _, r := range rows {
+		_, _ = b.WriteString(fmt.Sprintf(`workbuddy_hook_invocations_total{hook=%s,result=%s} %d`+"\n",
+			promLabel(r.hook, "hook"), promLabel(r.result, "result"), r.count))
+	}
+	// Aggregate overflow as a separate counter — central buffer overflow is
+	// hook-agnostic. Per-hook slot drops are surfaced as result=overflow.
+	_, _ = b.WriteString("# HELP workbuddy_hook_overflow_total Central dispatcher buffer overflows since process start.\n")
+	_, _ = b.WriteString("# TYPE workbuddy_hook_overflow_total counter\n")
+	_, _ = b.WriteString(fmt.Sprintf("workbuddy_hook_overflow_total %d\n", h.hooks.OverflowCount()))
+
+	// Per-hook overflow attribution: per-hook slot drops live in
+	// DispatcherDroppedCount() in aggregate; we surface that here as a
+	// hook-labelled metric where possible. Without per-hook drop tracking we
+	// expose the aggregate under hook="*".
+	_, _ = b.WriteString(fmt.Sprintf(`workbuddy_hook_invocations_total{hook=%s,result=%s} %d`+"\n",
+		promLabel("*", "hook"), promLabel("overflow", "result"), h.hooks.DroppedCount()))
+
+	// Histogram: workbuddy_hook_duration_seconds{hook=...}
+	_, _ = b.WriteString("# HELP workbuddy_hook_duration_seconds Histogram of hook action durations in seconds.\n")
+	_, _ = b.WriteString("# TYPE workbuddy_hook_duration_seconds histogram\n")
+	bounds := hooks.DurationBucketUpperBounds()
+	sortedStats := append([]hooks.HookStats(nil), stats...)
+	sort.Slice(sortedStats, func(i, j int) bool { return sortedStats[i].Name < sortedStats[j].Name })
+	for _, s := range sortedStats {
+		hookLabel := promLabel(s.Name, "hook")
+		var cumulative uint64
+		for i, upper := range bounds {
+			cumulative = s.DurationBuckets[i]
+			_, _ = b.WriteString(fmt.Sprintf(`workbuddy_hook_duration_seconds_bucket{hook=%s,le="%g"} %d`+"\n",
+				hookLabel, upper, cumulative))
+			_ = cumulative
+		}
+		_, _ = b.WriteString(fmt.Sprintf(`workbuddy_hook_duration_seconds_bucket{hook=%s,le="+Inf"} %d`+"\n",
+			hookLabel, s.DurationCount))
+		_, _ = b.WriteString(fmt.Sprintf(`workbuddy_hook_duration_seconds_sum{hook=%s} %g`+"\n",
+			hookLabel, float64(s.DurationSumNs)/1e9))
+		_, _ = b.WriteString(fmt.Sprintf(`workbuddy_hook_duration_seconds_count{hook=%s} %d`+"\n",
+			hookLabel, s.DurationCount))
+	}
 }
 
 func (h *Handler) writeEventlogHealth(b *strings.Builder) {

@@ -3652,3 +3652,49 @@ requirements:
       - cmd/hooks_test.go
     deps:
       - REQ-101
+  - id: REQ-105
+    title: hook system phase 1c — match filters, metrics, status/reload, eventlog gap fill (#266)
+    description: >
+      Phase 1c of the operator-owned hook system (#262). Adds `match.severity`
+      and `match.repo` filters with config-time warnings and runtime drop
+      counters, Prometheus metrics for invocations/duration/overflow,
+      `workbuddy hooks status` and `workbuddy hooks reload` CLI surfaces
+      backed by /api/v1/hooks/{status,reload}, and fills the eventlog
+      coverage gap by emitting `coordinator_started`, `coordinator_stopping`,
+      and `hooks_reloaded`. See docs/decisions/2026-04-30-hook-system.md.
+    rationale: >
+      Without filters, `*`-bound hooks fan-out indiscriminately and operators
+      have no way to narrow severity-aware paging without a wrapper script.
+      Without metrics + status, auto-disable becomes a silent failure mode.
+      Without reload, the only recovery from auto-disable is a coordinator
+      restart. The three lifecycle events close eventlog blind spots so
+      restart noise and reload events line up with subsequent hook activity.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-105-1: match.severity is enforced only when event_type=alert; configuring it for other event types emits a startup warning surfaced via ParseConfig."
+      - "AC-105-2: match.repo uses path.Match; an empty filter is match-all; a malformed glob fails ParseConfig with a clear error."
+      - "AC-105-3: Prometheus /metrics exposes workbuddy_hook_invocations_total{hook,result} (success/failure/filtered/disabled/overflow), workbuddy_hook_duration_seconds histogram, and workbuddy_hook_overflow_total."
+      - "AC-105-4: `workbuddy hooks status --coordinator URL` queries /api/v1/hooks/status and renders per-hook successes/failures/filtered, last error, and auto-disabled state."
+      - "AC-105-5: `workbuddy hooks reload --coordinator URL` POSTs /api/v1/hooks/reload, which re-reads the YAML, clears auto-disable, and emits a `hooks_reloaded` eventlog entry."
+      - "AC-105-6: cmd/coordinator.go emits `coordinator_started` after the HTTP listener is reserved (payload contains listen / pid / version) and `coordinator_stopping` at the head of the graceful-shutdown handler."
+      - "AC-105-7: internal/eventlog/eventlog.go declares constants TypeCoordinatorStarted, TypeCoordinatorStopping, TypeHooksReloaded and registers them in AllEventTypes."
+      - "AC-105-8: Unit tests cover all three filter cases (severity hit/miss/non-alert no-op, repo glob hit/miss, malformed glob), the reload-clears-auto-disable behavior, and the three new eventlog emit paths."
+    code:
+      - internal/eventlog/eventlog.go
+      - internal/hooks/config.go
+      - internal/hooks/dispatcher.go
+      - internal/metrics/handler.go
+      - internal/app/hooks_api.go
+      - cmd/hooks.go
+      - cmd/coordinator.go
+      - cmd/coordinator_lifecycle.go
+    tests:
+      - internal/hooks/match_test.go
+      - internal/hooks/reload_test.go
+      - internal/app/hooks_api_test.go
+      - cmd/coordinator_lifecycle_test.go
+    deps:
+      - REQ-101
+      - REQ-104

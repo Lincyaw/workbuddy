@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/app"
 	"github.com/Lincyaw/workbuddy/internal/hooks"
 	"github.com/spf13/cobra"
 )
@@ -33,6 +36,26 @@ var (
 	hooksTestEventFixture string
 )
 
+var hooksStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show per-hook invocation stats from a running coordinator",
+	Long: `Query the coordinator's /api/v1/hooks/status endpoint and render per-hook
+counts (success/failure/filtered/disabled), the last error, and whether the
+hook is auto-disabled. Requires --coordinator and a bearer token (env
+WORKBUDDY_AUTH_TOKEN or --token).`,
+	RunE: runHooksStatus,
+}
+
+var hooksReloadCmd = &cobra.Command{
+	Use:   "reload",
+	Short: "Reload the coordinator's hooks YAML, clearing auto-disable state",
+	Long: `POST to the coordinator's /api/v1/hooks/reload endpoint. The coordinator
+re-reads its hooks YAML, rebuilds dispatcher bindings (which clears
+auto-disable), and emits a hooks_reloaded event. Requires --coordinator and
+a bearer token.`,
+	RunE: runHooksReload,
+}
+
 var hooksTestCmd = &cobra.Command{
 	Use:   "test",
 	Short: "Fire a hook once with a fixture event (does NOT write eventlog)",
@@ -50,6 +73,19 @@ func init() {
 	_ = hooksTestCmd.MarkFlagRequired("hook")
 	_ = hooksTestCmd.MarkFlagRequired("event-fixture")
 	hooksCmd.AddCommand(hooksTestCmd)
+
+	hooksStatusCmd.Flags().String("coordinator", "", "Coordinator base URL")
+	addCoordinatorAuthFlags(hooksStatusCmd.Flags(), "t", "Bearer token for coordinator auth")
+	hooksStatusCmd.Flags().Duration("timeout", 15*time.Second, "HTTP timeout")
+	addOutputFormatFlag(hooksStatusCmd)
+	hooksCmd.AddCommand(hooksStatusCmd)
+
+	hooksReloadCmd.Flags().String("coordinator", "", "Coordinator base URL")
+	addCoordinatorAuthFlags(hooksReloadCmd.Flags(), "t", "Bearer token for coordinator auth")
+	hooksReloadCmd.Flags().Duration("timeout", 15*time.Second, "HTTP timeout")
+	addOutputFormatFlag(hooksReloadCmd)
+	hooksCmd.AddCommand(hooksReloadCmd)
+
 	rootCmd.AddCommand(hooksCmd)
 
 	// Make --hooks-config available on serve and coordinator so the loaded
@@ -210,6 +246,135 @@ func runHooksTest(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(out, "result: ok")
 		return nil
 	}
+}
+
+type hooksRemoteOpts struct {
+	coordinator string
+	token       string
+	timeout     time.Duration
+	format      string
+}
+
+func parseHooksRemoteFlags(cmd *cobra.Command, name string) (*hooksRemoteOpts, error) {
+	coordURL, _ := cmd.Flags().GetString("coordinator")
+	if strings.TrimSpace(coordURL) == "" {
+		return nil, fmt.Errorf("%s: --coordinator is required", name)
+	}
+	timeout, _ := cmd.Flags().GetDuration("timeout")
+	token, err := resolveCoordinatorAuthToken(cmd, name)
+	if err != nil {
+		return nil, err
+	}
+	format, err := resolveOutputFormat(cmd, name)
+	if err != nil {
+		return nil, err
+	}
+	return &hooksRemoteOpts{
+		coordinator: strings.TrimRight(strings.TrimSpace(coordURL), "/"),
+		token:       token,
+		timeout:     timeout,
+		format:      format,
+	}, nil
+}
+
+func runHooksStatus(cmd *cobra.Command, _ []string) error {
+	opts, err := parseHooksRemoteFlags(cmd, "hooks status")
+	if err != nil {
+		return err
+	}
+	body, err := callHooksAPI(cmd.Context(), opts, http.MethodGet, "/api/v1/hooks/status")
+	if err != nil {
+		return err
+	}
+	if isJSONOutput(opts.format) {
+		_, err = cmdStdout(cmd).Write(body)
+		return err
+	}
+	var resp app.HooksStatusResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return fmt.Errorf("hooks status: decode response: %w", err)
+	}
+	out := cmdStdout(cmd)
+	fmt.Fprintf(out, "config: %s\n", displayHooksPath(resp.ConfigPath))
+	fmt.Fprintf(out, "overflow: %d  dropped: %d\n\n", resp.OverflowTotal, resp.DroppedTotal)
+	if len(resp.Hooks) == 0 {
+		fmt.Fprintln(out, "no hooks registered")
+		return nil
+	}
+	tw := tabwriter.NewWriter(out, 0, 8, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "NAME\tEVENTS\tACTION\tENABLED\tDISABLED\tOK\tFAIL\tFILTERED\tLAST_ERROR")
+	rows := append([]app.HookStatusEntry(nil), resp.Hooks...)
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
+	for _, h := range rows {
+		enabled := "yes"
+		if !h.Enabled {
+			enabled = "no"
+		}
+		disabled := "no"
+		if h.AutoDisabled {
+			disabled = "yes"
+		}
+		lastErr := h.LastError
+		if len(lastErr) > 60 {
+			lastErr = lastErr[:57] + "..."
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\n",
+			h.Name, strings.Join(h.Events, ","), h.ActionType, enabled, disabled,
+			h.Successes, h.Failures, h.Filtered, lastErr)
+	}
+	return tw.Flush()
+}
+
+func runHooksReload(cmd *cobra.Command, _ []string) error {
+	opts, err := parseHooksRemoteFlags(cmd, "hooks reload")
+	if err != nil {
+		return err
+	}
+	if err := requireWritable(cmd, "hooks reload"); err != nil {
+		return err
+	}
+	body, err := callHooksAPI(cmd.Context(), opts, http.MethodPost, "/api/v1/hooks/reload")
+	if err != nil {
+		return err
+	}
+	if isJSONOutput(opts.format) {
+		_, err = cmdStdout(cmd).Write(body)
+		return err
+	}
+	var resp app.HooksReloadResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return fmt.Errorf("hooks reload: decode response: %w", err)
+	}
+	out := cmdStdout(cmd)
+	fmt.Fprintf(out, "reloaded %d hook(s) from %s\n", resp.HookCount, displayHooksPath(resp.ConfigPath))
+	for _, w := range resp.Warnings {
+		fmt.Fprintf(out, "warning: %s\n", w)
+	}
+	return nil
+}
+
+func callHooksAPI(ctx context.Context, opts *hooksRemoteOpts, method, path string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, opts.coordinator+path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	if opts.token != "" {
+		req.Header.Set("Authorization", "Bearer "+opts.token)
+	}
+	client := &http.Client{Timeout: opts.timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode/100 != 2 {
+		return nil, &cliExitError{
+			msg:  fmt.Sprintf("coordinator returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body))),
+			code: exitCodeFailure,
+		}
+	}
+	return body, nil
 }
 
 func displayHooksPath(p string) string {
