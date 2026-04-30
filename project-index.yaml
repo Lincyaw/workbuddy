@@ -3292,3 +3292,41 @@ requirements:
       - internal/store/store_supervisor_agent_id_test.go
     deps:
       - REQ-092
+
+  - id: REQ-097
+    title: workbuddy-updater.service systemd unit + deploy CICD docs (#238)
+    description: >
+      Phase 2 step 3 of #224. Wraps the Phase 2.2 `workbuddy deploy
+      watch` command into a systemd user service so a NAT-bound
+      deployment automatically pulls new releases without operator
+      intervention. `workbuddy deploy install` gains an opt-in
+      `--enable-updater` flag (off by default to avoid surprising
+      first-time installs); when set, install writes a separate
+      `workbuddy-updater.service` unit alongside the main install,
+      runs `daemon-reload`, then `enable --now`s the updater. The
+      generated unit uses `Type=simple`, `Restart=always`,
+      `RestartSec=30s`, reuses the install's `--env-file` (so a
+      single env file can carry the GitHub PAT used for release
+      reads), and `WantedBy=default.target` (or the system scope's
+      multi-user.target). Operator docs land in
+      `docs/deploy-cicd.md` covering token scope/placement, pause,
+      manual upgrade, and rollback. The PR template gains a
+      compatibility checkbox covering systemd unit / deploy command
+      changes.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-097-1: `workbuddy deploy install --enable-updater` writes <unit-dir>/workbuddy-updater.service with Type=simple, Restart=always, RestartSec=30s, WantedBy matching the install scope, and an ExecStart that invokes `<binary> deploy watch --repo <updater-repo> --interval <updater-interval> --systemctl-scope <scope> --restart-units <units,...>`."
+      - "AC-097-2: `--enable-updater` is off by default; a plain `workbuddy deploy install` does not write or enable the updater unit."
+      - "AC-097-3: When the updater is enabled, install runs systemctl daemon-reload then enable + start for `workbuddy-updater.service` in the install scope; --updater-interval is parsed as a Go duration and rejected if invalid."
+      - "AC-097-4: The updater unit reuses every `--env-file` passed to install, so the GitHub PAT can live in the same env file as the worker runtime credentials."
+      - "AC-097-5: docs/deploy-cicd.md documents token scope (Releases: read), placement (the env-file pointed at by --env-file), pausing (`systemctl --user stop workbuddy-updater`), manual upgrade (`workbuddy deploy upgrade` or `workbuddy deploy watch --once`), and rollback (`workbuddy deploy rollback` plus disable to keep it stopped)."
+      - "AC-097-6: `.github/pull_request_template.md` contains the checkbox `- [ ] 涉及 systemd unit / deploy 命令的改动已更新对应文档`."
+    code:
+      - cmd/deploy.go
+      - docs/deploy-cicd.md
+      - .github/pull_request_template.md
+    tests:
+      - cmd/deploy_test.go
+    deps: [REQ-095]
