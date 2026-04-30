@@ -1,10 +1,43 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 
 	"gopkg.in/yaml.v3"
 )
+
+// UnmarshalJSON accepts both legacy scalar joins persisted as bare strings
+// (`"join": "all_passed"`) and the rollout-aware mapping form
+// (`"join": {"strategy": "rollouts", "min_successes": 2}`). This mirrors
+// State.UnmarshalYAML so configs that round-trip through SQLite registration
+// JSON keep decoding after the rollouts phase-1 schema change. Without this
+// method, persisted registrations written before the JoinConfig struct
+// existed (where `Join` was a string scalar) will fail with
+// `cannot unmarshal string into Go struct field`.
+func (j *JoinConfig) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		*j = JoinConfig{}
+		return nil
+	}
+	if trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(trimmed, &s); err != nil {
+			return fmt.Errorf("config: decode legacy join scalar: %w", err)
+		}
+		*j = JoinConfig{Strategy: s}
+		return nil
+	}
+	type joinAlias JoinConfig
+	var aux joinAlias
+	if err := json.Unmarshal(trimmed, &aux); err != nil {
+		return fmt.Errorf("config: decode join object: %w", err)
+	}
+	*j = JoinConfig(aux)
+	return nil
+}
 
 // UnmarshalYAML accepts both legacy scalar joins (`join: all_passed`) and the
 // rollout-aware mapping form (`join: {strategy: rollouts, min_successes: 2}`).
