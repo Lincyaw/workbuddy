@@ -3126,3 +3126,44 @@ requirements:
       - internal/auditapi/handler_test.go
       - cmd/coordinator_sessions_spa_test.go
     deps: [REQ-089]
+
+  - id: REQ-092
+    title: Local agent supervisor process + IPC API (Phase 1 step 1 of #224)
+    description: >
+      Introduce `workbuddy supervisor`, a long-lived per-host process that
+      owns agent subprocesses on behalf of (potentially transient) workbuddy
+      worker processes. The supervisor binds a unix socket
+      (`$XDG_RUNTIME_DIR/workbuddy-supervisor.sock`) and exposes an HTTP API
+      to start, observe (status + SSE event tail), cancel, and list agents.
+      Subprocess stdout/stderr are written directly to per-agent files under
+      `$XDG_STATE_HOME/workbuddy/agents/<id>.{stdout,stderr}` (no pipes), so
+      the supervisor can restart and continue tailing. A mini SQLite DB
+      (`$XDG_STATE_HOME/workbuddy/supervisor.db`) records each agent and its
+      `/proc/<pid>/stat` starttime ticks; on restart the supervisor verifies
+      live agents by re-reading starttime to defend against pid reuse.
+      Children are launched with `setsid` so the supervisor's lifetime is
+      independent of theirs (KillMode=process friendly). This issue ships the
+      supervisor only; worker integration and systemd unit work are deferred
+      to Phase 1 steps 2 and 3 respectively (#224).
+    priority: P1
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-092-1: `workbuddy supervisor` binds a unix socket (default `$XDG_RUNTIME_DIR/workbuddy-supervisor.sock`) and serves the HTTP IPC API; --socket and --state-dir override defaults."
+      - "AC-092-2: `POST /agents` accepts `{runtime,args,workdir,env,session_id}`, starts the subprocess, and returns `{agent_id, started_at}` immediately."
+      - "AC-092-3: `GET /agents/:id` returns `{status: running|exited, exit_code, session_id, pid, runtime, workdir, started_at}`."
+      - "AC-092-4: `GET /agents/:id/events` is an SSE stream of stdout lines tagged with their 1-indexed offset; `?from_offset=N` skips the first N lines so a client can resume."
+      - "AC-092-5: `POST /agents/:id/cancel` sends SIGTERM and escalates to SIGKILL after the configured grace; `GET /agents` lists every known agent."
+      - "AC-092-6: stdout/stderr are persisted to `<state_dir>/agents/<id>.{stdout,stderr}` (no pipes), and a SQLite row in `<state_dir>/supervisor.db` captures `(agent_id, pid, start_time, status, exit_code, session_id, runtime, workdir, start_ticks)`."
+      - "AC-092-7: On restart the supervisor reloads agents from SQLite and validates running ones by comparing `/proc/<pid>/stat` field 22 (starttime) with the recorded value; mismatched rows are flipped to `exited`."
+      - "AC-092-8: Children are started with `Setsid=true` so they lead their own session/process group and survive supervisor exits (KillMode=process friendly)."
+      - "AC-092-9: Worker code paths (`internal/runtime/`, `cmd/worker.go`) are not touched by this issue; integration is left to Phase 1 step 2."
+    code:
+      - cmd/supervisor.go
+      - internal/supervisor/supervisor.go
+      - internal/supervisor/agent.go
+      - internal/supervisor/store.go
+      - internal/supervisor/proc.go
+    tests:
+      - internal/supervisor/supervisor_test.go
+    deps: []
