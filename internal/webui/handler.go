@@ -141,9 +141,10 @@ func markDeprecated(w http.ResponseWriter, r *http.Request, oldPath, newPath str
 //	tail   ("1" to take last N)   — when set, returns the last `limit` events;
 //	                                `offset` is ignored.
 //
-// Bulky string fields inside payload/raw are truncated server-side to keep
-// the response small. Clients can request the full event via the stream or
-// by re-querying without truncation (not yet implemented — intentional).
+// Each returned event mirrors the on-disk record verbatim — no per-string or
+// per-array truncation. The `limit` cap is the only size guard, since fields
+// like `payload.line` are themselves JSON strings the SPA re-parses, and
+// truncating them mid-string broke `JSON.parse(line)` on the client (#276).
 func (h *Handler) handleEventsJSON(w http.ResponseWriter, r *http.Request, sessionID string) {
 	path := h.eventsPath(sessionID)
 	if path == "" {
@@ -406,7 +407,9 @@ type eventsResponse struct {
 }
 
 // trimmedEvent is the on-the-wire shape: a thin projection of
-// launcherevents.Event that strips Raw and truncates bulky strings in Payload.
+// launcherevents.Event that strips Raw. Payload is returned verbatim — see
+// parseAndTrim. The Truncated field is retained for backward compatibility
+// with older SPA bundles but is never set to true (#276).
 type trimmedEvent struct {
 	Index     int    `json:"index"`
 	Kind      string `json:"kind"`
@@ -418,8 +421,11 @@ type trimmedEvent struct {
 	Truncated bool   `json:"truncated,omitempty"`
 }
 
-const maxStringLen = 4000
-
+// parseAndTrim decodes one events-v1.jsonl line into trimmedEvent. Despite
+// the historical name, it no longer trims — fields like payload.line are
+// themselves JSON strings the SPA re-parses, and any mid-string cut breaks
+// `JSON.parse(line)` on the client (#276). The only size guard is the
+// `limit` query param on the events endpoint.
 func parseAndTrim(line string, idx int) (trimmedEvent, bool) {
 	line = strings.TrimSpace(line)
 	if line == "" {
@@ -439,17 +445,13 @@ func parseAndTrim(line string, idx int) (trimmedEvent, bool) {
 			Kind:  "unparseable",
 			Payload: map[string]string{
 				"error": err.Error(),
-				"line":  truncString(line, maxStringLen),
+				"line":  line,
 			},
-			Truncated: len(line) > maxStringLen,
 		}, true
 	}
 	var payload any
-	truncated := false
 	if len(raw.Payload) > 0 {
-		if err := json.Unmarshal(raw.Payload, &payload); err == nil {
-			payload, truncated = trimValue(payload)
-		} else {
+		if err := json.Unmarshal(raw.Payload, &payload); err != nil {
 			payload = string(raw.Payload)
 		}
 	}
@@ -461,51 +463,7 @@ func parseAndTrim(line string, idx int) (trimmedEvent, bool) {
 		TurnID:    raw.TurnID,
 		Seq:       raw.Seq,
 		Payload:   payload,
-		Truncated: truncated,
 	}, true
-}
-
-// trimValue recursively walks decoded JSON and truncates long strings in place.
-// Returns (possibly-new) value and whether any truncation occurred.
-func trimValue(v any) (any, bool) {
-	switch x := v.(type) {
-	case string:
-		if len(x) > maxStringLen {
-			return x[:maxStringLen] + "… [truncated]", true
-		}
-		return x, false
-	case map[string]any:
-		trunc := false
-		for k, val := range x {
-			nv, t := trimValue(val)
-			x[k] = nv
-			trunc = trunc || t
-		}
-		return x, trunc
-	case []any:
-		trunc := false
-		// Cap array length so a 10k-line tool output doesn't blow the wire.
-		const maxArr = 200
-		if len(x) > maxArr {
-			x = append(x[:maxArr], "… [truncated "+strconv.Itoa(len(x)-maxArr)+" more]")
-			trunc = true
-		}
-		for i, val := range x {
-			nv, t := trimValue(val)
-			x[i] = nv
-			trunc = trunc || t
-		}
-		return x, trunc
-	default:
-		return v, false
-	}
-}
-
-func truncString(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "… [truncated]"
 }
 
 // SessionURL returns the URL path for a session detail page in the SPA.

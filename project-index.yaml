@@ -3780,3 +3780,36 @@ requirements:
       - internal/app/hooks_api_test.go
     deps:
       - REQ-106
+
+  - id: REQ-108
+    title: webui session events — drop server-side payload truncation (#276)
+    description: >
+      The /api/v1/sessions/{id}/events endpoint previously truncated any string
+      longer than 4000 bytes and any array longer than 200 elements inside the
+      decoded payload. That broke `kind=log` events whose `payload.line` is
+      itself a JSON document the SPA re-parses (Claude Code stream-json), since
+      the server cut mid-string and the client's `JSON.parse(line)` failed with
+      "Unterminated string". This requirement removes both guards so each event
+      mirrors the on-disk record verbatim. The `truncated` field is retained on
+      the wire for backward compatibility with older SPA bundles but is never
+      set to true.
+    rationale: >
+      The original truncation was added as a wire-size guard, but `payload.line`
+      and tool-call arrays are exactly the artefacts an operator opens the
+      session detail page to read. The single remaining size guard is the
+      `limit` query parameter (default 200, capped at 1000) so a session page
+      cannot accidentally ask for ten thousand events at once.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-108-1: internal/webui/handler.go no longer truncates strings or arrays inside payload — the decoded payload is passed through verbatim."
+      - "AC-108-2: trimmedEvent.Truncated is retained on the wire (json:\"truncated,omitempty\") but is never set to true by the server."
+      - "AC-108-3: The events endpoint still respects the limit query parameter (default 200, capped at 1000); only per-event slimming was removed."
+      - "AC-108-4: TestEventsAPINoTruncation seeds a payload with a 64KB inner JSON string and a 500-element array, asserts the API returns both at exact input length, asserts truncated=false, and asserts the returned `line` is still parseable as JSON (the SPA's JSON.parse(line) contract)."
+    code:
+      - internal/webui/handler.go
+    tests:
+      - internal/webui/handler_test.go
+    deps:
+      - REQ-091
