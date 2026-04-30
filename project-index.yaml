@@ -3752,3 +3752,31 @@ requirements:
       - REQ-101
       - REQ-104
       - REQ-105
+  - id: REQ-107
+    title: hooks API graceful degradation when no hooks configured (#273)
+    description: >
+      The hooks list and reload endpoints used to return 503 + an "error"
+      payload when the dispatcher wasn't bound (typical fresh install with no
+      `~/.config/workbuddy/hooks.yaml`). The webui /hooks page surfaced this
+      as an error banner even though there was nothing wrong. Make the surface
+      report "no config" instead so a brand-new install renders an empty state.
+    rationale: >
+      The CLI `workbuddy hooks list` already prints `no hooks configured at
+      <path>` in the same situation. The webui contract should match — there
+      is no operator action required, so the API must not look like a failure.
+    priority: P2
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-107-1: GET /api/v1/hooks returns 200 with hooks=[] (and the configured path) when the dispatcher is nil or the hooks YAML is missing on disk."
+      - "AC-107-2: GET /api/v1/hooks/{name}/invocations still returns 404 for an unknown hook (regression guard)."
+      - "AC-107-3: POST /api/v1/hooks/reload returns 200 with {reloaded:false, reason:\"no config\"} when the dispatcher is nil or the hooks YAML is missing — never 5xx."
+      - "AC-107-4: Webui /hooks renders 'No hooks configured. See docs/hooks.md.' on an empty list and the Reload button reports 'nothing to reload — no config' instead of an error banner."
+    code:
+      - internal/app/hooks_api.go
+      - web/src/api/hooks.ts
+      - web/src/pages/Hooks.tsx
+    tests:
+      - internal/app/hooks_api_test.go
+    deps:
+      - REQ-106

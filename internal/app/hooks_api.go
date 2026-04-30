@@ -11,10 +11,13 @@
 //	                                         auto-disable, emit hooks_reloaded
 //
 // These are the read/write counterparts of `workbuddy hooks list` (which is
-// purely client-side and reads the YAML, not the running dispatcher). Without
-// the dispatcher attached the endpoints respond with 503 so operators can
-// distinguish "no hooks configured" from "this binary doesn't know about
-// hooks".
+// purely client-side and reads the YAML, not the running dispatcher). When the
+// dispatcher isn't bound — typical on a fresh install with no
+// ~/.config/workbuddy/hooks.yaml — the list/status surfaces return an empty
+// 200 and reload returns {"reloaded": false, "reason": "no config"} so the
+// webui can render an empty state instead of an error banner. Per-hook
+// resources (invocations, config) still 404 because the named hook genuinely
+// isn't registered.
 package app
 
 import (
@@ -87,7 +90,13 @@ func (h *HooksAPI) HandleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.dispatcher == nil {
-		writeHooksJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "hooks dispatcher not configured"})
+		// Fresh install with no hooks.yaml: dispatcher was never built.
+		// Return an empty 200 so the webui renders the empty state rather
+		// than an error banner (issue #273).
+		writeHooksJSON(w, http.StatusOK, HooksStatusResponse{
+			ConfigPath: h.configPath,
+			Hooks:      []HookStatusEntry{},
+		})
 		return
 	}
 	resp := HooksStatusResponse{
@@ -290,7 +299,12 @@ func (h *HooksAPI) HandleHookSubtree(w http.ResponseWriter, r *http.Request) {
 }
 
 // HooksReloadResponse is the JSON shape returned by POST /api/v1/hooks/reload.
+// Reloaded is false when the dispatcher isn't bound (e.g. no hooks YAML at
+// startup); Reason explains why so callers don't have to special-case the
+// nil-dispatcher state.
 type HooksReloadResponse struct {
+	Reloaded   bool     `json:"reloaded"`
+	Reason     string   `json:"reason,omitempty"`
 	ConfigPath string   `json:"config_path"`
 	HookCount  int      `json:"hook_count"`
 	Warnings   []string `json:"warnings,omitempty"`
@@ -306,7 +320,14 @@ func (h *HooksAPI) HandleReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.dispatcher == nil {
-		writeHooksJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "hooks dispatcher not configured"})
+		// Nothing to reload — fresh install with no hooks.yaml. Report it
+		// truthfully so the webui can show "no hooks configured" instead of
+		// an error (issue #273).
+		writeHooksJSON(w, http.StatusOK, HooksReloadResponse{
+			Reloaded:   false,
+			Reason:     "no config",
+			ConfigPath: h.configPath,
+		})
 		return
 	}
 	cfg, parseWarnings, err := hooks.LoadConfig(h.configPath)
@@ -337,6 +358,7 @@ func (h *HooksAPI) HandleReload(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeHooksJSON(w, http.StatusOK, HooksReloadResponse{
+		Reloaded:   true,
 		ConfigPath: h.configPath,
 		HookCount:  count,
 		Warnings:   all,

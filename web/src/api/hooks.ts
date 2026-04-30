@@ -56,6 +56,9 @@ export interface HookConfigResponse {
 }
 
 export interface HookReloadResponse {
+  reloaded: boolean;
+  // Present when reloaded is false (e.g. "no config" on fresh installs).
+  reason?: string;
   config_path: string;
   hook_count: number;
   warnings?: string[];
