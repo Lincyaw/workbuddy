@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { useRoute } from 'preact-iso';
 import { Layout } from '../components/Layout';
+import { GitHubIssueLink } from '../components/GitHubIssueLink';
+import { splitRepoSlug } from '../utils/github';
 import {
   fetchSession,
   fetchSessionEvents,
@@ -332,7 +334,17 @@ export function SessionDetail() {
               <dt>Repo</dt>
               <dd>{meta.repo}</dd>
               <dt>Issue</dt>
-              <dd>#{meta.issue_num}</dd>
+              <dd>
+                #{meta.issue_num}{' '}
+                {meta.repo && (
+                  <GitHubIssueLink
+                    owner={splitRepoSlug(meta.repo).owner}
+                    repo={splitRepoSlug(meta.repo).name}
+                    num={meta.issue_num}
+                    variant="icon"
+                  />
+                )}
+              </dd>
               {meta.worker_id && (
                 <>
                   <dt>Worker</dt>
