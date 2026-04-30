@@ -3918,3 +3918,51 @@ requirements:
       - internal/auditapi/handler_test.go
     deps:
       - REQ-110
+
+  - id: REQ-112
+    title: "deploy install defaults to the supervisor+coordinator+worker bundle layout (#281)"
+    description: >
+      `workbuddy deploy install` (no flag) installs the v0.5 three-unit
+      bundle (workbuddy-supervisor + workbuddy-coordinator +
+      workbuddy-worker) by default. The legacy single-process `serve`
+      install path is reachable via an explicit `--legacy-serve` opt-out
+      flag, preserved for a one-version migration window. The `--bundle`
+      flag is kept as a no-op alias so existing automation continues to
+      work. `deploy upgrade` (no flag) runs the bundle upgrade path
+      (binary swap + supervisor backfill via
+      ensureSupervisorUnitForUpgrade) by default, and refuses to silently
+      upgrade a manifest whose Command is `serve` unless the caller passes
+      `--legacy-serve` — preventing silent layout drift between releases.
+      Documentation (`README.md`, `docs/upgrade-v0.4-to-v0.5.md`,
+      `deploy install --help`) leads with the bundle layout; single-process
+      `serve` is documented as legacy / for local-dev convenience only,
+      with a clear note that it does not preserve in-flight agent runs
+      across restart.
+    rationale: >
+      Issue #281: bundle was opt-in via `--bundle`, so operators following
+      the docs ended up with the worse single-process layout that loses
+      in-flight agent runs on every worker restart. The supervisor's
+      Type=notify + KillMode=process design (issue #245) is the
+      operational property we actually want as the headline path.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-281-1: `workbuddy deploy install` with no flags installs the bundle layout (supervisor + coordinator + worker user units). `--legacy-serve` opts back to the single-process serve install."
+      - "AC-281-2: `deploy install --help`, the example block, README and `docs/upgrade-v0.4-to-v0.5.md` lead with the bundle layout. Single-process `serve` is documented as legacy / for local-dev convenience only, with a note that it does not preserve in-flight agent runs across restart."
+      - "AC-281-3: A new Claude Code plugin skill (`deploy`) under `.claude/plugins/workbuddy/skills/deploy/` documents the recommended topology, the rolling-restart property, and the cutover from `serve` to bundle. The skill signposts to `workbuddy deploy install --help` for flag detail (per the skill-vs-CLI split rule)."
+      - "AC-281-4: `workbuddy deploy upgrade --bundle` continues to work; `workbuddy deploy upgrade` without `--bundle` runs the bundle upgrade path (ensureSupervisorUnitForUpgrade) against an existing bundle install, and emits an explicit error when the named manifest looks like a legacy single-process `serve` install."
+      - "AC-281-5: `go test ./cmd/...` covers the new default in `runDeployInstallCmd` (bundle path taken when `--bundle` is omitted) and the `--legacy-serve` opt-out renders a `serve` ExecStart. CI green."
+      - "AC-281-6: `serve` is not removed in this issue — it stays callable so the legacy install path keeps working through the migration window."
+      - "AC-281-7: project-index.yaml records this requirement with version v0.5.0 and status tested."
+    code:
+      - cmd/deploy.go
+      - cmd/deploy_bundle.go
+      - README.md
+      - docs/upgrade-v0.4-to-v0.5.md
+      - .claude/plugins/workbuddy/skills/deploy/SKILL.md
+    tests:
+      - cmd/deploy_test.go
+      - cmd/deploy_bundle_test.go
+    deps:
+      - REQ-105

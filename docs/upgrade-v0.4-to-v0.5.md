@@ -25,9 +25,11 @@ workbuddy deploy upgrade --name workbuddy-coordinator --version v0.5.0
 
 # 2) add the supervisor unit (idempotent — picks up the env-file from the
 #    coordinator/worker manifests, writes Type=notify, KillMode=process,
-#    Restart=always, ExecStart=workbuddy supervisor)
-workbuddy deploy upgrade --name workbuddy-worker --version v0.5.0 --bundle
-# (or, equivalently, run `deploy install --bundle` with --bundle-skip-coordinator
+#    Restart=always, ExecStart=workbuddy supervisor). Since v0.5.x this
+#    happens by default for any `deploy upgrade`; the --bundle alias is
+#    accepted for compatibility with existing automation.
+workbuddy deploy upgrade --name workbuddy-worker --version v0.5.0
+# (or, equivalently, run `deploy install` with --bundle-skip-coordinator
 #  and --bundle-skip-worker; both paths converge on the same supervisor unit.)
 
 # 3) start the supervisor first, then the worker
@@ -46,14 +48,28 @@ The coordinator can be left running through the upgrade — it has no stateful l
 ## Greenfield install (v0.5)
 
 ```bash
-workbuddy deploy install --bundle --scope user \
+workbuddy deploy install --scope user \
   --env-file /etc/workbuddy/bundle.env \
   --coordinator-args=--listen=127.0.0.1:8081 --coordinator-args=--auth \
   --worker-args=--coordinator=http://127.0.0.1:8081 --worker-args=--token=$WORKBUDDY_TOKEN \
   --worker-args=--repos=owner/repo=/srv/workbuddy
 ```
 
-The `--bundle` flag installs `workbuddy-supervisor.service` (`Type=notify`, `KillMode=process`, `Restart=always`), then `workbuddy-coordinator.service` and `workbuddy-worker.service` with `After=workbuddy-supervisor.service` ordering. Trailing `-- args` are not allowed with `--bundle`; use the per-unit `--{supervisor,coordinator,worker}-args` flags instead (each repeatable).
+`deploy install` defaults to the bundle layout: `workbuddy-supervisor.service`
+(`Type=notify`, `KillMode=process`, `Restart=always`), then
+`workbuddy-coordinator.service` and `workbuddy-worker.service` with
+`After=workbuddy-supervisor.service` ordering. Trailing `-- args` are not
+allowed in bundle mode; use the per-unit
+`--{supervisor,coordinator,worker}-args` flags instead (each repeatable).
+The `--bundle` flag is accepted as a no-op alias for backwards compatibility.
+
+To install the legacy single-process `serve` unit instead (preserved for one
+migration window only — does not preserve in-flight agent runs across
+restart), pass `--legacy-serve`:
+
+```bash
+workbuddy deploy install --legacy-serve --name workbuddy --scope user --systemd
+```
 
 To remove a bundled install:
 
