@@ -1416,3 +1416,143 @@ func TestHandleIssuesInFlight_Golden(t *testing.T) {
 	}
 	t.Fatal("issue 40 row not found in response")
 }
+
+// Issue #282: a session whose DB row hasn't been written yet but is actively
+// streaming events to disk must be reported as live (status=running,
+// degraded=false), not as aborted_before_start.
+func TestSessionDetailNoDBRowRunningWithEventsIsNotDegraded(t *testing.T) {
+	st := newTestStore(t)
+	sessionsDir := filepath.Join(t.TempDir(), "sessions")
+	sessionID := "session-running-with-events"
+	dir := filepath.Join(sessionsDir, sessionID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	metadata := map[string]any{
+		"session_id": sessionID,
+		"task_id":    "task-live",
+		"repo":       "owner/repo",
+		"issue_num":  281,
+		"agent_name": "dev-agent",
+		"runtime":    "claude-oneshot",
+		"worker_id":  "worker-z",
+		"attempt":    1,
+		"status":     "running",
+		"created_at": "2026-04-30T08:00:00Z",
+	}
+	metaJSON, _ := json.MarshalIndent(metadata, "", "  ")
+	if err := os.WriteFile(filepath.Join(dir, "metadata.json"), metaJSON, 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "events-v1.jsonl"),
+		[]byte(`{"type":"tool_use"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write events: %v", err)
+	}
+
+	h := NewHandler(st)
+	h.SetSessionsDir(sessionsDir)
+	mux := http.NewServeMux()
+	h.RegisterDashboard(mux)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	resp, err := http.Get(server.URL + "/api/v1/sessions/" + sessionID)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d body=%s", resp.StatusCode, string(body))
+	}
+	var body sessionDetailResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Degraded {
+		t.Fatalf("degraded = true, want false (live session with streaming events)")
+	}
+	if body.DegradedReason != "" {
+		t.Fatalf("degraded_reason = %q, want empty", body.DegradedReason)
+	}
+	if body.Status != store.TaskStatusRunning {
+		t.Fatalf("status = %q, want %q", body.Status, store.TaskStatusRunning)
+	}
+	if body.ExitCode != 0 {
+		t.Fatalf("exit_code = %d, want 0", body.ExitCode)
+	}
+	if body.Repo != "owner/repo" || body.IssueNum != 281 {
+		t.Fatalf("repo/issue mismatch: %q/%d", body.Repo, body.IssueNum)
+	}
+}
+
+// Issue #282 (list-side AC-3): a live in-flight session enumerated from disk
+// must appear as a running, non-degraded row in /api/v1/sessions so it does
+// not get a wb-badge-degraded pill.
+func TestDashboardSessionsList_LiveDiskOnlyRowIsNotDegraded(t *testing.T) {
+	st := newTestStore(t)
+	sessionsDir := filepath.Join(t.TempDir(), "sessions")
+	sessionID := "session-disk-only-live"
+	dir := filepath.Join(sessionsDir, sessionID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	metadata := map[string]any{
+		"session_id": sessionID,
+		"repo":       "owner/repo",
+		"issue_num":  281,
+		"agent_name": "dev-agent",
+		"attempt":    1,
+		"status":     "running",
+		"created_at": "2026-04-30T09:00:00Z",
+	}
+	metaJSON, _ := json.MarshalIndent(metadata, "", "  ")
+	if err := os.WriteFile(filepath.Join(dir, "metadata.json"), metaJSON, 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "events-v1.jsonl"),
+		[]byte(`{"type":"tool_use"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write events: %v", err)
+	}
+
+	h := NewHandler(st)
+	h.SetSessionsDir(sessionsDir)
+	mux := http.NewServeMux()
+	h.RegisterDashboard(mux)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	resp, err := http.Get(server.URL + "/api/v1/sessions?limit=10")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var rows []sessionListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var row *sessionListResponse
+	for i := range rows {
+		if rows[i].SessionID == sessionID {
+			row = &rows[i]
+		}
+	}
+	if row == nil {
+		t.Fatalf("live disk-only session missing from listing: %+v", rows)
+	}
+	if row.Degraded {
+		t.Fatalf("degraded = true, want false")
+	}
+	if row.DegradedReason != "" {
+		t.Fatalf("degraded_reason = %q, want empty", row.DegradedReason)
+	}
+	if row.Status != store.TaskStatusRunning {
+		t.Fatalf("status = %q, want %q", row.Status, store.TaskStatusRunning)
+	}
+	if row.TaskStatus != store.TaskStatusRunning {
+		t.Fatalf("task_status = %q, want %q", row.TaskStatus, store.TaskStatusRunning)
+	}
+	if row.ExitCode != 0 {
+		t.Fatalf("exit_code = %d, want 0", row.ExitCode)
+	}
+}
