@@ -56,6 +56,16 @@ describe('parseStructuredEvent', () => {
     expect(msg).toBeNull();
   });
 
+  it('maps codex system-like events to system chips', () => {
+    for (const structured of ['turn.started', 'turn.completed', 'token.usage', 'permission']) {
+      const msg = parseStructuredEvent(event(structured, { summary: `${structured} summary` }), {
+        runtime: 'codex',
+        summarizeEvent: (evt) => `${evt.kind} summary`,
+      });
+      expect(msg).toMatchObject({ kind: 'system', summary: `${structured} summary` });
+    }
+  });
+
   it('keeps claude log payload.line parsing unchanged', () => {
     const msg = parseStructuredEvent(
       event('log', {
