@@ -14,6 +14,7 @@ import {
 import { copyText, formatTimestamp, shortID, statusBadgeClass } from '../lib/format';
 import { parseLine, type ParsedMessage, type Runtime } from '../lib/streamMessages';
 import { StreamMessageView } from '../components/StreamMessage';
+import { mergeSessionEvents } from '../utils/sessionEvents';
 
 const KIND_OPTIONS = ['tool_call', 'tool_result', 'message', 'system'] as const;
 type ViewMode = 'pretty' | 'raw';
@@ -164,20 +165,24 @@ export function SessionDetail() {
       .then((data) => {
         if (aborted) return;
         const items = data.events || [];
-        const next: SessionEvent[] = [];
         for (const ev of items) {
-          if (seenRef.current.has(ev.index)) continue;
-          seenRef.current.add(ev.index);
-          next.push(ev);
           if (ev.index > lastIndexRef.current) lastIndexRef.current = ev.index;
         }
-        // Default-expand a few kinds by populating the map.
-        const exp: Record<number, boolean> = {};
-        for (const ev of next) {
-          if (defaultExpanded(ev.kind)) exp[ev.index] = true;
-        }
-        setExpanded(exp);
-        setEvents(next);
+        // Default-expand a few kinds; merge into existing map so events the SSE
+        // already added before this resolve keep their toggle state.
+        setExpanded((prev) => {
+          const exp = { ...prev };
+          for (const ev of items) {
+            if (exp[ev.index] === undefined && defaultExpanded(ev.kind)) {
+              exp[ev.index] = true;
+            }
+          }
+          return exp;
+        });
+        // Functional update + dedupe + sort: the SSE handler may have already
+        // pushed events 0..N before this fetch resolves. A plain setEvents(next)
+        // would clobber them. See issue #277.
+        setEvents((prev) => mergeSessionEvents(prev, items, seenRef.current));
       })
       .catch((err) => {
         if (!aborted) setLoadError(err?.message || 'failed to load events');
@@ -207,9 +212,8 @@ export function SessionDetail() {
       try {
         const ev: SessionEvent = JSON.parse(e.data);
         if (seenRef.current.has(ev.index)) return;
-        seenRef.current.add(ev.index);
         if (ev.index > lastIndexRef.current) lastIndexRef.current = ev.index;
-        setEvents((prev) => [...prev, ev]);
+        setEvents((prev) => mergeSessionEvents(prev, [ev], seenRef.current));
         if (followRef.current) {
           requestAnimationFrame(() => {
             const el = timelineRef.current;
@@ -260,9 +264,8 @@ export function SessionDetail() {
         try {
           const ev: SessionEvent = JSON.parse(e.data);
           if (seenRef.current.has(ev.index)) return;
-          seenRef.current.add(ev.index);
           if (ev.index > lastIndexRef.current) lastIndexRef.current = ev.index;
-          setEvents((prev) => [...prev, ev]);
+          setEvents((prev) => mergeSessionEvents(prev, [ev], seenRef.current));
         } catch {
           /* ignore */
         }
