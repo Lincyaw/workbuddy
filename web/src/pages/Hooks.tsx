@@ -3,7 +3,9 @@ import { useLocation } from 'preact-iso';
 import { Layout } from '../components/Layout';
 import { HookList } from '../components/HookList';
 import { ReloadButton } from '../components/ReloadButton';
+import { EmptyState } from '../components/EmptyState';
 import {
+  fetchHookInvocations,
   fetchHooks,
   reloadHooks,
   type HooksListResponse,
@@ -13,11 +15,12 @@ const POLL_INTERVAL_MS = 30_000;
 
 interface FetchState {
   data: HooksListResponse | null;
+  latencySamples: Record<string, number[]>;
   error: string | null;
   loading: boolean;
 }
 
-const INITIAL: FetchState = { data: null, error: null, loading: true };
+const INITIAL: FetchState = { data: null, latencySamples: {}, error: null, loading: true };
 
 export function Hooks() {
   const { route } = useLocation();
@@ -27,81 +30,96 @@ export function Hooks() {
   async function load() {
     try {
       const data = await fetchHooks();
-      setState({ data, error: null, loading: false });
+      const samples = Object.fromEntries(
+        await Promise.all(
+          (data.hooks || []).map(async (hook) => {
+            try {
+              const invocations = await fetchHookInvocations(hook.name, 50);
+              return [hook.name, invocations.invocations.map((item) => item.duration_ms)] as const;
+            } catch {
+              return [hook.name, []] as const;
+            }
+          }),
+        ),
+      );
+      setState({ data, latencySamples: samples, error: null, loading: false });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'failed to load hooks';
-      setState((prev) => ({ ...prev, error: msg, loading: false }));
+      setState((prev) => ({
+        ...prev,
+        error: err instanceof Error ? err.message : 'failed to load hooks',
+        loading: false,
+      }));
     }
   }
 
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      await load();
-      if (cancelled) return;
-    })();
-    const timer = setInterval(() => {
+    void load();
+    const timer = window.setInterval(() => {
       void load();
     }, POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => window.clearInterval(timer);
   }, []);
 
   async function handleReload() {
-    setReloadStatus('reloading…');
+    setReloadStatus('reloading hook registry…');
     try {
-      const resp = await reloadHooks();
-      if (!resp.reloaded) {
-        // Fresh install or missing config — keep the message neutral so
-        // operators don't think something failed (issue #273).
-        setReloadStatus(
-          `nothing to reload — ${resp.reason ?? 'no config'}`,
-        );
-      } else {
-        const warnings = resp.warnings?.length
-          ? ` (with ${resp.warnings.length} warning${resp.warnings.length === 1 ? '' : 's'})`
-          : '';
-        setReloadStatus(`reloaded ${resp.hook_count} hook(s)${warnings}`);
-      }
+      const response = await reloadHooks();
+      setReloadStatus(
+        response.reloaded
+          ? `reloaded ${response.hook_count} hook(s)`
+          : `nothing to reload — ${response.reason ?? 'no config detected'}`,
+      );
       await load();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'reload failed';
-      setReloadStatus(`reload failed: ${msg}`);
+      setReloadStatus(`reload failed: ${err instanceof Error ? err.message : 'unknown error'}`);
     }
   }
 
-  const data = state.data;
   return (
     <Layout>
-      <div class="wb-hooks-header">
-        <h1>Hooks</h1>
+      <section class="page-header">
+        <div>
+          <p class="page-eyebrow">automation hooks</p>
+          <h1>Hooks</h1>
+        </div>
         <ReloadButton onConfirm={handleReload} disabled={state.loading} />
-      </div>
-      {reloadStatus && <div class="wb-hooks-status">{reloadStatus}</div>}
-      {state.error && <div class="error-banner">{state.error}</div>}
-      <p class="muted" style={{ marginTop: 0 }}>
-        {data?.config_path ? <>Config: <code class="code-chip">{data.config_path}</code></> : null}
-        {data ? <span style={{ marginLeft: 12 }}>
-          dispatcher overflow: <strong>{data.overflow_total}</strong>{' '}· per-hook drops: <strong>{data.dropped_total}</strong>
-        </span> : null}
-      </p>
-      <div class="panel">
-        {state.loading && !data ? (
-          <div class="empty">Loading…</div>
-        ) : !data || data.hooks.length === 0 ? (
-          <div class="empty">
-            No hooks configured. See <code class="code-chip">docs/hooks.md</code>.
-          </div>
-        ) : (
-          <HookList
-            hooks={data.hooks}
-            onSelect={(name) => route(`/hooks/${encodeURIComponent(name)}`)}
+      </section>
+
+      {reloadStatus ? <div class="notice-banner">{reloadStatus}</div> : null}
+      {state.error ? <div class="error-banner">{state.error}</div> : null}
+
+      <section class="surface-card hooks-summary-card">
+        <div class="hook-summary-line">
+          <span>config</span>
+          <strong class="mono-chip">{state.data?.config_path || '~/.config/workbuddy/hooks.yaml'}</strong>
+        </div>
+        <div class="hook-summary-line">
+          <span>dispatcher overflow</span>
+          <strong>{state.data?.overflow_total ?? 0}</strong>
+        </div>
+        <div class="hook-summary-line">
+          <span>per-hook drops</span>
+          <strong>{state.data?.dropped_total ?? 0}</strong>
+        </div>
+      </section>
+
+      {state.loading && !state.data ? (
+        <div class="loading-copy">Loading hook telemetry…</div>
+      ) : !state.data || state.data.hooks.length === 0 ? (
+        <section class="surface-card">
+          <EmptyState
+            title="no hooks registered"
+            detail="point ~/.config/workbuddy/hooks.yaml at this coordinator and reload."
+            inline
           />
-        )}
-      </div>
+        </section>
+      ) : (
+        <HookList
+          hooks={state.data.hooks}
+          latencySamples={state.latencySamples}
+          onSelect={(name) => route(`/hooks/${encodeURIComponent(name)}`)}
+        />
+      )}
     </Layout>
   );
 }
