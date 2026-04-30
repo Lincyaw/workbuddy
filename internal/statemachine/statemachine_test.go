@@ -1300,6 +1300,64 @@ func TestRolloutDispatch_UsesLabelOverrideAndSharedGroupID(t *testing.T) {
 	}
 }
 
+func TestRolloutDispatch_NoSignalPreservesSingleTaskSemantics(t *testing.T) {
+	sm, _, dispatch := newTestSM(t)
+	sm.workflows["dev-flow"].States["developing"].Rollouts = 1
+
+	err := sm.HandleEvent(context.Background(), ChangeEvent{
+		Type:     poller.EventIssueCreated,
+		Repo:     "test/repo",
+		IssueNum: 88,
+		Labels:   []string{"workbuddy", "status:developing"},
+	})
+	if err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+
+	select {
+	case req := <-dispatch:
+		if req.RolloutIndex != 0 {
+			t.Fatalf("rollout_index = %d, want 0", req.RolloutIndex)
+		}
+		if req.RolloutsTotal != 0 {
+			t.Fatalf("rollouts_total = %d, want 0 dispatch default", req.RolloutsTotal)
+		}
+		if req.RolloutGroupID != "" {
+			t.Fatalf("rollout_group_id = %q, want empty", req.RolloutGroupID)
+		}
+	default:
+		t.Fatal("expected single dispatch")
+	}
+
+	select {
+	case extra := <-dispatch:
+		t.Fatalf("unexpected extra dispatch: %+v", extra)
+	default:
+	}
+}
+
+func TestResolveStateRollouts_StrictLiteralValidation(t *testing.T) {
+	state := &config.State{Rollouts: 3}
+
+	if got, err := resolveStateRollouts(state, []string{"workbuddy", "status:developing"}); err != nil || got != 3 {
+		t.Fatalf("resolveStateRollouts default = (%d, %v), want (3, nil)", got, err)
+	}
+	if got, err := resolveStateRollouts(state, []string{"rollouts:2"}); err != nil || got != 2 {
+		t.Fatalf("resolveStateRollouts override = (%d, %v), want (2, nil)", got, err)
+	}
+	for _, labels := range [][]string{
+		{"rollouts:1"},
+		{"rollouts:6"},
+		{"rollouts: 3"},
+		{"rollouts:banana"},
+		{"rollouts:2", "rollouts:3"},
+	} {
+		if _, err := resolveStateRollouts(state, labels); err == nil {
+			t.Fatalf("resolveStateRollouts(%v) = nil error, want validation failure", labels)
+		}
+	}
+}
+
 func TestRolloutCompletion_TransitionsAfterMinSuccessesAndTerminalSiblings(t *testing.T) {
 	sm, rec, dispatch := newTestSM(t)
 	sm.workflows["dev-flow"].States["developing"].Rollouts = 3
@@ -1363,6 +1421,58 @@ func TestRolloutCompletion_TransitionsAfterMinSuccessesAndTerminalSiblings(t *te
 	transitions := rec.find(eventlog.TypeTransition)
 	if len(transitions) != 1 {
 		t.Fatalf("transitions = %d, want 1", len(transitions))
+	}
+}
+
+func TestRolloutCompletion_FailedThresholdLogsNeedsHumanIntent(t *testing.T) {
+	sm, rec, dispatch := newTestSM(t)
+	sm.workflows["dev-flow"].States["developing"].Rollouts = 3
+	sm.workflows["dev-flow"].States["developing"].Join = config.JoinConfig{Strategy: config.JoinRollouts, MinSuccesses: 3}
+
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
+		Type:     poller.EventIssueCreated,
+		Repo:     "test/repo",
+		IssueNum: 79,
+		Labels:   []string{"workbuddy", "status:developing"},
+	}); err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		req := <-dispatch
+		status := store.TaskStatusCompleted
+		exitCode := 0
+		if i == 1 {
+			status = store.TaskStatusFailed
+			exitCode = 1
+		}
+		taskID := fmt.Sprintf("threshold-task-%d", i+1)
+		if err := sm.store.InsertTask(store.TaskRecord{
+			ID:             taskID,
+			Repo:           req.Repo,
+			IssueNum:       req.IssueNum,
+			AgentName:      req.AgentName,
+			Workflow:       req.Workflow,
+			State:          req.State,
+			RolloutIndex:   req.RolloutIndex,
+			RolloutsTotal:  req.RolloutsTotal,
+			RolloutGroupID: req.RolloutGroupID,
+			Status:         status,
+		}); err != nil {
+			t.Fatalf("InsertTask %d: %v", i+1, err)
+		}
+		sm.MarkAgentCompleted("test/repo", 79, taskID, "dev-agent", exitCode, []string{"workbuddy", "status:developing"})
+	}
+
+	if got := len(rec.find(eventlog.TypeTransition)); got != 0 {
+		t.Fatalf("transitions = %d, want 0", got)
+	}
+	failed := rec.find(eventlog.TypeTransitionToFailed)
+	if len(failed) != 1 {
+		t.Fatalf("transition_to_failed events = %d, want 1", len(failed))
+	}
+	if payload := fmt.Sprint(failed[0].Payload); !strings.Contains(payload, "needs_human:true") {
+		t.Fatalf("transition_to_failed payload = %s, want needs_human=true", payload)
 	}
 }
 

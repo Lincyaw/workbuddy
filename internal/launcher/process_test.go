@@ -41,6 +41,45 @@ func TestProcessSessionBuildSpec_UsesPromptForClaude(t *testing.T) {
 	}
 }
 
+func TestProcessSessionBuildSpec_AddsRolloutFlagsOnlyForRollouts(t *testing.T) {
+	task := newTestTask(t)
+	task.Rollout = runtimepkg.RolloutContext{Index: 2, Total: 3, GroupID: "rollout-group"}
+
+	sess := &runtimepkg.ProcessSession{
+		RuntimeName: config.RuntimeClaudeCode,
+		Agent: &config.AgentConfig{
+			Runtime: config.RuntimeClaudeCode,
+			Prompt:  "review issue {{.Issue.Number}}",
+			Policy: config.PolicyConfig{
+				Sandbox:  "read-only",
+				Approval: "never",
+			},
+		},
+		Task: task,
+	}
+
+	spec, err := sess.BuildSpec()
+	if err != nil {
+		t.Fatalf("BuildSpec: %v", err)
+	}
+	joined := strings.Join(spec.Args, " ")
+	for _, want := range []string{"--rollout-index 2", "--rollouts-total 3"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("args %q missing %q", joined, want)
+		}
+	}
+
+	task.Rollout = runtimepkg.RolloutContext{}
+	spec, err = sess.BuildSpec()
+	if err != nil {
+		t.Fatalf("BuildSpec without rollout: %v", err)
+	}
+	joined = strings.Join(spec.Args, " ")
+	if strings.Contains(joined, "--rollout-index") || strings.Contains(joined, "--rollouts-total") {
+		t.Fatalf("non-rollout args should omit rollout flags, got %q", joined)
+	}
+}
+
 func TestClaudePolicyArgs_SandboxGatesPermissionBypass(t *testing.T) {
 	cases := []struct {
 		name       string

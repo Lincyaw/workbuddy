@@ -12,6 +12,7 @@ type Spec struct {
 	Backend  string            `json:"backend"`
 	Workdir  string            `json:"workdir"`
 	Prompt   string            `json:"prompt"`
+	Args     []string          `json:"args,omitempty"`
 	Model    string            `json:"model,omitempty"`
 	Sandbox  string            `json:"sandbox,omitempty"`
 	Approval string            `json:"approval,omitempty"`

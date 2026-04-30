@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"text/template"
 )
@@ -104,6 +105,16 @@ func rolloutPromptPrelude(task *TaskContext) string {
 		return ""
 	}
 	return fmt.Sprintf("You are rollout %d of %d independent attempts at this issue. Other rollouts are running in parallel; do not coordinate with them. Make the choices you believe in -- don't play it safe just because someone else might do that. The synthesizer will pick or combine across rollouts later.", task.Rollout.Index, task.Rollout.Total)
+}
+
+func rolloutInvocationArgs(task *TaskContext) []string {
+	if task == nil || task.Rollout.Index <= 0 || task.Rollout.Total <= 1 {
+		return nil
+	}
+	return []string{
+		"--rollout-index", strconv.Itoa(task.Rollout.Index),
+		"--rollouts-total", strconv.Itoa(task.Rollout.Total),
+	}
 }
 
 // RenderAgentPrompt is a convenience wrapper that assembles body+footer and

@@ -188,6 +188,10 @@ func (w *DistributedWorker) ExecuteTask(ctx context.Context, task *workerclient.
 		Agent:            &agentCopy,
 		Context:          launchCtx,
 		Workflow:         task.Workflow,
+		State:            task.State,
+		RolloutIndex:     task.RolloutIndex,
+		RolloutsTotal:    task.RolloutsTotal,
+		RolloutGroupID:   task.RolloutGroupID,
 		WorkerID:         w.deps.WorkerID,
 		WorkspaceManager: w.deps.WorkspaceManager,
 		OnPrepared: func(ctx context.Context, _ Task) {

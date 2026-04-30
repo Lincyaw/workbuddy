@@ -33,6 +33,7 @@ func (b *Backend) NewSession(ctx context.Context, spec agent.Spec) (agent.Sessio
 		"--output-format", "stream-json",
 		"--verbose",
 	}
+	args = append(args, spec.Args...)
 	if spec.Sandbox == "danger-full-access" {
 		args = append(args, "--dangerously-skip-permissions")
 	}
@@ -124,8 +125,8 @@ type session struct {
 	waitErr  error
 }
 
-func (s *session) ID() string                  { return s.id }
-func (s *session) Events() <-chan agent.Event   { return s.events }
+func (s *session) ID() string                 { return s.id }
+func (s *session) Events() <-chan agent.Event { return s.events }
 
 func (s *session) Wait(ctx context.Context) (agent.Result, error) {
 	select {

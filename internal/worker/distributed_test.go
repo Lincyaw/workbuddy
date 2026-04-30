@@ -69,6 +69,26 @@ func (fakeDistributedIssueReader) ReadIssueLabels(string, int) ([]string, error)
 	return nil, nil
 }
 
+type fakeDistributedWorkspaceManager struct {
+	mu           sync.Mutex
+	createCalls  int
+	issueNum     int
+	taskID       string
+	rolloutIndex int
+}
+
+func (m *fakeDistributedWorkspaceManager) Create(issueNum int, taskID string, rolloutIndex int) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.createCalls++
+	m.issueNum = issueNum
+	m.taskID = taskID
+	m.rolloutIndex = rolloutIndex
+	return "", nil
+}
+
+func (m *fakeDistributedWorkspaceManager) Remove(string) error { return nil }
+
 func init() {
 	// Neutralize real backoff waits for tests.
 	submitResultSleep = func(ctx context.Context, d time.Duration) {}
@@ -237,5 +257,67 @@ func TestDistributedWorker_PreservesExplicitAgentRuntime(t *testing.T) {
 	}
 	if client.submitCalls != 1 {
 		t.Fatalf("submitCalls = %d, want 1", client.submitCalls)
+	}
+}
+
+func TestDistributedWorker_PassesRolloutMetadataIntoExecutor(t *testing.T) {
+	t.Parallel()
+
+	launcher := runtimepkg.NewRegistry()
+	launcher.SetSessionStarter(func(_ context.Context, _ *config.AgentConfig, task *runtimepkg.TaskContext) (runtimepkg.Session, error, bool) {
+		if task.Rollout.Index != 2 || task.Rollout.Total != 3 || task.Rollout.GroupID != "rollout-group-42" {
+			t.Fatalf("task rollout context = %+v", task.Rollout)
+		}
+		return &fakeSession{
+			run: func(_ context.Context, _ chan<- launcherevents.Event) (*runtimepkg.Result, error) {
+				return &runtimepkg.Result{ExitCode: 0, Meta: map[string]string{}}, nil
+			},
+		}, nil, true
+	})
+	executor := NewExecutor(launcher, fakeDistributedIssueReader{})
+	client := &fakeRemoteClient{}
+	workspace := &fakeDistributedWorkspaceManager{}
+	worker := NewDistributedWorker(DistributedDeps{
+		Config: &config.FullConfig{
+			Agents: map[string]*config.AgentConfig{
+				"dev-agent": {Name: "dev-agent", Runtime: config.RuntimeCodex},
+			},
+		},
+		Executor:          executor,
+		Reporter:          reporter.NewReporter(fakeCommentWriter{}),
+		Reader:            fakeDistributedIssueReader{},
+		Client:            client,
+		WorkDir:           t.TempDir(),
+		WorkerID:          "worker-1",
+		HeartbeatInterval: time.Hour,
+		ShutdownTimeout:   time.Second,
+		WorkspaceManager:  workspace,
+	})
+
+	err := worker.ExecuteTask(context.Background(), &workerclient.Task{
+		TaskID:         "task-rollout",
+		Repo:           "owner/repo",
+		IssueNum:       42,
+		AgentName:      "dev-agent",
+		Workflow:       "default",
+		State:          "developing",
+		RolloutIndex:   2,
+		RolloutsTotal:  3,
+		RolloutGroupID: "rollout-group-42",
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTask: %v", err)
+	}
+	if client.submitCalls != 1 {
+		t.Fatalf("submitCalls = %d, want 1", client.submitCalls)
+	}
+
+	workspace.mu.Lock()
+	defer workspace.mu.Unlock()
+	if workspace.createCalls != 1 {
+		t.Fatalf("workspace create calls = %d, want 1", workspace.createCalls)
+	}
+	if workspace.issueNum != 42 || workspace.taskID != "task-rollout" || workspace.rolloutIndex != 2 {
+		t.Fatalf("workspace create args = issue=%d task=%q rollout=%d", workspace.issueNum, workspace.taskID, workspace.rolloutIndex)
 	}
 }
