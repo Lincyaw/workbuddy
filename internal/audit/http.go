@@ -168,6 +168,17 @@ func (h *HTTPHandler) queryIssueState(repo string, issueNum int) (IssueStateResp
 	if depState != nil && depState.Verdict != "" {
 		dependencyVerdict = depState.Verdict
 	}
+	// REQ #255: a configuration-incompleteness hazard masks the dependency
+	// verdict in the user-facing surfaces — the issue cannot reach the
+	// dependency gate at all. Override DependencyVerdict so `workbuddy
+	// status` and the audit API surface the hazard kind directly.
+	hazard, err := h.store.QueryIssuePipelineHazard(repo, issueNum)
+	if err != nil {
+		return IssueStateResponse{}, err
+	}
+	if hazard != nil {
+		dependencyVerdict = hazard.Kind
+	}
 
 	cycleState, err := h.store.QueryIssueCycleState(repo, issueNum)
 	if err != nil {

@@ -290,6 +290,14 @@ func (s *Store) createTables() error {
 			expires_at DATETIME NOT NULL,
 			PRIMARY KEY (repo, issue_num)
 		)`,
+		`CREATE TABLE IF NOT EXISTS issue_pipeline_hazards (
+				repo TEXT NOT NULL,
+				issue_num INTEGER NOT NULL,
+				kind TEXT NOT NULL,
+				fingerprint TEXT NOT NULL,
+				detected_at DATETIME NOT NULL,
+				PRIMARY KEY (repo, issue_num)
+			)`,
 		`CREATE TABLE IF NOT EXISTS issue_cycle_state (
 			repo TEXT NOT NULL,
 			issue_num INTEGER NOT NULL,

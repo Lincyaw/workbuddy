@@ -24,6 +24,10 @@ const (
 	KindMissedRedispatch = "missed_redispatch"
 	KindOrphanedTask     = "orphaned_task"
 	KindRepeatedFailure  = "repeated_failure"
+	// KindPipelineHazard is emitted for issues that the coordinator has
+	// flagged in issue_pipeline_hazards (REQ #255): configuration-
+	// incompleteness conditions that cause silent dispatch skips.
+	KindPipelineHazard = "pipeline_hazard"
 
 	stuckThreshold       = time.Hour
 	defaultAgentTimeout  = 60 * time.Minute
@@ -262,6 +266,21 @@ func analyzeWithConfig(st *store.Store, repo string, now time.Time, cfg diagnose
 				SuggestedFix: "mark task completed so slot is released; restart worker if heartbeat is stuck",
 			})
 		}
+	}
+
+	hazards, err := st.ListIssuePipelineHazards(repo)
+	if err != nil {
+		return nil, fmt.Errorf("diagnose: list pipeline hazards: %w", err)
+	}
+	for _, h := range hazards {
+		findings = append(findings, Finding{
+			Kind:         KindPipelineHazard,
+			Repo:         h.Repo,
+			IssueNum:     h.IssueNum,
+			Severity:     SeverityWarn,
+			Diagnosis:    pipelineHazardDiagnosis(h.Kind),
+			SuggestedFix: pipelineHazardSuggestedFix(h.Kind),
+		})
 	}
 
 	failCounts := consecutiveFailureCounts(tasks, repo)
@@ -573,6 +592,28 @@ func parseFailureKey(raw string) (string, int, string) {
 	issueNum := 0
 	fmt.Sscanf(parts[1], "%d", &issueNum)
 	return parts[0], issueNum, parts[2]
+}
+
+func pipelineHazardDiagnosis(kind string) string {
+	switch kind {
+	case store.HazardKindNoWorkflowMatch:
+		return "issue carries a status:* label but no workflow trigger label matched, so the state machine cannot enter it"
+	case store.HazardKindAwaitingStatusLabel:
+		return "issue declares depends_on but has no status:* label, so the state machine cannot enter it and the dependency gate cannot release downstream work"
+	default:
+		return fmt.Sprintf("pipeline hazard: %s", kind)
+	}
+}
+
+func pipelineHazardSuggestedFix(kind string) string {
+	switch kind {
+	case store.HazardKindNoWorkflowMatch:
+		return "add the workflow trigger label, e.g. `workbuddy`"
+	case store.HazardKindAwaitingStatusLabel:
+		return "add `status:blocked` so the gate can evaluate, or `status:developing` if the deps are already satisfied"
+	default:
+		return "inspect issue labels and body; clear the hazard once the configuration is complete"
+	}
 }
 
 func issueKey(repo string, issueNum int) string {
