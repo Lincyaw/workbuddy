@@ -3813,3 +3813,35 @@ requirements:
       - internal/webui/handler_test.go
     deps:
       - REQ-091
+
+  - id: REQ-109
+    title: SessionDetail event-stream race fix — fetch must merge with SSE-arrived events
+    description: >
+      On slow networks the session detail page intermittently flashed events
+      and then blanked them: the initial REST fetch and the SSE subscription
+      both started in the same render, and when SSE arrived first the fetch
+      handler called `setEvents(next)` with a fresh array whose dedupe filter
+      had already eaten 0..N — wiping the SSE-rendered events out of state.
+      A new `mergeSessionEvents` utility funnels both code paths through one
+      functional update that dedupes by `index` (using the shared `seenRef`
+      set) and sorts by `index`, so out-of-order arrivals stay monotonic and
+      neither path can clobber the other. The clearTimeline re-subscribe
+      path uses the same helper. Vitest covers the SSE-before-fetch race,
+      the fetch-then-SSE flow, overlapping-batch dedupe, out-of-order sort,
+      and input-array immutability.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-109-1: `web/src/utils/sessionEvents.ts` exports `mergeSessionEvents(prev, incoming, seen)` that dedupes by `index` against a caller-owned `Set<number>`, returns a new sorted array, and never mutates `prev`."
+      - "AC-109-2: `web/src/pages/SessionDetail.tsx` initial-fetch handler uses a functional `setEvents` update that runs through `mergeSessionEvents` instead of `setEvents(next)`; SSE handlers and the clearTimeline re-subscribe path use the same helper."
+      - "AC-109-3: vitest in `web/src/utils/sessionEvents.test.ts` simulates SSE pushing events 0/1/2 before fetch resolves with 0/1/2/3/4 and asserts the final state has length 5 with strictly monotonic indices."
+      - "AC-109-4: vitest covers fetch-resolve-first then SSE pushes 5/6 with no duplicates and no loss; also covers out-of-order arrival sorting and dedupe across overlapping batches."
+      - "AC-109-5: `pnpm -C web build` and `pnpm -C web test` both succeed."
+    code:
+      - web/src/pages/SessionDetail.tsx
+      - web/src/utils/sessionEvents.ts
+    tests:
+      - web/src/utils/sessionEvents.test.ts
+    deps:
+      - REQ-091
