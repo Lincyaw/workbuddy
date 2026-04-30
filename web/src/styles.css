@@ -1006,6 +1006,111 @@ a:hover {
   padding: 10px;
 }
 
+
+.wb-pretty-timeline {
+  gap: 14px;
+}
+
+.wb-turn-group {
+  display: grid;
+  gap: 8px;
+}
+
+.wb-turn-label {
+  color: var(--text-secondary);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.wb-turn-stack {
+  display: grid;
+  gap: 10px;
+  padding-left: 12px;
+  border-left: 1px solid var(--border-hairline);
+}
+
+.wb-pretty-entry {
+  display: grid;
+  gap: 8px;
+}
+
+.wb-pretty-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.wb-sm {
+  display: grid;
+  gap: 10px;
+}
+
+.wb-sm-role,
+.wb-sm-tool-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.wb-sm-role,
+.wb-sm-chip,
+.wb-sm-tag {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.wb-sm-assistant,
+.wb-sm-user,
+.wb-sm-system,
+.wb-sm-result-card,
+.wb-sm-codex,
+.wb-sm-unparsed,
+.wb-sm-tool-use,
+.wb-sm-tool-result,
+.wb-sm-thinking,
+.wb-sm-unknown,
+.wb-sm-image {
+  border: 1px solid var(--border-hairline);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--bg-elev) 88%, transparent);
+  padding: 12px;
+}
+
+.wb-sm-text {
+  white-space: pre-wrap;
+}
+
+.wb-sm-thinking {
+  font-style: italic;
+}
+
+.wb-sm-toggle {
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.wb-sm-collapsible {
+  display: grid;
+  gap: 8px;
+}
+
+.wb-sm-id,
+.wb-sm-collapsible pre {
+  font-family: var(--font-mono);
+}
+
+.wb-sm-err {
+  color: var(--state-danger);
+  font-weight: 700;
+}
+
 .notice-banner,
 .error-banner,
 .loading-copy,
