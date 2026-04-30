@@ -1,35 +1,26 @@
-import { useEffect, useMemo, useState } from 'preact/hooks';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso';
-import { Layout } from '../components/Layout';
-import { EmptyState } from '../components/EmptyState';
 import { fetchSessions, type SessionListItem, type SessionListQuery } from '../api/sessions';
-import { copyText, formatTimestamp, shortID } from '../lib/format';
-import { distinctValues, groupSessionsByIssue, type DecoratedSession } from '../utils/sessionGroups';
+import { EmptyState } from '../components/EmptyState';
+import { Layout } from '../components/Layout';
 import { SessionStatusBadge } from '../components/DegradedSessionCard';
+import { copyText, formatTimestamp, shortID } from '../lib/format';
 
 const PAGE_LIMIT = 50;
-
-type ViewMode = 'grouped' | 'flat';
-type SortMode = 'recent' | 'issue';
+const POLL_INTERVAL_MS = 5_000;
 
 interface FilterState {
   repo: string;
   agent: string;
   issue: string;
-  view: ViewMode;
-  sort: SortMode;
   offset: number;
 }
 
 function parseQuery(query: Record<string, string>): FilterState {
-  const view = query.view === 'flat' ? 'flat' : 'grouped';
-  const sort = query.sort === 'issue' ? 'issue' : 'recent';
   return {
     repo: query.repo || '',
     agent: query.agent || '',
     issue: query.issue || '',
-    view,
-    sort,
     offset: parseInt(query.offset || '0', 10) || 0,
   };
 }
@@ -39,8 +30,6 @@ function buildSearch(filter: FilterState): string {
   if (filter.repo) sp.set('repo', filter.repo);
   if (filter.agent) sp.set('agent', filter.agent);
   if (filter.issue) sp.set('issue', filter.issue);
-  if (filter.view !== 'grouped') sp.set('view', filter.view);
-  if (filter.sort !== 'recent') sp.set('sort', filter.sort);
   if (filter.offset > 0) sp.set('offset', String(filter.offset));
   const search = sp.toString();
   return search ? `?${search}` : '';
@@ -49,42 +38,71 @@ function buildSearch(filter: FilterState): string {
 export function Sessions() {
   const location = useLocation();
   const filter = useMemo(() => parseQuery(location.query), [location.query]);
-  const [sessions, setSessions] = useState<SessionListItem[] | null>(null);
+  const [rows, setRows] = useState<SessionListItem[]>([]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [live, setLive] = useState(false);
+  const [flashIds, setFlashIds] = useState<Record<string, boolean>>({});
   const [form, setForm] = useState({ repo: filter.repo, agent: filter.agent, issue: filter.issue });
-  const [collapsed, setCollapsed] = useState<Record<number, boolean>>({});
+  const previousStatus = useRef<Record<string, string>>({});
 
   useEffect(() => {
     setForm({ repo: filter.repo, agent: filter.agent, issue: filter.issue });
   }, [filter.repo, filter.agent, filter.issue]);
 
   useEffect(() => {
-    let aborted = false;
-    setLoading(true);
-    setError(null);
-    const query: SessionListQuery = {
-      repo: filter.repo || undefined,
-      agent: filter.agent || undefined,
-      issue: filter.issue || undefined,
-      limit: PAGE_LIMIT,
-      offset: filter.offset,
+    let cancelled = false;
+    const timeouts: number[] = [];
+
+    const load = async () => {
+      setLoading((value) => (rows.length === 0 ? true : value));
+      setError(null);
+      try {
+        const query: SessionListQuery = {
+          repo: filter.repo || undefined,
+          agent: filter.agent || undefined,
+          issue: filter.issue || undefined,
+          limit: PAGE_LIMIT,
+          offset: filter.offset,
+        };
+        const next = await fetchSessions(query);
+        if (cancelled) return;
+        const changed: Record<string, boolean> = {};
+        for (const row of next) {
+          const prev = previousStatus.current[row.session_id];
+          const current = row.task_status || row.status || '';
+          if (prev && prev !== current) {
+            changed[row.session_id] = true;
+            const timeout = window.setTimeout(() => {
+              setFlashIds((value) => {
+                const copy = { ...value };
+                delete copy[row.session_id];
+                return copy;
+              });
+            }, 400);
+            timeouts.push(timeout);
+          }
+          previousStatus.current[row.session_id] = current;
+        }
+        setFlashIds((value) => ({ ...value, ...changed }));
+        setRows(next);
+        setLoading(false);
+        setLive(true);
+      } catch (err) {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : 'request failed');
+        setRows([]);
+        setLoading(false);
+        setLive(false);
+      }
     };
-    fetchSessions(query)
-      .then((items) => {
-        if (aborted) return;
-        setSessions(items || []);
-      })
-      .catch((err) => {
-        if (aborted) return;
-        setError(err?.message || 'request failed');
-        setSessions([]);
-      })
-      .finally(() => {
-        if (!aborted) setLoading(false);
-      });
+
+    void load();
+    const timer = window.setInterval(() => void load(), POLL_INTERVAL_MS);
     return () => {
-      aborted = true;
+      cancelled = true;
+      window.clearInterval(timer);
+      for (const timeout of timeouts) window.clearTimeout(timeout);
     };
   }, [filter.repo, filter.agent, filter.issue, filter.offset]);
 
@@ -92,284 +110,138 @@ export function Sessions() {
     location.route('/sessions' + buildSearch(next));
   }
 
-  function applyFilters(e: Event) {
-    e.preventDefault();
+  function applyFilters(event: Event) {
+    event.preventDefault();
     navigate({ ...filter, ...form, offset: 0 });
   }
 
-  function resetFilters() {
-    setForm({ repo: '', agent: '', issue: '' });
-    navigate({ ...filter, repo: '', agent: '', issue: '', offset: 0 });
-  }
-
-  function gotoOffset(offset: number) {
-    navigate({ ...filter, offset });
-  }
-
-  function setView(view: ViewMode) {
-    navigate({ ...filter, view });
-  }
-
-  function setSort(sort: SortMode) {
-    navigate({ ...filter, sort });
-  }
-
-  function rowClick(id: string, e: MouseEvent) {
-    if ((e.target as HTMLElement).closest('.id-copy')) return;
-    location.route(`/sessions/${encodeURIComponent(id)}`);
-  }
-
-  function toggleGroup(issueNum: number) {
-    setCollapsed((prev) => ({ ...prev, [issueNum]: !prev[issueNum] }));
-  }
-
-  const rows = sessions || [];
   const hasNext = rows.length === PAGE_LIMIT;
   const hasPrev = filter.offset > 0;
-  const pageStart = filter.offset + 1;
-  const pageEnd = filter.offset + rows.length;
-  const repoOptions = useMemo(() => distinctValues(rows, (session) => session.repo), [rows]);
-  const agentOptions = useMemo(() => distinctValues(rows, (session) => session.agent_name), [rows]);
-  const groups = useMemo(() => {
-    const grouped = groupSessionsByIssue(rows);
-    if (filter.sort === 'issue') return [...grouped].sort((left, right) => right.issueNum - left.issueNum);
-    return grouped;
-  }, [rows, filter.sort]);
 
   return (
     <Layout>
-      <div class="wb-page-header wb-page-header--tight">
-        <div>
-          <p class="wb-eyebrow">Runtime</p>
-          <h1 class="wb-page-title">Sessions</h1>
-          <p class="wb-page-subtitle">Filter by repo, agent, or issue and switch between grouped and flat views without leaving the page.</p>
-        </div>
-      </div>
-
-      <form class="wb-filters" onSubmit={applyFilters}>
-        <div class="wb-filter-inputs">
-          <input
-            list="wb-repo-options"
-            type="text"
-            placeholder="Repo (owner/name)"
-            value={form.repo}
-            onInput={(e) => setForm({ ...form, repo: (e.target as HTMLInputElement).value })}
-          />
-          <datalist id="wb-repo-options">
-            {repoOptions.map((repo) => <option key={repo} value={repo} />)}
-          </datalist>
-          <input
-            list="wb-agent-options"
-            type="text"
-            placeholder="Agent name"
-            value={form.agent}
-            onInput={(e) => setForm({ ...form, agent: (e.target as HTMLInputElement).value })}
-          />
-          <datalist id="wb-agent-options">
-            {agentOptions.map((agent) => <option key={agent} value={agent} />)}
-          </datalist>
-          <input
-            type="text"
-            placeholder="Issue #"
-            value={form.issue}
-            onInput={(e) => setForm({ ...form, issue: (e.target as HTMLInputElement).value })}
-          />
-        </div>
-
-        <div class="wb-filter-actions">
-          <button type="submit" class="wb-button wb-button--primary">Apply filters</button>
-          {(filter.repo || filter.agent || filter.issue) && (
-            <button type="button" class="wb-button wb-button--ghost" onClick={resetFilters}>Reset</button>
-          )}
-        </div>
-
-        <div class="wb-filter-chips" aria-label="View options">
-          <button type="button" class={`wb-filter-chip${filter.view === 'grouped' ? ' is-active' : ''}`} onClick={() => setView('grouped')}>
-            Grouped by issue
-          </button>
-          <button type="button" class={`wb-filter-chip${filter.view === 'flat' ? ' is-active' : ''}`} onClick={() => setView('flat')}>
-            Flat list
-          </button>
-          <button type="button" class={`wb-filter-chip${filter.sort === 'recent' ? ' is-active' : ''}`} onClick={() => setSort('recent')}>
-            Most recent
-          </button>
-          <button type="button" class={`wb-filter-chip${filter.sort === 'issue' ? ' is-active' : ''}`} onClick={() => setSort('issue')}>
-            Issue number
-          </button>
-        </div>
-      </form>
-
-      {error && <div class="wb-alert wb-alert--danger">Failed to load sessions: {error}</div>}
-
-      {loading && sessions === null ? (
-        <EmptyState icon=".." title="Loading sessions" copy="Fetching the latest session page for the selected filters." />
-      ) : rows.length === 0 ? (
-        <EmptyState
-          icon="[]"
-          title="No sessions match these filters"
-          copy="Try clearing a filter, switching to the flat view, or queueing a new issue to generate session history."
-        />
-      ) : filter.view === 'flat' ? (
-        <FlatTable rows={rows} onRowClick={rowClick} />
-      ) : (
-        <div class="wb-stack-md">
-          {groups.map((group) => {
-            const isCollapsed = !!collapsed[group.issueNum];
-            return (
-              <div class="wb-card wb-card--flush" key={group.issueNum}>
-                <button
-                  type="button"
-                  class="wb-session-group-header"
-                  onClick={() => toggleGroup(group.issueNum)}
-                  aria-expanded={!isCollapsed}
-                >
-                  <span class="wb-session-group-header__caret">{isCollapsed ? '>' : 'v'}</span>
-                  <span class="wb-session-group-header__title">#{group.issueNum}</span>
-                  <span class="wb-session-group-header__repo">{group.repo}</span>
-                  <span class="wb-session-group-header__count">{group.sessions.length} session{group.sessions.length === 1 ? '' : 's'}</span>
-                </button>
-                {!isCollapsed && <GroupedTable rows={group.sessions} onRowClick={rowClick} />}
+      <section class="wb-stack">
+        <header class="grid gap-3">
+          <p class="wb-section-label">session lane</p>
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div class="flex items-center gap-3">
+                <h1 class="wb-page-title">sessions</h1>
+                <span class="wb-live-indicator">
+                  <span class={`wb-live-dot${live ? ' is-live' : ''}`} aria-hidden="true" />
+                  {live ? 'stream connected' : 'polling'}
+                </span>
               </div>
-            );
-          })}
-        </div>
-      )}
+              <p class="wb-page-copy">Compact rows for time, repo, issue, agent, worker, runtime, and status while the queue is moving.</p>
+            </div>
+          </div>
+        </header>
 
-      <div class="wb-pager">
-        <button type="button" class="wb-button wb-button--ghost" disabled={!hasPrev} onClick={() => gotoOffset(Math.max(0, filter.offset - PAGE_LIMIT))}>Prev</button>
-        <button type="button" class="wb-button wb-button--ghost" disabled={!hasNext} onClick={() => gotoOffset(filter.offset + PAGE_LIMIT)}>Next</button>
-        {rows.length > 0 && <span class="wb-muted">showing {pageStart}-{pageEnd}</span>}
-      </div>
+        <form class="wb-panel wb-filter-row" onSubmit={applyFilters}>
+          <div class="grid gap-3 md:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_120px_auto]">
+            <input type="text" placeholder="repo (owner/name)" value={form.repo} onInput={(event) => setForm({ ...form, repo: (event.target as HTMLInputElement).value })} />
+            <input type="text" placeholder="agent" value={form.agent} onInput={(event) => setForm({ ...form, agent: (event.target as HTMLInputElement).value })} />
+            <input type="text" placeholder="issue #" value={form.issue} onInput={(event) => setForm({ ...form, issue: (event.target as HTMLInputElement).value })} />
+            <div class="flex flex-wrap gap-2">
+              <button type="submit" class="wb-cta wb-cta--primary">apply</button>
+              <button type="button" class="wb-cta wb-cta--ghost" onClick={() => navigate({ repo: '', agent: '', issue: '', offset: 0 })}>reset</button>
+            </div>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            {filter.repo ? <span class="wb-filter-pill is-active">repo</span> : null}
+            {filter.agent ? <span class="wb-filter-pill is-active">agent</span> : null}
+            {filter.issue ? <span class="wb-filter-pill is-active">issue</span> : null}
+            {!filter.repo && !filter.agent && !filter.issue ? <span class="wb-filter-pill">all sessions</span> : null}
+          </div>
+        </form>
+
+        {error ? <div class="wb-panel text-state-danger">Failed to load sessions: {error}</div> : null}
+
+        {loading && rows.length === 0 ? (
+          <EmptyState glyph="loading" title="loading sessions" copy="Reading the latest session page for the active filters." />
+        ) : rows.length === 0 ? (
+          <EmptyState
+            glyph="sessions"
+            title="no sessions yet"
+            copy="open an issue with `status:developing` and the coordinator will dispatch one."
+          />
+        ) : (
+          <>
+            <section class="wb-table-shell">
+              <div class="wb-table-wrap">
+                <table class="wb-table">
+                  <thead>
+                    <tr>
+                      <th>time</th>
+                      <th>repo + issue</th>
+                      <th>agent</th>
+                      <th>worker</th>
+                      <th>runtime</th>
+                      <th>status</th>
+                      <th>duration</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((row) => (
+                      <tr key={row.session_id} onClick={() => location.route(`/sessions/${encodeURIComponent(row.session_id)}`)}>
+                        <td class="wb-time">{formatTimestamp(row.created_at)}</td>
+                        <td>
+                          <div class="grid gap-2">
+                            <span class="wb-id-pill">{row.repo}#{row.issue_num}</span>
+                            <div class="flex items-center gap-2 text-[12px] text-text-secondary">
+                              <span class="wb-code-inline">{shortID(row.session_id, 12)}</span>
+                              <button type="button" class="wb-faint" onClick={(event) => {
+                                event.stopPropagation();
+                                copyText(row.session_id);
+                              }}>copy</button>
+                            </div>
+                          </div>
+                        </td>
+                        <td>{row.agent_name}</td>
+                        <td>{row.worker_id ? <span class="wb-id-pill">{row.worker_id}</span> : <span class="wb-faint">--</span>}</td>
+                        <td class="wb-mono text-[12px] uppercase text-text-secondary">{row.runtime || 'unknown'}</td>
+                        <td>
+                          <div class={flashIds[row.session_id] ? 'wb-status-flash inline-flex' : 'inline-flex'}>
+                            <SessionStatusBadge row={row} />
+                          </div>
+                        </td>
+                        <td class="wb-time">{Math.round(row.duration / 1000)}s</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div class="wb-mobile-card-list p-4">
+                {rows.map((row) => (
+                  <button type="button" class="wb-mobile-card text-left" key={row.session_id} onClick={() => location.route(`/sessions/${encodeURIComponent(row.session_id)}`)}>
+                    <div class="flex items-start justify-between gap-3">
+                      <div class="grid gap-2">
+                        <span class="wb-id-pill">{row.repo}#{row.issue_num}</span>
+                        <strong>{row.agent_name}</strong>
+                      </div>
+                      <div class={flashIds[row.session_id] ? 'wb-status-flash inline-flex' : 'inline-flex'}>
+                        <SessionStatusBadge row={row} />
+                      </div>
+                    </div>
+                    <div class="mt-3 grid gap-1 text-[12px] text-text-secondary">
+                      <span>{formatTimestamp(row.created_at)}</span>
+                      <span>worker: {row.worker_id || '--'} · runtime: {row.runtime || 'unknown'}</span>
+                      <span>duration: {Math.round(row.duration / 1000)}s</span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <div class="flex items-center justify-between gap-3">
+              <button type="button" class="wb-cta wb-cta--ghost" disabled={!hasPrev} onClick={() => navigate({ ...filter, offset: Math.max(0, filter.offset - PAGE_LIMIT) })}>prev</button>
+              <span class="wb-faint">showing {filter.offset + 1}-{filter.offset + rows.length}</span>
+              <button type="button" class="wb-cta wb-cta--ghost" disabled={!hasNext} onClick={() => navigate({ ...filter, offset: filter.offset + PAGE_LIMIT })}>next</button>
+            </div>
+          </>
+        )}
+      </section>
     </Layout>
-  );
-}
-
-function IDCell({ id }: { id: string }) {
-  return (
-    <span class="wb-id-cell">
-      <code class="wb-code-inline">{shortID(id, 16)}</code>
-      <button
-        type="button"
-        class="wb-button wb-button--ghost wb-button--mini id-copy"
-        title="Copy full session ID"
-        onClick={(e) => {
-          e.stopPropagation();
-          copyText(id);
-        }}
-      >
-        copy
-      </button>
-    </span>
-  );
-}
-
-function FlatTable({ rows, onRowClick }: { rows: SessionListItem[]; onRowClick: (id: string, e: MouseEvent) => void; }) {
-  return (
-    <>
-      <div class="wb-table-card wb-desktop-only">
-        <div class="wb-table-scroll">
-          <table class="wb-table">
-            <thead>
-              <tr>
-                <th>Session ID</th>
-                <th>Agent</th>
-                <th>Repo</th>
-                <th>Issue</th>
-                <th>Status</th>
-                <th>Created</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((session) => (
-                <tr key={session.session_id} class="wb-row-link" onClick={(e) => onRowClick(session.session_id, e as unknown as MouseEvent)}>
-                  <td><IDCell id={session.session_id} /></td>
-                  <td>{session.agent_name}</td>
-                  <td>{session.repo}</td>
-                  <td class="wb-num">#{session.issue_num}</td>
-                  <td><SessionStatusBadge row={session} /></td>
-                  <td class="wb-time">{formatTimestamp(session.created_at)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-      <div class="wb-mobile-list wb-mobile-only">
-        {rows.map((session) => (
-          <button type="button" class="wb-mobile-card wb-mobile-card--interactive" key={session.session_id} onClick={(e) => onRowClick(session.session_id, e as unknown as MouseEvent)}>
-            <div class="wb-mobile-card__header">
-              <span class="wb-code-pill">{shortID(session.session_id, 16)}</span>
-              <SessionStatusBadge row={session} />
-            </div>
-            <div class="wb-mobile-card__grid">
-              <span>Agent</span>
-              <strong>{session.agent_name}</strong>
-              <span>Repo</span>
-              <strong>{session.repo}</strong>
-              <span>Issue</span>
-              <strong class="wb-num">#{session.issue_num}</strong>
-              <span>Created</span>
-              <strong class="wb-time">{formatTimestamp(session.created_at)}</strong>
-            </div>
-          </button>
-        ))}
-      </div>
-    </>
-  );
-}
-
-function GroupedTable({ rows, onRowClick }: { rows: DecoratedSession[]; onRowClick: (id: string, e: MouseEvent) => void; }) {
-  return (
-    <>
-      <div class="wb-table-scroll wb-desktop-only">
-        <table class="wb-table">
-          <thead>
-            <tr>
-              <th>Session ID</th>
-              <th>Role / Cycle</th>
-              <th>Agent</th>
-              <th>Status</th>
-              <th>Created</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((session) => (
-              <tr key={session.session_id} class="wb-row-link" onClick={(e) => onRowClick(session.session_id, e as unknown as MouseEvent)}>
-                <td><IDCell id={session.session_id} /></td>
-                <td>
-                  <span class={`wb-role-pill wb-role-pill--${session.role}`}>{session.role}</span>
-                  <span class="wb-muted wb-num">cycle {session.cycle}</span>
-                </td>
-                <td>{session.agent_name}</td>
-                <td><SessionStatusBadge row={session} /></td>
-                <td class="wb-time">{formatTimestamp(session.created_at)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div class="wb-mobile-list wb-mobile-only">
-        {rows.map((session) => (
-          <button type="button" class="wb-mobile-card wb-mobile-card--interactive" key={session.session_id} onClick={(e) => onRowClick(session.session_id, e as unknown as MouseEvent)}>
-            <div class="wb-mobile-card__header">
-              <span class="wb-code-pill">{shortID(session.session_id, 16)}</span>
-              <SessionStatusBadge row={session} />
-            </div>
-            <div class="wb-mobile-card__grid">
-              <span>Role</span>
-              <strong>
-                <span class={`wb-role-pill wb-role-pill--${session.role}`}>{session.role}</span>
-                <span class="wb-muted wb-num"> cycle {session.cycle}</span>
-              </strong>
-              <span>Agent</span>
-              <strong>{session.agent_name}</strong>
-              <span>Created</span>
-              <strong class="wb-time">{formatTimestamp(session.created_at)}</strong>
-            </div>
-          </button>
-        ))}
-      </div>
-    </>
   );
 }
 

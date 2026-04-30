@@ -1,21 +1,21 @@
-import { Layout } from '../components/Layout';
 import { EmptyState } from '../components/EmptyState';
+import { Layout } from '../components/Layout';
 
 export function NotFound() {
   return (
     <Layout>
-      <div class="wb-page-header wb-page-header--tight">
-        <div>
-          <p class="wb-eyebrow">Navigation</p>
-          <h1 class="wb-page-title">Not found</h1>
-          <p class="wb-page-subtitle">That route does not match a Workbuddy page in this build.</p>
-        </div>
-      </div>
-      <EmptyState
-        icon="?"
-        title="We couldn't find that screen"
-        copy={<>Head back to the <a href="/">dashboard</a> or use the topbar to jump to sessions and hooks.</>}
-      />
+      <section class="wb-stack">
+        <header>
+          <p class="wb-section-label">navigation</p>
+          <h1 class="wb-page-title">404</h1>
+        </header>
+        <EmptyState
+          glyph="missing"
+          title="this route doesn't exist"
+          copy="you might be looking for /sessions or /dashboard."
+          cta={<a href="/" class="wb-cta wb-cta--primary">return to dashboard</a>}
+        />
+      </section>
     </Layout>
   );
 }

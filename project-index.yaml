@@ -4011,60 +4011,67 @@ requirements:
       - cmd/validate_test.go
 
   - id: REQ-114
-    title: "Web UI design-token refresh with dark mode and mobile parity (#287)"
+    title: "Mission-control web UI redesign with ticker shell (#287)"
     description: >
-      Issue #287 refreshes the SPA presentation layer without changing API
-      contracts, route shapes, or public component props. The web shell must
-      move to a single wb-* design vocabulary with an explicit token layer in
-      `web/src/styles.css`, light and dark themes, a persisted system/light/dark
-      toggle in the topbar, compact readable tables and timelines, reusable
-      empty states, and mobile-safe layouts for dashboard, sessions, hooks, and
-      issue detail pages. The regenerated embedded dist bundle must ship the
-      same visual update for `go install` users.
+      Issue #287 replaces the previous generic dashboard refresh with a
+      deliberate operator-console presentation for the existing Preact + Vite
+      SPA. The redesign keeps API contracts and route shapes stable while
+      shipping self-hosted Geist Sans + JetBrains Mono fonts, a dark-default
+      theme system, a live dispatch ticker, compact data-dense tables and
+      timelines, Tailwind-backed token usage, and refreshed dashboard /
+      sessions / detail / hooks / login shells.
     rationale: >
-      The prior SPA mixed legacy `.card/.badge/.panel` classes with newer
-      `wb-*` components, stayed light-only, and looked cramped on phones. A
-      tokenized refresh reduces layering drift, improves accessibility, and
-      makes future UI changes cheaper because page styling now composes from
-      one shared system instead of overlapping one-off rules.
+      Operators spend long stretches staring at Workbuddy during incidents and
+      active dispatch windows. The UI needs a memorable control-room identity,
+      stronger live-state signaling, and a maintainable token pipeline so the
+      embedded SPA feels purpose-built instead of like generic SaaS chrome.
     priority: P1
     version: v0.5.0
     status: tested
     acceptance_criteria:
-      - "AC-287-1: `web/src/styles.css` starts with the documented token layer, includes `html[data-theme='dark']`, and keeps legacy `.card/.badge/.panel/.timeline` selectors only as thin aliases to unified wb-* recipes."
-      - "AC-287-2: `web/src/components/Layout.tsx`, `web/src/main.tsx`, and `web/src/theme.ts` implement a keyboard-accessible system/light/dark toggle that persists to `localStorage['wb:theme']` and applies the resolved theme to `<html data-theme=...>`."
-      - "AC-287-3: `rg -n '#[0-9a-fA-F]{3,8}' web/src --glob '*.tsx'` returns no matches, so TSX color usage routes through CSS custom properties instead of hardcoded hex values."
-      - "AC-287-4: `web/src/pages/Dashboard.tsx`, `web/src/pages/Sessions.tsx`, `web/src/pages/Hooks.tsx`, and `web/src/pages/IssueDetail.tsx` render without page-level horizontal overflow at narrow widths by using table-scroll wrappers or mobile card stacks, and `web/src/components/Layout.tsx` completes the drawer-style topbar collapse at <=600px."
-      - "AC-287-5: `web/src/pages/SessionDetail.tsx` and `web/src/styles.css` tighten the timeline rail and event chrome so the toolbar and event list stay compact, with event padding capped at the new 6-8px rhythm outside the payload body."
-      - "AC-287-6: `web/src/components/StateBadge.tsx`, `web/src/lib/format.ts`, `web/src/components/DegradedSessionCard.tsx`, `web/src/components/HookList.tsx`, and `web/src/components/HookInvocationTimeline.tsx` derive status and result badges from the consolidated wb/state token recipes; `degraded` and `aborted_before_start` share the warning palette."
-      - "AC-287-7: `web/src/components/EmptyState.tsx` is used by at least Sessions, Hooks, and IssueDetail with actionable copy and optional CTA support."
-      - "AC-287-8: `web/src/styles.css` includes the login card/token recipes needed for the server-rendered login shell to follow the same visual system and dark-mode color vocabulary."
-      - "AC-287-9: `make web` regenerates `internal/webui/dist/` so the embedded SPA bundle includes the refreshed dashboard, sessions, session detail, hooks, and hook detail views."
-      - "AC-287-10: `pnpm -C web test` and `pnpm -C web build` pass, and a local build comparison against `origin/main` shows the total gzipped bundle delta remains under +5 kB."
-      - "AC-287-11: `web/src/styles.css` enforces >=36px interactive targets and >=44px inputs at <=600px, including the sessions filters and the session-detail toolbar controls."
-      - "AC-287-12: `web/src/styles.css` documents text/background contrast ratios in the top comment block and routes muted text, event time, badge text, and topbar links through those accessible tokens."
+      - "AC-1: Two web fonts (`Geist` + `JetBrains Mono`) are vendored under `web/public/fonts/` and loaded via `@font-face` with `font-display: swap`. The Vite build produces gzipped font assets <= 80 kB total."
+      - "AC-2: Tailwind is wired through `@tailwindcss/vite`. The Tailwind config exposes the full token palette under `theme.extend.colors`, and `rg -n -e '#[0-9a-fA-F]{3,8}' web/src --glob '*.tsx' --glob '!**/*.test.tsx'` returns no matches."
+      - "AC-3: Dark theme is the default. The topbar toggle cycles `system -> light -> dark`, persists to `localStorage['wb:theme']`, and respects `prefers-color-scheme` when the stored preference is `system`."
+      - "AC-4: `web/src/components/DispatchTicker.tsx` polls `/api/v1/sessions`, renders the latest ticker events, scrolls at a constant pace, pauses on hover/focus, resumes on Escape, and has vitest coverage for debounce plus pause behavior."
+      - "AC-5: Dashboard, Sessions, SessionDetail, IssueDetail, Hooks, HookDetail, Login, and NotFound render through the shared operator-console token system under both themes without raw TSX hex colors."
+      - "AC-6: SessionDetail uses a two-column split with a sticky metadata rail and dense collapsed event rows whose expanded payloads render in 12 px JetBrains Mono code blocks on `--bg-elev`."
+      - "AC-7: Dashboard applies one staggered fade-up reveal across the live counters and in-flight table card, and the animation is disabled under `prefers-reduced-motion: reduce`."
+      - "AC-8: Session list status updates flash only the status cell for 400 ms when a row's reported status changes during live refreshes."
+      - "AC-9: Mobile layouts collapse the topbar into a drawer, keep the ticker in a truncated expandable mobile mode, swap data tables to card stacks, and preserve >=36 px tap targets with >=44 px inputs."
+      - "AC-10: `web/src/styles.css` documents contrast ratios for the token pairs used across both themes."
+      - "AC-11: `web/scripts/lint-aesthetic.sh` fails on banned font/gradient patterns and is wired into `pnpm -C web lint`."
+      - "AC-12: Local before/after screenshots were captured against Vite dev servers for Dashboard, Sessions, SessionDetail, Hooks, HookDetail, and Login in light + dark themes and referenced in the PR notes."
+      - "AC-13: `pnpm -C web test` and `pnpm -C web build` pass, and a local comparison against `origin/main` keeps the gzipped bundle delta within the issue budget."
     code:
-      - web/src/styles.css
-      - web/src/theme.ts
-      - web/src/main.tsx
-      - web/src/components/Layout.tsx
-      - web/src/components/EmptyState.tsx
-      - web/src/components/StateBadge.tsx
+      - web/package.json
+      - web/pnpm-lock.yaml
+      - web/public/fonts/
+      - web/scripts/lint-aesthetic.sh
+      - web/src/App.tsx
+      - web/src/components/DispatchTicker.tsx
       - web/src/components/DegradedSessionCard.tsx
-      - web/src/components/HookList.tsx
+      - web/src/components/EmptyState.tsx
       - web/src/components/HookInvocationTimeline.tsx
+      - web/src/components/HookList.tsx
+      - web/src/components/Layout.tsx
       - web/src/components/ReloadButton.tsx
+      - web/src/components/StateBadge.tsx
       - web/src/lib/format.ts
       - web/src/pages/Dashboard.tsx
-      - web/src/pages/Sessions.tsx
-      - web/src/pages/SessionDetail.tsx
-      - web/src/pages/Hooks.tsx
       - web/src/pages/HookDetail.tsx
+      - web/src/pages/Hooks.tsx
       - web/src/pages/IssueDetail.tsx
       - web/src/pages/NotFound.tsx
+      - web/src/pages/SessionDetail.tsx
+      - web/src/pages/Sessions.tsx
+      - web/src/styles.css
+      - web/src/theme.ts
+      - web/tailwind.config.ts
+      - web/vite.config.ts
       - internal/webui/dist/
     tests:
-      - web/src/components/Layout.test.tsx
-      - web/src/components/HookList.test.tsx
-      - web/src/components/HookInvocationTimeline.test.tsx
       - web/src/components/DegradedSessionCard.test.tsx
+      - web/src/components/DispatchTicker.test.tsx
+      - web/src/components/HookInvocationTimeline.test.tsx
+      - web/src/components/HookList.test.tsx
+      - web/src/components/Layout.test.tsx

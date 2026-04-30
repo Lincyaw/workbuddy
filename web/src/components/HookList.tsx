@@ -3,29 +3,46 @@ import { errorRatePercent } from '../api/hooks';
 
 interface HookListProps {
   hooks: HookListEntry[];
+  latencySeries?: Record<string, number[]>;
   onSelect: (name: string) => void;
 }
 
-function hookState(entry: HookListEntry): { label: string; badgeClass: string } {
-  if (entry.auto_disabled) return { label: 'auto-disabled', badgeClass: 'wb-badge wb-badge-warning' };
-  if (entry.enabled) return { label: 'enabled', badgeClass: 'wb-badge wb-badge-success' };
-  return { label: 'disabled', badgeClass: 'wb-badge wb-badge-neutral' };
+function hookState(entry: HookListEntry): { label: string; tone: string } {
+  if (entry.auto_disabled) return { label: 'auto-disabled', tone: 'danger' };
+  if (entry.enabled) return { label: 'armed', tone: 'success' };
+  return { label: 'disabled', tone: 'neutral' };
 }
 
-export function HookList({ hooks, onSelect }: HookListProps) {
+function Sparkline({ values }: { values: number[] }) {
+  if (values.length === 0) {
+    return <div class="text-[12px] text-text-tertiary">no samples</div>;
+  }
+  const max = Math.max(...values, 1);
+  const step = values.length === 1 ? 0 : 116 / (values.length - 1);
+  const points = values
+    .map((value, index) => `${2 + index * step},${30 - Math.round((value / max) * 24)}`)
+    .join(' ');
+  return (
+    <svg viewBox="0 0 120 32" class="wb-sparkline" aria-hidden="true">
+      <polyline fill="none" stroke="var(--border-strong)" stroke-width="1" points="0,30 120,30" />
+      <polyline fill="none" stroke="var(--accent)" stroke-width="2" points={points} />
+    </svg>
+  );
+}
+
+export function HookList({ hooks, latencySeries = {}, onSelect }: HookListProps) {
   return (
     <>
-      <div class="wb-table-scroll wb-desktop-only">
-        <table class="wb-table wb-hooks-table">
+      <div class="wb-table-wrap">
+        <table class="wb-table">
           <thead>
             <tr>
-              <th>Name</th>
-              <th>Events</th>
-              <th>Action</th>
-              <th>Calls</th>
-              <th>Errors</th>
-              <th>Error rate</th>
-              <th>State</th>
+              <th>name</th>
+              <th>event glob</th>
+              <th>last result</th>
+              <th>latency</th>
+              <th>calls</th>
+              <th>error rate</th>
             </tr>
           </thead>
           <tbody>
@@ -33,74 +50,43 @@ export function HookList({ hooks, onSelect }: HookListProps) {
               const total = hook.successes + hook.failures;
               const rate = errorRatePercent(hook.successes, hook.failures);
               const state = hookState(hook);
+              const lastResult = hook.failures > 0 && hook.last_failure_at ? 'failure' : hook.successes > 0 ? 'success' : state.label;
               return (
-                <tr
-                  key={hook.name}
-                  class="wb-row-link"
-                  onClick={(e) => {
-                    if ((e.target as HTMLElement).closest('a, button')) return;
-                    onSelect(hook.name);
-                  }}
-                >
+                <tr key={hook.name} onClick={() => onSelect(hook.name)}>
                   <td>
-                    <a
-                      href={`/hooks/${encodeURIComponent(hook.name)}`}
-                      class="wb-code-pill"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        onSelect(hook.name);
-                      }}
-                    >
-                      {hook.name}
-                    </a>
+                    <div class="grid gap-2">
+                      <strong class="text-[15px]">{hook.name}</strong>
+                      <span class="wb-mono text-[12px] text-text-secondary">{hook.action_type}</span>
+                    </div>
                   </td>
-                  <td>
-                    {hook.events.length === 0 ? (
-                      <span class="wb-muted">--</span>
-                    ) : (
-                      hook.events.map((ev) => (
-                        <span class="wb-event-pill" key={ev}>{ev}</span>
-                      ))
-                    )}
-                  </td>
-                  <td><span class="wb-code-pill">{hook.action_type}</span></td>
-                  <td class="wb-num" title="Total invocations since dispatcher start or last reload">{total}</td>
-                  <td class={`wb-num ${hook.failures > 0 ? 'wb-text-danger' : ''}`}>{hook.failures}</td>
-                  <td class={`wb-num ${rate > 50 ? 'wb-text-danger' : ''}`}>{rate}%</td>
-                  <td><span class={state.badgeClass}>{state.label}</span></td>
+                  <td><span class="wb-id-pill">{hook.events.join(', ') || '*'}</span></td>
+                  <td><span class={`wb-badge wb-badge--${state.tone === 'success' && lastResult === 'success' ? 'success' : lastResult === 'failure' ? 'danger' : state.tone}`}>{lastResult}</span></td>
+                  <td><Sparkline values={latencySeries[hook.name] || []} /></td>
+                  <td class="wb-num">{total}</td>
+                  <td class="wb-num">{rate}%</td>
                 </tr>
               );
             })}
           </tbody>
         </table>
       </div>
-
-      <div class="wb-mobile-list wb-mobile-only">
+      <div class="wb-mobile-card-list">
         {hooks.map((hook) => {
           const total = hook.successes + hook.failures;
           const rate = errorRatePercent(hook.successes, hook.failures);
           const state = hookState(hook);
           return (
-            <button
-              type="button"
-              class="wb-mobile-card wb-mobile-card--interactive"
-              key={hook.name}
-              onClick={() => onSelect(hook.name)}
-            >
-              <div class="wb-mobile-card__header">
-                <span class="wb-code-pill">{hook.name}</span>
-                <span class={state.badgeClass}>{state.label}</span>
+            <button type="button" class="wb-mobile-card text-left" key={hook.name} onClick={() => onSelect(hook.name)}>
+              <div class="flex items-center justify-between gap-3">
+                <strong>{hook.name}</strong>
+                <span class={`wb-badge wb-badge--${state.tone}`}>{state.label}</span>
               </div>
-              <div class="wb-mobile-card__grid">
-                <span>Events</span>
-                <strong>{hook.events.length === 0 ? '--' : hook.events.join(', ')}</strong>
-                <span>Action</span>
-                <strong>{hook.action_type}</strong>
-                <span>Calls</span>
-                <strong class="wb-num">{total}</strong>
-                <span>Error rate</span>
-                <strong class={`wb-num ${rate > 50 ? 'wb-text-danger' : ''}`}>{rate}%</strong>
+              <div class="mt-2 text-[12px] text-text-secondary">{hook.events.join(', ') || '*'}</div>
+              <div class="mt-3 flex items-center justify-between gap-3 text-[12px]">
+                <span>{total} calls</span>
+                <span>{rate}% error</span>
               </div>
+              <div class="mt-3"><Sparkline values={latencySeries[hook.name] || []} /></div>
             </button>
           );
         })}

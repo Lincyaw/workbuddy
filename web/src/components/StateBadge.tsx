@@ -1,33 +1,26 @@
-const KNOWN_STATES = new Set([
-  'developing',
-  'reviewing',
-  'blocked',
-  'queued',
-  'done',
-  'failed',
-]);
-
-function badgeClass(state: string): string {
+function stateTone(state: string): string {
   switch (state) {
     case 'developing':
-      return 'wb-badge wb-badge-warning';
+    case 'running':
     case 'reviewing':
-      return 'wb-badge wb-badge-running';
-    case 'blocked':
-      return 'wb-badge wb-badge-danger';
-    case 'queued':
-      return 'wb-badge wb-badge-neutral';
+      return 'running';
     case 'done':
-      return 'wb-badge wb-badge-success';
+    case 'completed':
+    case 'success':
+      return 'success';
+    case 'blocked':
     case 'failed':
-      return 'wb-badge wb-badge-danger';
+    case 'error':
+      return 'danger';
+    case 'queued':
+    case 'pending':
+      return 'neutral';
     default:
-      return 'wb-badge wb-badge-neutral';
+      return 'warning';
   }
 }
 
 export function StateBadge({ state }: { state: string }) {
-  const normalized = (state || '').trim().toLowerCase();
-  const label = KNOWN_STATES.has(normalized) ? normalized : normalized || 'unknown';
-  return <span class={badgeClass(normalized)}>{label}</span>;
+  const normalized = (state || 'unknown').trim().toLowerCase() || 'unknown';
+  return <span class={`wb-badge wb-badge--${stateTone(normalized)}`}>{normalized}</span>;
 }

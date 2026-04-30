@@ -1,20 +1,21 @@
 import { useEffect, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso';
-import { Layout } from '../components/Layout';
-import { HookList } from '../components/HookList';
-import { ReloadButton } from '../components/ReloadButton';
+import { fetchHookInvocations, fetchHooks, reloadHooks, type HooksListResponse } from '../api/hooks';
 import { EmptyState } from '../components/EmptyState';
-import { fetchHooks, reloadHooks, type HooksListResponse } from '../api/hooks';
+import { HookList } from '../components/HookList';
+import { Layout } from '../components/Layout';
+import { ReloadButton } from '../components/ReloadButton';
 
 const POLL_INTERVAL_MS = 30_000;
 
 interface FetchState {
   data: HooksListResponse | null;
+  latencySeries: Record<string, number[]>;
   error: string | null;
   loading: boolean;
 }
 
-const INITIAL: FetchState = { data: null, error: null, loading: true };
+const INITIAL: FetchState = { data: null, latencySeries: {}, error: null, loading: true };
 
 export function Hooks() {
   const { route } = useLocation();
@@ -24,85 +25,78 @@ export function Hooks() {
   async function load() {
     try {
       const data = await fetchHooks();
-      setState({ data, error: null, loading: false });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'failed to load hooks';
-      setState((prev) => ({ ...prev, error: msg, loading: false }));
+      const entries = await Promise.all(
+        data.hooks.map(async (hook) => {
+          try {
+            const invocations = await fetchHookInvocations(hook.name, 50);
+            return [hook.name, invocations.invocations.map((item) => item.duration_ms)] as const;
+          } catch {
+            return [hook.name, []] as const;
+          }
+        }),
+      );
+      setState({ data, latencySeries: Object.fromEntries(entries), error: null, loading: false });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'failed to load hooks';
+      setState((current) => ({ ...current, error: message, loading: false }));
     }
   }
 
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      await load();
-      if (cancelled) return;
-    })();
-    const timer = setInterval(() => {
-      void load();
-    }, POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
+    void load();
+    const timer = window.setInterval(() => void load(), POLL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
   }, []);
 
   async function handleReload() {
-    setReloadStatus('Reloading hook configuration...');
+    setReloadStatus('reloading hook configuration...');
     try {
-      const resp = await reloadHooks();
-      if (!resp.reloaded) {
-        setReloadStatus(`Nothing to reload - ${resp.reason ?? 'no config found'}`);
-      } else {
-        const warnings = resp.warnings?.length
-          ? ` with ${resp.warnings.length} warning${resp.warnings.length === 1 ? '' : 's'}`
-          : '';
-        setReloadStatus(`Reloaded ${resp.hook_count} hook(s)${warnings}.`);
-      }
+      const response = await reloadHooks();
+      setReloadStatus(response.reloaded ? `reloaded ${response.hook_count} hook(s)` : `nothing to reload — ${response.reason || 'no config found'}`);
       await load();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'reload failed';
-      setReloadStatus(`Reload failed: ${msg}`);
+    } catch (error) {
+      setReloadStatus(`reload failed: ${error instanceof Error ? error.message : 'unknown error'}`);
     }
   }
 
   const data = state.data;
+
   return (
     <Layout>
-      <div class="wb-page-header wb-page-header--split">
-        <div>
-          <p class="wb-eyebrow">Automation</p>
-          <h1 class="wb-page-title">Hooks</h1>
-          <p class="wb-page-subtitle">Inspect dispatcher bindings, failure rates, and the hooks currently loaded from config.</p>
-        </div>
-        <ReloadButton onConfirm={handleReload} disabled={state.loading} />
-      </div>
-
-      {reloadStatus && <div class="wb-alert wb-alert--info">{reloadStatus}</div>}
-      {state.error && <div class="wb-alert wb-alert--danger">{state.error}</div>}
-
-      <div class="wb-card wb-card--sm wb-stack-sm">
-        {data?.config_path ? <div>Config path <code class="wb-code-pill">{data.config_path}</code></div> : null}
-        {data ? (
-          <div class="wb-inline-metrics wb-num">
-            <span>Dispatcher overflow <strong>{data.overflow_total}</strong></span>
-            <span>Per-hook drops <strong>{data.dropped_total}</strong></span>
+      <section class="wb-stack">
+        <header class="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <p class="wb-section-label">hooks registry</p>
+            <h1 class="wb-page-title">hooks</h1>
+            <p class="wb-page-copy">Registered dispatch hooks, their most recent outcomes, and a latency sparkline for the last fifty invocations.</p>
           </div>
-        ) : null}
-      </div>
+          <ReloadButton onConfirm={handleReload} disabled={state.loading} />
+        </header>
 
-      <div class="wb-table-card">
+        {reloadStatus ? <div class="wb-panel">{reloadStatus}</div> : null}
+        {state.error ? <div class="wb-panel text-state-danger">{state.error}</div> : null}
+
         {state.loading && !data ? (
-          <EmptyState icon=".." title="Loading hooks" copy="Reading hook configuration, invocation counters, and dispatcher state." />
+          <EmptyState glyph="loading" title="loading hooks" copy="Reading hook configuration, counters, and recent latency samples." />
         ) : !data || data.hooks.length === 0 ? (
           <EmptyState
-            icon="[]"
-            title="No hooks are configured yet"
-            copy={<>Add entries to <code class="wb-code-pill">docs/hooks.md</code> and reload the dispatcher to see them here.</>}
+            glyph="hooks"
+            title="no hooks registered"
+            copy="point `~/.config/workbuddy/hooks.yaml` at this coordinator and reload."
           />
         ) : (
-          <HookList hooks={data.hooks} onSelect={(name) => route(`/hooks/${encodeURIComponent(name)}`)} />
+          <>
+            <section class="wb-panel flex flex-wrap items-center gap-3 text-[13px] text-text-secondary">
+              {data.config_path ? <span>config <span class="wb-id-pill">{data.config_path}</span></span> : null}
+              <span>overflow <strong class="text-text-primary">{data.overflow_total}</strong></span>
+              <span>dropped <strong class="text-text-primary">{data.dropped_total}</strong></span>
+            </section>
+            <section class="wb-table-shell p-4">
+              <HookList hooks={data.hooks} latencySeries={state.latencySeries} onSelect={(name) => route(`/hooks/${encodeURIComponent(name)}`)} />
+            </section>
+          </>
         )}
-      </div>
+      </section>
     </Layout>
   );
 }

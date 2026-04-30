@@ -3,12 +3,12 @@ export type ThemePreference = 'system' | 'light' | 'dark';
 export const THEME_STORAGE_KEY = 'wb:theme';
 
 export function normalizeThemePreference(value: string | null | undefined): ThemePreference {
-  if (value === 'light' || value === 'dark' || value === 'system') return value;
-  return 'system';
+  if (value === 'system' || value === 'light' || value === 'dark') return value;
+  return 'dark';
 }
 
 export function readThemePreference(): ThemePreference {
-  if (typeof window === 'undefined') return 'system';
+  if (typeof window === 'undefined') return 'dark';
   return normalizeThemePreference(window.localStorage.getItem(THEME_STORAGE_KEY));
 }
 

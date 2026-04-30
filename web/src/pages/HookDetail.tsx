@@ -1,9 +1,5 @@
 import { useEffect, useState } from 'preact/hooks';
 import { useLocation, useRoute } from 'preact-iso';
-import { Layout } from '../components/Layout';
-import { ReloadButton } from '../components/ReloadButton';
-import { HookInvocationTimeline } from '../components/HookInvocationTimeline';
-import { EmptyState } from '../components/EmptyState';
 import {
   errorRatePercent,
   fetchHookConfig,
@@ -14,6 +10,10 @@ import {
   type HookInvocationsResponse,
   type HookListEntry,
 } from '../api/hooks';
+import { EmptyState } from '../components/EmptyState';
+import { HookInvocationTimeline } from '../components/HookInvocationTimeline';
+import { Layout } from '../components/Layout';
+import { ReloadButton } from '../components/ReloadButton';
 import { formatTimestamp } from '../lib/format';
 
 const POLL_INTERVAL_MS = 30_000;
@@ -36,6 +36,12 @@ const INITIAL: DetailState = {
   reloadStatus: null,
 };
 
+function stateTone(entry: HookListEntry): 'success' | 'neutral' | 'danger' {
+  if (entry.auto_disabled) return 'danger';
+  if (entry.enabled) return 'success';
+  return 'neutral';
+}
+
 export function HookDetail() {
   const { params } = useRoute();
   const location = useLocation();
@@ -48,150 +54,103 @@ export function HookDetail() {
       return;
     }
     try {
-      const [list, invs, cfg] = await Promise.all([
+      const [list, invocations, config] = await Promise.all([
         fetchHooks(),
         fetchHookInvocations(name, 20),
         fetchHookConfig(name).catch(() => null),
       ]);
       const entry = list.hooks.find((hook) => hook.name === name) || null;
-      setState((prev) => ({
-        ...prev,
+      setState((current) => ({
+        ...current,
         entry,
-        invocations: invs,
-        config: cfg,
+        invocations,
+        config,
         error: entry ? null : `hook ${name} is not registered`,
         loading: false,
       }));
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'failed to load hook';
-      setState((prev) => ({ ...prev, error: msg, loading: false }));
+    } catch (error) {
+      setState((current) => ({ ...current, loading: false, error: error instanceof Error ? error.message : 'failed to load hook' }));
     }
   }
 
   useEffect(() => {
     void load();
-    const timer = setInterval(() => void load(), POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
+    const timer = window.setInterval(() => void load(), POLL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
   }, [name]);
 
   async function handleReload() {
-    setState((prev) => ({ ...prev, reloadStatus: 'Reloading hook configuration...' }));
+    setState((current) => ({ ...current, reloadStatus: 'reloading hook configuration...' }));
     try {
-      const resp = await reloadHooks();
-      setState((prev) => ({
-        ...prev,
-        reloadStatus: `Reloaded ${resp.hook_count} hook(s).`,
-      }));
+      const response = await reloadHooks();
+      setState((current) => ({ ...current, reloadStatus: `reloaded ${response.hook_count} hook(s)` }));
       await load();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'reload failed';
-      setState((prev) => ({ ...prev, reloadStatus: `Reload failed: ${msg}` }));
+    } catch (error) {
+      setState((current) => ({ ...current, reloadStatus: `reload failed: ${error instanceof Error ? error.message : 'unknown error'}` }));
     }
   }
 
   return (
     <Layout>
-      <div class="wb-page-header wb-page-header--split">
-        <div>
-          <p class="wb-eyebrow">Automation</p>
-          <h1 class="wb-page-title wb-inline-title">
-            <a href="/hooks" onClick={(e) => { e.preventDefault(); location.route('/hooks'); }}>
-              Hooks
+      <section class="wb-stack">
+        <header class="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <a href="/hooks" class="wb-backlink" onClick={(event) => { event.preventDefault(); location.route('/hooks'); }}>
+              ← hooks
             </a>
-            <span class="wb-muted"> / </span>
-            <code class="wb-code-pill">{name}</code>
-          </h1>
-          <p class="wb-page-subtitle">Review one hook's runtime state, YAML, and the latest invocation history.</p>
-        </div>
-        <ReloadButton onConfirm={handleReload} disabled={state.loading} />
-      </div>
-
-      {state.reloadStatus && <div class="wb-alert wb-alert--info">{state.reloadStatus}</div>}
-      {state.error && <div class="wb-alert wb-alert--danger">{state.error}</div>}
-      {state.loading && !state.entry ? (
-        <EmptyState icon=".." title="Loading hook detail" copy="Fetching the hook summary, YAML, and invocation timeline." />
-      ) : state.entry ? (
-        <HookSummary entry={state.entry} />
-      ) : null}
-
-      <section class="wb-section">
-        <div class="wb-section-heading">
-          <div>
-            <h2>Configuration</h2>
-            <p>The raw hook YAML is kept in a themed code block so long config fits without breaking the layout.</p>
+            <p class="wb-section-label">hook detail</p>
+            <h1 class="wb-page-title">{name}</h1>
+            <p class="wb-page-copy">YAML, runtime counters, and the invocation rail share the same event recipe as sessions.</p>
           </div>
-        </div>
-        <div class="wb-card wb-card--sm">
-          {state.config?.yaml ? (
-            <pre class="wb-codeblock">{state.config.yaml}</pre>
-          ) : state.config?.note ? (
-            <div class="wb-muted">{state.config.note}</div>
-          ) : (
-            <EmptyState icon="{ }" title="No config snapshot available" copy="Reload the dispatcher after adding the hook to capture a YAML snapshot here." />
-          )}
-        </div>
-      </section>
+          <ReloadButton onConfirm={handleReload} disabled={state.loading} />
+        </header>
 
-      <section class="wb-section">
-        <div class="wb-section-heading">
-          <div>
-            <h2>Recent invocations</h2>
-            <p>Invocation cards align with the rest of the shell and keep stdout and stderr in compact code blocks.</p>
-          </div>
-        </div>
-        <div class="wb-card wb-card--flush">
-          {state.invocations ? (
-            <HookInvocationTimeline invocations={state.invocations.invocations} />
-          ) : (
-            <EmptyState icon=".." title="Loading invocations" copy="Reading the most recent calls for this hook." />
-          )}
-        </div>
+        {state.reloadStatus ? <div class="wb-panel">{state.reloadStatus}</div> : null}
+        {state.error ? <div class="wb-panel text-state-danger">{state.error}</div> : null}
+
+        {state.loading && !state.entry ? (
+          <EmptyState glyph="loading" title="loading hook detail" copy="Fetching the hook summary, YAML, and invocation rail." />
+        ) : state.entry ? (
+          <section class="wb-detail-grid">
+            <aside class="wb-panel wb-detail-sidebar">
+              <dl class="wb-kv">
+                <dt>state</dt>
+                <dd><span class={`wb-badge wb-badge--${stateTone(state.entry)}`}>{state.entry.auto_disabled ? 'auto-disabled' : state.entry.enabled ? 'armed' : 'disabled'}</span></dd>
+                <dt>events</dt>
+                <dd><span class="wb-id-pill">{state.entry.events.join(', ') || '*'}</span></dd>
+                <dt>action</dt>
+                <dd><span class="wb-id-pill">{state.entry.action_type}</span></dd>
+                <dt>calls</dt>
+                <dd class="wb-num">{state.entry.successes + state.entry.failures}</dd>
+                <dt>error rate</dt>
+                <dd class="wb-num">{errorRatePercent(state.entry.successes, state.entry.failures)}%</dd>
+                <dt>last invoked</dt>
+                <dd class="wb-time">{state.entry.last_invoked_at ? formatTimestamp(state.entry.last_invoked_at) : '--'}</dd>
+              </dl>
+            </aside>
+
+            <div class="wb-stack">
+              <section class="wb-panel">
+                <p class="wb-section-label">configuration</p>
+                {state.config?.yaml ? (
+                  <pre class="wb-codeblock">{state.config.yaml}</pre>
+                ) : (
+                  <EmptyState glyph="hooks" title="no config snapshot available" copy="Reload the dispatcher after adding the hook to capture a YAML snapshot here." />
+                )}
+              </section>
+
+              <section class="wb-table-shell">
+                <div class="border-b border-border-hairline px-4 py-3">
+                  <p class="wb-section-label mb-1">invocations</p>
+                  <h2 class="m-0 text-[20px]">recent hook executions</h2>
+                </div>
+                <HookInvocationTimeline invocations={state.invocations?.invocations || []} />
+              </section>
+            </div>
+          </section>
+        ) : null}
       </section>
     </Layout>
-  );
-}
-
-function HookSummary({ entry }: { entry: HookListEntry }) {
-  const total = entry.successes + entry.failures;
-  const rate = errorRatePercent(entry.successes, entry.failures);
-  const stateLabel = entry.auto_disabled
-    ? 'auto-disabled (operator must reload)'
-    : entry.enabled
-    ? 'enabled'
-    : 'disabled';
-  const badgeClass = entry.auto_disabled
-    ? 'wb-badge wb-badge-warning'
-    : entry.enabled
-    ? 'wb-badge wb-badge-success'
-    : 'wb-badge wb-badge-neutral';
-
-  return (
-    <div class="wb-card wb-card--md">
-      <dl class="wb-key-value-grid">
-        <dt>State</dt>
-        <dd><span class={badgeClass}>{stateLabel}</span></dd>
-        <dt>Events</dt>
-        <dd>
-          {entry.events.length === 0
-            ? '--'
-            : entry.events.map((ev) => (
-                <span class="wb-event-pill" key={ev}>{ev}</span>
-              ))}
-        </dd>
-        <dt>Action</dt>
-        <dd><span class="wb-code-pill">{entry.action_type}</span></dd>
-        <dt>Calls</dt>
-        <dd class="wb-num">{total} total · {entry.successes} success · {entry.failures} failure · {entry.filtered} filtered · {entry.overflow} overflow</dd>
-        <dt>Error rate</dt>
-        <dd class="wb-num">{rate}%</dd>
-        <dt>Last invoked</dt>
-        <dd>{entry.last_invoked_at ? formatTimestamp(entry.last_invoked_at) : <span class="wb-muted">never</span>}</dd>
-        <dt>Last error</dt>
-        <dd>
-          {entry.last_error ? <code class="wb-code-inline wb-text-danger">{entry.last_error}</code> : <span class="wb-muted">none</span>}
-        </dd>
-      </dl>
-    </div>
   );
 }
 

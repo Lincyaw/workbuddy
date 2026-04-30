@@ -13,11 +13,7 @@ export function DegradedSessionCard({
   const apiDegraded = meta.degraded === true;
   const status = (meta.status || '').toLowerCase();
   const inferredEmpty =
-    eventsTotal !== null &&
-    eventsTotal === 0 &&
-    status !== '' &&
-    status !== 'running' &&
-    status !== 'pending';
+    eventsTotal !== null && eventsTotal === 0 && status !== '' && status !== 'running' && status !== 'pending';
   if (!apiDegraded && !inferredEmpty) return null;
 
   const reasonLabel = describeDegradedReason(meta.degraded_reason, apiDegraded, inferredEmpty);
@@ -25,25 +21,23 @@ export function DegradedSessionCard({
   const summary = (meta.summary || '').trim();
 
   return (
-    <div class="wb-card wb-card--warning wb-stack-sm wb-degraded-card" role="alert">
-      <div class="wb-inline-flow wb-inline-flow--between">
-        <h2 class="wb-card-title">This session never produced any events</h2>
-        <span class="wb-badge wb-badge-warning">degraded session</span>
+    <div class="wb-panel wb-degraded-card grid gap-3 border-state-warning/40 bg-[color-mix(in_srgb,var(--state-warning)_10%,var(--bg-panel))]" role="alert">
+      <div class="flex items-center justify-between gap-3">
+        <h2 class="m-0 text-[20px]">this session never produced any events</h2>
+        <span class="wb-badge wb-badge--warning">degraded session</span>
       </div>
-      <p><strong>Reason</strong> {reasonLabel}</p>
-      <p>
-        <strong>Reported status</strong> <span class={statusBadgeClass(meta.status || 'aborted_before_start')}>{meta.status || 'aborted_before_start'}</span> · exit code <code class="wb-code-inline">{meta.exit_code}</code>
+      <p class="m-0"><strong>reason</strong> {reasonLabel}</p>
+      <p class="m-0">
+        <strong>reported status</strong> <span class={statusBadgeClass(meta.status || 'aborted_before_start')}>{meta.status || 'aborted_before_start'}</span> · exit code <code class="wb-code-inline">{meta.exit_code}</code>
       </p>
-      {summary && <pre class="wb-codeblock">{summary}</pre>}
-      {!summary && stderrExcerpt && (
+      {summary ? <pre class="wb-codeblock">{summary}</pre> : null}
+      {!summary && stderrExcerpt ? (
         <>
-          <div class="wb-code-label">stderr excerpt</div>
+          <div class="wb-faint">stderr excerpt</div>
           <pre class="wb-codeblock">{stderrExcerpt}</pre>
         </>
-      )}
-      {!summary && !stderrExcerpt && (
-        <p class="wb-muted">No summary or stderr was captured for this session - the empty timeline below is expected, not a UI bug.</p>
-      )}
+      ) : null}
+      {!summary && !stderrExcerpt ? <p class="m-0 text-text-secondary">No summary or stderr was captured for this session.</p> : null}
     </div>
   );
 }
@@ -62,11 +56,11 @@ function describeDegradedReason(reason: string | undefined, apiDegraded: boolean
 
 export function SessionStatusBadge({ row }: { row: SessionListItem }): JSX.Element {
   const statusText = row.status === 'aborted_before_start' ? 'aborted_before_start' : row.task_status || row.status || 'unknown';
-  const cls = row.degraded ? 'wb-badge wb-badge-warning wb-badge-degraded' : statusBadgeClass(row.task_status || row.status);
+  const cls = row.degraded ? 'wb-badge wb-badge--warning wb-badge-degraded' : statusBadgeClass(row.task_status || row.status);
   const title = row.degraded ? `degraded: ${row.degraded_reason || 'no events captured'}` : undefined;
   return (
-    <span title={title}>
-      {row.degraded && <span class="wb-degraded-marker" aria-label="degraded session" title={title}>⚠️</span>}
+    <span title={title} class="inline-flex items-center gap-1">
+      {row.degraded ? <span class="wb-degraded-marker" aria-label="degraded session">⚠️</span> : null}
       <span class={cls}>{statusText}</span>
     </span>
   );

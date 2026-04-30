@@ -17,28 +17,11 @@ export function formatTimestamp(ts?: string | null): string {
 
 export function statusBadgeClass(status?: string): string {
   const key = (status || '').toLowerCase();
-  switch (key) {
-    case 'running':
-    case 'in_progress':
-      return 'wb-badge wb-badge-running';
-    case 'completed':
-    case 'done':
-    case 'success':
-      return 'wb-badge wb-badge-success';
-    case 'failed':
-    case 'error':
-    case 'timeout':
-      return 'wb-badge wb-badge-danger';
-    case 'aborted_before_start':
-    case 'degraded':
-      return 'wb-badge wb-badge-warning';
-    case 'pending':
-    case 'queued':
-    case 'disabled':
-      return 'wb-badge wb-badge-neutral';
-    default:
-      return 'wb-badge wb-badge-neutral';
-  }
+  if (key === 'running' || key === 'in_progress' || key === 'reviewing') return 'wb-badge wb-badge--running';
+  if (key === 'completed' || key === 'done' || key === 'success') return 'wb-badge wb-badge--success';
+  if (key === 'failed' || key === 'error' || key === 'timeout' || key === 'blocked') return 'wb-badge wb-badge--danger';
+  if (key === 'aborted_before_start' || key === 'degraded' || key === 'developing') return 'wb-badge wb-badge--warning';
+  return 'wb-badge wb-badge--neutral';
 }
 
 export function copyText(value: string): void {
@@ -53,7 +36,7 @@ export function copyText(value: string): void {
   try {
     document.execCommand('copy');
   } catch {
-    /* ignore */
+    // ignore fallback copy failures
   }
   document.body.removeChild(ta);
 }
