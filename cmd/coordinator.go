@@ -606,6 +606,7 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 	mux.Handle("/api/v1/hooks", api.WrapAuth(http.HandlerFunc(hooksAPI.HandleStatus)))
 	mux.Handle("/api/v1/hooks/status", api.WrapAuth(http.HandlerFunc(hooksAPI.HandleStatus)))
 	mux.Handle("/api/v1/hooks/reload", api.WrapAuth(http.HandlerFunc(hooksAPI.HandleReload)))
+	mux.Handle("/api/v1/admin/issues/", api.WrapAuth(http.HandlerFunc(api.HandleClearIssueInflight)))
 	// Per-hook routes (must be registered as a subtree so {name} is path-decoded
 	// inside the handler — Go 1.22 mux patterns don't compose with WrapAuth here).
 	mux.Handle("/api/v1/hooks/", api.WrapAuth(http.HandlerFunc(hooksAPI.HandleHookSubtree)))

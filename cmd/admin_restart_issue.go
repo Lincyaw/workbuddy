@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"path/filepath"
 	"strings"
 
@@ -18,6 +19,8 @@ type restartIssueOpts struct {
 	issue       int
 	dbPath      string
 	source      string
+	coordinator string
+	token       string
 	jsonOut     bool
 	force       bool
 	dryRun      bool
@@ -32,6 +35,7 @@ type restartIssueResult struct {
 	DependencyStateCleared bool   `json:"dependency_state_cleared"`
 	ClaimCleared           bool   `json:"claim_cleared"`
 	CycleStateCleared      bool   `json:"cycle_state_cleared"`
+	InflightCleared        bool   `json:"inflight_cleared"`
 	ClaimOwner             string `json:"claim_owner,omitempty"`
 	EventLogged            bool   `json:"event_logged"`
 }
@@ -41,10 +45,12 @@ var issueRestartCmd = &cobra.Command{
 	Short: "Force an issue back through the next poll cycle",
 	Long: `Clear the local recovery state for one issue so the next poll cycle
 treats it as fresh. This removes the issue's poller cache row, resets any
-cached dependency verdict, and clears a lingering issue-claim lease when one
-exists. Use this when an issue is stuck in status:developing/status:reviewing
-and simple label toggles are ignored because the poller cache already matches
-GitHub.`,
+cached dependency verdict, clears a lingering issue-claim lease when one
+exists, and when a coordinator is reachable also clears that issue's in-memory
+inflight dispatch tracker. If the coordinator is unreachable, the next dispatch
+attempt still self-heals from task_queue state. Use this when an issue is stuck
+in status:developing/status:reviewing and simple label toggles are ignored
+because the poller cache already matches GitHub.`,
 	Example: `  workbuddy issue restart --repo owner/name --issue 173
   workbuddy issue restart --repo owner/name --issue 173 --format json`,
 	RunE: runRestartIssueCmd,
@@ -87,6 +93,8 @@ func bindRestartIssueFlags(cmd *cobra.Command) {
 	cmd.Flags().String("repo", "", "GitHub repository in OWNER/NAME form")
 	cmd.Flags().Int("issue", 0, "Issue number to restart")
 	cmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "SQLite database path")
+	cmd.Flags().String("coordinator", "", "Coordinator base URL for clearing the live inflight tracker (auto-discovered from deploy manifests when omitted)")
+	addCoordinatorAuthFlags(cmd.Flags(), "t", "Bearer token for coordinator auth")
 	addOutputFormatFlag(cmd)
 	addDeprecatedJSONAliasFlag(cmd)
 	cmd.Flags().Bool("force", false, "Skip confirmation prompts for destructive actions")
@@ -97,7 +105,12 @@ func parseRestartIssueFlags(cmd *cobra.Command) (*restartIssueOpts, error) {
 	repo, _ := cmd.Flags().GetString("repo")
 	issue, _ := cmd.Flags().GetInt("issue")
 	dbPath, _ := cmd.Flags().GetString("db-path")
+	coordinatorURL, _ := cmd.Flags().GetString("coordinator")
 	format, err := resolveOutputFormat(cmd, "restart-issue")
+	if err != nil {
+		return nil, err
+	}
+	token, err := resolveCoordinatorAuthToken(cmd, "restart-issue")
 	if err != nil {
 		return nil, err
 	}
@@ -120,6 +133,8 @@ func parseRestartIssueFlags(cmd *cobra.Command) (*restartIssueOpts, error) {
 		issue:       issue,
 		dbPath:      dbPath,
 		source:      "cli:admin:restart-issue",
+		coordinator: strings.TrimRight(strings.TrimSpace(coordinatorURL), "/"),
+		token:       token,
 		jsonOut:     isJSONOutput(format),
 		force:       force,
 		dryRun:      dryRun,
@@ -128,7 +143,12 @@ func parseRestartIssueFlags(cmd *cobra.Command) (*restartIssueOpts, error) {
 	}, nil
 }
 
-func runRestartIssueWithOpts(_ context.Context, opts *restartIssueOpts, stdout io.Writer) error {
+// runRestartIssueWithOpts clears the issue's persisted recovery rows first,
+// then best-effort asks the running coordinator to drop the matching in-memory
+// inflight entry via the admin API. If no coordinator is reachable, Dispatch's
+// task_queue-backed self-heal path is the fallback that clears stale inflight
+// state on the next dispatch attempt.
+func runRestartIssueWithOpts(ctx context.Context, opts *restartIssueOpts, stdout io.Writer) error {
 	dbPath, err := filepath.Abs(opts.dbPath)
 	if err != nil {
 		return fmt.Errorf("restart-issue: resolve db path: %w", err)
@@ -173,6 +193,12 @@ func runRestartIssueWithOpts(_ context.Context, opts *restartIssueOpts, stdout i
 	if err != nil {
 		return err
 	}
+	coordinatorURL, token := resolveRestartCoordinatorTarget(opts.repo, opts.coordinator, opts.token)
+	if coordinatorURL != "" {
+		if cleared, err := clearCoordinatorInflight(ctx, coordinatorURL, token, opts.repo, opts.issue); err == nil {
+			result.InflightCleared = cleared
+		}
+	}
 	return writeRestartIssueResult(stdout, result, false, opts.jsonOut)
 }
 
@@ -196,6 +222,7 @@ func writeRestartIssueResult(stdout io.Writer, result restartIssueResult, dryRun
 		prefix = "dry-run: "
 	}
 	_, _ = fmt.Fprintf(stdout, "%s%s#%d: cache=%t dependency_state=%t claim=%t cycle_state=%t", prefix, result.Repo, result.IssueNum, result.CacheCleared, result.DependencyStateCleared, result.ClaimCleared, result.CycleStateCleared)
+	_, _ = fmt.Fprintf(stdout, " inflight=%t", result.InflightCleared)
 	if result.ClaimOwner != "" {
 		_, _ = fmt.Fprintf(stdout, " held_by=%s", result.ClaimOwner)
 	}
@@ -292,4 +319,46 @@ func runRestartIssueStore(st *store.Store, repo string, issueNum int, source str
 	}
 	result.EventLogged = true
 	return result, nil
+}
+
+func resolveRestartCoordinatorTarget(repo string, explicitURL string, explicitToken string) (string, string) {
+	explicitURL = strings.TrimRight(strings.TrimSpace(explicitURL), "/")
+	explicitToken = strings.TrimSpace(explicitToken)
+	if explicitURL != "" {
+		return explicitURL, explicitToken
+	}
+	target, ok := discoverManagedStatusTarget(repo)
+	if !ok || target == nil || strings.TrimSpace(target.baseURL) == "" {
+		return "", explicitToken
+	}
+	token := explicitToken
+	if token == "" {
+		token = strings.TrimSpace(target.token)
+	}
+	return strings.TrimRight(strings.TrimSpace(target.baseURL), "/"), token
+}
+
+func clearCoordinatorInflight(ctx context.Context, coordinatorURL, token, repo string, issueNum int) (bool, error) {
+	path := fmt.Sprintf("%s/api/v1/admin/issues/%s/%d/clear-inflight", strings.TrimRight(strings.TrimSpace(coordinatorURL), "/"), escapeRepoPath(repo), issueNum)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, path, nil)
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(token) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return true, nil
+	case http.StatusNotFound:
+		return false, nil
+	default:
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return false, fmt.Errorf("coordinator returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
 }

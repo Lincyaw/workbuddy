@@ -630,6 +630,33 @@ func (s *Store) GetTask(taskID string) (*TaskRecord, error) {
 	return &t, nil
 }
 
+// ListIssueTasks loads all task rows for one issue, newest first.
+func (s *Store) ListIssueTasks(repo string, issueNum int) ([]TaskRecord, error) {
+	rows, err := s.db.Query(`SELECT
+		tq.id, tq.repo, tq.issue_num, tq.agent_name, ic.labels, tq.role, tq.runtime, tq.workflow, tq.state,
+		tq.worker_id, tq.claim_token, tq.status, tq.lease_expires_at, tq.acked_at, tq.heartbeat_at,
+		tq.completed_at, tq.exit_code, tq.session_refs, tq.supervisor_agent_id, tq.created_at, tq.updated_at
+		FROM task_queue tq
+		LEFT JOIN issue_cache ic
+		  ON ic.repo = tq.repo AND ic.issue_num = tq.issue_num
+		WHERE tq.repo = ? AND tq.issue_num = ?
+		ORDER BY tq.updated_at DESC, tq.id DESC`, repo, issueNum)
+	if err != nil {
+		return nil, fmt.Errorf("store: list issue tasks: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []TaskRecord
+	for rows.Next() {
+		t, err := scanTaskRecord(rows.Scan)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan issue task: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // UpdateTaskSupervisorAgentID writes the supervisor-managed agent id onto a
 // task row. Used by the worker immediately after POSTing to the supervisor
 // IPC API so a coordinator-side resume path can find the agent on restart

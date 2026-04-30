@@ -4009,3 +4009,45 @@ requirements:
       - internal/worker/distributed_test.go
       - internal/validate/validate_codes_test.go
       - cmd/validate_test.go
+
+  - id: REQ-114
+    title: "Inflight dispatch tracker self-heals after task loss and supports admin clearing (#289)"
+    description: >
+      Issue #289: when an agent subprocess dies before reporting completion,
+      the coordinator's in-memory inflight map can leak for the lifetime of
+      the process and permanently suppress later dispatch attempts for the
+      same issue. `workbuddy issue restart` must clear the durable restart
+      state and, when possible, also clear the live coordinator inflight
+      entry, while Dispatch itself must self-heal by reconciling inflight
+      state against `task_queue`.
+    rationale: >
+      The durable SQLite state and the coordinator's in-memory execution lock
+      must converge after crashes or redeploys. Without reconciliation,
+      operators see silent `dispatch_skipped_inflight` loops and need a full
+      coordinator restart to recover.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-114-1: `workbuddy issue restart` clears durable restart state and, when a coordinator is reachable, POSTs to the coordinator admin API to clear the matching in-memory inflight entry; the helper doc comment names this behavior and the dispatch self-heal fallback."
+      - "AC-114-2: Dispatch self-heals stale inflight entries by checking `task_queue`; when the backing row is gone, terminal (`failed`/`timeout`/equivalent), or its lease has been expired for more than `5×lease_duration`, the stale inflight entry is dropped and dispatch proceeds."
+      - "AC-114-3: `POST /api/v1/admin/issues/{owner}/{repo}/{issue_num}/clear-inflight` is auth-gated like other write endpoints, returns 200 with the prior workflow/state/agents when an inflight entry existed, and 404 when it did not."
+      - "AC-114-4: `dispatch_skipped_inflight` event payloads include `task_status`, showing the live backing task status or `gone` when no matching task row exists."
+      - "AC-114-5: State-machine tests cover self-healing when the backing task row is deleted and when it is terminal/failed; coordinator tests cover the clear-inflight admin endpoint; restart-command tests cover the coordinator clear-inflight call."
+      - "AC-114-6: CLI help and implemented docs for `workbuddy issue restart` call out that the command now clears the in-memory inflight tracker (with self-heal fallback), removing the previous gotcha."
+    code:
+      - internal/statemachine/statemachine.go
+      - internal/store/store.go
+      - internal/app/coordinator.go
+      - internal/app/repo_runtime.go
+      - cmd/coordinator.go
+      - cmd/admin_restart_issue.go
+      - docs/implemented/pipeline-observability-and-diagnosis.md
+      - docs/implemented/distributed-topology-and-cli.md
+    tests:
+      - internal/statemachine/statemachine_test.go
+      - internal/app/coordinator_test.go
+      - cmd/admin_restart_issue_test.go
+    deps:
+      - REQ-060
+      - REQ-061

@@ -458,6 +458,17 @@ func TestExecutionMutex(t *testing.T) {
 		t.Fatalf("HandleEvent 1: %v", err)
 	}
 	<-dispatch // drain; agent is now inflight
+	if err := sm.store.InsertTask(store.TaskRecord{
+		ID:        "task-review-live",
+		Repo:      "r",
+		IssueNum:  7,
+		AgentName: "review-agent",
+		Workflow:  "dev-flow",
+		State:     "reviewing",
+		Status:    store.TaskStatusPending,
+	}); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
 
 	// Don't mark complete — agent still running.
 	sm.ResetDedup() // simulate new poll cycle
@@ -479,8 +490,91 @@ func TestExecutionMutex(t *testing.T) {
 	}
 
 	// Should have logged the skip.
-	if len(rec.find(eventlog.TypeDispatchSkippedInflight)) == 0 {
+	skips := rec.find(eventlog.TypeDispatchSkippedInflight)
+	if len(skips) == 0 {
 		t.Error("expected dispatch_skipped_inflight event")
+	}
+	payload, ok := skips[len(skips)-1].Payload.(map[string]string)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]string", skips[len(skips)-1].Payload)
+	}
+	if got := payload["task_status"]; got != store.TaskStatusPending {
+		t.Fatalf("task_status = %q, want %q", got, store.TaskStatusPending)
+	}
+}
+
+func TestDispatchSelfHealsInflightWhenBackingTaskDeleted(t *testing.T) {
+	sm, _, dispatch := newTestSM(t)
+	wf := sm.workflows["dev-flow"]
+
+	if err := sm.dispatchStateAgents(context.Background(), "owner/repo", 81, "dev-flow", "reviewing", wf.States["reviewing"]); err != nil {
+		t.Fatalf("dispatchStateAgents initial: %v", err)
+	}
+	<-dispatch
+
+	task := store.TaskRecord{
+		ID:        "task-review-81",
+		Repo:      "owner/repo",
+		IssueNum:  81,
+		AgentName: "review-agent",
+		Workflow:  "dev-flow",
+		State:     "reviewing",
+		Status:    store.TaskStatusPending,
+	}
+	if err := sm.store.InsertTask(task); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+	if _, err := sm.store.DB().Exec(`DELETE FROM task_queue WHERE id = ?`, task.ID); err != nil {
+		t.Fatalf("delete task row: %v", err)
+	}
+
+	if err := sm.dispatchStateAgents(context.Background(), "owner/repo", 81, "dev-flow", "developing", wf.States["developing"]); err != nil {
+		t.Fatalf("dispatchStateAgents self-heal: %v", err)
+	}
+
+	select {
+	case req := <-dispatch:
+		if req.AgentName != "dev-agent" || req.State != "developing" {
+			t.Fatalf("unexpected redispatch: %+v", req)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected redispatch after stale inflight row was deleted")
+	}
+}
+
+func TestDispatchSelfHealsInflightWhenBackingTaskFailed(t *testing.T) {
+	sm, _, dispatch := newTestSM(t)
+	wf := sm.workflows["dev-flow"]
+
+	if err := sm.dispatchStateAgents(context.Background(), "owner/repo", 82, "dev-flow", "reviewing", wf.States["reviewing"]); err != nil {
+		t.Fatalf("dispatchStateAgents initial: %v", err)
+	}
+	<-dispatch
+
+	task := store.TaskRecord{
+		ID:        "task-review-82",
+		Repo:      "owner/repo",
+		IssueNum:  82,
+		AgentName: "review-agent",
+		Workflow:  "dev-flow",
+		State:     "reviewing",
+		Status:    store.TaskStatusFailed,
+	}
+	if err := sm.store.InsertTask(task); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+
+	if err := sm.dispatchStateAgents(context.Background(), "owner/repo", 82, "dev-flow", "developing", wf.States["developing"]); err != nil {
+		t.Fatalf("dispatchStateAgents self-heal: %v", err)
+	}
+
+	select {
+	case req := <-dispatch:
+		if req.AgentName != "dev-agent" || req.State != "developing" {
+			t.Fatalf("unexpected redispatch: %+v", req)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected redispatch after inflight task failed")
 	}
 }
 

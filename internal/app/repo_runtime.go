@@ -491,6 +491,17 @@ func (pm *PollerManager) MarkAgentCompleted(repo string, issueNum int, taskID, a
 	runtime.StateMachine.MarkAgentCompleted(repo, issueNum, taskID, agentName, exitCode, currentLabels)
 }
 
+// ClearInflight removes one repo runtime's in-memory inflight entry.
+func (pm *PollerManager) ClearInflight(repo string, issueNum int) (*statemachine.InflightGroupSnapshot, bool) {
+	pm.mu.RLock()
+	runtime := pm.runtimes[repo]
+	pm.mu.RUnlock()
+	if runtime == nil || runtime.StateMachine == nil {
+		return nil, false
+	}
+	return runtime.StateMachine.ClearInflight(repo, issueNum)
+}
+
 func (pm *PollerManager) handleEvent(ev poller.ChangeEvent) {
 	pm.mu.RLock()
 	runtime := pm.runtimes[ev.Repo]

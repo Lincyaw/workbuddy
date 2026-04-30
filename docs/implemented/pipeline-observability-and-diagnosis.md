@@ -61,7 +61,7 @@ workbuddy cache invalidate --repo OWNER/NAME --issue 47,48,49
 - 直连 SQLite，不依赖 serve 进程
 - `workbuddy cache-invalidate ...` 仍可用，但会在 stderr 打印 deprecation warning
 
-### issue restart（REQ-060, REQ-061）
+### issue restart（REQ-060, REQ-061, REQ-114）
 
 显式重启单个 issue 的调度状态，解决“标签没变但就是不再派发”的恢复场景：
 
@@ -72,10 +72,15 @@ workbuddy issue restart --repo OWNER/NAME --issue 173
 - 删除该 issue 的 `issue_cache` 行，让下一次 poll 把它当成新 issue
 - 清除 `issue_dependency_state`，避免沿用旧 verdict
 - 如果存在残留 `issue_claim`，一并删除
+- 清除 dev↔review cycle state，避免 cycle-cap 旧记录继续卡住后续派发
+- 如果能连到运行中的 coordinator（显式 `--coordinator`，或从 deploy manifest 自动发现），会额外调用 `POST /api/v1/admin/issues/{owner}/{repo}/{issue}/clear-inflight` 清掉进程内 inflight map
+- 如果 coordinator 当时不可达，下一次 dispatch 也会基于 `task_queue` 自愈：当 backing task 行已删除、已变成 `failed`/`timeout`，或 lease 过期超过 `5×lease_duration` 时，会自动丢弃泄漏的 inflight 记录并继续派发
 - 记录 `issue_restarted` 事件，方便事后审计
 - `workbuddy admin restart-issue ...` 仍可用，但会在 stderr 打印 deprecation warning
 
 相比直接操作 SQLite，这个命令把手工恢复流程固化成了可审计的 CLI。
+
+`dispatch_skipped_inflight` 事件现在带 `task_status` 字段，operator 直接看事件流就能区分“确实还在跑”（例如 `pending` / `running`）还是“内存 inflight 泄漏”（`gone` / `failed` / `timeout`）。
 
 ### diagnose（REQ-037）
 

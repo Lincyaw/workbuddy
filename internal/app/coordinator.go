@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -110,6 +111,14 @@ type TaskReleaseRequest struct {
 	Reason   string `json:"reason,omitempty"`
 }
 
+type clearInflightResponse struct {
+	Repo     string   `json:"repo"`
+	IssueNum int      `json:"issue_num"`
+	Workflow string   `json:"workflow"`
+	State    string   `json:"state"`
+	Agents   []string `json:"agents"`
+}
+
 // HandleConfigReload serves POST /api/v1/config/reload.
 func (s *FullCoordinatorServer) HandleConfigReload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -126,6 +135,36 @@ func (s *FullCoordinatorServer) HandleConfigReload(w http.ResponseWriter, r *htt
 		return
 	}
 	CoordWriteJSON(w, http.StatusOK, summary)
+}
+
+// HandleClearIssueInflight serves
+// POST /api/v1/admin/issues/{owner}/{repo}/{issue_num}/clear-inflight.
+func (s *FullCoordinatorServer) HandleClearIssueInflight(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		CoordWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	repo, issueNum, ok := parseClearIssueInflightPath(r.URL.Path)
+	if !ok {
+		CoordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid admin issue path"})
+		return
+	}
+	if s.Pollers == nil {
+		CoordWriteJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "poller manager unavailable"})
+		return
+	}
+	snapshot, cleared := s.Pollers.ClearInflight(repo, issueNum)
+	if !cleared || snapshot == nil {
+		CoordWriteJSON(w, http.StatusNotFound, map[string]string{"error": "no inflight entry for issue"})
+		return
+	}
+	CoordWriteJSON(w, http.StatusOK, clearInflightResponse{
+		Repo:     repo,
+		IssueNum: issueNum,
+		Workflow: snapshot.Workflow,
+		State:    snapshot.State,
+		Agents:   append([]string(nil), snapshot.Agents...),
+	})
 }
 
 // WrapAuth returns a handler that enforces Bearer-token auth when enabled.
@@ -668,6 +707,27 @@ func parseFullTaskActionPath(path string) (taskID string, action string, ok bool
 		return "", "", false
 	}
 	return parts[0], parts[1], true
+}
+
+func parseClearIssueInflightPath(path string) (repo string, issueNum int, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/api/v1/admin/issues/")
+	parts := strings.Split(strings.Trim(trimmed, "/"), "/")
+	if len(parts) != 4 || parts[0] == "" || parts[1] == "" || parts[2] == "" || parts[3] != "clear-inflight" {
+		return "", 0, false
+	}
+	n, err := strconv.Atoi(parts[2])
+	if err != nil || n <= 0 {
+		return "", 0, false
+	}
+	owner, err := url.PathUnescape(parts[0])
+	if err != nil || strings.TrimSpace(owner) == "" {
+		return "", 0, false
+	}
+	name, err := url.PathUnescape(parts[1])
+	if err != nil || strings.TrimSpace(name) == "" {
+		return "", 0, false
+	}
+	return owner + "/" + name, n, true
 }
 
 // NormalizeTaskResultStatus normalizes a raw status string to one of the

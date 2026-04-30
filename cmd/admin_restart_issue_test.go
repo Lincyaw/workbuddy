@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -173,6 +175,65 @@ func TestRunRestartIssueStoreClearsCycleState(t *testing.T) {
 	}
 	if state != nil {
 		t.Fatalf("expected nil cycle state after restart, got %+v", state)
+	}
+}
+
+func TestRunRestartIssueWithOptsClearsCoordinatorInflight(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "restart-coordinator.db")
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	const (
+		repo     = "owner/repo"
+		issueNum = 218
+	)
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     repo,
+		IssueNum: issueNum,
+		Labels:   `["workbuddy","status:developing"]`,
+		State:    "open",
+	}); err != nil {
+		t.Fatalf("UpsertIssueCache: %v", err)
+	}
+	_ = st.Close()
+
+	var called bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if got, want := r.URL.Path, "/api/v1/admin/issues/owner/repo/218/clear-inflight"; got != want {
+			t.Fatalf("path = %q, want %q", got, want)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer shared-secret" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		called = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"repo":"owner/repo","issue_num":218,"workflow":"default","state":"developing","agents":["dev-agent"]}`))
+	}))
+	defer srv.Close()
+
+	var out bytes.Buffer
+	err = runRestartIssueWithOpts(context.Background(), &restartIssueOpts{
+		repo:        repo,
+		issue:       issueNum,
+		dbPath:      dbPath,
+		source:      "test",
+		coordinator: srv.URL,
+		token:       "shared-secret",
+		force:       true,
+		interactive: false,
+	}, &out)
+	if err != nil {
+		t.Fatalf("runRestartIssueWithOpts: %v", err)
+	}
+	if !called {
+		t.Fatal("expected coordinator clear-inflight request")
+	}
+	if !strings.Contains(out.String(), "inflight=true") {
+		t.Fatalf("output missing inflight=true: %q", out.String())
 	}
 }
 

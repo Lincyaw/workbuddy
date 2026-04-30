@@ -1,11 +1,15 @@
 package app
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
 
+	"github.com/Lincyaw/workbuddy/internal/config"
+	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
@@ -111,5 +115,64 @@ func TestWrapAuthRejectsRevokedAndUnregisteredWorkerTokens(t *testing.T) {
 				t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
 			}
 		})
+	}
+}
+
+func TestHandleClearIssueInflight(t *testing.T) {
+	st := newCoordinatorTestStore(t)
+	dispatchCh := make(chan statemachine.DispatchRequest, 1)
+	sm := statemachine.NewStateMachine(map[string]*config.WorkflowConfig{
+		"default": {
+			Name:    "default",
+			Trigger: config.WorkflowTrigger{IssueLabel: "workbuddy"},
+			States: map[string]*config.State{
+				"developing": {EnterLabel: "status:developing", Agent: "dev-agent"},
+			},
+		},
+	}, st, dispatchCh, eventlog.NewEventLogger(st), nil)
+	if err := st.InsertTask(store.TaskRecord{
+		ID:        "task-41",
+		Repo:      "owner/repo",
+		IssueNum:  41,
+		AgentName: "dev-agent",
+		Workflow:  "default",
+		State:     "developing",
+		Status:    store.TaskStatusPending,
+	}); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+	if err := sm.HandleEvent(context.Background(), statemachine.ChangeEvent{
+		Type:     "issue_created",
+		Repo:     "owner/repo",
+		IssueNum: 41,
+		Labels:   []string{"workbuddy", "status:developing"},
+	}); err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+	<-dispatchCh
+
+	pm := &PollerManager{runtimes: map[string]*RepoRuntime{
+		"owner/repo": {StateMachine: sm},
+	}}
+	server := &FullCoordinatorServer{Pollers: pm, AuthEnabled: true, AuthToken: "shared-secret"}
+	protected := server.WrapAuth(http.HandlerFunc(server.HandleClearIssueInflight))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/issues/owner/repo/41/clear-inflight", nil)
+	req.Header.Set("Authorization", "Bearer shared-secret")
+	rec := httptest.NewRecorder()
+	protected.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if sm.IsInflight("owner/repo", 41) {
+		t.Fatal("inflight entry should be cleared")
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/admin/issues/owner/repo/41/clear-inflight", nil)
+	req.Header.Set("Authorization", "Bearer shared-secret")
+	rec = httptest.NewRecorder()
+	protected.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusNotFound, rec.Body.String())
 	}
 }

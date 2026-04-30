@@ -52,6 +52,9 @@ type EventRecorder interface {
 const StuckTimeout = 5 * time.Minute
 
 const defaultJoinStrategy = config.JoinAllPassed
+const inflightTaskStatusGone = "gone"
+const inflightLeaseExpiryMultiplier = 5
+const defaultTaskLease = 30 * time.Second
 
 // MaxConsecutiveAgentFailures is the number of back-to-back failed or timed-out
 // tasks the same agent may accumulate on one issue before the coordinator
@@ -115,6 +118,14 @@ type dispatchGroup struct {
 	failedAgents     map[string]struct{}
 }
 
+// InflightGroupSnapshot is the operator-facing identity of one inflight
+// dispatch group.
+type InflightGroupSnapshot struct {
+	Workflow string   `json:"workflow"`
+	State    string   `json:"state"`
+	Agents   []string `json:"agents"`
+}
+
 func newDispatchGroup(wf, state, join string, agents []string) *dispatchGroup {
 	g := &dispatchGroup{
 		workflow:         wf,
@@ -131,6 +142,22 @@ func newDispatchGroup(wf, state, join string, agents []string) *dispatchGroup {
 		g.agents[a] = struct{}{}
 	}
 	return g
+}
+
+func snapshotDispatchGroup(group *dispatchGroup) *InflightGroupSnapshot {
+	if group == nil {
+		return nil
+	}
+	agents := make([]string, 0, len(group.agents))
+	for agent := range group.agents {
+		agents = append(agents, agent)
+	}
+	sort.Strings(agents)
+	return &InflightGroupSnapshot{
+		Workflow: group.workflow,
+		State:    group.state,
+		Agents:   agents,
+	}
 }
 
 // StateMachine evaluates Poller events against workflow definitions,
@@ -886,26 +913,50 @@ func (sm *StateMachine) dispatchSingleAgent(ctx context.Context, repo string, is
 
 	sm.inflightMu.Lock()
 	if existing, ok := sm.inflight[issueKey]; ok {
+		if existing.workflow == workflow && existing.state == state {
+			if _, dispatched := existing.dispatchedAgents[agentName]; !dispatched {
+				existing.dispatchedAgents[agentName] = struct{}{}
+				sm.inflightMu.Unlock()
+				goto dispatchReady
+			}
+		}
+		sm.inflightMu.Unlock()
+		taskStatus, stale := sm.inspectInflightTaskStatus(repo, issueNum, existing)
+		if stale {
+			if sm.clearInflightIfMatch(issueKey, existing) {
+				sm.releaseIssueClaim(repo, issueNum)
+			}
+			sm.inflightMu.Lock()
+			existing = sm.inflight[issueKey]
+			if existing == nil {
+				group := newDispatchGroup(workflow, state, defaultJoinStrategy, []string{agentName})
+				group.dispatchedAgents[agentName] = struct{}{}
+				sm.inflight[issueKey] = group
+				sm.inflightMu.Unlock()
+				goto dispatchReady
+			}
+		} else {
+			sm.inflightMu.Lock()
+		}
 		if existing.workflow != workflow || existing.state != state {
 			sm.inflightMu.Unlock()
 			sm.eventlog.Log(eventlog.TypeDispatchSkippedInflight, repo, issueNum,
-				map[string]string{"agent": agentName, "reason": "different state/workflow already running", "state": state, "workflow": workflow})
+				map[string]string{"agent": agentName, "reason": "different state/workflow already running", "state": state, "task_status": taskStatus, "workflow": workflow})
 			return nil
 		}
-		// Same workflow+state: block if this agent was already dispatched.
-		if _, dispatched := existing.dispatchedAgents[agentName]; dispatched {
-			sm.inflightMu.Unlock()
-			sm.eventlog.Log(eventlog.TypeDispatchSkippedInflight, repo, issueNum,
-				map[string]string{"agent": agentName, "reason": "agent already dispatched", "state": state, "workflow": workflow})
-			return nil
-		}
-		existing.dispatchedAgents[agentName] = struct{}{}
+		sm.inflightMu.Unlock()
+		sm.eventlog.Log(eventlog.TypeDispatchSkippedInflight, repo, issueNum,
+			map[string]string{"agent": agentName, "reason": "agent already dispatched", "state": state, "task_status": taskStatus, "workflow": workflow})
+		return nil
 	} else {
 		// Create a single-agent inflight group to prevent duplicate dispatches.
-		sm.inflight[issueKey] = newDispatchGroup(workflow, state, defaultJoinStrategy, []string{agentName})
+		group := newDispatchGroup(workflow, state, defaultJoinStrategy, []string{agentName})
+		group.dispatchedAgents[agentName] = struct{}{}
+		sm.inflight[issueKey] = group
 	}
 	sm.inflightMu.Unlock()
 
+dispatchReady:
 	sm.eventlog.Log(eventlog.TypeDispatch, repo, issueNum, map[string]any{
 		"agent_name": agentName,
 		"workflow":   workflow,
@@ -979,18 +1030,34 @@ func (sm *StateMachine) dispatchStateAgents(ctx context.Context, repo string, is
 
 	sm.inflightMu.Lock()
 	if existing, ok := sm.inflight[issueKey]; ok {
+		sm.inflightMu.Unlock()
+		taskStatus, stale := sm.inspectInflightTaskStatus(repo, issueNum, existing)
+		if stale {
+			if sm.clearInflightIfMatch(issueKey, existing) {
+				sm.releaseIssueClaim(repo, issueNum)
+			}
+			sm.inflightMu.Lock()
+			if _, still := sm.inflight[issueKey]; !still {
+				sm.inflight[issueKey] = group
+				sm.inflightMu.Unlock()
+				goto dispatchGroupReady
+			}
+			existing = sm.inflight[issueKey]
+			taskStatus, _ = sm.inspectInflightTaskStatus(repo, issueNum, existing)
+			sm.inflightMu.Unlock()
+		}
 		reason := "same state group already inflight"
 		if existing.workflow != wfName || existing.state != state {
 			reason = "different state/workflow already running"
 		}
-		sm.inflightMu.Unlock()
 		sm.eventlog.Log(eventlog.TypeDispatchSkippedInflight, repo, issueNum,
-			map[string]string{"state": state, "reason": reason, "workflow": wfName})
+			map[string]string{"reason": reason, "state": state, "task_status": taskStatus, "workflow": wfName})
 		return nil
 	}
 	sm.inflight[issueKey] = group
 	sm.inflightMu.Unlock()
 
+dispatchGroupReady:
 	for _, agent := range agents {
 		if err := sm.dispatchSingleAgent(ctx, repo, issueNum, agent, wfName, state); err != nil {
 			// Don't remove the inflight group — agents already dispatched before
@@ -1282,6 +1349,25 @@ func (sm *StateMachine) IsInflight(repo string, issueNum int) bool {
 	return ok
 }
 
+// ClearInflight removes the in-memory inflight entry for one issue and returns
+// the group identity that was cleared. This is the manual escape hatch used by
+// the coordinator admin API; normal recovery should come from Dispatch's
+// task_queue-backed self-heal path.
+func (sm *StateMachine) ClearInflight(repo string, issueNum int) (*InflightGroupSnapshot, bool) {
+	issueKey := sm.issueKey(repo, issueNum)
+	sm.inflightMu.Lock()
+	group := sm.inflight[issueKey]
+	if group == nil {
+		sm.inflightMu.Unlock()
+		return nil, false
+	}
+	snapshot := snapshotDispatchGroup(group)
+	delete(sm.inflight, issueKey)
+	sm.inflightMu.Unlock()
+	sm.releaseIssueClaim(repo, issueNum)
+	return snapshot, true
+}
+
 func (sm *StateMachine) stateAgents(state *config.State) []string {
 	if len(state.Agents) > 0 {
 		return state.Agents
@@ -1298,6 +1384,67 @@ func (sm *StateMachine) stateHasAgents(state *config.State) bool {
 
 func (sm *StateMachine) issueKey(repo string, issueNum int) string {
 	return fmt.Sprintf("%s#%d", repo, issueNum)
+}
+
+func (sm *StateMachine) clearInflightIfMatch(issueKey string, target *dispatchGroup) bool {
+	sm.inflightMu.Lock()
+	defer sm.inflightMu.Unlock()
+	current := sm.inflight[issueKey]
+	if current == nil || current != target {
+		return false
+	}
+	delete(sm.inflight, issueKey)
+	return true
+}
+
+func (sm *StateMachine) inspectInflightTaskStatus(repo string, issueNum int, group *dispatchGroup) (string, bool) {
+	if sm.store == nil || group == nil {
+		return "", false
+	}
+	tasks, err := sm.store.ListIssueTasks(repo, issueNum)
+	if err != nil {
+		log.Printf("[statemachine] inspect inflight task status for %s#%d: %v", repo, issueNum, err)
+		return "", false
+	}
+
+	now := time.Now().UTC()
+	var matched *store.TaskRecord
+	for idx := range tasks {
+		task := &tasks[idx]
+		if task.Workflow != group.workflow || task.State != group.state {
+			continue
+		}
+		if _, ok := group.agents[task.AgentName]; !ok {
+			continue
+		}
+		if matched == nil {
+			matched = task
+		}
+		if sm.taskKeepsInflightAlive(task, now) {
+			return task.Status, false
+		}
+	}
+	if matched == nil {
+		return inflightTaskStatusGone, true
+	}
+	return matched.Status, true
+}
+
+func (sm *StateMachine) taskKeepsInflightAlive(task *store.TaskRecord, now time.Time) bool {
+	if task == nil {
+		return false
+	}
+	switch task.Status {
+	case store.TaskStatusPending:
+		return true
+	case store.TaskStatusRunning:
+		if task.LeaseExpiresAt.IsZero() {
+			return true
+		}
+		return now.Before(task.LeaseExpiresAt.Add(inflightLeaseExpiryMultiplier * defaultTaskLease))
+	default:
+		return false
+	}
 }
 
 // detectNoWorkflowMatchHazard records the scenario A hazard (issue has a
@@ -1335,9 +1482,9 @@ func (sm *StateMachine) detectNoWorkflowMatchHazard(event ChangeEvent) {
 	}
 	triggers := sm.workflowTriggerLabels()
 	sm.eventlog.Log(eventlog.TypeIssueNoWorkflowMatch, event.Repo, event.IssueNum, map[string]any{
-		"labels":             append([]string(nil), event.Labels...),
-		"workflow_triggers":  triggers,
-		"hint":               "add one of the workflow trigger labels (e.g. workbuddy) to opt this issue into the pipeline",
+		"labels":            append([]string(nil), event.Labels...),
+		"workflow_triggers": triggers,
+		"hint":              "add one of the workflow trigger labels (e.g. workbuddy) to opt this issue into the pipeline",
 	})
 }
 
@@ -1381,10 +1528,10 @@ func (sm *StateMachine) detectDependencyUnenteredHazard(wf *config.WorkflowConfi
 		return
 	}
 	sm.eventlog.Log(eventlog.TypeIssueDependencyUnentered, event.Repo, event.IssueNum, map[string]any{
-		"workflow":    wf.Name,
-		"labels":      append([]string(nil), event.Labels...),
-		"depends_on":  deps,
-		"hint":        "add status:blocked so the dependency gate can evaluate, or status:developing if the deps are already satisfied",
+		"workflow":   wf.Name,
+		"labels":     append([]string(nil), event.Labels...),
+		"depends_on": deps,
+		"hint":       "add status:blocked so the dependency gate can evaluate, or status:developing if the deps are already satisfied",
 	})
 }
 
