@@ -650,6 +650,37 @@ func (s *Store) GetTask(taskID string) (*TaskRecord, error) {
 	return &t, nil
 }
 
+// ListIssueTasks returns every task row for one issue, including terminal
+// tasks, ordered from oldest to newest.
+func (s *Store) ListIssueTasks(repo string, issueNum int) ([]TaskRecord, error) {
+	rows, err := s.db.Query(`SELECT
+		tq.id, tq.repo, tq.issue_num, tq.agent_name, ic.labels, tq.role, tq.runtime, tq.workflow, tq.state,
+		tq.worker_id, tq.claim_token, tq.status, tq.lease_expires_at, tq.acked_at, tq.heartbeat_at,
+		tq.completed_at, tq.exit_code, tq.session_refs, tq.rollout_index, tq.rollouts_total, tq.rollout_group_id, tq.supervisor_agent_id, tq.created_at, tq.updated_at
+		FROM task_queue tq
+		LEFT JOIN issue_cache ic
+		  ON ic.repo = tq.repo AND ic.issue_num = tq.issue_num
+		WHERE tq.repo = ? AND tq.issue_num = ?
+		ORDER BY tq.created_at, tq.id`, repo, issueNum)
+	if err != nil {
+		return nil, fmt.Errorf("store: list issue tasks: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []TaskRecord
+	for rows.Next() {
+		t, scanErr := scanTaskRecord(rows.Scan)
+		if scanErr != nil {
+			return nil, fmt.Errorf("store: scan issue task: %w", scanErr)
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate issue tasks: %w", err)
+	}
+	return out, nil
+}
+
 // UpdateTaskSupervisorAgentID writes the supervisor-managed agent id onto a
 // task row. Used by the worker immediately after POSTing to the supervisor
 // IPC API so a coordinator-side resume path can find the agent on restart

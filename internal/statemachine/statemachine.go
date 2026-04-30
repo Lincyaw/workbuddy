@@ -89,6 +89,12 @@ const (
 	stateNameBlocked    = "blocked"
 )
 
+const (
+	inflightTaskStatusGone        = "gone"
+	inflightLeaseExpiryMultiplier = 5
+	defaultTaskLease              = 30 * time.Second
+)
+
 // CycleCapReporter is the optional callback used by the StateMachine to post
 // a needs-human comment with the rejection-trail digest when an issue trips
 // the dev↔review cycle cap. The interface is satisfied by *reporter.Reporter
@@ -136,6 +142,41 @@ func newDispatchGroup(wf, state string, join config.JoinConfig, slots map[string
 		g.slots[key] = agentName
 	}
 	return g
+}
+
+// InflightGroupSnapshot is the operator-facing identity of one tracked
+// in-memory dispatch group.
+type InflightGroupSnapshot struct {
+	Workflow string            `json:"workflow"`
+	State    string            `json:"state"`
+	Join     string            `json:"join"`
+	Agents   []string          `json:"agents"`
+	Slots    map[string]string `json:"slots"`
+}
+
+func snapshotDispatchGroup(group *dispatchGroup) *InflightGroupSnapshot {
+	if group == nil {
+		return nil
+	}
+	agents := make([]string, 0, len(group.slots))
+	seen := make(map[string]struct{}, len(group.slots))
+	slots := make(map[string]string, len(group.slots))
+	for slotKey, agentName := range group.slots {
+		slots[slotKey] = agentName
+		if _, ok := seen[agentName]; ok {
+			continue
+		}
+		seen[agentName] = struct{}{}
+		agents = append(agents, agentName)
+	}
+	sort.Strings(agents)
+	return &InflightGroupSnapshot{
+		Workflow: group.workflow,
+		State:    group.state,
+		Join:     group.join.Strategy,
+		Agents:   agents,
+		Slots:    slots,
+	}
 }
 
 // StateMachine evaluates Poller events against workflow definitions,
@@ -669,6 +710,7 @@ func (sm *StateMachine) DispatchAgent(ctx context.Context, repo string, issueNum
 	} else if blocked {
 		return nil
 	}
+	sm.reconcileStaleInflight(repo, issueNum)
 	if blocked, err := sm.isBlockedByIssueClaim(repo, issueNum, agentName, workflow, state); err != nil {
 		return err
 	} else if blocked {
@@ -911,15 +953,17 @@ func (sm *StateMachine) dispatchSingleAgent(ctx context.Context, req DispatchReq
 	if existing, ok := sm.inflight[issueKey]; ok {
 		if existing.workflow != workflow || existing.state != state {
 			sm.inflightMu.Unlock()
+			taskStatus, _ := sm.inspectInflightTaskStatus(repo, issueNum, existing)
 			sm.eventlog.Log(eventlog.TypeDispatchSkippedInflight, repo, issueNum,
-				map[string]string{"agent": agentName, "reason": "different state/workflow already running", "state": state, "workflow": workflow})
+				map[string]string{"agent": agentName, "reason": "different state/workflow already running", "state": state, "task_status": taskStatus, "workflow": workflow})
 			return nil
 		}
 		// Same workflow+state: block if this slot was already dispatched.
 		if _, dispatched := existing.dispatchedSlots[slotKey]; dispatched {
 			sm.inflightMu.Unlock()
+			taskStatus, _ := sm.inspectInflightTaskStatus(repo, issueNum, existing)
 			sm.eventlog.Log(eventlog.TypeDispatchSkippedInflight, repo, issueNum,
-				map[string]string{"agent": agentName, "reason": "agent already dispatched", "state": state, "workflow": workflow})
+				map[string]string{"agent": agentName, "reason": "agent already dispatched", "state": state, "task_status": taskStatus, "workflow": workflow})
 			return nil
 		}
 		existing.dispatchedSlots[slotKey] = struct{}{}
@@ -987,6 +1031,7 @@ func (sm *StateMachine) dispatchStateAgents(ctx context.Context, repo string, is
 	} else if blocked {
 		return nil
 	}
+	sm.reconcileStaleInflight(repo, issueNum)
 
 	// Acquire the per-issue claim once for the whole group so concurrent
 	// coordinators sharing the same SQLite database cannot both dispatch a
@@ -1055,8 +1100,9 @@ func (sm *StateMachine) dispatchStateAgents(ctx context.Context, repo string, is
 			reason = "different state/workflow already running"
 		}
 		sm.inflightMu.Unlock()
+		taskStatus, _ := sm.inspectInflightTaskStatus(repo, issueNum, existing)
 		sm.eventlog.Log(eventlog.TypeDispatchSkippedInflight, repo, issueNum,
-			map[string]string{"state": state, "reason": reason, "workflow": wfName})
+			map[string]string{"state": state, "reason": reason, "task_status": taskStatus, "workflow": wfName})
 		return nil
 	}
 	sm.inflight[issueKey] = group
@@ -1468,6 +1514,194 @@ func (sm *StateMachine) IsInflight(repo string, issueNum int) bool {
 	defer sm.inflightMu.Unlock()
 	_, ok := sm.inflight[issueKey]
 	return ok
+}
+
+// ClearInflight removes the in-memory inflight entry for one issue and returns
+// the prior group identity. This is the manual escape hatch behind the
+// coordinator admin API; ordinary recovery should come from Dispatch's
+// task_queue-backed self-heal path.
+func (sm *StateMachine) ClearInflight(repo string, issueNum int) (*InflightGroupSnapshot, bool) {
+	issueKey := sm.issueKey(repo, issueNum)
+	sm.inflightMu.Lock()
+	group := sm.inflight[issueKey]
+	if group == nil {
+		sm.inflightMu.Unlock()
+		return nil, false
+	}
+	snapshot := snapshotDispatchGroup(group)
+	delete(sm.inflight, issueKey)
+	sm.inflightMu.Unlock()
+	sm.releaseIssueClaim(repo, issueNum)
+	return snapshot, true
+}
+
+func (sm *StateMachine) reconcileStaleInflight(repo string, issueNum int) {
+	issueKey := sm.issueKey(repo, issueNum)
+	sm.inflightMu.Lock()
+	group := sm.inflight[issueKey]
+	sm.inflightMu.Unlock()
+	if group == nil {
+		return
+	}
+	taskStatus, stale := sm.inspectInflightTaskStatus(repo, issueNum, group)
+	if !stale {
+		return
+	}
+	if !sm.clearInflightIfMatch(issueKey, group) {
+		return
+	}
+	sm.releaseIssueClaim(repo, issueNum)
+	log.Printf("[statemachine] reclaimed stale inflight group for %s task_status=%s", issueKey, taskStatus)
+}
+
+func (sm *StateMachine) clearInflightIfMatch(issueKey string, target *dispatchGroup) bool {
+	sm.inflightMu.Lock()
+	defer sm.inflightMu.Unlock()
+	current := sm.inflight[issueKey]
+	if current == nil || current != target {
+		return false
+	}
+	delete(sm.inflight, issueKey)
+	return true
+}
+
+func (sm *StateMachine) inspectInflightTaskStatus(repo string, issueNum int, group *dispatchGroup) (string, bool) {
+	if sm.store == nil || group == nil {
+		return "", false
+	}
+	tasks, err := sm.store.ListIssueTasks(repo, issueNum)
+	if err != nil {
+		log.Printf("[statemachine] inspect inflight task status for %s#%d: %v", repo, issueNum, err)
+		return "", false
+	}
+	slotKeys := make([]string, 0, len(group.slots))
+	for slotKey := range group.slots {
+		slotKeys = append(slotKeys, slotKey)
+	}
+	sort.Strings(slotKeys)
+
+	statusBySlot := make(map[string]string, len(slotKeys))
+	allReclaimable := len(slotKeys) > 0
+	for _, slotKey := range slotKeys {
+		task, ok := findInflightSlotTask(tasks, group, slotKey)
+		if !ok {
+			statusBySlot[slotKey] = inflightTaskStatusGone
+			continue
+		}
+		statusBySlot[slotKey] = task.Status
+		if inflightTaskKeepsGroupLive(task) {
+			allReclaimable = false
+		}
+	}
+	return formatInflightTaskStatus(slotKeys, statusBySlot), allReclaimable
+}
+
+func findInflightSlotTask(tasks []store.TaskRecord, group *dispatchGroup, slotKey string) (*store.TaskRecord, bool) {
+	wantAgent := group.slots[slotKey]
+	wantRollout := 0
+	if strings.HasPrefix(slotKey, "rollout:") {
+		idx, err := strconv.Atoi(strings.TrimPrefix(slotKey, "rollout:"))
+		if err != nil {
+			return nil, false
+		}
+		wantRollout = idx
+	}
+
+	var best *store.TaskRecord
+	for i := range tasks {
+		task := &tasks[i]
+		if task.Workflow != group.workflow || task.State != group.state {
+			continue
+		}
+		if wantRollout > 0 {
+			if task.RolloutIndex != wantRollout {
+				continue
+			}
+		} else {
+			if task.RolloutIndex != 0 || task.AgentName != wantAgent {
+				continue
+			}
+		}
+		if best == nil || taskRecency(task).After(taskRecency(best)) {
+			best = task
+		}
+	}
+	if best == nil {
+		return nil, false
+	}
+	return best, true
+}
+
+func taskRecency(task *store.TaskRecord) time.Time {
+	if task == nil {
+		return time.Time{}
+	}
+	if !task.UpdatedAt.IsZero() {
+		return task.UpdatedAt
+	}
+	return task.CreatedAt
+}
+
+func inflightTaskKeepsGroupLive(task *store.TaskRecord) bool {
+	if task == nil {
+		return false
+	}
+	switch task.Status {
+	case store.TaskStatusPending:
+		return true
+	case store.TaskStatusRunning:
+		if task.LeaseExpiresAt.IsZero() {
+			return true
+		}
+		lease := inferredTaskLease(task)
+		return time.Now().UTC().Before(task.LeaseExpiresAt.Add(inflightLeaseExpiryMultiplier * lease))
+	case store.TaskStatusCompleted:
+		return true
+	default:
+		return false
+	}
+}
+
+func inferredTaskLease(task *store.TaskRecord) time.Duration {
+	if task == nil || task.LeaseExpiresAt.IsZero() {
+		return defaultTaskLease
+	}
+	var leaseStart time.Time
+	switch {
+	case !task.HeartbeatAt.IsZero():
+		leaseStart = task.HeartbeatAt
+	case !task.AckedAt.IsZero():
+		leaseStart = task.AckedAt
+	}
+	if leaseStart.IsZero() {
+		return defaultTaskLease
+	}
+	lease := task.LeaseExpiresAt.Sub(leaseStart)
+	if lease <= 0 {
+		return defaultTaskLease
+	}
+	return lease
+}
+
+func formatInflightTaskStatus(slotKeys []string, statusBySlot map[string]string) string {
+	if len(slotKeys) == 0 {
+		return inflightTaskStatusGone
+	}
+	if len(slotKeys) == 1 {
+		if status := strings.TrimSpace(statusBySlot[slotKeys[0]]); status != "" {
+			return status
+		}
+		return inflightTaskStatusGone
+	}
+	parts := make([]string, 0, len(slotKeys))
+	for _, slotKey := range slotKeys {
+		status := strings.TrimSpace(statusBySlot[slotKey])
+		if status == "" {
+			status = inflightTaskStatusGone
+		}
+		parts = append(parts, fmt.Sprintf("%s=%s", slotKey, status))
+	}
+	return strings.Join(parts, ",")
 }
 
 func (sm *StateMachine) stateAgents(state *config.State) []string {
