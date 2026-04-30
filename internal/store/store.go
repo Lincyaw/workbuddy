@@ -389,15 +389,30 @@ func (s *Store) migrateLegacySessions() error {
 // ---------------------------------------------------------------------------
 
 // InsertEvent records an event and returns the auto-generated ID.
+//
+// busy_timeout(5000ms) is set on connection open, but under sustained
+// concurrent writer contention with WAL the driver still occasionally
+// surfaces SQLITE_BUSY. Retry transparently a few times with a small
+// backoff so observability writes don't silently drop.
 func (s *Store) InsertEvent(e Event) (int64, error) {
-	res, err := s.db.Exec(
-		`INSERT INTO events (type, repo, issue_num, payload) VALUES (?, ?, ?, ?)`,
-		e.Type, e.Repo, e.IssueNum, e.Payload,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("store: insert event: %w", err)
+	var lastErr error
+	for _, delay := range []time.Duration{0, 5 * time.Millisecond, 25 * time.Millisecond, 125 * time.Millisecond} {
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		res, err := s.db.Exec(
+			`INSERT INTO events (type, repo, issue_num, payload) VALUES (?, ?, ?, ?)`,
+			e.Type, e.Repo, e.IssueNum, e.Payload,
+		)
+		if err == nil {
+			return res.LastInsertId()
+		}
+		lastErr = err
+		if !isSQLiteBusyError(err) {
+			break
+		}
 	}
-	return res.LastInsertId()
+	return 0, fmt.Errorf("store: insert event: %w", lastErr)
 }
 
 // QueryEvents returns events matching the given repo (empty string = all repos).

@@ -192,8 +192,8 @@ func (s *Supervisor) watchRecovered(a *Agent) {
 	defer ticker.Stop()
 	for range ticker.C {
 		if !s.pidIsAlive(a.pid, a.startTicks) {
-			a.markExited(-1)
 			_ = updateAgentExit(s.db, a.ID, -1)
+			a.markExited(-1)
 			return
 		}
 	}
@@ -343,8 +343,8 @@ func (s *Supervisor) StartAgent(req StartAgentRequest) (*Agent, error) {
 				exitCode = -1
 			}
 		}
-		a.markExited(exitCode)
 		_ = updateAgentExit(s.db, a.ID, exitCode)
+		a.markExited(exitCode)
 	}()
 
 	return a, nil
