@@ -124,6 +124,14 @@ type Health struct {
 	LastFailureAt time.Time `json:"last_failure_at,omitempty"`
 }
 
+// Publisher is the optional sink the EventLogger forwards every successfully
+// (or attempted) inserted event to. The hook dispatcher is the canonical
+// implementation. Defining the interface here keeps internal/eventlog free of
+// an internal/hooks import (the dependency direction is hooks → eventlog).
+type Publisher interface {
+	PublishFromRaw(eventType, repo string, issueNum int, payloadJSON string)
+}
+
 // EventLogger provides a higher-level API over store.Store for event logging.
 // It marshals payloads to JSON and swallows write errors (printing to stderr),
 // while tracking failures on a per-instance health counter so operators can
@@ -137,6 +145,9 @@ type EventLogger struct {
 	healthMu      sync.RWMutex
 	lastErr       string
 	lastFailureAt time.Time
+
+	pubMu     sync.RWMutex
+	publisher Publisher
 }
 
 // NewEventLogger creates an EventLogger backed by the given Store.
@@ -178,6 +189,24 @@ func (l *EventLogger) Log(eventType, repo string, issueNum int, payload interfac
 		fmt.Fprintf(l.errWriter, "eventlog: write failed: %v\n", err)
 		l.recordFailure(err)
 	}
+
+	// Publish to the hook dispatcher after the SQLite insert. The dispatcher
+	// is responsible for filtering its own self-events (hook_*) and for
+	// non-blocking semantics — Log() never blocks even under hook back-pressure.
+	l.pubMu.RLock()
+	pub := l.publisher
+	l.pubMu.RUnlock()
+	if pub != nil {
+		pub.PublishFromRaw(eventType, repo, issueNum, payloadStr)
+	}
+}
+
+// SetPublisher attaches (or detaches with nil) a hook dispatcher. Safe to
+// call from any goroutine and at any time during the process lifetime.
+func (l *EventLogger) SetPublisher(p Publisher) {
+	l.pubMu.Lock()
+	l.publisher = p
+	l.pubMu.Unlock()
 }
 
 func (l *EventLogger) recordFailure(err error) {

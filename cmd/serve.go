@@ -41,6 +41,7 @@ type serveOpts struct {
 	trustedAuthorsSet bool
 	cookieInsecure    bool
 	reportBaseURL     string
+	hooksConfig       string
 }
 
 var serveCmd = &cobra.Command{
@@ -95,6 +96,7 @@ func parseServeFlags(cmd *cobra.Command) (*serveOpts, error) {
 	trustedAuthorsSet := cmd.Flags().Changed("trusted-authors")
 	cookieInsecure, _ := cmd.Flags().GetBool("cookie-insecure")
 	reportBaseURL, _ := cmd.Flags().GetString("report-base-url")
+	hooksConfig, _ := cmd.Flags().GetString(flagHooksConfig)
 	if maxParallelTasks < 0 {
 		return nil, fmt.Errorf("serve: --max-parallel-tasks must be >= 0")
 	}
@@ -112,6 +114,7 @@ func parseServeFlags(cmd *cobra.Command) (*serveOpts, error) {
 		trustedAuthorsSet: trustedAuthorsSet,
 		cookieInsecure:    cookieInsecure,
 		reportBaseURL:     strings.TrimSpace(reportBaseURL),
+		hooksConfig:       strings.TrimSpace(hooksConfig),
 	}, nil
 }
 
@@ -162,6 +165,7 @@ func runServeWithOutput(opts *serveOpts, ghReader poller.GHReader, launcherOverr
 			trustedAuthorsSet: opts.trustedAuthorsSet,
 			cookieInsecure:    opts.cookieInsecure,
 			reportBaseURL:     resolvedReportBaseURL,
+			hooksConfig:       opts.hooksConfig,
 		}, ghReader, ctx)
 	}()
 
