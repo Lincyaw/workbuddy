@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Lincyaw/workbuddy/schemas/hook.schema.json",
+  "title": "Workbuddy Hooks Configuration (issue #262)",
+  "description": "Schema for ~/.config/workbuddy/hooks.yaml. Hooks are coordinator-host-level: only the operator who deploys workbuddy can edit this file. PR contributors cannot inject hooks. Per-repo .github/workbuddy/hooks/ is intentionally NOT supported. Keep in sync with internal/hooks/config.go.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["hooks"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Top-level config schema version. Optional; defaults to 1."
+    },
+    "hooks": {
+      "type": "array",
+      "description": "List of hook definitions. Order is irrelevant; hooks fire concurrently.",
+      "items": { "$ref": "#/$defs/hook" }
+    }
+  },
+  "$defs": {
+    "hook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "events", "action"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9._-]+$",
+          "description": "Stable identifier. Used in CLI (`workbuddy hooks list/test/status`), metrics (`workbuddy_hook_invocations_total{hook=\"<name>\"}`), and `hook_disabled` event payloads. Must be unique across the file."
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Set false to keep the definition but skip dispatch. Auto-disable on N consecutive failures (see hook_disabled event) is a separate runtime flag and does not modify this field."
+        },
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Event type from internal/eventlog/eventlog.go (e.g. `state_entry`, `dispatch`, `completed`, `alert`, `dev_review_cycle_cap_reached`, `dispatch_blocked_by_dependency`, `infra_failure`, `issue_restarted`, `worker_registered`, `coordinator_started`, `coordinator_stopping`, `config_reloaded`). The literal `*` matches all events except those with the `hook_` prefix (which are filtered to prevent self-amplification). `poll_cycle_done` is allowed but documented as 'not recommended' due to volume."
+          }
+        },
+        "match": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Optional pre-action filter. Applied AFTER event-type matching. All present fields must match (AND).",
+          "properties": {
+            "severity": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "type": "string", "enum": ["info", "warn", "error"] },
+              "description": "Only meaningful when the event is `alert`. Other event types ignore this filter."
+            },
+            "repo": {
+              "type": "string",
+              "description": "Glob pattern matched against payload.repo (e.g. `Lincyaw/*`, `*`). Empty/missing means match-all."
+            }
+          }
+        },
+        "timeout": {
+          "type": "string",
+          "default": "5s",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
+          "description": "Go time.Duration. After timeout: SIGTERM, then SIGKILL after a 2s grace (command actions); HTTP request cancelled (webhook actions)."
+        },
+        "action": { "$ref": "#/$defs/action" }
+      }
+    },
+    "action": {
+      "oneOf": [
+        { "$ref": "#/$defs/webhookAction" },
+        { "$ref": "#/$defs/commandAction" }
+      ],
+      "description": "Action to execute when an event matches. Action types are pluggable via internal/hooks/action.go ActionRegistry; new types require code changes but no dispatcher changes."
+    },
+    "webhookAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "url"],
+      "properties": {
+        "type": { "const": "webhook" },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Target URL. The dispatcher POSTs the v1 event payload as application/json. HTTP 2xx is success; anything else (incl. timeout) is failure."
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Optional headers. Values support `${ENV_VAR}` substitution at coordinator startup (resolved against the coordinator's environment, not the caller's request). Missing env vars resolve to empty string and emit a startup warning."
+        },
+        "method": {
+          "type": "string",
+          "enum": ["POST", "PUT"],
+          "default": "POST",
+          "description": "HTTP method. Defaults to POST; PUT supported for idempotent receivers."
+        }
+      }
+    },
+    "commandAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "cmd"],
+      "properties": {
+        "type": { "const": "command" },
+        "cmd": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" },
+          "description": "argv. cmd[0] is the executable; remaining items are literal arguments (no shell expansion). The dispatcher writes the v1 event payload to stdin as JSON. Env: process inherits coordinator env plus `WORKBUDDY_EVENT_TYPE`, `WORKBUDDY_REPO`, `WORKBUDDY_ISSUE_NUM`, `WORKBUDDY_HOOK_NAME`. Non-zero exit code = failure."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory. Defaults to the coordinator's working directory."
+        }
+      }
+    }
+  }
+}
