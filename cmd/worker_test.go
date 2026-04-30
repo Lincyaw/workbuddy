@@ -340,6 +340,7 @@ func TestParseWorkerFlags_DefaultReportBaseURLAndMgmtAuthToken(t *testing.T) {
 }
 
 func TestParseWorkerFlags_MgmtPublicURLRequiresSharedAuth(t *testing.T) {
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", "")
 	cmd := newWorkerFlagCommand()
 	if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
 		t.Fatalf("set coordinator: %v", err)

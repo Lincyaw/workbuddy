@@ -3966,3 +3966,46 @@ requirements:
       - cmd/deploy_bundle_test.go
     deps:
       - REQ-105
+
+  - id: REQ-113
+    title: "Runtime-aware task routing honors worker capability and agent config (#285)"
+    description: >
+      Issue #285: distributed workers were claiming tasks solely by repo+role,
+      ignoring the queued task runtime, and then overwriting the agent's
+      requested runtime with the worker's startup `--runtime` alias. That made
+      `.github/workbuddy/agents/*.md` `runtime:` effectively dead metadata and
+      silently dispatched codex tasks onto claude-only workers. The dispatch
+      path must treat `task_queue.runtime=''` as backward-compatible any
+      runtime for old rows, persist each worker's advertised runtime in the
+      workers table, route polls through that capability, preserve an explicit
+      agent runtime during execution, and warn during `workbuddy validate` when
+      the local config declares a runtime that no registered worker advertises.
+    rationale: >
+      Multi-runtime deployments only work when worker capability, queue
+      routing, and launcher selection agree on the same runtime contract.
+      Without that, operators get silent misroutes and misleading session
+      metadata instead of an actionable validation signal.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-113-1: `Store.ClaimNextTask` accepts a worker runtime and only claims tasks whose `task_queue.runtime` matches that runtime, while still treating empty task runtime as backward-compatible any-runtime."
+      - "AC-113-2: coordinator task polling reads the worker's advertised runtime from the workers table and passes it through to the claim path without changing the `/api/v1/tasks/poll` wire contract."
+      - "AC-113-3: worker registration persists runtime capability on the workers row so later lookups and routing decisions can read it back."
+      - "AC-113-4: distributed worker execution preserves an explicit agent-config runtime and only falls back to the worker runtime alias when the agent config has no runtime."
+      - "AC-113-5: `workbuddy validate` emits a warning when a local agent declares a runtime that no registered worker advertises."
+      - "AC-113-6: Unit tests cover runtime claim filtering, worker-runtime persistence, explicit-runtime preservation, and the validate warning path."
+    code:
+      - internal/store/store.go
+      - internal/store/types.go
+      - internal/app/coordinator.go
+      - internal/registry/registry.go
+      - internal/worker/distributed.go
+      - internal/validate/validate.go
+      - internal/validate/semantics.go
+      - cmd/validate.go
+    tests:
+      - internal/store/store_test.go
+      - internal/worker/distributed_test.go
+      - internal/validate/validate_codes_test.go
+      - cmd/validate_test.go

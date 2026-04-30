@@ -9,6 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/config"
+	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
+	"github.com/Lincyaw/workbuddy/internal/poller"
+	"github.com/Lincyaw/workbuddy/internal/reporter"
+	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 	"github.com/Lincyaw/workbuddy/internal/workerclient"
 )
 
@@ -16,9 +21,9 @@ import (
 type fakeRemoteClient struct {
 	mu sync.Mutex
 
-	submitErrs   []error // consumed in order; once exhausted returns nil
-	submitCalls  int
-	submitReqs   []workerclient.ResultRequest
+	submitErrs  []error // consumed in order; once exhausted returns nil
+	submitCalls int
+	submitReqs  []workerclient.ResultRequest
 
 	releaseErr   error
 	releaseCalls int
@@ -48,6 +53,20 @@ func (c *fakeRemoteClient) SubmitResult(ctx context.Context, taskID string, req 
 	err := c.submitErrs[0]
 	c.submitErrs = c.submitErrs[1:]
 	return err
+}
+
+type fakeCommentWriter struct{}
+
+func (fakeCommentWriter) WriteComment(string, int, string) error { return nil }
+
+type fakeDistributedIssueReader struct{}
+
+func (fakeDistributedIssueReader) ReadIssue(string, int) (poller.IssueDetails, error) {
+	return poller.IssueDetails{}, nil
+}
+
+func (fakeDistributedIssueReader) ReadIssueLabels(string, int) ([]string, error) {
+	return nil, nil
 }
 
 func init() {
@@ -169,5 +188,54 @@ func TestDistributedWorker_ReleasesWithReasonOnPermanentSubmitFailure(t *testing
 	}
 	if got := client.releaseReqs[0].Reason; !strings.Contains(got, "submit result failed") || !strings.Contains(got, "coordinator 500") {
 		t.Fatalf("release reason should reference submit error, got %q", got)
+	}
+}
+
+func TestDistributedWorker_PreservesExplicitAgentRuntime(t *testing.T) {
+	t.Parallel()
+
+	launcher := runtimepkg.NewRegistry()
+	var startedRuntime string
+	launcher.SetSessionStarter(func(_ context.Context, agent *config.AgentConfig, _ *runtimepkg.TaskContext) (runtimepkg.Session, error, bool) {
+		startedRuntime = agent.Runtime
+		return &fakeSession{
+			run: func(_ context.Context, _ chan<- launcherevents.Event) (*runtimepkg.Result, error) {
+				return &runtimepkg.Result{ExitCode: 0, Meta: map[string]string{}}, nil
+			},
+		}, nil, true
+	})
+	executor := NewExecutor(launcher, fakeDistributedIssueReader{})
+	client := &fakeRemoteClient{}
+	worker := NewDistributedWorker(DistributedDeps{
+		Config: &config.FullConfig{
+			Agents: map[string]*config.AgentConfig{
+				"dev-agent": {Name: "dev-agent", Runtime: config.RuntimeCodex},
+			},
+		},
+		Executor:          executor,
+		Reporter:          reporter.NewReporter(fakeCommentWriter{}),
+		Reader:            fakeDistributedIssueReader{},
+		Client:            client,
+		WorkDir:           t.TempDir(),
+		WorkerID:          "worker-1",
+		RuntimeAlias:      config.RuntimeClaudeCode,
+		HeartbeatInterval: time.Hour,
+		ShutdownTimeout:   time.Second,
+	})
+
+	err := worker.ExecuteTask(context.Background(), &workerclient.Task{
+		TaskID:    "task-1",
+		Repo:      "owner/repo",
+		IssueNum:  42,
+		AgentName: "dev-agent",
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTask: %v", err)
+	}
+	if startedRuntime != config.RuntimeCodex {
+		t.Fatalf("runtime passed to launcher = %q, want %q", startedRuntime, config.RuntimeCodex)
+	}
+	if client.submitCalls != 1 {
+		t.Fatalf("submitCalls = %d, want 1", client.submitCalls)
 	}
 }

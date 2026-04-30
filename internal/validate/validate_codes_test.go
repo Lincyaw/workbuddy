@@ -225,6 +225,23 @@ func TestValidateDir_CodeFixtures(t *testing.T) {
 			wantHas: CodeAgentInTerminalState,
 		},
 		{
+			name: "WB-S005 no worker advertises agent runtime",
+			files: map[string]string{
+				"config.yaml":         "repo: octo/x\n",
+				"agents/dev-agent.md": fixtureAgent("dev-agent", "developing", "dev", "codex", "Repo: {{.Repo}}"),
+				"workflows/default.md": fixtureWorkflow(map[string]workflowState{
+					"developing": {EnterLabel: "status:developing", Agent: "dev-agent", Transitions: []string{"reviewing"}},
+					"reviewing":  {EnterLabel: "status:reviewing"},
+				}),
+			},
+			opts: Options{
+				SkipRuntimeBinaryCheck: true,
+				CheckWorkerRuntimes:    true,
+				WorkerRuntimes:         []string{"claude-code"},
+			},
+			wantHas: CodeRuntimeNoWorkerSupport,
+		},
+		{
 			name: "WB-L001 prompt body inlines gh issue edit",
 			files: map[string]string{
 				"config.yaml": "repo: octo/x\n",

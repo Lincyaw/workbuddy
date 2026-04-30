@@ -46,6 +46,7 @@ type WorkerRecord struct {
 	Repo          string
 	ReposJSON     string
 	Roles         string // JSON array
+	Runtime       string
 	Hostname      string
 	MgmtBaseURL   string
 	Status        string // online, offline

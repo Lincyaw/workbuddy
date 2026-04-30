@@ -4,8 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 
+	"github.com/Lincyaw/workbuddy/internal/store"
 	intvalidate "github.com/Lincyaw/workbuddy/internal/validate"
 	"github.com/spf13/cobra"
 )
@@ -92,9 +96,16 @@ func parseValidateFlags(cmd *cobra.Command) (*validateOpts, error) {
 }
 
 func runValidateWithOpts(_ context.Context, opts *validateOpts, stdout, stderr io.Writer) error {
-	diags, err := intvalidate.ValidateDirWithOptions(opts.configDir, intvalidate.Options{
+	validateOptions := intvalidate.Options{
 		SkipRuntimeBinaryCheck: opts.noRuntimeCheck,
-	})
+	}
+	if runtimes, ok, err := loadAdvertisedWorkerRuntimes(opts.configDir); err != nil {
+		return err
+	} else if ok {
+		validateOptions.WorkerRuntimes = runtimes
+		validateOptions.CheckWorkerRuntimes = true
+	}
+	diags, err := intvalidate.ValidateDirWithOptions(opts.configDir, validateOptions)
 	if err != nil {
 		return err
 	}
@@ -145,4 +156,58 @@ func classifyDiagnostics(diags []intvalidate.Diagnostic) (hasError, hasWarning b
 		}
 	}
 	return
+}
+
+func loadAdvertisedWorkerRuntimes(configDir string) ([]string, bool, error) {
+	dbPath, ok, err := localWorkerDBPath(configDir)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		return nil, false, fmt.Errorf("validate: open worker registry %q: %w", dbPath, err)
+	}
+	defer func() { _ = st.Close() }()
+
+	workers, err := st.QueryWorkers("")
+	if err != nil {
+		return nil, false, fmt.Errorf("validate: query workers from %q: %w", dbPath, err)
+	}
+	seen := make(map[string]struct{}, len(workers))
+	for _, worker := range workers {
+		runtime := strings.TrimSpace(worker.Runtime)
+		if runtime == "" {
+			continue
+		}
+		seen[runtime] = struct{}{}
+	}
+	runtimes := make([]string, 0, len(seen))
+	for runtime := range seen {
+		runtimes = append(runtimes, runtime)
+	}
+	sort.Strings(runtimes)
+	return runtimes, true, nil
+}
+
+func localWorkerDBPath(configDir string) (string, bool, error) {
+	configDir = strings.TrimSpace(configDir)
+	if configDir == "" {
+		return "", false, nil
+	}
+	absConfigDir, err := filepath.Abs(configDir)
+	if err != nil {
+		return "", false, fmt.Errorf("validate: abs config dir: %w", err)
+	}
+	repoRoot := filepath.Dir(absConfigDir)
+	if filepath.Base(absConfigDir) == "workbuddy" && filepath.Base(repoRoot) == ".github" {
+		repoRoot = filepath.Dir(repoRoot)
+	}
+	dbPath := filepath.Join(repoRoot, ".workbuddy", "workbuddy.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("validate: stat worker registry %q: %w", dbPath, err)
+	}
+	return dbPath, true, nil
 }

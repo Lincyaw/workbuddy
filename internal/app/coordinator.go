@@ -361,6 +361,9 @@ func (s *FullCoordinatorServer) HandleRegisterWorker(w http.ResponseWriter, r *h
 	if req.Repo == "" && len(req.Repos) > 0 {
 		req.Repo = strings.TrimSpace(req.Repos[0])
 	}
+	if strings.TrimSpace(req.Runtime) == "" {
+		req.Runtime = config.RuntimeClaudeCode
+	}
 	if req.WorkerID == "" || req.Repo == "" || len(req.Roles) == 0 {
 		CoordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "worker_id, repo, and roles are required"})
 		return
@@ -376,7 +379,7 @@ func (s *FullCoordinatorServer) HandleRegisterWorker(w http.ResponseWriter, r *h
 			return
 		}
 	}
-	if err := s.Registry.RegisterWithRepos(req.WorkerID, req.Repo, req.Repos, req.Roles, req.Hostname, req.MgmtBaseURL); err != nil {
+	if err := s.Registry.RegisterWithRepos(req.WorkerID, req.Repo, req.Repos, req.Roles, req.Runtime, req.Hostname, req.MgmtBaseURL); err != nil {
 		CoordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -613,16 +616,7 @@ func (s *FullCoordinatorServer) HandleTaskRelease(w http.ResponseWriter, r *http
 }
 
 func (s *FullCoordinatorServer) lookupWorker(workerID string) (*store.WorkerRecord, error) {
-	workers, err := s.Store.QueryWorkers("")
-	if err != nil {
-		return nil, err
-	}
-	for _, worker := range workers {
-		if worker.ID == workerID {
-			return &worker, nil
-		}
-	}
-	return nil, nil
+	return s.Store.GetWorker(workerID)
 }
 
 func (s *FullCoordinatorServer) claimNextTask(worker *store.WorkerRecord) (*TaskPollResponse, error) {
@@ -634,7 +628,7 @@ func (s *FullCoordinatorServer) claimNextTask(worker *store.WorkerRecord) (*Task
 	if err := json.Unmarshal([]byte(worker.ReposJSON), &repos); err != nil || len(repos) == 0 {
 		repos = []string{worker.Repo}
 	}
-	task, err := s.Store.ClaimNextTask(worker.ID, roles, repos, "", DefaultLongPollTimeout)
+	task, err := s.Store.ClaimNextTask(worker.ID, roles, repos, worker.Runtime, "", DefaultLongPollTimeout)
 	if err != nil || task == nil {
 		return nil, err
 	}

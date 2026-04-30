@@ -32,6 +32,10 @@ const (
 	// that has no outgoing transitions. Terminal states should not
 	// invoke an agent because there is no path forward.
 	CodeAgentInTerminalState = "WB-S004"
+
+	// CodeRuntimeNoWorkerSupport — an agent declares a runtime that no local
+	// registered worker currently advertises, so dispatch would dead-end.
+	CodeRuntimeNoWorkerSupport = "WB-S005"
 )
 
 // suspiciousTimeoutCutoff is the upper bound past which WB-S002 fires.
@@ -50,6 +54,8 @@ var runtimeBinaries = map[string]string{
 
 type semanticsOptions struct {
 	SkipRuntimeBinaryCheck bool
+	WorkerRuntimes         map[string]struct{}
+	CheckWorkerRuntimes    bool
 }
 
 // validateSemantics implements WB-S001..WB-S004.
@@ -161,6 +167,33 @@ func validateAgentSemantics(agent *agentDoc, idleThreshold time.Duration, opts s
 						),
 					})
 				}
+			}
+		}
+	}
+
+	// WB-S005 — local workers do not advertise the agent's explicit runtime.
+	if opts.CheckWorkerRuntimes {
+		if rt := strings.TrimSpace(agent.Runtime); rt != "" {
+			if _, ok := opts.WorkerRuntimes[rt]; !ok {
+				advertised := make([]string, 0, len(opts.WorkerRuntimes))
+				for runtime := range opts.WorkerRuntimes {
+					advertised = append(advertised, runtime)
+				}
+				sort.Strings(advertised)
+				msg := "no registered workers advertise any runtime"
+				if len(advertised) > 0 {
+					msg = fmt.Sprintf("registered worker runtimes: %s", strings.Join(advertised, ", "))
+				}
+				diags = append(diags, Diagnostic{
+					Path:     agent.Path,
+					Line:     orFallback(agent.RuntimeLine, agent.NameLine),
+					Severity: SeverityWarning,
+					Code:     CodeRuntimeNoWorkerSupport,
+					Message: fmt.Sprintf(
+						"agent %q declares runtime %q but no registered worker advertises it (%s)",
+						agent.Name, rt, msg,
+					),
+				})
 			}
 		}
 	}

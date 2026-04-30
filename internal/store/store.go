@@ -170,6 +170,7 @@ func (s *Store) createTables() error {
 			repo TEXT NOT NULL,
 			repos_json TEXT NOT NULL DEFAULT '[]',
 			roles TEXT NOT NULL,
+			runtime TEXT NOT NULL DEFAULT '',
 			hostname TEXT,
 			mgmt_base_url TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL DEFAULT 'online',
@@ -321,6 +322,9 @@ func (s *Store) createTables() error {
 	}
 	if _, err := s.db.Exec(`ALTER TABLE workers ADD COLUMN repos_json TEXT NOT NULL DEFAULT '[]'`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("store: alter workers add repos_json: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE workers ADD COLUMN runtime TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("store: alter workers add runtime: %w", err)
 	}
 	if _, err := s.db.Exec(`ALTER TABLE workers ADD COLUMN token_hash TEXT`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("store: alter workers add token_hash: %w", err)
@@ -785,21 +789,21 @@ func (s *Store) ReleaseTask(taskID, workerID string) (bool, error) {
 // ClaimNextTask assigns the next dispatchable task to workerID. If the same
 // worker repeats the request with the same non-empty claimToken before the
 // lease expires, the previously claimed task is returned.
-func (s *Store) ClaimNextTask(workerID string, roles []string, repos []string, claimToken string, lease time.Duration) (*TaskRecord, error) {
+func (s *Store) ClaimNextTask(workerID string, roles []string, repos []string, runtime string, claimToken string, lease time.Duration) (*TaskRecord, error) {
 	if lease <= 0 {
 		lease = 30 * time.Second
 	}
 	for attempt := 0; attempt < 5; attempt++ {
-		task, err := s.claimNextTaskOnce(workerID, roles, repos, claimToken, lease)
+		task, err := s.claimNextTaskOnce(workerID, roles, repos, runtime, claimToken, lease)
 		if err == nil || !isSQLiteBusyError(err) {
 			return task, err
 		}
 		time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
 	}
-	return s.claimNextTaskOnce(workerID, roles, repos, claimToken, lease)
+	return s.claimNextTaskOnce(workerID, roles, repos, runtime, claimToken, lease)
 }
 
-func (s *Store) claimNextTaskOnce(workerID string, roles []string, repos []string, claimToken string, lease time.Duration) (*TaskRecord, error) {
+func (s *Store) claimNextTaskOnce(workerID string, roles []string, repos []string, runtime string, claimToken string, lease time.Duration) (*TaskRecord, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("store: begin claim tx: %w", err)
@@ -866,6 +870,13 @@ func (s *Store) claimNextTaskOnce(workerID string, roles []string, repos []strin
 	if len(repoConds) > 0 {
 		query += ` AND (` + strings.Join(repoConds, " OR ") + `)`
 		args = append(args, repoArgs...)
+	}
+	runtime = strings.TrimSpace(runtime)
+	if runtime == "" {
+		query += ` AND COALESCE(NULLIF(TRIM(runtime), ''), '') = ''`
+	} else {
+		query += ` AND (COALESCE(NULLIF(TRIM(runtime), ''), '') = '' OR runtime = ?)`
+		args = append(args, runtime)
 	}
 	query += ` ORDER BY created_at, id LIMIT 1`
 
@@ -1086,17 +1097,18 @@ func (s *Store) InsertWorker(w WorkerRecord) error {
 		w.ReposJSON = "[]"
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO workers (id, repo, repos_json, roles, hostname, mgmt_base_url, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO workers (id, repo, repos_json, roles, runtime, hostname, mgmt_base_url, status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		 repo = excluded.repo,
 		 repos_json = excluded.repos_json,
 		 roles = excluded.roles,
+		 runtime = excluded.runtime,
 		 hostname = excluded.hostname,
 		 mgmt_base_url = excluded.mgmt_base_url,
 		 status = excluded.status,
 		 last_heartbeat = CURRENT_TIMESTAMP`,
-		w.ID, w.Repo, w.ReposJSON, w.Roles, w.Hostname, w.MgmtBaseURL, w.Status,
+		w.ID, w.Repo, w.ReposJSON, w.Roles, w.Runtime, w.Hostname, w.MgmtBaseURL, w.Status,
 	)
 	if err != nil {
 		return fmt.Errorf("store: insert worker: %w", err)
@@ -1106,7 +1118,7 @@ func (s *Store) InsertWorker(w WorkerRecord) error {
 
 // QueryWorkers returns workers filtered by repo (empty = all).
 func (s *Store) QueryWorkers(repo string) ([]WorkerRecord, error) {
-	rows, err := s.db.Query(`SELECT id, repo, repos_json, roles, hostname, mgmt_base_url, status, last_heartbeat, registered_at FROM workers ORDER BY id`)
+	rows, err := s.db.Query(`SELECT id, repo, repos_json, roles, runtime, hostname, mgmt_base_url, status, last_heartbeat, registered_at FROM workers ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("store: query workers: %w", err)
 	}
@@ -1116,7 +1128,7 @@ func (s *Store) QueryWorkers(repo string) ([]WorkerRecord, error) {
 	for rows.Next() {
 		var w WorkerRecord
 		var hb, ra string
-		if err := rows.Scan(&w.ID, &w.Repo, &w.ReposJSON, &w.Roles, &w.Hostname, &w.MgmtBaseURL, &w.Status, &hb, &ra); err != nil {
+		if err := rows.Scan(&w.ID, &w.Repo, &w.ReposJSON, &w.Roles, &w.Runtime, &w.Hostname, &w.MgmtBaseURL, &w.Status, &hb, &ra); err != nil {
 			return nil, fmt.Errorf("store: scan worker: %w", err)
 		}
 		w.LastHeartbeat, _ = ParseTimestamp(hb, "worker.last_heartbeat")
@@ -1131,10 +1143,10 @@ func (s *Store) QueryWorkers(repo string) ([]WorkerRecord, error) {
 
 // GetWorker returns a single registered worker by ID, or nil when absent.
 func (s *Store) GetWorker(workerID string) (*WorkerRecord, error) {
-	row := s.db.QueryRow(`SELECT id, repo, repos_json, roles, hostname, mgmt_base_url, status, last_heartbeat, registered_at FROM workers WHERE id = ?`, workerID)
+	row := s.db.QueryRow(`SELECT id, repo, repos_json, roles, runtime, hostname, mgmt_base_url, status, last_heartbeat, registered_at FROM workers WHERE id = ?`, workerID)
 	var w WorkerRecord
 	var hb, ra string
-	if err := row.Scan(&w.ID, &w.Repo, &w.ReposJSON, &w.Roles, &w.Hostname, &w.MgmtBaseURL, &w.Status, &hb, &ra); err != nil {
+	if err := row.Scan(&w.ID, &w.Repo, &w.ReposJSON, &w.Roles, &w.Runtime, &w.Hostname, &w.MgmtBaseURL, &w.Status, &hb, &ra); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
