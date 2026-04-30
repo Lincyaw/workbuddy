@@ -312,7 +312,7 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 	stateEntryDetected := (event.Type == poller.EventLabelAdded && event.Detail == currentState.EnterLabel) ||
 		(event.Type == poller.EventIssueCreated)
 	if stateEntryDetected && sm.stateHasAgents(currentState) {
-		log.Printf("[statemachine] state entry detected: %s#%d entered %q, dispatching agents %q",
+		log.Printf("[statemachine] state entry detected: %s#%d entered %q, candidate agents=%q",
 			event.Repo, event.IssueNum, currentStateName, sm.stateAgents(currentState))
 		sm.eventlog.Log(eventlog.TypeStateEntry, event.Repo, event.IssueNum,
 			map[string]interface{}{
@@ -839,6 +839,8 @@ func (sm *StateMachine) isBlockedByDependency(repo string, issueNum int, agentFo
 		return false, fmt.Errorf("statemachine: query dependency state: %w", err)
 	}
 	if depState != nil && (depState.Verdict == store.DependencyVerdictBlocked || depState.Verdict == store.DependencyVerdictNeedsHuman) {
+		log.Printf("[statemachine] dispatch blocked by dependency: %s#%d agent=%s verdict=%s",
+			repo, issueNum, agentForLog, depState.Verdict)
 		sm.eventlog.Log(eventlog.TypeDispatchBlockedByDependency, repo, issueNum, map[string]string{
 			"verdict": depState.Verdict,
 			"agent":   agentForLog,
@@ -890,6 +892,7 @@ func (sm *StateMachine) dispatchSingleAgent(ctx context.Context, repo string, is
 	}
 	select {
 	case sm.dispatch <- req:
+		log.Printf("[statemachine] dispatched %s for %s#%d state=%s", agentName, repo, issueNum, state)
 	case <-ctx.Done():
 		// Context cancelled before dispatch sent. Remove this agent from
 		// the group. If no agents were successfully dispatched, clean up

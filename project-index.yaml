@@ -277,10 +277,8 @@ documentation:
       notes: Historical drift resolved by the app-server JSON-RPC codex backend; keep only as archive context. Codex is now a single runtime path on the 2-agent catalog rather than a separate agent or a dual-backend choice.
 
 requirements:
-  # ============================================================
-  # Layer 1: Core Engine
-  # ============================================================
-
+  # =====================================================  # Layer 1: Core Engine
+  # =====================================================
   - id: REQ-001
     title: Config Loader
     description: >
@@ -425,10 +423,8 @@ requirements:
     tests: []
     deps: [REQ-004]
 
-  # ============================================================
-  # Layer 2: Agent Runtime
-  # ============================================================
-
+  # =====================================================  # Layer 2: Agent Runtime
+  # =====================================================
   - id: REQ-006
     title: Agent Launcher (Multi-Runtime)
     description: >
@@ -544,10 +540,8 @@ requirements:
       - internal/store/store_test.go
     deps: [REQ-024]
 
-  # ============================================================
-  # Layer 3: Communication (v0.2.0)
-  # ============================================================
-
+  # =====================================================  # Layer 3: Communication (v0.2.0)
+  # =====================================================
   - id: REQ-025
     title: Coordinator HTTP API
     description: >
@@ -603,10 +597,8 @@ requirements:
       - internal/worker/distributed_test.go
     deps: [REQ-025]
 
-  # ============================================================
-  # Layer 4: Observability
-  # ============================================================
-
+  # =====================================================  # Layer 4: Observability
+  # =====================================================
   - id: REQ-009
     title: Event Log
     description: >
@@ -712,10 +704,8 @@ requirements:
       - internal/auditapi/handler_test.go
     deps: [REQ-011]
 
-  # ============================================================
-  # Layer 5: Workflow Orchestration
-  # ============================================================
-
+  # =====================================================  # Layer 5: Workflow Orchestration
+  # =====================================================
   - id: REQ-013
     title: Transition Rules Engine (superseded by transitions map)
     description: >
@@ -810,10 +800,8 @@ requirements:
     tests: []
     deps: [REQ-003]
 
-  # ============================================================
-  # CLI Commands
-  # ============================================================
-
+  # =====================================================  # CLI Commands
+  # =====================================================
   - id: REQ-017
     title: CLI - serve command (single-process wrapper)
     description: >
@@ -961,10 +949,8 @@ requirements:
     tests: [cmd/logs_test.go]
     deps: [REQ-008]
 
-  # ============================================================
-  # New Requirements (Architecture Change)
-  # ============================================================
-
+  # =====================================================  # New Requirements (Architecture Change)
+  # =====================================================
   - id: REQ-023
     title: Worker Registry
     description: >
@@ -1062,10 +1048,8 @@ requirements:
       - cmd/worker_test.go
     deps: [REQ-026, REQ-006]
 
-  # ============================================================
-  # Layer 6: Security & Resilience
-  # ============================================================
-
+  # =====================================================  # Layer 6: Security & Resilience
+  # =====================================================
   - id: REQ-029
     title: Worker Authentication
     description: >
@@ -1100,10 +1084,8 @@ requirements:
       - internal/store/store_test.go
     deps: [REQ-025]
 
-  # ============================================================
-  # Layer 7: Audit & Traceability
-  # ============================================================
-
+  # =====================================================  # Layer 7: Audit & Traceability
+  # =====================================================
   - id: REQ-030
     title: Agent Session Audit
     description: >
@@ -1170,10 +1152,8 @@ requirements:
       - cmd/serve_test.go
     deps: [REQ-002, REQ-003, REQ-004, REQ-024]
 
-  # ============================================================
-  # Layer 8: Pipeline Observability & Diagnosis
-  # ============================================================
-
+  # =====================================================  # Layer 8: Pipeline Observability & Diagnosis
+  # =====================================================
   - id: REQ-033
     title: CLI - status --tasks (task queue view)
     description: >
@@ -3207,4 +3187,34 @@ requirements:
       - .github/workflows/ci.yml
       - scripts/validate_index.py
     related_docs: []
+    deps: []
+
+  - id: REQ-094
+    title: State-machine dispatch logs distinguish intent from outcome (#241)
+    description: >
+      The state-entry log line previously read "dispatching agents %q",
+      which was misleading: dispatch can still be vetoed downstream by the
+      dependency gate (`isBlockedByDependency`) before the task ever enters
+      the dispatch channel. Operators reading `journalctl` saw the issue as
+      "dispatched" when it was actually blocked. Re-word the state-entry
+      line to "candidate agents=%q" (intent only), add a
+      `[statemachine] dispatched %s for %s#%d state=%s` line in
+      `dispatchSingleAgent` immediately after the request enters the
+      dispatch channel (true outcome), and add a
+      `[statemachine] dispatch blocked by dependency: ... verdict=%s` line
+      in `isBlockedByDependency` so blocking reasons surface in the system
+      log next to the existing `dispatch_blocked_by_dependency` event. The
+      event payload is unchanged for backwards compatibility.
+    priority: P2
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-094-1: `internal/statemachine/statemachine.go` state-entry log uses neutral wording (`candidate agents=`), not `dispatching agents`."
+      - "AC-094-2: `dispatchSingleAgent` emits `[statemachine] dispatched <agent> for <repo>#<n> state=<state>` after the dispatch request is accepted by the channel."
+      - "AC-094-3: `isBlockedByDependency` emits `[statemachine] dispatch blocked by dependency: <repo>#<n> agent=<a> verdict=<v>` whenever it returns blocked, alongside the existing `dispatch_blocked_by_dependency` event (unchanged payload)."
+      - "AC-094-4: Tests assert that the gate-passed path produces the `dispatched ...` log line and the gate-blocked path does not (and additionally produces the new `dispatch blocked by dependency` line)."
+    code:
+      - internal/statemachine/statemachine.go
+    tests:
+      - internal/statemachine/statemachine_test.go
     deps: []
