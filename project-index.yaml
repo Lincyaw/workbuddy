@@ -4144,4 +4144,5 @@ requirements:
       - internal/worker/distributed_test.go
       - internal/workspace/workspace_test.go
       - internal/recover/recover_test.go
+      - internal/config/state_join_test.go
       - web/src/utils/sessionGroups.test.ts
