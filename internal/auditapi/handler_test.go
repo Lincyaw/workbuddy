@@ -1083,6 +1083,233 @@ func TestDashboardStatusEndpoint_AddedFields(t *testing.T) {
 	}
 }
 
+// Issue #275: a session with only a metadata.json (no DB row, no events
+// file) must surface as degraded so operators can tell it apart from a
+// session that ran normally and happened to emit nothing.
+func TestDashboardSessionDetail_DegradedFromDiskMetadata(t *testing.T) {
+	st := newTestStore(t)
+	sessionsDir := filepath.Join(t.TempDir(), "sessions")
+	sessionID := "session-aborted-before-start"
+	dir := filepath.Join(sessionsDir, sessionID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir session dir: %v", err)
+	}
+	metadata := map[string]any{
+		"session_id":  sessionID,
+		"task_id":     "task-aborted",
+		"repo":        "owner/repo",
+		"issue_num":   77,
+		"agent_name":  "dev-agent",
+		"runtime":     "claude-oneshot",
+		"worker_id":   "worker-x",
+		"attempt":     1,
+		"status":      "running",
+		"created_at":  "2026-04-30T08:00:00Z",
+		"stdout_path": filepath.Join(dir, "stdout"),
+		"stderr_path": filepath.Join(dir, "stderr"),
+	}
+	metaJSON, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal metadata: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "metadata.json"), metaJSON, 0o644); err != nil {
+		t.Fatalf("write metadata.json: %v", err)
+	}
+	stderrExcerpt := "runtime: claude-oneshot: start: post /agents: Post \"http://127.0.0.1:36597/agents\": context canceled\n"
+	if err := os.WriteFile(filepath.Join(dir, "stderr"), []byte(stderrExcerpt), 0o644); err != nil {
+		t.Fatalf("write stderr: %v", err)
+	}
+
+	h := NewHandler(st)
+	h.SetSessionsDir(sessionsDir)
+	mux := http.NewServeMux()
+	h.RegisterDashboard(mux)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	resp, err := http.Get(server.URL + "/api/v1/sessions/" + sessionID)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d body=%s", resp.StatusCode, string(body))
+	}
+	var body sessionDetailResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !body.Degraded {
+		t.Fatalf("degraded = false, want true")
+	}
+	if body.DegradedReason != "no_db_row" {
+		t.Fatalf("degraded_reason = %q, want %q", body.DegradedReason, "no_db_row")
+	}
+	if body.Status != StatusAbortedBeforeStart {
+		t.Fatalf("status = %q, want %q", body.Status, StatusAbortedBeforeStart)
+	}
+	if body.ExitCode != -1 {
+		t.Fatalf("exit_code = %d, want -1", body.ExitCode)
+	}
+	if body.SessionID != sessionID {
+		t.Fatalf("session_id = %q", body.SessionID)
+	}
+	if body.Repo != "owner/repo" || body.IssueNum != 77 {
+		t.Fatalf("repo/issue = %q/%d", body.Repo, body.IssueNum)
+	}
+	if body.AgentName != "dev-agent" {
+		t.Fatalf("agent_name = %q", body.AgentName)
+	}
+	if !strings.Contains(body.StderrSummary, "context canceled") {
+		t.Fatalf("stderr_summary missing canceled marker: %q", body.StderrSummary)
+	}
+	if !strings.Contains(body.Summary, "no session file") {
+		t.Fatalf("summary missing degraded marker: %q", body.Summary)
+	}
+	if !strings.Contains(body.Summary, "context canceled") {
+		t.Fatalf("summary missing stderr excerpt: %q", body.Summary)
+	}
+}
+
+// TestDashboardSessionDetail_NoMetadataReturns404 keeps the existing 404
+// behavior for sessions where neither the DB nor disk has anything.
+func TestDashboardSessionDetail_NoMetadataReturns404(t *testing.T) {
+	fixture := newDashboardFixture(t)
+	resp, err := http.Get(fixture.server.URL + "/api/v1/sessions/totally-missing")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// Issue #275: a DB-backed session whose events-v1.jsonl is empty AND whose
+// status is terminal should also be flagged degraded so the SPA surfaces
+// the warning even when the row exists.
+func TestDashboardSessionDetail_DegradedForEmptyEventsFile(t *testing.T) {
+	st := newTestStore(t)
+	sessionsDir := filepath.Join(t.TempDir(), "sessions")
+	dir := filepath.Join(sessionsDir, "session-empty-events")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "events-v1.jsonl"), []byte{}, 0o644); err != nil {
+		t.Fatalf("write events: %v", err)
+	}
+	if err := st.InsertTask(store.TaskRecord{
+		ID:        "task-empty",
+		Repo:      "owner/repo",
+		IssueNum:  78,
+		AgentName: "dev-agent",
+		Status:    store.TaskStatusFailed,
+	}); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+	if _, err := st.CreateSession(store.SessionRecord{
+		SessionID: "session-empty-events",
+		TaskID:    "task-empty",
+		Repo:      "owner/repo",
+		IssueNum:  78,
+		AgentName: "dev-agent",
+		Status:    store.TaskStatusFailed,
+		Dir:       dir,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	h := NewHandler(st)
+	h.SetSessionsDir(sessionsDir)
+	mux := http.NewServeMux()
+	h.RegisterDashboard(mux)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	resp, err := http.Get(server.URL + "/api/v1/sessions/session-empty-events")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var body sessionDetailResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !body.Degraded {
+		t.Fatalf("degraded = false, want true (empty events + terminal status)")
+	}
+	if body.DegradedReason != "no_events_file" {
+		t.Fatalf("degraded_reason = %q, want no_events_file", body.DegradedReason)
+	}
+}
+
+// Issue #275: the listing endpoint should surface disk-only sessions and
+// flag them degraded so they appear in /sessions with the ⚠️ badge.
+func TestDashboardSessionsList_IncludesDegradedDiskOnlyRow(t *testing.T) {
+	st := newTestStore(t)
+	sessionsDir := filepath.Join(t.TempDir(), "sessions")
+	sessionID := "session-disk-only"
+	dir := filepath.Join(sessionsDir, sessionID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	metadata := map[string]any{
+		"session_id": sessionID,
+		"repo":       "owner/repo",
+		"issue_num":  79,
+		"agent_name": "dev-agent",
+		"attempt":    1,
+		"status":     "running",
+		"created_at": "2026-04-30T09:00:00Z",
+	}
+	metaJSON, _ := json.MarshalIndent(metadata, "", "  ")
+	if err := os.WriteFile(filepath.Join(dir, "metadata.json"), metaJSON, 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	h := NewHandler(st)
+	h.SetSessionsDir(sessionsDir)
+	mux := http.NewServeMux()
+	h.RegisterDashboard(mux)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	resp, err := http.Get(server.URL + "/api/v1/sessions?limit=10")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var rows []sessionListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var disk *sessionListResponse
+	for i := range rows {
+		if rows[i].SessionID == sessionID {
+			disk = &rows[i]
+		}
+	}
+	if disk == nil {
+		t.Fatalf("disk-only session missing from listing: %+v", rows)
+	}
+	if !disk.Degraded {
+		t.Fatalf("degraded = false, want true")
+	}
+	if disk.DegradedReason != "no_db_row" {
+		t.Fatalf("degraded_reason = %q, want no_db_row", disk.DegradedReason)
+	}
+	if disk.Status != StatusAbortedBeforeStart {
+		t.Fatalf("status = %q, want %q", disk.Status, StatusAbortedBeforeStart)
+	}
+	if disk.ExitCode != -1 {
+		t.Fatalf("exit_code = %d, want -1", disk.ExitCode)
+	}
+}
+
 func TestDeprecatedSessionPath_AddsHeaderAndKeepsBody(t *testing.T) {
 	st := newTestStore(t)
 	sessionsDir := filepath.Join(t.TempDir(), "sessions")

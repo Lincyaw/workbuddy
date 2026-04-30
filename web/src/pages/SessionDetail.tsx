@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { useRoute } from 'preact-iso';
 import { Layout } from '../components/Layout';
 import { GitHubIssueLink } from '../components/GitHubIssueLink';
+import { DegradedSessionCard } from '../components/DegradedSessionCard';
 import { splitRepoSlug } from '../utils/github';
 import {
   fetchSession,
@@ -111,6 +112,7 @@ export function SessionDetail() {
   const [meta, setMeta] = useState<SessionDetailMeta | null>(null);
   const [metaError, setMetaError] = useState<string | null>(null);
   const [events, setEvents] = useState<SessionEvent[]>([]);
+  const [eventsTotal, setEventsTotal] = useState<number | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [follow, setFollow] = useState(true);
   const [streamLive, setStreamLive] = useState(false);
@@ -183,6 +185,7 @@ export function SessionDetail() {
         // pushed events 0..N before this fetch resolves. A plain setEvents(next)
         // would clobber them. See issue #277.
         setEvents((prev) => mergeSessionEvents(prev, items, seenRef.current));
+        setEventsTotal(typeof data.total === 'number' ? data.total : 0);
       })
       .catch((err) => {
         if (!aborted) setLoadError(err?.message || 'failed to load events');
@@ -320,6 +323,8 @@ export function SessionDetail() {
       </div>
 
       {metaError && <div class="wb-error">Session metadata: {metaError}</div>}
+
+      <DegradedSessionCard meta={meta} eventsTotal={eventsTotal} />
 
       <div class="wb-card">
         <dl class="wb-meta-grid">

@@ -6,12 +6,13 @@ import {
   type SessionListItem,
   type SessionListQuery,
 } from '../api/sessions';
-import { copyText, formatTimestamp, shortID, statusBadgeClass } from '../lib/format';
+import { copyText, formatTimestamp, shortID } from '../lib/format';
 import {
   distinctValues,
   groupSessionsByIssue,
   type DecoratedSession,
 } from '../utils/sessionGroups';
+import { SessionStatusBadge } from '../components/DegradedSessionCard';
 
 const PAGE_LIMIT = 50;
 
@@ -310,9 +311,7 @@ function FlatTable({
             <td>{s.repo}</td>
             <td>#{s.issue_num}</td>
             <td>
-              <span class={statusBadgeClass(s.task_status || s.status)}>
-                {s.task_status || s.status || 'unknown'}
-              </span>
+              <SessionStatusBadge row={s} />
             </td>
             <td>{formatTimestamp(s.created_at)}</td>
           </tr>
@@ -350,9 +349,7 @@ function GroupedTable({
             </td>
             <td>{s.agent_name}</td>
             <td>
-              <span class={statusBadgeClass(s.task_status || s.status)}>
-                {s.task_status || s.status || 'unknown'}
-              </span>
+              <SessionStatusBadge row={s} />
             </td>
             <td>{formatTimestamp(s.created_at)}</td>
           </tr>
