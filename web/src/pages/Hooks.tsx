@@ -54,10 +54,18 @@ export function Hooks() {
     setReloadStatus('reloading…');
     try {
       const resp = await reloadHooks();
-      const warnings = resp.warnings?.length
-        ? ` (with ${resp.warnings.length} warning${resp.warnings.length === 1 ? '' : 's'})`
-        : '';
-      setReloadStatus(`reloaded ${resp.hook_count} hook(s)${warnings}`);
+      if (!resp.reloaded) {
+        // Fresh install or missing config — keep the message neutral so
+        // operators don't think something failed (issue #273).
+        setReloadStatus(
+          `nothing to reload — ${resp.reason ?? 'no config'}`,
+        );
+      } else {
+        const warnings = resp.warnings?.length
+          ? ` (with ${resp.warnings.length} warning${resp.warnings.length === 1 ? '' : 's'})`
+          : '';
+        setReloadStatus(`reloaded ${resp.hook_count} hook(s)${warnings}`);
+      }
       await load();
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'reload failed';
@@ -84,7 +92,9 @@ export function Hooks() {
         {state.loading && !data ? (
           <div class="empty">Loading…</div>
         ) : !data || data.hooks.length === 0 ? (
-          <div class="empty">No hooks registered. Add entries to your hooks YAML and click Reload.</div>
+          <div class="empty">
+            No hooks configured. See <code class="code-chip">docs/hooks.md</code>.
+          </div>
         ) : (
           <HookList
             hooks={data.hooks}

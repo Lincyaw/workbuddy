@@ -133,13 +133,120 @@ func TestHooksAPIStatusReportsCounters(t *testing.T) {
 	}
 }
 
-func TestHooksAPIStatusReturns503WhenDispatcherMissing(t *testing.T) {
-	api := NewHooksAPI(nil, nil, "")
+// When the dispatcher isn't bound (no hooks YAML at startup) the list /
+// status endpoint must return an empty 200 rather than a 5xx, so the webui
+// renders the empty state instead of an error banner. See issue #273.
+func TestHooksAPIStatusReturnsEmptyListWhenDispatcherMissing(t *testing.T) {
+	api := NewHooksAPI(nil, nil, "/etc/workbuddy/hooks.yaml")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/hooks/status", nil)
 	rr := httptest.NewRecorder()
 	api.HandleStatus(rr, req)
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status=%d want 503", rr.Code)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s want 200", rr.Code, rr.Body.String())
+	}
+	var resp HooksStatusResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Hooks == nil {
+		t.Fatalf("hooks should be a non-nil empty slice for stable JSON shape")
+	}
+	if len(resp.Hooks) != 0 {
+		t.Fatalf("hooks=%v want empty", resp.Hooks)
+	}
+	if resp.ConfigPath != "/etc/workbuddy/hooks.yaml" {
+		t.Fatalf("config_path=%q", resp.ConfigPath)
+	}
+}
+
+// When the configured hooks YAML doesn't exist on disk, initHooksDispatcher
+// returns (nil, nil) so the API has no dispatcher to query — same surface as
+// "operator never wrote a hooks file." Verify the canonical /api/v1/hooks
+// path still degrades to an empty 200. See issue #273.
+func TestHooksAPIListReturnsEmptyListWhenConfigFileMissing(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist.yaml")
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("precondition: %s should not exist (err=%v)", missing, err)
+	}
+	api := NewHooksAPI(nil, nil, missing)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/hooks", nil)
+	rr := httptest.NewRecorder()
+	api.HandleStatus(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s want 200", rr.Code, rr.Body.String())
+	}
+	var resp HooksStatusResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Hooks) != 0 {
+		t.Fatalf("hooks=%v want empty", resp.Hooks)
+	}
+	if resp.ConfigPath != missing {
+		t.Fatalf("config_path=%q want %q", resp.ConfigPath, missing)
+	}
+}
+
+// Reload with no dispatcher must succeed (200) with reloaded=false and a
+// human-readable reason so the webui Reload button doesn't surface a 5xx on
+// fresh installs. See issue #273.
+func TestHooksAPIReloadReturnsNoConfigWhenDispatcherMissing(t *testing.T) {
+	api := NewHooksAPI(nil, nil, "/etc/workbuddy/hooks.yaml")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/reload", nil)
+	rr := httptest.NewRecorder()
+	api.HandleReload(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s want 200", rr.Code, rr.Body.String())
+	}
+	var resp HooksReloadResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Reloaded {
+		t.Fatalf("reloaded=true want false")
+	}
+	if resp.Reason != "no config" {
+		t.Fatalf("reason=%q want %q", resp.Reason, "no config")
+	}
+	if resp.ConfigPath != "/etc/workbuddy/hooks.yaml" {
+		t.Fatalf("config_path=%q", resp.ConfigPath)
+	}
+}
+
+// Symmetric to the list-endpoint test: when the hooks YAML doesn't exist,
+// reload reports {"reloaded": false, "reason": "no config"} instead of 500.
+func TestHooksAPIReloadReturnsNoConfigWhenConfigFileMissing(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist.yaml")
+	api := NewHooksAPI(nil, nil, missing)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/reload", nil)
+	rr := httptest.NewRecorder()
+	api.HandleReload(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s want 200", rr.Code, rr.Body.String())
+	}
+	var resp HooksReloadResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Reloaded || resp.Reason != "no config" {
+		t.Fatalf("got reloaded=%v reason=%q want false / %q", resp.Reloaded, resp.Reason, "no config")
+	}
+}
+
+// AC#2: per-hook invocations must still 404 when the hook isn't registered,
+// even after the empty-list/reload graceful-degradation changes.
+func TestHooksAPIInvocationsStill404sForMissingHook(t *testing.T) {
+	cfg := &hooks.Config{SchemaVersion: 1}
+	d, _, err := hooks.NewDispatcher(cfg, hooks.DefaultActionRegistry())
+	if err != nil {
+		t.Fatalf("dispatcher: %v", err)
+	}
+	api := NewHooksAPI(d, nil, "")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/hooks/missing/invocations", nil)
+	rr := httptest.NewRecorder()
+	api.HandleInvocations(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status=%d want 404", rr.Code)
 	}
 }
 
