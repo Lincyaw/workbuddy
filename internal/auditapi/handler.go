@@ -531,13 +531,14 @@ func (h *Handler) handleAPIIssueDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	labels := decodeLabels(cache.Labels)
 	resp := issueDetailResponse{
-		Repo:         cache.Repo,
-		IssueNum:     cache.IssueNum,
-		Title:        firstLine(cache.Body),
-		CurrentState: labelToState(currentLabel(labels)),
-		Labels:       labels,
-		Transitions:  []issueTransitionResponse{},
-		Sessions:     []issueSessionRefResponse{},
+		Repo:             cache.Repo,
+		IssueNum:         cache.IssueNum,
+		Title:            firstLine(cache.Body),
+		CurrentState:     labelToState(currentLabel(labels)),
+		Labels:           labels,
+		Transitions:      []issueTransitionResponse{},
+		TransitionCounts: []transitionCountResponse{},
+		Sessions:         []issueSessionRefResponse{},
 	}
 	transitions, err := h.store.QueryIssueTransitions(repo, issueNum)
 	if err != nil {

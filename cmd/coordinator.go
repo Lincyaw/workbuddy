@@ -565,7 +565,10 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 	audit.NewHTTPHandler(st).Register(readOnlyAuditMux)
 	mux.Handle("/events", api.WrapAuth(readOnlyAuditMux))
 	mux.Handle("/tasks", api.WrapAuth(readOnlyAuditMux))
-	mux.Handle("/issues/", api.WrapAuth(readOnlyAuditMux))
+	// Legacy /issues/{owner}/{repo}/{num}/state — kept for `workbuddy status`
+	// clients. Use a path-specific pattern so SPA routes like
+	// /issues/{owner}/{repo}/{num} still fall through to the catch-all.
+	mux.Handle("/issues/{owner}/{repo}/{num}/state", api.WrapAuth(readOnlyAuditMux))
 
 	metricsMux := http.NewServeMux()
 	metrics.NewHandler(st).WithEventLogger(evlog).Register(metricsMux)
