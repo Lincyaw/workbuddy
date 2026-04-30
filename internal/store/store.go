@@ -335,6 +335,10 @@ func (s *Store) createTables() error {
 		`ALTER TABLE task_queue ADD COLUMN completed_at DATETIME`,
 		`ALTER TABLE task_queue ADD COLUMN exit_code INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE task_queue ADD COLUMN session_refs TEXT NOT NULL DEFAULT '[]'`,
+		// REQ-061: supervisor_agent_id links a coordinator task row to a
+		// subprocess managed by the local supervisor (issue #234). Nullable so
+		// rows written by older workers (or non-IPC code paths) stay valid.
+		`ALTER TABLE task_queue ADD COLUMN supervisor_agent_id TEXT`,
 	}
 	for _, stmt := range taskQueueMigrations {
 		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
@@ -455,7 +459,7 @@ func scanTaskRecord(scan func(dest ...any) error) (TaskRecord, error) {
 	var t TaskRecord
 	var createdAt, updatedAt string
 	var leaseExpiresAt, ackedAt, heartbeatAt, completedAt sql.NullString
-	var workerID, claimToken, labels sql.NullString
+	var workerID, claimToken, labels, supervisorAgentID sql.NullString
 	if err := scan(
 		&t.ID,
 		&t.Repo,
@@ -475,6 +479,7 @@ func scanTaskRecord(scan func(dest ...any) error) (TaskRecord, error) {
 		&completedAt,
 		&t.ExitCode,
 		&t.SessionRefs,
+		&supervisorAgentID,
 		&createdAt,
 		&updatedAt,
 	); err != nil {
@@ -488,6 +493,9 @@ func scanTaskRecord(scan func(dest ...any) error) (TaskRecord, error) {
 	}
 	if labels.Valid {
 		t.Labels = labels.String
+	}
+	if supervisorAgentID.Valid {
+		t.SupervisorAgentID = supervisorAgentID.String
 	}
 	t.CreatedAt, _ = ParseTimestamp(createdAt, "task.created_at")
 	t.UpdatedAt, _ = ParseTimestamp(updatedAt, "task.updated_at")
@@ -539,7 +547,7 @@ func (s *Store) QueryTasksFiltered(filter TaskFilter) ([]TaskRecord, error) {
 	const selectTasks = `SELECT
 		tq.id, tq.repo, tq.issue_num, tq.agent_name, ic.labels, tq.role, tq.runtime, tq.workflow, tq.state,
 		tq.worker_id, tq.claim_token, tq.status, tq.lease_expires_at, tq.acked_at, tq.heartbeat_at,
-		tq.completed_at, tq.exit_code, tq.session_refs, tq.created_at, tq.updated_at
+		tq.completed_at, tq.exit_code, tq.session_refs, tq.supervisor_agent_id, tq.created_at, tq.updated_at
 		FROM task_queue tq
 		LEFT JOIN issue_cache ic
 		  ON ic.repo = tq.repo AND ic.issue_num = tq.issue_num`
@@ -580,7 +588,7 @@ func (s *Store) GetTask(taskID string) (*TaskRecord, error) {
 	row := s.db.QueryRow(`SELECT
 		tq.id, tq.repo, tq.issue_num, tq.agent_name, ic.labels, tq.role, tq.runtime, tq.workflow, tq.state,
 		tq.worker_id, tq.claim_token, tq.status, tq.lease_expires_at, tq.acked_at, tq.heartbeat_at,
-		tq.completed_at, tq.exit_code, tq.session_refs, tq.created_at, tq.updated_at
+		tq.completed_at, tq.exit_code, tq.session_refs, tq.supervisor_agent_id, tq.created_at, tq.updated_at
 		FROM task_queue tq
 		LEFT JOIN issue_cache ic
 		  ON ic.repo = tq.repo AND ic.issue_num = tq.issue_num
@@ -593,6 +601,25 @@ func (s *Store) GetTask(taskID string) (*TaskRecord, error) {
 		return nil, fmt.Errorf("store: get task: %w", err)
 	}
 	return &t, nil
+}
+
+// UpdateTaskSupervisorAgentID writes the supervisor-managed agent id onto a
+// task row. Used by the worker immediately after POSTing to the supervisor
+// IPC API so a coordinator-side resume path can find the agent on restart
+// (issue #234).
+func (s *Store) UpdateTaskSupervisorAgentID(taskID, agentID string) error {
+	res, err := s.db.Exec(
+		`UPDATE task_queue SET supervisor_agent_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		agentID, taskID,
+	)
+	if err != nil {
+		return fmt.Errorf("store: update task supervisor_agent_id: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("store: update task supervisor_agent_id: task %q not found", taskID)
+	}
+	return nil
 }
 
 // UpdateTaskStatus updates the status and updated_at of a task.
@@ -760,7 +787,7 @@ func (s *Store) claimNextTaskOnce(workerID string, roles []string, repos []strin
 		row := tx.QueryRow(`SELECT
 			id, repo, issue_num, agent_name, NULL, role, runtime, workflow, state,
 			worker_id, claim_token, status, lease_expires_at, acked_at, heartbeat_at,
-			completed_at, exit_code, session_refs, created_at, updated_at
+			completed_at, exit_code, session_refs, supervisor_agent_id, created_at, updated_at
 			FROM task_queue
 			WHERE worker_id = ? AND claim_token = ? AND status = ?
 			  AND lease_expires_at IS NOT NULL AND lease_expires_at >= CURRENT_TIMESTAMP
@@ -803,7 +830,7 @@ func (s *Store) claimNextTaskOnce(workerID string, roles []string, repos []strin
 	query := `SELECT
 		id, repo, issue_num, agent_name, NULL, role, runtime, workflow, state,
 		worker_id, claim_token, status, lease_expires_at, acked_at, heartbeat_at,
-		completed_at, exit_code, session_refs, created_at, updated_at
+		completed_at, exit_code, session_refs, supervisor_agent_id, created_at, updated_at
 		FROM task_queue
 		WHERE status IN (?, ?)
 		  AND (lease_expires_at IS NULL OR lease_expires_at < CURRENT_TIMESTAMP)
@@ -887,7 +914,7 @@ func (s *Store) ensureTaskOwnership(tx *sql.Tx, taskID, workerID string) (*TaskR
 	row := tx.QueryRow(`SELECT
 		id, repo, issue_num, agent_name, NULL, role, runtime, workflow, state,
 		worker_id, claim_token, status, lease_expires_at, acked_at, heartbeat_at,
-		completed_at, exit_code, session_refs, created_at, updated_at
+		completed_at, exit_code, session_refs, supervisor_agent_id, created_at, updated_at
 		FROM task_queue WHERE id = ?`, taskID)
 	task, err := scanTaskRecord(row.Scan)
 	if err != nil {
