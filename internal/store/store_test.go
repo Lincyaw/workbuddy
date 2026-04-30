@@ -894,6 +894,38 @@ func TestDeleteWorker(t *testing.T) {
 	}
 }
 
+func TestInsertWorkerReRegistrationBumpsHeartbeat(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.InsertWorker(WorkerRecord{ID: "w-rr", Repo: "org/repo", Roles: `["dev"]`, Hostname: "h1", Status: "online"}); err != nil {
+		t.Fatalf("InsertWorker initial: %v", err)
+	}
+	first, err := s.GetWorker("w-rr")
+	if err != nil || first == nil {
+		t.Fatalf("GetWorker initial: %v %+v", err, first)
+	}
+
+	// Force a stale heartbeat so we can prove re-registration refreshes it.
+	if _, err := s.DB().Exec(`UPDATE workers SET last_heartbeat = datetime('now', '-1 hour') WHERE id = 'w-rr'`); err != nil {
+		t.Fatalf("force stale heartbeat: %v", err)
+	}
+	stale, err := s.GetWorker("w-rr")
+	if err != nil || stale == nil {
+		t.Fatalf("GetWorker stale: %v %+v", err, stale)
+	}
+
+	if err := s.InsertWorker(WorkerRecord{ID: "w-rr", Repo: "org/repo", Roles: `["dev"]`, Hostname: "h1", Status: "online"}); err != nil {
+		t.Fatalf("InsertWorker re-register: %v", err)
+	}
+	after, err := s.GetWorker("w-rr")
+	if err != nil || after == nil {
+		t.Fatalf("GetWorker after: %v %+v", err, after)
+	}
+	if !after.LastHeartbeat.After(stale.LastHeartbeat) {
+		t.Fatalf("expected last_heartbeat to advance after re-registration; stale=%v after=%v", stale.LastHeartbeat, after.LastHeartbeat)
+	}
+}
+
 func TestWorkerHasRunningTask(t *testing.T) {
 	s := newTestStore(t)
 

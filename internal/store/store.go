@@ -1086,7 +1086,8 @@ func (s *Store) InsertWorker(w WorkerRecord) error {
 		 roles = excluded.roles,
 		 hostname = excluded.hostname,
 		 mgmt_base_url = excluded.mgmt_base_url,
-		 status = excluded.status`,
+		 status = excluded.status,
+		 last_heartbeat = CURRENT_TIMESTAMP`,
 		w.ID, w.Repo, w.ReposJSON, w.Roles, w.Hostname, w.MgmtBaseURL, w.Status,
 	)
 	if err != nil {
