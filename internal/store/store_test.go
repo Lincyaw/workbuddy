@@ -119,7 +119,7 @@ func TestCreateAndReadWrite(t *testing.T) {
 	}
 
 	// --- Workers ---
-	err = s.InsertWorker(WorkerRecord{ID: "w-1", Repo: "org/repo", Roles: `["dev"]`, Hostname: "host1", Status: "online"})
+	err = s.InsertWorker(WorkerRecord{ID: "w-1", Repo: "org/repo", Roles: `["dev"]`, Runtime: "codex", Hostname: "host1", Status: "online"})
 	if err != nil {
 		t.Fatalf("InsertWorker: %v", err)
 	}
@@ -129,6 +129,9 @@ func TestCreateAndReadWrite(t *testing.T) {
 	}
 	if len(workers) != 1 || workers[0].Hostname != "host1" {
 		t.Fatalf("unexpected workers: %+v", workers)
+	}
+	if workers[0].Runtime != "codex" {
+		t.Fatalf("expected runtime codex, got %+v", workers[0])
 	}
 	if err := s.UpdateWorkerHeartbeat("w-1"); err != nil {
 		t.Fatalf("UpdateWorkerHeartbeat: %v", err)
@@ -369,7 +372,7 @@ func TestTaskClaimLifecycle(t *testing.T) {
 		t.Fatalf("InsertTask: %v", err)
 	}
 
-	task, err := s.ClaimNextTask("worker-a", []string{"dev"}, []string{"org/repo"}, "claim-1", 30*time.Second)
+	task, err := s.ClaimNextTask("worker-a", []string{"dev"}, []string{"org/repo"}, "codex", "claim-1", 30*time.Second)
 	if err != nil {
 		t.Fatalf("ClaimNextTask: %v", err)
 	}
@@ -377,7 +380,7 @@ func TestTaskClaimLifecycle(t *testing.T) {
 		t.Fatalf("unexpected claimed task: %+v", task)
 	}
 
-	sameTask, err := s.ClaimNextTask("worker-a", []string{"dev"}, []string{"org/repo"}, "claim-1", 30*time.Second)
+	sameTask, err := s.ClaimNextTask("worker-a", []string{"dev"}, []string{"org/repo"}, "codex", "claim-1", 30*time.Second)
 	if err != nil {
 		t.Fatalf("ClaimNextTask idempotent: %v", err)
 	}
@@ -385,7 +388,7 @@ func TestTaskClaimLifecycle(t *testing.T) {
 		t.Fatalf("idempotent claim returned %+v, want %q", sameTask, task.ID)
 	}
 
-	none, err := s.ClaimNextTask("worker-b", []string{"dev"}, []string{"other/repo"}, "", 30*time.Second)
+	none, err := s.ClaimNextTask("worker-b", []string{"dev"}, []string{"other/repo"}, "codex", "", 30*time.Second)
 	if err != nil {
 		t.Fatalf("ClaimNextTask other worker: %v", err)
 	}
@@ -426,7 +429,7 @@ func TestTaskOwnershipConflicts(t *testing.T) {
 		t.Fatalf("InsertTask: %v", err)
 	}
 
-	task, err := s.ClaimNextTask("worker-a", []string{"review"}, []string{"org/repo"}, "claim-review", 30*time.Second)
+	task, err := s.ClaimNextTask("worker-a", []string{"review"}, []string{"org/repo"}, "codex", "claim-review", 30*time.Second)
 	if err != nil {
 		t.Fatalf("ClaimNextTask: %v", err)
 	}
@@ -453,7 +456,7 @@ func TestClaimNextTaskDoesNotSelfReclaimExpiredRunningTask(t *testing.T) {
 		t.Fatalf("InsertTask: %v", err)
 	}
 
-	task, err := s.ClaimNextTask("worker-a", []string{"dev"}, []string{"org/repo"}, "", 30*time.Second)
+	task, err := s.ClaimNextTask("worker-a", []string{"dev"}, []string{"org/repo"}, "codex", "", 30*time.Second)
 	if err != nil {
 		t.Fatalf("ClaimNextTask: %v", err)
 	}
@@ -465,7 +468,7 @@ func TestClaimNextTaskDoesNotSelfReclaimExpiredRunningTask(t *testing.T) {
 		t.Fatalf("expire lease: %v", err)
 	}
 
-	again, err := s.ClaimNextTask("worker-a", []string{"dev"}, []string{"org/repo"}, "", 30*time.Second)
+	again, err := s.ClaimNextTask("worker-a", []string{"dev"}, []string{"org/repo"}, "codex", "", 30*time.Second)
 	if err != nil {
 		t.Fatalf("ClaimNextTask self reclaim: %v", err)
 	}
@@ -473,13 +476,78 @@ func TestClaimNextTaskDoesNotSelfReclaimExpiredRunningTask(t *testing.T) {
 		t.Fatalf("expected expired running task to be hidden from original worker, got %+v", again)
 	}
 
-	other, err := s.ClaimNextTask("worker-b", []string{"dev"}, []string{"org/repo"}, "", 30*time.Second)
+	other, err := s.ClaimNextTask("worker-b", []string{"dev"}, []string{"org/repo"}, "codex", "", 30*time.Second)
 	if err != nil {
 		t.Fatalf("ClaimNextTask other worker: %v", err)
 	}
 	if other == nil || other.ID != task.ID {
 		t.Fatalf("expected another worker to reclaim expired task, got %+v", other)
 	}
+}
+
+func TestClaimNextTaskFiltersByRuntime(t *testing.T) {
+	insertTask := func(t *testing.T, s *Store, id, runtime string) {
+		t.Helper()
+		if err := s.InsertTask(TaskRecord{
+			ID:        id,
+			Repo:      "org/repo",
+			IssueNum:  10,
+			AgentName: "dev-agent",
+			Role:      "dev",
+			Runtime:   runtime,
+			Status:    TaskStatusPending,
+		}); err != nil {
+			t.Fatalf("InsertTask(%s): %v", id, err)
+		}
+	}
+
+	t.Run("codex worker claims codex task", func(t *testing.T) {
+		s := newTestStore(t)
+		insertTask(t, s, "task-codex", "codex")
+		task, err := s.ClaimNextTask("worker-codex", []string{"dev"}, []string{"org/repo"}, "codex", "", 30*time.Second)
+		if err != nil {
+			t.Fatalf("ClaimNextTask: %v", err)
+		}
+		if task == nil || task.ID != "task-codex" {
+			t.Fatalf("expected codex task, got %+v", task)
+		}
+	})
+
+	t.Run("codex worker does not claim claude task", func(t *testing.T) {
+		s := newTestStore(t)
+		insertTask(t, s, "task-claude", "claude-code")
+		task, err := s.ClaimNextTask("worker-codex-2", []string{"dev"}, []string{"org/repo"}, "codex", "", 30*time.Second)
+		if err != nil {
+			t.Fatalf("ClaimNextTask: %v", err)
+		}
+		if task != nil {
+			t.Fatalf("expected no task, got %+v", task)
+		}
+	})
+
+	t.Run("claude worker does not claim codex task", func(t *testing.T) {
+		s := newTestStore(t)
+		insertTask(t, s, "task-codex-2", "codex")
+		task, err := s.ClaimNextTask("worker-claude", []string{"dev"}, []string{"org/repo"}, "claude-code", "", 30*time.Second)
+		if err != nil {
+			t.Fatalf("ClaimNextTask: %v", err)
+		}
+		if task != nil {
+			t.Fatalf("expected no task, got %+v", task)
+		}
+	})
+
+	t.Run("empty-runtime worker only claims any-runtime task", func(t *testing.T) {
+		s := newTestStore(t)
+		insertTask(t, s, "task-any", "")
+		task, err := s.ClaimNextTask("worker-any", []string{"dev"}, []string{"org/repo"}, "", "", 30*time.Second)
+		if err != nil {
+			t.Fatalf("ClaimNextTask: %v", err)
+		}
+		if task == nil || task.ID != "task-any" {
+			t.Fatalf("expected any-runtime task, got %+v", task)
+		}
+	})
 }
 
 // TestParseTimestamp verifies the multi-format timestamp parser.

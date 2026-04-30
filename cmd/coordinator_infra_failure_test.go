@@ -52,7 +52,7 @@ func TestCoordinator_InfraFailureEmitsInfraEvent(t *testing.T) {
 		Pollers: &pollerManager{},
 	}
 
-	if err := reg.Register("worker-1", "owner/repo", []string{"dev"}, "host1"); err != nil {
+	if err := reg.Register("worker-1", "owner/repo", []string{"dev"}, "", "host1"); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
 
@@ -139,7 +139,7 @@ func TestCoordinator_GenuineFailureDoesNotEmitInfraEvent(t *testing.T) {
 		TaskHub:  tasknotify.NewHub(),
 		Pollers:  &pollerManager{},
 	}
-	if err := reg.Register("worker-1", "owner/repo", []string{"dev"}, "host1"); err != nil {
+	if err := reg.Register("worker-1", "owner/repo", []string{"dev"}, "", "host1"); err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
 	if err := st.InsertTask(store.TaskRecord{

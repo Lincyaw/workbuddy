@@ -44,12 +44,12 @@ func (r *Registry) SetPollInterval(pollInterval time.Duration) {
 
 // Register adds a worker to the registry.
 // roles is stored as a JSON array string in the DB.
-func (r *Registry) Register(id, repo string, roles []string, hostname string) error {
-	return r.RegisterWithRepos(id, repo, []string{repo}, roles, hostname, "")
+func (r *Registry) Register(id, repo string, roles []string, runtime string, hostname string) error {
+	return r.RegisterWithRepos(id, repo, []string{repo}, roles, runtime, hostname, "")
 }
 
 // RegisterWithRepos adds a worker to the registry with explicit repo bindings.
-func (r *Registry) RegisterWithRepos(id, repo string, repos []string, roles []string, hostname, mgmtBaseURL string) error {
+func (r *Registry) RegisterWithRepos(id, repo string, repos []string, roles []string, runtime, hostname, mgmtBaseURL string) error {
 	rolesJSON, err := json.Marshal(roles)
 	if err != nil {
 		return fmt.Errorf("registry: marshal roles: %w", err)
@@ -63,6 +63,7 @@ func (r *Registry) RegisterWithRepos(id, repo string, repos []string, roles []st
 		Repo:        repo,
 		ReposJSON:   string(reposJSON),
 		Roles:       string(rolesJSON),
+		Runtime:     runtime,
 		Hostname:    hostname,
 		MgmtBaseURL: mgmtBaseURL,
 		Status:      "online",
@@ -174,7 +175,7 @@ func (r *Registry) RegisterEmbedded(repo string, roles []string) (string, error)
 		hostname = "unknown"
 	}
 	id := "embedded-" + hostname
-	if err := r.Register(id, repo, roles, hostname); err != nil {
+	if err := r.Register(id, repo, roles, "", hostname); err != nil {
 		return "", fmt.Errorf("registry: register embedded: %w", err)
 	}
 	return id, nil

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
 func TestRunValidateWithOpts_ValidConfig(t *testing.T) {
@@ -141,6 +143,55 @@ func TestRunValidateWithOpts_StrictPromotesWarnings(t *testing.T) {
 	var exitErr *cliExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
 		t.Fatalf("expected exit 1 from --strict, got %v", err)
+	}
+}
+
+func TestRunValidateWithOpts_WarnsWhenNoWorkerAdvertisesAgentRuntime(t *testing.T) {
+	configDir := writeValidateFixture(t, validateFixtureFiles{
+		"config.yaml": "repo: octo/workbuddy\n",
+		"agents/dev-agent.md": `---
+name: dev-agent
+description: test agent
+triggers:
+  - state: developing
+role: dev
+runtime: codex
+command: echo run
+context:
+  - Repo
+---
+Repo: {{.Repo}}
+`,
+		"agents/review-agent.md": validateAgentFixture("review-agent", "status:reviewing"),
+		"workflows/default.md":   validateWorkflowFixture(),
+	})
+	dbPath := filepath.Join(filepath.Dir(filepath.Dir(configDir)), ".workbuddy", "workbuddy.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		t.Fatalf("mkdir db dir: %v", err)
+	}
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := st.InsertWorker(store.WorkerRecord{
+		ID:       "worker-1",
+		Repo:     "octo/workbuddy",
+		Roles:    `["dev"]`,
+		Runtime:  "claude-code",
+		Hostname: "host1",
+		Status:   "online",
+	}); err != nil {
+		t.Fatalf("InsertWorker: %v", err)
+	}
+	_ = st.Close()
+
+	var stderr bytes.Buffer
+	err = runValidateWithOpts(t.Context(), &validateOpts{configDir: configDir, noRuntimeCheck: true}, io.Discard, &stderr)
+	if err != nil {
+		t.Fatalf("warning-only run should exit 0, got %v", err)
+	}
+	if !strings.Contains(stderr.String(), "WB-S005") || !strings.Contains(stderr.String(), "runtime \"codex\"") {
+		t.Fatalf("stderr missing WB-S005 runtime warning: %q", stderr.String())
 	}
 }
 

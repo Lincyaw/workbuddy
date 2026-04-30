@@ -162,6 +162,13 @@ type Options struct {
 	// Useful for CI/sandbox environments where neither codex nor claude
 	// is installed.
 	SkipRuntimeBinaryCheck bool
+	// WorkerRuntimes enables WB-S005 when populated from the local workers
+	// registry. The validator treats an explicit empty list as "checked and no
+	// worker runtimes are currently advertised".
+	WorkerRuntimes []string
+	// CheckWorkerRuntimes toggles WB-S005. Callers should set this only when
+	// they successfully loaded a local workers table.
+	CheckWorkerRuntimes bool
 }
 
 // ValidateDir validates a .github/workbuddy configuration directory using
@@ -266,7 +273,7 @@ func ValidateDirWithOptions(configDir string, opts Options) ([]Diagnostic, error
 	}
 
 	// Layer 4 — semantic / cross-knob consistency (WB-S001..S004).
-	diags = append(diags, validateSemantics(configDir, agents, workflows, semanticsOptions(opts))...)
+	diags = append(diags, validateSemantics(configDir, agents, workflows, newSemanticsOptions(opts))...)
 
 	// Layer L — content/control-flow drift lint (WB-L001..L003). All
 	// warnings; default exit 0, gated by --strict.
@@ -448,6 +455,25 @@ func parseAgentFile(path string) (*agentDoc, []Diagnostic) {
 		diags = append(diags, Diagnostic{Path: path, Line: fmStartLine, Message: "missing agent name"})
 	}
 	return agent, diags
+}
+
+func newSemanticsOptions(opts Options) semanticsOptions {
+	out := semanticsOptions{
+		SkipRuntimeBinaryCheck: opts.SkipRuntimeBinaryCheck,
+		CheckWorkerRuntimes:    opts.CheckWorkerRuntimes,
+	}
+	if len(opts.WorkerRuntimes) == 0 {
+		return out
+	}
+	out.WorkerRuntimes = make(map[string]struct{}, len(opts.WorkerRuntimes))
+	for _, runtime := range opts.WorkerRuntimes {
+		runtime = strings.TrimSpace(runtime)
+		if runtime == "" {
+			continue
+		}
+		out.WorkerRuntimes[runtime] = struct{}{}
+	}
+	return out
 }
 
 // firstNonBlankLine returns the absolute file line of the first non-blank

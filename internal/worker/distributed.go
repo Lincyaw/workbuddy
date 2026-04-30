@@ -106,7 +106,7 @@ func (w *DistributedWorker) ExecuteTask(ctx context.Context, task *workerclient.
 	}
 
 	agentCopy := *agentCfg
-	if w.deps.RuntimeAlias != "" {
+	if strings.TrimSpace(agentCopy.Runtime) == "" && w.deps.RuntimeAlias != "" {
 		agentCopy.Runtime = w.deps.RuntimeAlias
 	}
 
