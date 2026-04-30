@@ -4009,3 +4009,62 @@ requirements:
       - internal/worker/distributed_test.go
       - internal/validate/validate_codes_test.go
       - cmd/validate_test.go
+
+  - id: REQ-114
+    title: "Web UI design-token refresh with dark mode and mobile parity (#287)"
+    description: >
+      Issue #287 refreshes the SPA presentation layer without changing API
+      contracts, route shapes, or public component props. The web shell must
+      move to a single wb-* design vocabulary with an explicit token layer in
+      `web/src/styles.css`, light and dark themes, a persisted system/light/dark
+      toggle in the topbar, compact readable tables and timelines, reusable
+      empty states, and mobile-safe layouts for dashboard, sessions, hooks, and
+      issue detail pages. The regenerated embedded dist bundle must ship the
+      same visual update for `go install` users.
+    rationale: >
+      The prior SPA mixed legacy `.card/.badge/.panel` classes with newer
+      `wb-*` components, stayed light-only, and looked cramped on phones. A
+      tokenized refresh reduces layering drift, improves accessibility, and
+      makes future UI changes cheaper because page styling now composes from
+      one shared system instead of overlapping one-off rules.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-287-1: `web/src/styles.css` starts with the documented token layer, includes `html[data-theme='dark']`, and keeps legacy `.card/.badge/.panel/.timeline` selectors only as thin aliases to unified wb-* recipes."
+      - "AC-287-2: `web/src/components/Layout.tsx`, `web/src/main.tsx`, and `web/src/theme.ts` implement a keyboard-accessible system/light/dark toggle that persists to `localStorage['wb:theme']` and applies the resolved theme to `<html data-theme=...>`."
+      - "AC-287-3: `rg -n '#[0-9a-fA-F]{3,8}' web/src --glob '*.tsx'` returns no matches, so TSX color usage routes through CSS custom properties instead of hardcoded hex values."
+      - "AC-287-4: `web/src/pages/Dashboard.tsx`, `web/src/pages/Sessions.tsx`, `web/src/pages/Hooks.tsx`, and `web/src/pages/IssueDetail.tsx` render without page-level horizontal overflow at narrow widths by using table-scroll wrappers or mobile card stacks, and `web/src/components/Layout.tsx` completes the drawer-style topbar collapse at <=600px."
+      - "AC-287-5: `web/src/pages/SessionDetail.tsx` and `web/src/styles.css` tighten the timeline rail and event chrome so the toolbar and event list stay compact, with event padding capped at the new 6-8px rhythm outside the payload body."
+      - "AC-287-6: `web/src/components/StateBadge.tsx`, `web/src/lib/format.ts`, `web/src/components/DegradedSessionCard.tsx`, `web/src/components/HookList.tsx`, and `web/src/components/HookInvocationTimeline.tsx` derive status and result badges from the consolidated wb/state token recipes; `degraded` and `aborted_before_start` share the warning palette."
+      - "AC-287-7: `web/src/components/EmptyState.tsx` is used by at least Sessions, Hooks, and IssueDetail with actionable copy and optional CTA support."
+      - "AC-287-8: `web/src/styles.css` includes the login card/token recipes needed for the server-rendered login shell to follow the same visual system and dark-mode color vocabulary."
+      - "AC-287-9: `make web` regenerates `internal/webui/dist/` so the embedded SPA bundle includes the refreshed dashboard, sessions, session detail, hooks, and hook detail views."
+      - "AC-287-10: `pnpm -C web test` and `pnpm -C web build` pass, and a local build comparison against `origin/main` shows the total gzipped bundle delta remains under +5 kB."
+      - "AC-287-11: `web/src/styles.css` enforces >=36px interactive targets and >=44px inputs at <=600px, including the sessions filters and the session-detail toolbar controls."
+      - "AC-287-12: `web/src/styles.css` documents text/background contrast ratios in the top comment block and routes muted text, event time, badge text, and topbar links through those accessible tokens."
+    code:
+      - web/src/styles.css
+      - web/src/theme.ts
+      - web/src/main.tsx
+      - web/src/components/Layout.tsx
+      - web/src/components/EmptyState.tsx
+      - web/src/components/StateBadge.tsx
+      - web/src/components/DegradedSessionCard.tsx
+      - web/src/components/HookList.tsx
+      - web/src/components/HookInvocationTimeline.tsx
+      - web/src/components/ReloadButton.tsx
+      - web/src/lib/format.ts
+      - web/src/pages/Dashboard.tsx
+      - web/src/pages/Sessions.tsx
+      - web/src/pages/SessionDetail.tsx
+      - web/src/pages/Hooks.tsx
+      - web/src/pages/HookDetail.tsx
+      - web/src/pages/IssueDetail.tsx
+      - web/src/pages/NotFound.tsx
+      - internal/webui/dist/
+    tests:
+      - web/src/components/Layout.test.tsx
+      - web/src/components/HookList.test.tsx
+      - web/src/components/HookInvocationTimeline.test.tsx
+      - web/src/components/DegradedSessionCard.test.tsx

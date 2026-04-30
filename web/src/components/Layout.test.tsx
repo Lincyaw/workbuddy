@@ -1,6 +1,6 @@
 import { fireEvent, render } from '@testing-library/preact';
 import { LocationProvider } from 'preact-iso';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,19 +21,24 @@ function renderLayout() {
 }
 
 describe('Layout responsive shell', () => {
-  it('renders a hamburger toggle that collapses the nav by default', () => {
-    const { container } = renderLayout();
-    const toggle = container.querySelector('.topbar-toggle');
-    expect(toggle).not.toBeNull();
-    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
-    expect(container.querySelector('.topbar.menu-open')).toBeNull();
+  beforeEach(() => {
+    window.localStorage.clear();
+    document.documentElement.removeAttribute('data-theme');
   });
 
-  it('toggles menu-open class when the hamburger is clicked', () => {
+  it('renders a hamburger toggle that keeps the drawer closed by default', () => {
     const { container } = renderLayout();
-    const toggle = container.querySelector('.topbar-toggle') as HTMLButtonElement;
+    const toggle = container.querySelector('.wb-topbar__menu-toggle');
+    expect(toggle).not.toBeNull();
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(container.querySelector('.wb-topbar.is-open')).toBeNull();
+  });
+
+  it('toggles the topbar drawer when the menu button is clicked', () => {
+    const { container } = renderLayout();
+    const toggle = container.querySelector('.wb-topbar__menu-toggle') as HTMLButtonElement;
     fireEvent.click(toggle);
-    expect(container.querySelector('.topbar.menu-open')).not.toBeNull();
+    expect(container.querySelector('.wb-topbar.is-open')).not.toBeNull();
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
   });
 
@@ -46,33 +51,43 @@ describe('Layout responsive shell', () => {
     expect(labels).toContain('Sessions');
     expect(labels).toContain('Hooks');
   });
+
+  it('cycles theme preference and persists it to localStorage', () => {
+    const { getByRole } = renderLayout();
+    const themeButton = getByRole('button', { name: /Theme:/i });
+    fireEvent.click(themeButton);
+    expect(window.localStorage.getItem('wb:theme')).toBe('light');
+    expect(document.documentElement.dataset.theme).toBe('light');
+    fireEvent.click(themeButton);
+    expect(window.localStorage.getItem('wb:theme')).toBe('dark');
+    expect(document.documentElement.dataset.theme).toBe('dark');
+  });
 });
 
 describe('styles.css responsive contract', () => {
-  it('declares both ≤480 and ≤768 breakpoints', () => {
-    expect(css).toMatch(/@media\s*\(max-width:\s*480px\)/);
-    expect(css).toMatch(/@media\s*\(max-width:\s*768px\)/);
+  it('declares the 900px and 600px breakpoints used by the refreshed shell', () => {
+    expect(css).toMatch(/@media\s*\(max-width:\s*900px\)/);
+    expect(css).toMatch(/@media\s*\(max-width:\s*600px\)/);
   });
 
-  it('makes form inputs at least 16px on narrow screens (iOS no-zoom)', () => {
-    // Pull the ≤768px block and assert the input rule sets font-size:16px.
-    const block = css.match(/@media\s*\(max-width:\s*768px\)\s*{([\s\S]*?)\n}\n/);
+  it('keeps form controls at 16px on narrow screens', () => {
+    const block = css.match(/@media\s*\(max-width:\s*600px\)\s*{([\s\S]*?)\n}\n/);
     expect(block).not.toBeNull();
-    expect(block?.[1]).toMatch(/input\[type="password"\][\s\S]*font-size:\s*16px/);
+    expect(block?.[1]).toMatch(/input,[\s\S]*font-size:\s*16px/);
   });
 
   it('pins the first table column on narrow screens', () => {
-    const block = css.match(/@media\s*\(max-width:\s*768px\)\s*{([\s\S]*?)\n}\n/);
+    const block = css.match(/@media\s*\(max-width:\s*600px\)\s*{([\s\S]*?)\n}\n/);
     expect(block?.[1]).toMatch(/th:first-child[\s\S]*position:\s*sticky/);
   });
 
   it('collapses session metadata to a single column on narrow screens', () => {
-    const block = css.match(/@media\s*\(max-width:\s*768px\)\s*{([\s\S]*?)\n}\n/);
+    const block = css.match(/@media\s*\(max-width:\s*600px\)\s*{([\s\S]*?)\n}\n/);
     expect(block?.[1]).toMatch(/\.wb-meta-grid[\s\S]*grid-template-columns:\s*1fr/);
   });
 
-  it('thins the pretty-mode turn boundary on narrow screens', () => {
-    const block = css.match(/@media\s*\(max-width:\s*768px\)\s*{([\s\S]*?)\n}\n/);
-    expect(block?.[1]).toMatch(/\.wb-turn-group[\s\S]*border-left-width:\s*1px/);
+  it('keeps the turn boundary rail thin on narrow screens', () => {
+    const block = css.match(/@media\s*\(max-width:\s*600px\)\s*{([\s\S]*?)\n}\n/);
+    expect(block?.[1]).toMatch(/\.wb-turn-group[\s\S]*padding-left:\s*var\(--sp-2\)/);
   });
 });

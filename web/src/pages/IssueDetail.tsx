@@ -3,6 +3,7 @@ import { useRoute } from 'preact-iso';
 import { Layout } from '../components/Layout';
 import { StateBadge } from '../components/StateBadge';
 import { GitHubIssueLink } from '../components/GitHubIssueLink';
+import { EmptyState } from '../components/EmptyState';
 import { getIssueDetail } from '../api/client';
 import type { ApiError } from '../api/client';
 import type { IssueDetail as IssueDetailDTO } from '../api/types';
@@ -55,11 +56,11 @@ export function IssueDetail() {
 
   return (
     <Layout>
-      <a href="/" class="muted" style="display: inline-block; margin-bottom: 0.6rem;">
-        ← Dashboard
-      </a>
-      {state.error && <div class="error-banner">{state.error}</div>}
-      {state.loading && state.detail === null && <div class="empty">Loading…</div>}
+      <a href="/" class="wb-backlink">Back to dashboard</a>
+      {state.error && <div class="wb-alert wb-alert--danger">{state.error}</div>}
+      {state.loading && state.detail === null && (
+        <EmptyState icon=".." title="Loading issue detail" copy="Reading transition history, cycle counts, and linked sessions for this issue." />
+      )}
       {state.detail && <IssueDetailBody detail={state.detail} />}
     </Layout>
   );
@@ -69,112 +70,154 @@ function IssueDetailBody({ detail }: { detail: IssueDetailDTO }) {
   const { owner, name } = splitRepoSlug(detail.repo);
   return (
     <>
-      <h1>
-        <span class="code-chip">{detail.repo}#{detail.issue_num}</span>{' '}
-        {detail.title || <span class="muted">(no title)</span>}{' '}
-        <GitHubIssueLink owner={owner} repo={name} num={detail.issue_num} />
-      </h1>
-
-      <dl class="kv">
-        <dt>State</dt>
-        <dd><StateBadge state={detail.current_state} /></dd>
-        <dt>Labels</dt>
-        <dd>
-          {detail.labels.length === 0
-            ? <span class="muted">—</span>
-            : detail.labels.map((label) => (
-                <span class="code-chip" style="margin-right: 0.3rem;">{label}</span>
-              ))}
-        </dd>
-      </dl>
-
-      <h2>Cycle counts</h2>
-      <div class="panel">
-        {detail.transition_counts.length === 0 ? (
-          <div class="empty">No transitions recorded yet.</div>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>From</th>
-                <th>To</th>
-                <th>Count</th>
-              </tr>
-            </thead>
-            <tbody>
-              {detail.transition_counts.map((tc) => (
-                <tr key={`${tc.from_state}->${tc.to_state}`}>
-                  <td><StateBadge state={tc.from_state} /></td>
-                  <td><StateBadge state={tc.to_state} /></td>
-                  <td>{tc.count}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+      <div class="wb-page-header wb-page-header--tight">
+        <div>
+          <p class="wb-eyebrow">Issue detail</p>
+          <h1 class="wb-page-title wb-inline-title">
+            <span class="wb-code-pill">{detail.repo}#{detail.issue_num}</span>
+            <span>{detail.title || <span class="wb-muted">(no title)</span>}</span>
+            <GitHubIssueLink owner={owner} repo={name} num={detail.issue_num} />
+          </h1>
+        </div>
       </div>
 
-      <h2>Transitions</h2>
-      <div class="panel">
-        {detail.transitions.length === 0 ? (
-          <div class="empty">No transitions recorded yet.</div>
-        ) : (
-          <ol class="timeline">
-            {detail.transitions.map((t, i) => (
-              <li key={`${t.at}-${i}`}>
-                <span class="ts">
-                  {formatRelative(t.at)}
-                  <span class="muted" style="display: block; font-size: 0.75rem;">{t.at}</span>
-                </span>
-                <span>
-                  <StateBadge state={t.from} />
-                  <span class="transition-arrow">→</span>
-                  <StateBadge state={t.to} />
-                </span>
-                <span class="muted">{t.by || '—'}</span>
-              </li>
-            ))}
-          </ol>
-        )}
+      <div class="wb-card wb-card--md">
+        <dl class="wb-key-value-grid">
+          <dt>State</dt>
+          <dd><StateBadge state={detail.current_state} /></dd>
+          <dt>Labels</dt>
+          <dd>
+            {detail.labels.length === 0
+              ? <span class="wb-muted">--</span>
+              : detail.labels.map((label) => <span class="wb-code-pill wb-code-pill--spaced">{label}</span>)}
+          </dd>
+        </dl>
       </div>
 
-      <h2>Sessions</h2>
-      <div class="panel">
-        {detail.sessions.length === 0 ? (
-          <div class="empty">No sessions recorded yet.</div>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>Session</th>
-                <th>Agent</th>
-                <th>Started</th>
-                <th>Finished</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {detail.sessions.map((s) => (
-                <tr key={s.session_id}>
-                  <td>
-                    <a href={`/sessions/${encodeURIComponent(s.session_id)}`} class="code-chip">
-                      {s.session_id}
-                    </a>
-                  </td>
-                  <td>{s.agent}</td>
-                  <td>{formatRelative(s.started_at)}</td>
-                  <td>
-                    {s.finished_at
-                      ? formatRelative(s.finished_at)
-                      : <span class="muted">—</span>}
-                  </td>
-                  <td>{s.status || <span class="muted">—</span>}</td>
-                </tr>
+      <section class="wb-section">
+        <div class="wb-section-heading">
+          <div>
+            <h2>Cycle counts</h2>
+            <p>Transition counts stay numeric and aligned even when the table scrolls on narrow screens.</p>
+          </div>
+        </div>
+        <div class="wb-table-card">
+          {detail.transition_counts.length === 0 ? (
+            <EmptyState
+              icon="<>"
+              title="No cycles recorded yet"
+              copy="Run the issue through a dev or review pass and the state transition counts will appear here."
+            />
+          ) : (
+            <div class="wb-table-scroll">
+              <table class="wb-table">
+                <thead>
+                  <tr>
+                    <th>From</th>
+                    <th>To</th>
+                    <th>Count</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {detail.transition_counts.map((tc) => (
+                    <tr key={`${tc.from_state}->${tc.to_state}`}>
+                      <td><StateBadge state={tc.from_state} /></td>
+                      <td><StateBadge state={tc.to_state} /></td>
+                      <td class="wb-num">{tc.count}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section class="wb-section">
+        <div class="wb-section-heading">
+          <div>
+            <h2>Transitions</h2>
+            <p>A tighter left rail keeps the history readable while preserving exact timestamps and actor identity.</p>
+          </div>
+        </div>
+        <div class="wb-card wb-card--flush">
+          {detail.transitions.length === 0 ? (
+            <EmptyState
+              icon="->"
+              title="No transitions yet"
+              copy="This issue has not moved through the workflow yet. When the coordinator edits labels, the history will land here."
+            />
+          ) : (
+            <ol class="wb-timeline-list">
+              {detail.transitions.map((transition, index) => (
+                <li key={`${transition.at}-${index}`} class="wb-timeline-list__item">
+                  <div class="wb-timeline-list__time wb-time">
+                    {formatRelative(transition.at)}
+                    <span>{transition.at}</span>
+                  </div>
+                  <div class="wb-timeline-list__body">
+                    <div class="wb-inline-flow">
+                      <StateBadge state={transition.from} />
+                      <span class="wb-timeline-arrow">to</span>
+                      <StateBadge state={transition.to} />
+                    </div>
+                    <div class="wb-muted">{transition.by || '--'}</div>
+                  </div>
+                </li>
               ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+            </ol>
+          )}
+        </div>
+      </section>
+
+      <section class="wb-section">
+        <div class="wb-section-heading">
+          <div>
+            <h2>Sessions</h2>
+            <p>Every linked session stays accessible from here without forcing a full-width page scroll.</p>
+          </div>
+        </div>
+        <div class="wb-table-card">
+          {detail.sessions.length === 0 ? (
+            <EmptyState
+              icon="[]"
+              title="No sessions recorded"
+              copy="Once an agent claims this issue, you will be able to jump straight into the session timeline from this panel."
+            />
+          ) : (
+            <div class="wb-table-scroll">
+              <table class="wb-table">
+                <thead>
+                  <tr>
+                    <th>Session</th>
+                    <th>Agent</th>
+                    <th>Started</th>
+                    <th>Finished</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {detail.sessions.map((session) => (
+                    <tr key={session.session_id}>
+                      <td>
+                        <a href={`/sessions/${encodeURIComponent(session.session_id)}`} class="wb-code-pill">
+                          {session.session_id}
+                        </a>
+                      </td>
+                      <td>{session.agent}</td>
+                      <td class="wb-time">{formatRelative(session.started_at)}</td>
+                      <td class="wb-time">
+                        {session.finished_at ? formatRelative(session.finished_at) : <span class="wb-muted">--</span>}
+                      </td>
+                      <td>{session.status || <span class="wb-muted">--</span>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </section>
     </>
   );
 }

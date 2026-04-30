@@ -24,16 +24,20 @@ export function statusBadgeClass(status?: string): string {
     case 'completed':
     case 'done':
     case 'success':
-      return 'wb-badge wb-badge-completed';
+      return 'wb-badge wb-badge-success';
     case 'failed':
     case 'error':
     case 'timeout':
-      return 'wb-badge wb-badge-failed';
+      return 'wb-badge wb-badge-danger';
+    case 'aborted_before_start':
+    case 'degraded':
+      return 'wb-badge wb-badge-warning';
     case 'pending':
     case 'queued':
-      return 'wb-badge wb-badge-pending';
+    case 'disabled':
+      return 'wb-badge wb-badge-neutral';
     default:
-      return 'wb-badge wb-badge-default';
+      return 'wb-badge wb-badge-neutral';
   }
 }
 

@@ -4,6 +4,7 @@ import { useRoute } from 'preact-iso';
 import { Layout } from '../components/Layout';
 import { GitHubIssueLink } from '../components/GitHubIssueLink';
 import { DegradedSessionCard } from '../components/DegradedSessionCard';
+import { EmptyState } from '../components/EmptyState';
 import { splitRepoSlug } from '../utils/github';
 import {
   fetchSession,
@@ -24,84 +25,86 @@ type KindOption = (typeof KIND_OPTIONS)[number];
 const INITIAL_LIMIT = 200;
 
 function classifyKind(kind: string): KindOption | 'other' {
-  const k = (kind || '').toLowerCase();
-  if (k.includes('tool.call') || k === 'tool_call') return 'tool_call';
-  if (k.includes('tool.result') || k === 'tool_result') return 'tool_result';
-  if (
-    k.includes('message') ||
-    k === 'agent.message' ||
-    k === 'reasoning' ||
-    k === 'agent_message'
-  )
-    return 'message';
-  if (k.includes('system') || k.includes('turn.') || k === 'log' || k.includes('token'))
-    return 'system';
+  const value = (kind || '').toLowerCase();
+  if (value.includes('tool.call') || value === 'tool_call') return 'tool_call';
+  if (value.includes('tool.result') || value === 'tool_result') return 'tool_result';
+  if (value.includes('message') || value === 'agent.message' || value === 'reasoning' || value === 'agent_message') return 'message';
+  if (value.includes('system') || value.includes('turn.') || value === 'log' || value.includes('token')) return 'system';
   return 'other';
 }
 
 function eventClass(kind: string): string {
-  const c = classifyKind(kind);
-  if (c === 'tool_call') return 'wb-event k-tool_call';
-  if (c === 'tool_result') return 'wb-event k-tool_result';
-  if (c === 'message') return 'wb-event k-message';
-  if (c === 'system') return 'wb-event k-system';
+  const value = classifyKind(kind);
+  if (value === 'tool_call') return 'wb-event k-tool_call';
+  if (value === 'tool_result') return 'wb-event k-tool_result';
+  if (value === 'message') return 'wb-event k-message';
+  if (value === 'system') return 'wb-event k-system';
   if ((kind || '').toLowerCase().includes('error')) return 'wb-event k-error';
   return 'wb-event k-default';
 }
 
-function shorten(s: string, n = 140): string {
-  const flat = String(s || '').replace(/\s+/g, ' ').trim();
-  return flat.length > n ? flat.slice(0, n) + '…' : flat;
+function kindGlyph(kind: string): string {
+  const value = classifyKind(kind);
+  if (value === 'tool_call') return 'TC';
+  if (value === 'tool_result') return 'TR';
+  if (value === 'message') return 'MSG';
+  if (value === 'system') return 'SYS';
+  if ((kind || '').toLowerCase().includes('error')) return 'ERR';
+  return 'EVT';
+}
+
+function shorten(value: string, length = 140): string {
+  const flat = String(value || '').replace(/\s+/g, ' ').trim();
+  return flat.length > length ? flat.slice(0, length) + '...' : flat;
 }
 
 function eventTitle(ev: SessionEvent): string {
-  const p = (ev.payload || {}) as Record<string, unknown>;
-  const get = (k: string): string => {
-    const v = p[k];
-    return typeof v === 'string' ? v : '';
+  const payload = (ev.payload || {}) as Record<string, unknown>;
+  const get = (key: string): string => {
+    const value = payload[key];
+    return typeof value === 'string' ? value : '';
   };
-  const k = (ev.kind || '').toLowerCase();
-  if (k === 'agent.message') return shorten(get('text') || get('content'));
-  if (k === 'reasoning') return shorten(get('text') || get('summary'));
-  if (k === 'tool.call' || k === 'tool_call') {
+  const kind = (ev.kind || '').toLowerCase();
+  if (kind === 'agent.message') return shorten(get('text') || get('content'));
+  if (kind === 'reasoning') return shorten(get('text') || get('summary'));
+  if (kind === 'tool.call' || kind === 'tool_call') {
     const name = get('name') || get('tool') || 'tool';
-    const args = (p.input || p.arguments) as Record<string, unknown> | undefined;
+    const args = (payload.input || payload.arguments) as Record<string, unknown> | undefined;
     const keys = args && typeof args === 'object' ? Object.keys(args) : [];
     return `${name}(${keys.join(', ')})`;
   }
-  if (k === 'tool.result' || k === 'tool_result') {
+  if (kind === 'tool.result' || kind === 'tool_result') {
     const name = get('name') || get('tool') || 'result';
-    return `${name}${p.is_error ? ' · ERROR' : ''}`;
+    return `${name}${payload.is_error ? ' · ERROR' : ''}`;
   }
-  if (k === 'command.exec') {
-    const cmd = p.command;
-    return shorten(Array.isArray(cmd) ? cmd.join(' ') : String(cmd || ''));
+  if (kind === 'command.exec') {
+    const command = payload.command;
+    return shorten(Array.isArray(command) ? command.join(' ') : String(command || ''));
   }
-  if (k === 'command.output') return shorten(get('chunk') || get('output') || get('text'));
-  if (k === 'file.change') return `${get('action') || 'change'} ${get('path')}`;
-  if (k === 'turn.started') return `turn ${get('turn_id') || ev.turn_id || ''}`;
-  if (k === 'turn.completed') {
+  if (kind === 'command.output') return shorten(get('chunk') || get('output') || get('text'));
+  if (kind === 'file.change') return `${get('action') || 'change'} ${get('path')}`;
+  if (kind === 'turn.started') return `turn ${get('turn_id') || ev.turn_id || ''}`;
+  if (kind === 'turn.completed') {
     const status = get('status') ? ` · ${get('status')}` : '';
     return `turn ${get('turn_id') || ev.turn_id || ''}${status}`;
   }
-  if (k === 'token.usage')
-    return `${(p.input_tokens as number) || 0} in / ${(p.output_tokens as number) || 0} out`;
-  if (k === 'error') return shorten(get('message') || get('error') || 'error');
-  if (k === 'log') return shorten(get('message') || get('text'));
+  if (kind === 'token.usage') return `${(payload.input_tokens as number) || 0} in / ${(payload.output_tokens as number) || 0} out`;
+  if (kind === 'error') return shorten(get('message') || get('error') || 'error');
+  if (kind === 'log') return shorten(get('message') || get('text'));
   return '';
 }
 
 function eventTime(ev: SessionEvent): string {
   if (!ev.ts) return `#${ev.index}`;
-  const d = new Date(ev.ts);
-  if (Number.isNaN(d.getTime())) return `#${ev.index}`;
-  return d.toLocaleTimeString();
+  const date = new Date(ev.ts);
+  if (Number.isNaN(date.getTime())) return `#${ev.index}`;
+  return date.toLocaleTimeString();
 }
 
 function defaultExpanded(kind: string): boolean {
-  const k = (kind || '').toLowerCase();
-  if (k === 'agent.message' || k === 'reasoning' || k.includes('message')) return true;
-  if (k === 'error') return true;
+  const value = (kind || '').toLowerCase();
+  if (value === 'agent.message' || value === 'reasoning' || value.includes('message')) return true;
+  if (value === 'error') return true;
   return false;
 }
 
@@ -144,7 +147,6 @@ export function SessionDetail() {
     setStreamLive(false);
   };
 
-  // Load meta + initial events.
   useEffect(() => {
     if (!sessionID) return;
     let aborted = false;
@@ -156,8 +158,8 @@ export function SessionDetail() {
     setLoadError(null);
 
     fetchSession(sessionID)
-      .then((m) => {
-        if (!aborted) setMeta(m);
+      .then((detail) => {
+        if (!aborted) setMeta(detail);
       })
       .catch((err) => {
         if (!aborted) setMetaError(err?.message || 'failed to load session');
@@ -167,23 +169,18 @@ export function SessionDetail() {
       .then((data) => {
         if (aborted) return;
         const items = data.events || [];
-        for (const ev of items) {
-          if (ev.index > lastIndexRef.current) lastIndexRef.current = ev.index;
+        for (const event of items) {
+          if (event.index > lastIndexRef.current) lastIndexRef.current = event.index;
         }
-        // Default-expand a few kinds; merge into existing map so events the SSE
-        // already added before this resolve keep their toggle state.
         setExpanded((prev) => {
-          const exp = { ...prev };
-          for (const ev of items) {
-            if (exp[ev.index] === undefined && defaultExpanded(ev.kind)) {
-              exp[ev.index] = true;
+          const next = { ...prev };
+          for (const event of items) {
+            if (next[event.index] === undefined && defaultExpanded(event.kind)) {
+              next[event.index] = true;
             }
           }
-          return exp;
+          return next;
         });
-        // Functional update + dedupe + sort: the SSE handler may have already
-        // pushed events 0..N before this fetch resolves. A plain setEvents(next)
-        // would clobber them. See issue #277.
         setEvents((prev) => mergeSessionEvents(prev, items, seenRef.current));
         setEventsTotal(typeof data.total === 'number' ? data.total : 0);
       })
@@ -195,10 +192,8 @@ export function SessionDetail() {
       aborted = true;
       closeStream();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionID]);
 
-  // SSE subscription tied to follow toggle.
   useEffect(() => {
     if (!sessionID) return;
     if (!follow) {
@@ -206,25 +201,25 @@ export function SessionDetail() {
       return;
     }
     const after = lastIndexRef.current + 1;
-    const url = sessionStreamURL(sessionID, after);
-    const es = new EventSource(url, { withCredentials: true });
+    const es = new EventSource(sessionStreamURL(sessionID, after), { withCredentials: true });
     esRef.current = es;
     setStreamLive(true);
     setPausedOffset(null);
-    es.addEventListener('evt', (e: MessageEvent) => {
+
+    es.addEventListener('evt', (evt: MessageEvent) => {
       try {
-        const ev: SessionEvent = JSON.parse(e.data);
-        if (seenRef.current.has(ev.index)) return;
-        if (ev.index > lastIndexRef.current) lastIndexRef.current = ev.index;
-        setEvents((prev) => mergeSessionEvents(prev, [ev], seenRef.current));
+        const event: SessionEvent = JSON.parse(evt.data);
+        if (seenRef.current.has(event.index)) return;
+        if (event.index > lastIndexRef.current) lastIndexRef.current = event.index;
+        setEvents((prev) => mergeSessionEvents(prev, [event], seenRef.current));
         if (followRef.current) {
           requestAnimationFrame(() => {
-            const el = timelineRef.current;
-            if (el) el.scrollTop = el.scrollHeight;
+            const node = timelineRef.current;
+            if (node) node.scrollTop = node.scrollHeight;
           });
         }
       } catch {
-        /* ignore parse errors */
+        // ignore parse failures from partial or malformed stream lines
       }
     });
     es.addEventListener('error', () => {
@@ -232,9 +227,7 @@ export function SessionDetail() {
     });
     return () => {
       es.close();
-      if (esRef.current === es) {
-        esRef.current = null;
-      }
+      if (esRef.current === es) esRef.current = null;
     };
   }, [sessionID, follow]);
 
@@ -258,19 +251,17 @@ export function SessionDetail() {
     setPausedOffset(null);
     setExpanded({});
     if (follow) {
-      // Re-subscribe immediately with after=0 to pick up the live tail again.
-      const url = sessionStreamURL(sessionID, 0);
-      const es = new EventSource(url, { withCredentials: true });
+      const es = new EventSource(sessionStreamURL(sessionID, 0), { withCredentials: true });
       esRef.current = es;
       setStreamLive(true);
-      es.addEventListener('evt', (e: MessageEvent) => {
+      es.addEventListener('evt', (evt: MessageEvent) => {
         try {
-          const ev: SessionEvent = JSON.parse(e.data);
-          if (seenRef.current.has(ev.index)) return;
-          if (ev.index > lastIndexRef.current) lastIndexRef.current = ev.index;
-          setEvents((prev) => mergeSessionEvents(prev, [ev], seenRef.current));
+          const event: SessionEvent = JSON.parse(evt.data);
+          if (seenRef.current.has(event.index)) return;
+          if (event.index > lastIndexRef.current) lastIndexRef.current = event.index;
+          setEvents((prev) => mergeSessionEvents(prev, [event], seenRef.current));
         } catch {
-          /* ignore */
+          // ignore
         }
       });
       es.addEventListener('error', () => setStreamLive(false));
@@ -281,21 +272,21 @@ export function SessionDetail() {
     setEnabledKinds((prev) => ({ ...prev, [kind]: !prev[kind] }));
   }
 
-  function toggleExpanded(idx: number) {
-    setExpanded((prev) => ({ ...prev, [idx]: !prev[idx] }));
+  function toggleExpanded(index: number) {
+    setExpanded((prev) => ({ ...prev, [index]: !prev[index] }));
   }
 
   const filteredEvents = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return events.filter((ev) => {
-      const cls = classifyKind(ev.kind);
-      if (!enabledKinds[cls]) return false;
-      if (!q) return true;
-      const kindMatch = (ev.kind || '').toLowerCase().includes(q);
+    const query = search.trim().toLowerCase();
+    return events.filter((event) => {
+      const kind = classifyKind(event.kind);
+      if (!enabledKinds[kind]) return false;
+      if (!query) return true;
+      const kindMatch = (event.kind || '').toLowerCase().includes(query);
       let payloadMatch = false;
-      if (ev.payload) {
+      if (event.payload) {
         try {
-          payloadMatch = JSON.stringify(ev.payload).toLowerCase().includes(q);
+          payloadMatch = JSON.stringify(event.payload).toLowerCase().includes(query);
         } catch {
           payloadMatch = false;
         }
@@ -307,7 +298,7 @@ export function SessionDetail() {
   if (!sessionID) {
     return (
       <Layout>
-        <div class="wb-error">Missing session id in URL.</div>
+        <div class="wb-alert wb-alert--danger">Missing session id in URL.</div>
       </Layout>
     );
   }
@@ -316,27 +307,22 @@ export function SessionDetail() {
     <Layout>
       <div class="wb-breadcrumb">
         <a href="/">Home</a>
-        <span class="sep">/</span>
+        <span class="wb-breadcrumb__sep">/</span>
         <a href="/sessions">Sessions</a>
-        <span class="sep">/</span>
-        <code>{shortID(sessionID, 16)}</code>
+        <span class="wb-breadcrumb__sep">/</span>
+        <code class="wb-code-pill">{shortID(sessionID, 16)}</code>
       </div>
 
-      {metaError && <div class="wb-error">Session metadata: {metaError}</div>}
+      {metaError && <div class="wb-alert wb-alert--danger">Session metadata: {metaError}</div>}
 
       <DegradedSessionCard meta={meta} eventsTotal={eventsTotal} />
 
-      <div class="wb-card">
+      <div class="wb-card wb-card--md">
         <dl class="wb-meta-grid">
           <dt>Session ID</dt>
           <dd>
-            <code>{sessionID}</code>{' '}
-            <button
-              type="button"
-              class="id-copy"
-              onClick={() => copyText(sessionID)}
-              style={{ marginLeft: 6 }}
-            >
+            <code class="wb-code-inline">{sessionID}</code>{' '}
+            <button type="button" class="wb-button wb-button--ghost wb-button--mini id-copy" onClick={() => copyText(sessionID)}>
               copy
             </button>
           </dd>
@@ -361,25 +347,19 @@ export function SessionDetail() {
               {meta.worker_id && (
                 <>
                   <dt>Worker</dt>
-                  <dd>
-                    <code>{meta.worker_id}</code>
-                  </dd>
+                  <dd><code class="wb-code-inline">{meta.worker_id}</code></dd>
                 </>
               )}
               <dt>Started</dt>
-              <dd>{formatTimestamp(meta.created_at)}</dd>
+              <dd class="wb-time">{formatTimestamp(meta.created_at)}</dd>
               <dt>Status</dt>
-              <dd>
-                <span class={statusBadgeClass(meta.status)}>{meta.status || 'unknown'}</span>
-              </dd>
+              <dd><span class={statusBadgeClass(meta.status)}>{meta.status || 'unknown'}</span></dd>
               <dt>Exit code</dt>
-              <dd>{meta.exit_code}</dd>
+              <dd class="wb-num">{meta.exit_code}</dd>
               {meta.task_id && (
                 <>
                   <dt>Task ID</dt>
-                  <dd>
-                    <code>{meta.task_id}</code>
-                  </dd>
+                  <dd><code class="wb-code-inline">{meta.task_id}</code></dd>
                 </>
               )}
             </>
@@ -387,115 +367,84 @@ export function SessionDetail() {
         </dl>
       </div>
 
-      <div class="wb-toolbar">
-        <strong style={{ fontSize: 13 }}>Timeline</strong>
+      <div class="wb-toolbar-grid">
+        <div class="wb-toolbar-grid__label">Timeline</div>
         <div class="wb-view-toggle" role="tablist" aria-label="View mode">
-          <button
-            type="button"
-            class={viewMode === 'pretty' ? 'active' : ''}
-            onClick={() => setViewMode('pretty')}
-            aria-pressed={viewMode === 'pretty'}
-          >
+          <button type="button" class={viewMode === 'pretty' ? 'active' : ''} onClick={() => setViewMode('pretty')} aria-pressed={viewMode === 'pretty'}>
             Pretty
           </button>
-          <button
-            type="button"
-            class={viewMode === 'raw' ? 'active' : ''}
-            onClick={() => setViewMode('raw')}
-            aria-pressed={viewMode === 'raw'}
-          >
+          <button type="button" class={viewMode === 'raw' ? 'active' : ''} onClick={() => setViewMode('raw')} aria-pressed={viewMode === 'raw'}>
             Raw
           </button>
         </div>
-        <div class="kinds">
-          {(['tool_call', 'tool_result', 'message', 'system'] as const).map((k) => (
-            <label key={k} class={enabledKinds[k] ? 'checked' : ''}>
-              <input
-                type="checkbox"
-                checked={enabledKinds[k]}
-                onChange={() => toggleKind(k)}
-              />
-              {k}
-            </label>
+        <div class="wb-kind-filters">
+          {KIND_OPTIONS.map((kind) => (
+            <button
+              key={kind}
+              type="button"
+              class={`wb-filter-chip${enabledKinds[kind] ? ' is-active' : ''}`}
+              onClick={() => toggleKind(kind)}
+              aria-pressed={enabledKinds[kind]}
+            >
+              {kind.replace('_', ' ')}
+            </button>
           ))}
         </div>
-        <input
-          type="search"
-          placeholder="Filter…"
-          value={search}
-          onInput={(e) => setSearch((e.target as HTMLInputElement).value)}
-          style={{ minWidth: 160 }}
-        />
-        <button
-          type="button"
-          class={follow ? 'active' : ''}
-          onClick={toggleFollow}
-          title="Toggle SSE tail-follow"
-        >
-          {follow ? 'Tail follow' : 'Paused'}
+        <div class="wb-toolbar-grid__search">
+          <input type="search" placeholder="Filter events" value={search} onInput={(e) => setSearch((e.target as HTMLInputElement).value)} />
+        </div>
+        <button type="button" class={`wb-live-toggle${follow ? ' is-active' : ''}`} onClick={toggleFollow} title="Toggle SSE tail-follow">
+          <span class={`wb-live-dot${streamLive ? ' is-live' : ''}`} aria-hidden="true" />
+          {follow ? 'Live follow' : 'Paused'}
         </button>
-        <button type="button" onClick={clearTimeline}>Clear</button>
-        <span class="grow" />
-        <span class={`wb-status${streamLive ? ' live' : ''}`}>
-          {streamLive ? 'streaming' : follow ? 'connecting…' : 'paused'}
-        </span>
+        <div class="wb-toolbar-grid__actions">
+          <button type="button" class="wb-button wb-button--ghost" onClick={clearTimeline}>Clear</button>
+          <span class={`wb-live-state${streamLive ? ' is-live' : ''}`}>{streamLive ? 'streaming' : follow ? 'connecting...' : 'paused'}</span>
+        </div>
       </div>
 
-      {loadError && <div class="wb-error">Events: {loadError}</div>}
+      {loadError && <div class="wb-alert wb-alert--danger">Events: {loadError}</div>}
 
       <div class={`wb-timeline${viewMode === 'pretty' ? ' wb-timeline-pretty' : ''}`} ref={timelineRef}>
         {filteredEvents.length === 0 ? (
-          <div class="wb-empty">
-            {events.length === 0 ? 'No events yet.' : 'No events match the filters.'}
-          </div>
+          <EmptyState
+            icon="[]"
+            title={events.length === 0 ? 'No events yet' : 'No events match these filters'}
+            copy={events.length === 0 ? 'The session exists, but no event payloads have landed yet.' : 'Relax the event kind chips or clear the text filter to bring rows back.'}
+          />
         ) : viewMode === 'raw' ? (
-          filteredEvents.map((ev) => (
-            <Event
-              key={ev.index}
-              ev={ev}
-              expanded={expanded[ev.index] ?? defaultExpanded(ev.kind)}
-              onToggle={() => toggleExpanded(ev.index)}
-            />
+          filteredEvents.map((event) => (
+            <Event key={event.index} ev={event} expanded={expanded[event.index] ?? defaultExpanded(event.kind)} onToggle={() => toggleExpanded(event.index)} />
           ))
         ) : (
           renderPretty(filteredEvents, (meta?.runtime as Runtime | undefined) ?? 'unknown', expanded, toggleExpanded)
         )}
       </div>
 
-      <div class={`wb-bottom-bar${streamLive ? ' live' : ''}`}>
-        <span>
+      <div class={`wb-bottom-bar${streamLive ? ' is-live' : ''}`}>
+        <span class="wb-num">
           {events.length} events
           {streamLive ? ' · live' : pausedOffset != null ? ` · paused at offset ${pausedOffset}` : ''}
         </span>
-        <span>{filteredEvents.length} shown</span>
+        <span class="wb-num">{filteredEvents.length} shown</span>
       </div>
     </Layout>
   );
 }
 
-function Event({
-  ev,
-  expanded,
-  onToggle,
-}: {
-  ev: SessionEvent;
-  expanded: boolean;
-  onToggle: () => void;
-}) {
+function Event({ ev, expanded, onToggle }: { ev: SessionEvent; expanded: boolean; onToggle: () => void; }) {
   const payloadText = ev.payload == null ? '' : JSON.stringify(ev.payload, null, 2);
   return (
     <div class={eventClass(ev.kind)}>
-      <div class="wb-event-header" onClick={onToggle}>
-        <span class="wb-kind-badge">{ev.kind || '?'}</span>
+      <button type="button" class="wb-event-header" onClick={onToggle} aria-expanded={expanded}>
+        <span class="wb-kind-badge"><span class="wb-kind-glyph">{kindGlyph(ev.kind)}</span>{ev.kind || '?'}</span>
         <span class="wb-event-title">{eventTitle(ev) || '(no summary)'}</span>
         <span class="wb-event-time">{eventTime(ev)}</span>
-      </div>
+      </button>
       {expanded && (
         <div class="wb-event-body">
-          <pre>{payloadText || '(no payload)'}</pre>
-          {ev.truncated && (
-            <div class="wb-event-truncated">payload truncated for transport</div>
-          )}
+          <pre class="wb-codeblock">{payloadText || '(no payload)'}</pre>
+          {ev.truncated && <div class="wb-event-truncated">payload truncated for transport</div>}
         </div>
       )}
     </div>
@@ -508,30 +457,29 @@ function renderPretty(
   expanded: Record<number, boolean>,
   toggleExpanded: (idx: number) => void,
 ): JSX.Element[] {
-  // Group consecutive events that share a turn_id.
   const groups: { turnId: string; events: SessionEvent[] }[] = [];
-  for (const ev of events) {
-    const tid = ev.turn_id || '';
+  for (const event of events) {
+    const turnId = event.turn_id || '';
     const last = groups[groups.length - 1];
-    if (!last || last.turnId !== tid) {
-      groups.push({ turnId: tid, events: [ev] });
+    if (!last || last.turnId !== turnId) {
+      groups.push({ turnId, events: [event] });
     } else {
-      last.events.push(ev);
+      last.events.push(event);
     }
   }
-  return groups.map((g, gi) => (
-    <div key={`turn-${gi}-${g.turnId}`} class="wb-turn-group">
+  return groups.map((group, groupIndex) => (
+    <div key={`turn-${groupIndex}-${group.turnId}`} class="wb-turn-group">
       <div class="wb-turn-boundary">
-        <span class="wb-turn-label">turn{g.turnId ? ` · ${shortID(g.turnId, 12)}` : ''}</span>
+        <span class="wb-turn-label">turn{group.turnId ? ` · ${shortID(group.turnId, 12)}` : ''}</span>
       </div>
       <div class="wb-turn-body">
-        {g.events.map((ev) => (
+        {group.events.map((event) => (
           <PrettyEvent
-            key={ev.index}
-            ev={ev}
+            key={event.index}
+            ev={event}
             runtime={runtime}
-            expanded={expanded[ev.index] ?? defaultExpanded(ev.kind)}
-            onToggle={() => toggleExpanded(ev.index)}
+            expanded={expanded[event.index] ?? defaultExpanded(event.kind)}
+            onToggle={() => toggleExpanded(event.index)}
           />
         ))}
       </div>
@@ -539,20 +487,7 @@ function renderPretty(
   ));
 }
 
-function PrettyEvent({
-  ev,
-  runtime,
-  expanded,
-  onToggle,
-}: {
-  ev: SessionEvent;
-  runtime: Runtime;
-  expanded: boolean;
-  onToggle: () => void;
-}) {
-  // Only `kind=log` events with a JSON `payload.line` get the structured
-  // renderer; all other event kinds keep the existing Event view (which
-  // already renders the typed launcher payload nicely).
+function PrettyEvent({ ev, runtime, expanded, onToggle }: { ev: SessionEvent; runtime: Runtime; expanded: boolean; onToggle: () => void; }) {
   if ((ev.kind || '').toLowerCase() === 'log') {
     const line = extractLine(ev.payload);
     if (line) {
@@ -572,8 +507,7 @@ function PrettyEvent({
 
 function extractLine(payload: unknown): string | null {
   if (!payload || typeof payload !== 'object') return null;
-  const p = payload as Record<string, unknown>;
-  const line = p.line;
+  const line = (payload as Record<string, unknown>).line;
   return typeof line === 'string' ? line : null;
 }
 

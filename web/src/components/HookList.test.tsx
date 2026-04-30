@@ -28,9 +28,9 @@ function renderWithRouter(ui: preact.ComponentChild) {
 }
 
 describe('HookList', () => {
-  it('renders one row per hook with name / events / action / state', () => {
+  it('renders one desktop row per hook with name, action, and state', () => {
     const onSelect = vi.fn();
-    const { container, getByText } = renderWithRouter(
+    const { container } = renderWithRouter(
       <HookList
         hooks={[makeEntry({ name: 'alpha' }), makeEntry({ name: 'beta', auto_disabled: true })]}
         onSelect={onSelect}
@@ -38,49 +38,38 @@ describe('HookList', () => {
     );
     const rows = container.querySelectorAll('tbody tr');
     expect(rows.length).toBe(2);
-    expect(getByText('alpha')).not.toBeNull();
-    expect(getByText('beta')).not.toBeNull();
-    // Auto-disabled row shows the failed badge.
-    expect(getByText('auto-disabled').className).toContain('failed');
+    const firstLink = rows[0].querySelector('a.wb-code-pill');
+    expect(firstLink?.textContent).toBe('alpha');
+    expect(rows[1].querySelector('.wb-badge')?.textContent).toBe('auto-disabled');
   });
 
-  it('computes the error rate from successes + failures', () => {
-    const { getByText } = renderWithRouter(
-      <HookList
-        hooks={[makeEntry({ successes: 3, failures: 1 })]}
-        onSelect={() => {}}
-      />,
+  it('computes the error rate from successes plus failures', () => {
+    const { container } = renderWithRouter(
+      <HookList hooks={[makeEntry({ successes: 3, failures: 1 })]} onSelect={() => {}} />,
     );
-    expect(getByText('25%')).not.toBeNull();
+    expect(container.querySelector('tbody tr td:nth-child(6)')?.textContent).toBe('25%');
   });
 
   it('routes to /hooks/:name when a row is clicked', () => {
     const onSelect = vi.fn();
-    const { container } = renderWithRouter(
-      <HookList hooks={[makeEntry({ name: 'alpha' })]} onSelect={onSelect} />,
-    );
+    const { container } = renderWithRouter(<HookList hooks={[makeEntry({ name: 'alpha' })]} onSelect={onSelect} />);
     const row = container.querySelector('tbody tr') as HTMLElement;
     fireEvent.click(row);
     expect(onSelect).toHaveBeenCalledWith('alpha');
   });
 
-  it('still routes when the name link inside the row is clicked (preventDefault)', () => {
+  it('still routes when the name link inside the row is clicked', () => {
     const onSelect = vi.fn();
-    const { container } = renderWithRouter(
-      <HookList hooks={[makeEntry({ name: 'alpha' })]} onSelect={onSelect} />,
-    );
-    const link = container.querySelector('a.code-chip') as HTMLAnchorElement;
+    const { container } = renderWithRouter(<HookList hooks={[makeEntry({ name: 'alpha' })]} onSelect={onSelect} />);
+    const link = container.querySelector('tbody tr a.wb-code-pill') as HTMLAnchorElement;
     fireEvent.click(link);
     expect(onSelect).toHaveBeenCalledWith('alpha');
   });
 
   it('renders 0% error rate cleanly when there are no calls yet', () => {
-    const { getByText } = renderWithRouter(
-      <HookList
-        hooks={[makeEntry({ successes: 0, failures: 0 })]}
-        onSelect={() => {}}
-      />,
+    const { container } = renderWithRouter(
+      <HookList hooks={[makeEntry({ successes: 0, failures: 0 })]} onSelect={() => {}} />,
     );
-    expect(getByText('0%')).not.toBeNull();
+    expect(container.querySelector('tbody tr td:nth-child(6)')?.textContent).toBe('0%');
   });
 });
