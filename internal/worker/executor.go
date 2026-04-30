@@ -94,7 +94,7 @@ func (e *Executor) Execute(ctx context.Context, task Task) Execution {
 		}()
 	}
 	if task.WorkspaceManager != nil {
-		worktreePath, err := task.WorkspaceManager.Create(task.IssueNum, task.TaskID)
+		worktreePath, err := task.WorkspaceManager.Create(task.IssueNum, task.TaskID, task.RolloutIndex)
 		if err != nil {
 			exec.CompletedAt = time.Now().UTC()
 			exec.RunErr = fmt.Errorf("worktree setup failed: %w", err)

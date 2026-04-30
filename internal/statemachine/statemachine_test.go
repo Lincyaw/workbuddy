@@ -128,7 +128,7 @@ func newParallelWorkflow(join string) *config.WorkflowConfig {
 			"developing": {
 				EnterLabel: "status:developing",
 				Agents:     []string{"dev-agent", "review-agent"},
-				Join:       join,
+				Join:       config.JoinConfig{Strategy: join},
 				Transitions: map[string]string{
 					"status:done": "done",
 				},
@@ -1253,6 +1253,116 @@ func TestReleaseAllIssueClaims(t *testing.T) {
 	}
 	if claim != nil {
 		t.Fatalf("expected claim to be deleted on shutdown, got %+v", claim)
+	}
+}
+
+func TestRolloutDispatch_UsesLabelOverrideAndSharedGroupID(t *testing.T) {
+	sm, rec, dispatch := newTestSM(t)
+	sm.workflows["dev-flow"].States["developing"].Rollouts = 1
+	sm.workflows["dev-flow"].States["developing"].Join = config.JoinConfig{Strategy: config.JoinRollouts, MinSuccesses: 2}
+
+	err := sm.HandleEvent(context.Background(), ChangeEvent{
+		Type:     poller.EventIssueCreated,
+		Repo:     "test/repo",
+		IssueNum: 77,
+		Labels:   []string{"workbuddy", "status:developing", "rollouts:3"},
+	})
+	if err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+
+	var got []DispatchRequest
+	for i := 0; i < 3; i++ {
+		select {
+		case req := <-dispatch:
+			got = append(got, req)
+		default:
+			t.Fatalf("expected rollout dispatch %d", i+1)
+		}
+	}
+	if extra := len(rec.find(eventlog.TypeRolloutDispatched)); extra != 3 {
+		t.Fatalf("rollout_dispatched events = %d, want 3", extra)
+	}
+	groupID := got[0].RolloutGroupID
+	if groupID == "" {
+		t.Fatal("expected rollout group id")
+	}
+	for i, req := range got {
+		if req.RolloutIndex != i+1 {
+			t.Fatalf("dispatch %d rollout_index = %d, want %d", i, req.RolloutIndex, i+1)
+		}
+		if req.RolloutsTotal != 3 {
+			t.Fatalf("dispatch %d rollouts_total = %d, want 3", i, req.RolloutsTotal)
+		}
+		if req.RolloutGroupID != groupID {
+			t.Fatalf("dispatch %d group_id = %q, want %q", i, req.RolloutGroupID, groupID)
+		}
+	}
+}
+
+func TestRolloutCompletion_TransitionsAfterMinSuccessesAndTerminalSiblings(t *testing.T) {
+	sm, rec, dispatch := newTestSM(t)
+	sm.workflows["dev-flow"].States["developing"].Rollouts = 3
+	sm.workflows["dev-flow"].States["developing"].Join = config.JoinConfig{Strategy: config.JoinRollouts, MinSuccesses: 2}
+	sm.workflows["dev-flow"].States["developing"].Transitions = map[string]string{"status:reviewing": "reviewing"}
+	sm.workflows["dev-flow"].States["reviewing"] = &config.State{EnterLabel: "status:reviewing"}
+
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
+		Type:     poller.EventIssueCreated,
+		Repo:     "test/repo",
+		IssueNum: 78,
+		Labels:   []string{"workbuddy", "status:developing"},
+	}); err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+
+	reqs := make([]DispatchRequest, 0, 3)
+	for i := 0; i < 3; i++ {
+		req := <-dispatch
+		reqs = append(reqs, req)
+		if err := sm.store.InsertTask(store.TaskRecord{
+			ID:             fmt.Sprintf("task-%d", i+1),
+			Repo:           req.Repo,
+			IssueNum:       req.IssueNum,
+			AgentName:      req.AgentName,
+			Workflow:       req.Workflow,
+			State:          req.State,
+			RolloutIndex:   req.RolloutIndex,
+			RolloutsTotal:  req.RolloutsTotal,
+			RolloutGroupID: req.RolloutGroupID,
+			Status:         store.TaskStatusPending,
+		}); err != nil {
+			t.Fatalf("InsertTask %d: %v", i+1, err)
+		}
+	}
+
+	if err := sm.store.UpdateTaskStatus("task-1", store.TaskStatusCompleted); err != nil {
+		t.Fatalf("UpdateTaskStatus task-1: %v", err)
+	}
+	sm.MarkAgentCompleted("test/repo", 78, "task-1", "dev-agent", 0, []string{"workbuddy", "status:reviewing"})
+	if got := len(rec.find(eventlog.TypeTransition)); got != 0 {
+		t.Fatalf("transitions after first completion = %d, want 0", got)
+	}
+
+	if err := sm.store.UpdateTaskStatus("task-2", store.TaskStatusFailed); err != nil {
+		t.Fatalf("UpdateTaskStatus task-2: %v", err)
+	}
+	sm.MarkAgentCompleted("test/repo", 78, "task-2", "dev-agent", 1, []string{"workbuddy", "status:reviewing"})
+	if got := len(rec.find(eventlog.TypeTransition)); got != 0 {
+		t.Fatalf("transitions after second completion = %d, want 0", got)
+	}
+
+	if err := sm.store.UpdateTaskStatus("task-3", store.TaskStatusCompleted); err != nil {
+		t.Fatalf("UpdateTaskStatus task-3: %v", err)
+	}
+	sm.MarkAgentCompleted("test/repo", 78, "task-3", "dev-agent", 0, []string{"workbuddy", "status:reviewing"})
+
+	if got := len(rec.find(eventlog.TypeRolloutCompleted)); got != 3 {
+		t.Fatalf("rollout_completed events = %d, want 3", got)
+	}
+	transitions := rec.find(eventlog.TypeTransition)
+	if len(transitions) != 1 {
+		t.Fatalf("transitions = %d, want 1", len(transitions))
 	}
 }
 

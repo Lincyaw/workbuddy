@@ -74,6 +74,7 @@ type TaskContext struct {
 	Session        SessionContext
 	RelatedPRs     []PRSummary
 	RelatedPRsText string
+	Rollout        RolloutContext
 	sessionHandle  *ManagedSession
 
 	// stateName / state carry the workflow state metadata used to synthesize
@@ -132,6 +133,12 @@ type SessionContext struct {
 	Attempt    int
 	PreLabels  []string
 	PostLabels []string
+}
+
+type RolloutContext struct {
+	Index   int
+	Total   int
+	GroupID string
 }
 
 func (t *TaskContext) SessionHandle() *ManagedSession {

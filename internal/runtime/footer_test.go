@@ -137,3 +137,19 @@ func TestRenderAgentPrompt_E2E(t *testing.T) {
 		t.Fatalf("rendered prompt missing rendered gh command:\n%s", got)
 	}
 }
+
+func TestAssembleAgentPrompt_PrependsRolloutPreludeOnce(t *testing.T) {
+	body := "Repo: {{.Repo}}"
+	task := &TaskContext{
+		Repo:    "octo/x",
+		Rollout: RolloutContext{Index: 2, Total: 3, GroupID: "g-1"},
+	}
+	got := AssembleAgentPrompt(body, task)
+	want := "You are rollout 2 of 3 independent attempts at this issue."
+	if !strings.HasPrefix(got, want) {
+		t.Fatalf("prompt missing rollout prelude prefix:\n%s", got)
+	}
+	if strings.Count(got, want) != 1 {
+		t.Fatalf("expected rollout prelude once, got %d copies", strings.Count(got, want))
+	}
+}

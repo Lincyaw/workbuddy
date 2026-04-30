@@ -22,6 +22,10 @@ RelatedPRs[].Title	scalar
 RelatedPRs[].URL	scalar
 Repo	scalar
 RepoRoot	scalar
+Rollout	struct
+Rollout.GroupID	scalar
+Rollout.Index	scalar
+Rollout.Total	scalar
 Session	struct
 Session.Attempt	scalar
 Session.ID	scalar

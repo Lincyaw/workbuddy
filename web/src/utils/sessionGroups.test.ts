@@ -87,6 +87,34 @@ describe('groupSessionsByIssue', () => {
     expect(g.sessions[0].role).toBe('dev');
     expect(g.sessions[1].role).toBe('other');
   });
+
+  it('uses rollout numbering when rollout metadata is present', () => {
+    const sessions: SessionListItem[] = [
+      mk({
+        session_id: 'r2',
+        issue_num: 12,
+        agent_name: 'dev-agent',
+        rollout_index: 2,
+        rollouts_total: 3,
+        created_at: '2026-04-29T10:00:00Z',
+      }),
+      mk({
+        session_id: 'r1',
+        issue_num: 12,
+        agent_name: 'dev-agent',
+        rollout_index: 1,
+        rollouts_total: 3,
+        created_at: '2026-04-29T09:00:00Z',
+      }),
+    ];
+
+    const [group] = groupSessionsByIssue(sessions);
+    expect(group.sessions.map((s) => s.cycle)).toEqual([1, 2]);
+    expect(group.sessions.map((s) => s.rolloutLabel)).toEqual([
+      'rollout 1/3',
+      'rollout 2/3',
+    ]);
+  });
 });
 
 describe('distinctValues', () => {

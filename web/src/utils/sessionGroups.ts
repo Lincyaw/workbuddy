@@ -12,6 +12,7 @@ export type SessionRole = 'dev' | 'review' | 'other';
 export interface DecoratedSession extends SessionListItem {
   role: SessionRole;
   cycle: number;
+  rolloutLabel?: string;
 }
 
 export interface SessionGroup {
@@ -61,6 +62,16 @@ export function groupSessionsByIssue(sessions: SessionListItem[]): SessionGroup[
     const roleCounts: Record<SessionRole, number> = { dev: 0, review: 0, other: 0 };
     const decorated: DecoratedSession[] = sorted.map((s) => {
       const role = inferRole(s.agent_name);
+      const rolloutIndex = s.rollout_index || 0;
+      const rolloutsTotal = s.rollouts_total || 0;
+      if (rolloutIndex > 0 && rolloutsTotal > 1) {
+        return {
+          ...s,
+          role,
+          cycle: rolloutIndex,
+          rolloutLabel: `rollout ${rolloutIndex}/${rolloutsTotal}`,
+        };
+      }
       roleCounts[role] += 1;
       return { ...s, role, cycle: roleCounts[role] };
     });

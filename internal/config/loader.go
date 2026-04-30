@@ -36,6 +36,7 @@ const (
 const (
 	JoinAllPassed = "all_passed"
 	JoinAnyPassed = "any_passed"
+	JoinRollouts  = "rollouts"
 )
 
 var validRuntimes = map[string]bool{
@@ -464,21 +465,54 @@ func normalizeWorkflowStates(fname string, wf *WorkflowConfig) error {
 			state.Agents = []string{state.Agent}
 		}
 
+		if state.Rollouts <= 0 {
+			state.Rollouts = 1
+		}
+		if state.Rollouts > 5 {
+			return fmt.Errorf("config: %s: state %q rollouts=%d is invalid (expected 1..5)", fname, stateName, state.Rollouts)
+		}
+
 		if len(state.Agents) == 0 {
-			state.Join = ""
+			state.Join = JoinConfig{}
+			if state.Rollouts > 1 {
+				return fmt.Errorf("config: %s: state %q sets rollouts=%d but has no agents", fname, stateName, state.Rollouts)
+			}
 			continue
 		}
 
-		join := strings.TrimSpace(state.Join)
-		if join == "" {
-			join = JoinAllPassed
+		join := strings.TrimSpace(state.Join.Strategy)
+		if state.Rollouts > 1 {
+			if join == "" {
+				join = JoinRollouts
+			}
+			if len(state.Agents) != 1 {
+				return fmt.Errorf("config: %s: state %q rollouts require exactly one agent", fname, stateName)
+			}
+			switch join {
+			case JoinRollouts:
+			default:
+				return fmt.Errorf("config: %s: invalid rollout join strategy %q for state %q (expected %q)", fname, join, stateName, JoinRollouts)
+			}
+			if state.Join.MinSuccesses <= 0 {
+				state.Join.MinSuccesses = state.Rollouts
+			}
+			if state.Join.MinSuccesses > state.Rollouts {
+				return fmt.Errorf("config: %s: state %q min_successes=%d exceeds rollouts=%d", fname, stateName, state.Join.MinSuccesses, state.Rollouts)
+			}
+		} else {
+			if join == "" {
+				join = JoinAllPassed
+			}
+			switch join {
+			case JoinAllPassed, JoinAnyPassed:
+			default:
+				return fmt.Errorf("config: %s: invalid join %q for state %q (expected %q, %q, or rollouts with rollouts>1)", fname, join, stateName, JoinAllPassed, JoinAnyPassed)
+			}
+			if state.Join.MinSuccesses != 0 {
+				return fmt.Errorf("config: %s: state %q min_successes requires rollouts>1", fname, stateName)
+			}
 		}
-		switch join {
-		case JoinAllPassed, JoinAnyPassed:
-		default:
-			return fmt.Errorf("config: %s: invalid join %q for state %q (expected %q or %q)", fname, join, stateName, JoinAllPassed, JoinAnyPassed)
-		}
-		state.Join = join
+		state.Join.Strategy = join
 
 		seenAgents := make(map[string]struct{}, len(state.Agents))
 		normalizedAgents := make([]string, 0, len(state.Agents))

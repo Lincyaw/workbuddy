@@ -166,13 +166,16 @@ func (r *Router) decide(req statemachine.DispatchRequest) (Decision, bool) {
 		return Decision{}, false
 	}
 	return Decision{
-		Repo:      req.Repo,
-		IssueNum:  req.IssueNum,
-		AgentName: req.AgentName,
-		Agent:     agent,
-		Workflow:  req.Workflow,
-		State:     req.State,
-		StateDef:  r.lookupState(req.Workflow, req.State),
+		Repo:           req.Repo,
+		IssueNum:       req.IssueNum,
+		AgentName:      req.AgentName,
+		Agent:          agent,
+		Workflow:       req.Workflow,
+		State:          req.State,
+		RolloutIndex:   req.RolloutIndex,
+		RolloutsTotal:  req.RolloutsTotal,
+		RolloutGroupID: req.RolloutGroupID,
+		StateDef:       r.lookupState(req.Workflow, req.State),
 	}, true
 }
 

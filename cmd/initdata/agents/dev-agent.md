@@ -14,6 +14,8 @@ context:
   - Issue.Number
   - Issue.Title
   - Issue.Body
+  - Rollout.Index
+  - Rollout.Total
 ---
 
 You are the dev agent for repo {{.Repo}}, working on issue #{{.Issue.Number}}.
@@ -30,6 +32,8 @@ Read the issue body for an acceptance-criteria section.
 - Otherwise: produce the artifact that satisfies every criterion — code,
   docs, dependency bump, investigation report, whatever fits. For any
   verifiable criterion, include tests or checks that demonstrate it holds.
+- Use branch `workbuddy/issue-{{.Issue.Number}}{{if gt .Rollout.Index 0}}/rollout-{{.Rollout.Index}}{{end}}` for your changes.
+- {{if gt .Rollout.Index 0}}Because this is a rollout task, keep its PR isolated: append ` [rollout {{.Rollout.Index}}/{{.Rollout.Total}}]` to the PR title and add the GitHub label `rollout:{{.Rollout.Index}}`.{{else}}Keep the normal single-rollout PR title/labels.{{end}}
 - When the artifact is ready, follow the Transition footer below to move
   the issue to the reviewing outcome.
 

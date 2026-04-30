@@ -380,7 +380,18 @@ func BuildRemoteTaskContext(task *workerclient.Task, reader DistributedIssueRead
 			issue.Labels = append([]string(nil), details.Labels...)
 		}
 	}
-	return &runtimepkg.TaskContext{Issue: issue, Repo: task.Repo, RepoRoot: workDir, WorkDir: workDir, Session: runtimepkg.SessionContext{ID: generateSessionID(task.TaskID)}}
+	return &runtimepkg.TaskContext{
+		Issue:    issue,
+		Repo:     task.Repo,
+		RepoRoot: workDir,
+		WorkDir:  workDir,
+		Rollout: runtimepkg.RolloutContext{
+			Index:   task.RolloutIndex,
+			Total:   task.RolloutsTotal,
+			GroupID: task.RolloutGroupID,
+		},
+		Session: runtimepkg.SessionContext{ID: generateSessionID(task.TaskID)},
+	}
 }
 
 func runRemoteSessionWithWatchdog(

@@ -162,6 +162,9 @@ func (s *Store) createTables() error {
 			completed_at DATETIME,
 			exit_code INTEGER NOT NULL DEFAULT 0,
 			session_refs TEXT NOT NULL DEFAULT '[]',
+			rollout_index INTEGER NOT NULL DEFAULT 0,
+			rollouts_total INTEGER NOT NULL DEFAULT 1,
+			rollout_group_id TEXT NOT NULL DEFAULT '',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -347,6 +350,9 @@ func (s *Store) createTables() error {
 		`ALTER TABLE task_queue ADD COLUMN completed_at DATETIME`,
 		`ALTER TABLE task_queue ADD COLUMN exit_code INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE task_queue ADD COLUMN session_refs TEXT NOT NULL DEFAULT '[]'`,
+		`ALTER TABLE task_queue ADD COLUMN rollout_index INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE task_queue ADD COLUMN rollouts_total INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE task_queue ADD COLUMN rollout_group_id TEXT NOT NULL DEFAULT ''`,
 		// REQ-061: supervisor_agent_id links a coordinator task row to a
 		// subprocess managed by the local supervisor (issue #234). Nullable so
 		// rows written by older workers (or non-IPC code paths) stay valid.
@@ -486,7 +492,7 @@ func scanTaskRecord(scan func(dest ...any) error) (TaskRecord, error) {
 	var t TaskRecord
 	var createdAt, updatedAt string
 	var leaseExpiresAt, ackedAt, heartbeatAt, completedAt sql.NullString
-	var workerID, claimToken, labels, supervisorAgentID sql.NullString
+	var workerID, claimToken, labels, rolloutGroupID, supervisorAgentID sql.NullString
 	if err := scan(
 		&t.ID,
 		&t.Repo,
@@ -506,6 +512,9 @@ func scanTaskRecord(scan func(dest ...any) error) (TaskRecord, error) {
 		&completedAt,
 		&t.ExitCode,
 		&t.SessionRefs,
+		&t.RolloutIndex,
+		&t.RolloutsTotal,
+		&rolloutGroupID,
 		&supervisorAgentID,
 		&createdAt,
 		&updatedAt,
@@ -520,6 +529,12 @@ func scanTaskRecord(scan func(dest ...any) error) (TaskRecord, error) {
 	}
 	if labels.Valid {
 		t.Labels = labels.String
+	}
+	if rolloutGroupID.Valid {
+		t.RolloutGroupID = rolloutGroupID.String
+	}
+	if t.RolloutsTotal == 0 {
+		t.RolloutsTotal = 1
 	}
 	if supervisorAgentID.Valid {
 		t.SupervisorAgentID = supervisorAgentID.String
@@ -549,13 +564,18 @@ func (s *Store) InsertTask(t TaskRecord) error {
 	if t.SessionRefs == "" {
 		t.SessionRefs = "[]"
 	}
+	if t.RolloutsTotal <= 0 {
+		t.RolloutsTotal = 1
+	}
 	_, err := s.db.Exec(
 		`INSERT INTO task_queue (
 			id, repo, issue_num, agent_name, role, runtime, workflow, state,
-			worker_id, claim_token, status, exit_code, session_refs
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			worker_id, claim_token, status, exit_code, session_refs,
+			rollout_index, rollouts_total, rollout_group_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.ID, t.Repo, t.IssueNum, t.AgentName, t.Role, t.Runtime, t.Workflow, t.State,
 		t.WorkerID, t.ClaimToken, t.Status, t.ExitCode, t.SessionRefs,
+		t.RolloutIndex, t.RolloutsTotal, t.RolloutGroupID,
 	)
 	if err != nil {
 		return fmt.Errorf("store: insert task: %w", err)
@@ -574,7 +594,7 @@ func (s *Store) QueryTasksFiltered(filter TaskFilter) ([]TaskRecord, error) {
 	const selectTasks = `SELECT
 		tq.id, tq.repo, tq.issue_num, tq.agent_name, ic.labels, tq.role, tq.runtime, tq.workflow, tq.state,
 		tq.worker_id, tq.claim_token, tq.status, tq.lease_expires_at, tq.acked_at, tq.heartbeat_at,
-		tq.completed_at, tq.exit_code, tq.session_refs, tq.supervisor_agent_id, tq.created_at, tq.updated_at
+		tq.completed_at, tq.exit_code, tq.session_refs, tq.rollout_index, tq.rollouts_total, tq.rollout_group_id, tq.supervisor_agent_id, tq.created_at, tq.updated_at
 		FROM task_queue tq
 		LEFT JOIN issue_cache ic
 		  ON ic.repo = tq.repo AND ic.issue_num = tq.issue_num`
@@ -615,7 +635,7 @@ func (s *Store) GetTask(taskID string) (*TaskRecord, error) {
 	row := s.db.QueryRow(`SELECT
 		tq.id, tq.repo, tq.issue_num, tq.agent_name, ic.labels, tq.role, tq.runtime, tq.workflow, tq.state,
 		tq.worker_id, tq.claim_token, tq.status, tq.lease_expires_at, tq.acked_at, tq.heartbeat_at,
-		tq.completed_at, tq.exit_code, tq.session_refs, tq.supervisor_agent_id, tq.created_at, tq.updated_at
+		tq.completed_at, tq.exit_code, tq.session_refs, tq.rollout_index, tq.rollouts_total, tq.rollout_group_id, tq.supervisor_agent_id, tq.created_at, tq.updated_at
 		FROM task_queue tq
 		LEFT JOIN issue_cache ic
 		  ON ic.repo = tq.repo AND ic.issue_num = tq.issue_num
@@ -814,7 +834,7 @@ func (s *Store) claimNextTaskOnce(workerID string, roles []string, repos []strin
 		row := tx.QueryRow(`SELECT
 			id, repo, issue_num, agent_name, NULL, role, runtime, workflow, state,
 			worker_id, claim_token, status, lease_expires_at, acked_at, heartbeat_at,
-			completed_at, exit_code, session_refs, supervisor_agent_id, created_at, updated_at
+			completed_at, exit_code, session_refs, rollout_index, rollouts_total, rollout_group_id, supervisor_agent_id, created_at, updated_at
 			FROM task_queue
 			WHERE worker_id = ? AND claim_token = ? AND status = ?
 			  AND lease_expires_at IS NOT NULL AND lease_expires_at >= CURRENT_TIMESTAMP
@@ -857,7 +877,7 @@ func (s *Store) claimNextTaskOnce(workerID string, roles []string, repos []strin
 	query := `SELECT
 		id, repo, issue_num, agent_name, NULL, role, runtime, workflow, state,
 		worker_id, claim_token, status, lease_expires_at, acked_at, heartbeat_at,
-		completed_at, exit_code, session_refs, supervisor_agent_id, created_at, updated_at
+		completed_at, exit_code, session_refs, rollout_index, rollouts_total, rollout_group_id, supervisor_agent_id, created_at, updated_at
 		FROM task_queue
 		WHERE status IN (?, ?)
 		  AND (lease_expires_at IS NULL OR lease_expires_at < CURRENT_TIMESTAMP)
@@ -948,7 +968,7 @@ func (s *Store) ensureTaskOwnership(tx *sql.Tx, taskID, workerID string) (*TaskR
 	row := tx.QueryRow(`SELECT
 		id, repo, issue_num, agent_name, NULL, role, runtime, workflow, state,
 		worker_id, claim_token, status, lease_expires_at, acked_at, heartbeat_at,
-		completed_at, exit_code, session_refs, supervisor_agent_id, created_at, updated_at
+		completed_at, exit_code, session_refs, rollout_index, rollouts_total, rollout_group_id, supervisor_agent_id, created_at, updated_at
 		FROM task_queue WHERE id = ?`, taskID)
 	task, err := scanTaskRecord(row.Scan)
 	if err != nil {
@@ -2256,4 +2276,79 @@ func boolToInt(v bool) int {
 		return 1
 	}
 	return 0
+}
+
+type RolloutGroupSummary struct {
+	RolloutGroupID string
+	RolloutsTotal  int
+	SuccessCount   int
+	FailedCount    int
+	TerminalCount  int
+	PendingCount   int
+	Tasks          []TaskRecord
+}
+
+func (s *Store) ListTasksByRolloutGroup(groupID string) ([]TaskRecord, error) {
+	groupID = strings.TrimSpace(groupID)
+	if groupID == "" {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`SELECT
+		tq.id, tq.repo, tq.issue_num, tq.agent_name, ic.labels, tq.role, tq.runtime, tq.workflow, tq.state,
+		tq.worker_id, tq.claim_token, tq.status, tq.lease_expires_at, tq.acked_at, tq.heartbeat_at,
+		tq.completed_at, tq.exit_code, tq.session_refs, tq.rollout_index, tq.rollouts_total, tq.rollout_group_id, tq.supervisor_agent_id, tq.created_at, tq.updated_at
+		FROM task_queue tq
+		LEFT JOIN issue_cache ic ON ic.repo = tq.repo AND ic.issue_num = tq.issue_num
+		WHERE tq.rollout_group_id = ?
+		ORDER BY tq.rollout_index, tq.created_at, tq.id`, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list rollout group tasks: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []TaskRecord
+	for rows.Next() {
+		rec, err := scanTaskRecord(rows.Scan)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan rollout group task: %w", err)
+		}
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate rollout group tasks: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Store) SummarizeRolloutGroup(groupID string) (*RolloutGroupSummary, error) {
+	tasks, err := s.ListTasksByRolloutGroup(groupID)
+	if err != nil {
+		return nil, err
+	}
+	if len(tasks) == 0 {
+		return nil, nil
+	}
+	summary := &RolloutGroupSummary{
+		RolloutGroupID: groupID,
+		RolloutsTotal:  tasks[0].RolloutsTotal,
+		Tasks:          tasks,
+	}
+	for _, task := range tasks {
+		switch task.Status {
+		case TaskStatusCompleted:
+			summary.SuccessCount++
+			summary.TerminalCount++
+		case TaskStatusFailed, TaskStatusTimeout:
+			summary.FailedCount++
+			summary.TerminalCount++
+		default:
+			summary.PendingCount++
+		}
+		if task.RolloutsTotal > summary.RolloutsTotal {
+			summary.RolloutsTotal = task.RolloutsTotal
+		}
+	}
+	if summary.RolloutsTotal <= 0 {
+		summary.RolloutsTotal = len(tasks)
+	}
+	return summary, nil
 }

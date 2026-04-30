@@ -214,23 +214,26 @@ type statusResponse struct {
 }
 
 type sessionListResponse struct {
-	SessionID    string     `json:"session_id"`
-	TaskID       string     `json:"task_id,omitempty"`
-	Repo         string     `json:"repo"`
-	IssueNum     int        `json:"issue_num"`
-	AgentName    string     `json:"agent_name"`
-	Runtime      string     `json:"runtime,omitempty"`
-	WorkerID     string     `json:"worker_id,omitempty"`
-	Attempt      int        `json:"attempt"`
-	Status       string     `json:"status"`
-	TaskStatus   string     `json:"task_status,omitempty"`
-	Workflow     string     `json:"workflow,omitempty"`
-	CurrentState string     `json:"current_state,omitempty"`
-	ExitCode     int        `json:"exit_code"`
-	Duration     int64      `json:"duration"`
-	CreatedAt    time.Time  `json:"created_at"`
-	FinishedAt   *time.Time `json:"finished_at"`
-	Summary      string     `json:"summary,omitempty"`
+	SessionID      string     `json:"session_id"`
+	TaskID         string     `json:"task_id,omitempty"`
+	Repo           string     `json:"repo"`
+	IssueNum       int        `json:"issue_num"`
+	AgentName      string     `json:"agent_name"`
+	Runtime        string     `json:"runtime,omitempty"`
+	WorkerID       string     `json:"worker_id,omitempty"`
+	Attempt        int        `json:"attempt"`
+	Status         string     `json:"status"`
+	TaskStatus     string     `json:"task_status,omitempty"`
+	Workflow       string     `json:"workflow,omitempty"`
+	CurrentState   string     `json:"current_state,omitempty"`
+	RolloutIndex   int        `json:"rollout_index,omitempty"`
+	RolloutsTotal  int        `json:"rollouts_total,omitempty"`
+	RolloutGroupID string     `json:"rollout_group_id,omitempty"`
+	ExitCode       int        `json:"exit_code"`
+	Duration       int64      `json:"duration"`
+	CreatedAt      time.Time  `json:"created_at"`
+	FinishedAt     *time.Time `json:"finished_at"`
+	Summary        string     `json:"summary,omitempty"`
 	// Degraded marks rows whose persisted artefacts indicate the agent
 	// never produced a normal session: either no DB row at all (the response
 	// is synthesized from disk metadata.json) or the events-v1.jsonl file is
@@ -1095,6 +1098,9 @@ func (h *Handler) listSessions(p sessionListParams) ([]sessionListResponse, erro
 				row.TaskStatus = task.Status
 				row.Workflow = task.Workflow
 				row.CurrentState = task.State
+				row.RolloutIndex = task.RolloutIndex
+				row.RolloutsTotal = task.RolloutsTotal
+				row.RolloutGroupID = task.RolloutGroupID
 			}
 		}
 		if row.CurrentState == "" {

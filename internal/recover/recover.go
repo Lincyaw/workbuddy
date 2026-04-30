@@ -96,7 +96,7 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 	if opts.PruneWorktrees {
-		if err := pruneWorktrees(ctx, commonRoot, opts); err != nil {
+		if err := pruneWorktrees(ctx, repoRoot, commonRoot, opts); err != nil {
 			return err
 		}
 	}
@@ -245,28 +245,66 @@ func processParentPID(processes []Process, pid int) (int, bool) {
 	return 0, false
 }
 
-func pruneWorktrees(ctx context.Context, commonRoot string, opts Options) error {
+func pruneWorktrees(ctx context.Context, repoRoot, commonRoot string, opts Options) error {
 	wtRoot := filepath.Join(commonRoot, worktreesDir)
-	entries, err := os.ReadDir(wtRoot)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("recover: read worktrees dir: %w", err)
+	managed, err := listManagedWorktrees(ctx, commonRoot, wtRoot)
+	if err != nil {
+		return err
 	}
-	for _, entry := range entries {
-		target := filepath.Join(wtRoot, entry.Name())
+	if len(managed) == 0 {
+		emitAction(opts, Action{
+			Step:    "prune_worktrees",
+			Kind:    "note",
+			Message: "No managed worktrees found.",
+		})
+		fmt.Fprintln(opts.Stdout, "No managed worktrees found.")
+		return nil
+	}
+
+	repoSlug, err := gitHubRepoSlug(ctx, repoRoot)
+	if err != nil {
+		return err
+	}
+	openPRBranches, err := listOpenPRBranches(ctx, repoRoot, repoSlug)
+	if err != nil {
+		return err
+	}
+	remoteBranches, err := listRemoteIssueBranches(ctx, commonRoot)
+	if err != nil {
+		return fmt.Errorf("recover: list remote branches for worktree prune: %w", err)
+	}
+	remoteSet := make(map[string]struct{}, len(remoteBranches))
+	for _, branch := range remoteBranches {
+		remoteSet[branch] = struct{}{}
+	}
+
+	var pruned bool
+	for _, wt := range managed {
+		target := wt.Path
+		_, hasRemote := remoteSet[wt.Branch]
+		_, hasOpenPR := openPRBranches[wt.Branch]
+		if hasRemote && hasOpenPR {
+			continue
+		}
+		reason := "closed PR"
+		if !hasRemote {
+			reason = "deleted remote branch"
+		}
 		emitAction(opts, Action{
 			Step:    "prune_worktrees",
 			Kind:    "worktree_path",
 			Target:  target,
 			Preview: opts.DryRun,
-			Message: fmt.Sprintf("%s worktree path %s", actionText(opts.DryRun, "Would remove", "Removing"), target),
+			Message: fmt.Sprintf("%s worktree path %s (%s)", actionText(opts.DryRun, "Would remove", "Removing"), target, reason),
 		})
-		fmt.Fprintf(opts.Stdout, "%s worktree path %s\n", actionText(opts.DryRun, "Would remove", "Removing"), target)
+		fmt.Fprintf(opts.Stdout, "%s worktree path %s (%s)\n", actionText(opts.DryRun, "Would remove", "Removing"), target, reason)
 		if opts.DryRun {
 			continue
 		}
-		if err := os.RemoveAll(target); err != nil {
+		if err := removeManagedWorktree(ctx, commonRoot, target); err != nil {
 			return fmt.Errorf("recover: remove worktree %s: %w", target, err)
 		}
+		pruned = true
 	}
 	emitAction(opts, Action{
 		Step:    "prune_worktrees",
@@ -280,6 +318,62 @@ func pruneWorktrees(ctx context.Context, commonRoot string, opts Options) error 
 	}
 	if _, err := gitOutput(ctx, commonRoot, "worktree", "prune"); err != nil {
 		return fmt.Errorf("recover: git worktree prune: %w", err)
+	}
+	if !pruned {
+		emitAction(opts, Action{
+			Step:    "prune_worktrees",
+			Kind:    "note",
+			Message: "No orphaned managed worktrees found.",
+		})
+		fmt.Fprintln(opts.Stdout, "No orphaned managed worktrees found.")
+	}
+	return nil
+}
+
+type managedWorktree struct {
+	Path   string
+	Branch string
+}
+
+func listManagedWorktrees(ctx context.Context, commonRoot, wtRoot string) ([]managedWorktree, error) {
+	out, err := gitOutput(ctx, commonRoot, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, fmt.Errorf("recover: list git worktrees: %w", err)
+	}
+	var outWorktrees []managedWorktree
+	var currentPath string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			currentPath = strings.TrimSpace(strings.TrimPrefix(line, "worktree "))
+		case strings.HasPrefix(line, "branch ") && currentPath != "":
+			branchRef := strings.TrimSpace(strings.TrimPrefix(line, "branch "))
+			branchRef = strings.TrimPrefix(branchRef, "refs/heads/")
+			if branchRef == "" {
+				continue
+			}
+			if !isWithinRoot(wtRoot, currentPath) {
+				continue
+			}
+			if !strings.HasPrefix(branchRef, "workbuddy/issue-") {
+				continue
+			}
+			outWorktrees = append(outWorktrees, managedWorktree{
+				Path:   currentPath,
+				Branch: branchRef,
+			})
+		}
+	}
+	return outWorktrees, nil
+}
+
+func removeManagedWorktree(ctx context.Context, commonRoot, target string) error {
+	if _, err := gitOutput(ctx, commonRoot, "worktree", "remove", "--force", target); err == nil {
+		return nil
+	}
+	if err := os.RemoveAll(target); err != nil {
+		return err
 	}
 	return nil
 }

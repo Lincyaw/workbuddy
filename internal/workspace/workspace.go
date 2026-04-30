@@ -54,12 +54,16 @@ func refKey(wtPath string) string {
 // If the worktree path already exists and is on the expected branch with
 // no uncommitted changes, it is reused. Otherwise, the call fails loudly
 // and never falls back to the main working tree.
-func (m *Manager) Create(issueNum int, taskID string) (string, error) {
+func (m *Manager) Create(issueNum int, taskID string, rolloutIndex int) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	branchName := fmt.Sprintf("workbuddy/issue-%d", issueNum)
 	wtPath := filepath.Join(m.baseDir, worktreeDir, fmt.Sprintf("issue-%d", issueNum))
+	if rolloutIndex > 0 {
+		branchName = fmt.Sprintf("workbuddy/issue-%d/rollout-%d", issueNum, rolloutIndex)
+		wtPath = filepath.Join(wtPath, fmt.Sprintf("rollout-%d", rolloutIndex))
+	}
 
 	// 1. Prune stale worktree metadata (cheap, idempotent).
 	pruneCmd := exec.Command("git", "worktree", "prune")

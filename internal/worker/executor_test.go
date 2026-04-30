@@ -375,7 +375,7 @@ type fakeWorkspaceManager struct {
 	removed string
 }
 
-func (f *fakeWorkspaceManager) Create(issueNum int, taskID string) (string, error) {
+func (f *fakeWorkspaceManager) Create(issueNum int, taskID string, rolloutIndex int) (string, error) {
 	if f.err != nil {
 		return "", f.err
 	}

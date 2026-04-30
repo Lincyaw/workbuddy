@@ -13,6 +13,9 @@ export interface SessionListItem {
   task_status?: string;
   workflow?: string;
   current_state?: string;
+  rollout_index?: number;
+  rollouts_total?: number;
+  rollout_group_id?: string;
   exit_code: number;
   duration: number;
   created_at: string;

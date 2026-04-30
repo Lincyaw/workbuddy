@@ -304,6 +304,34 @@ func TestCreateAndReadWrite(t *testing.T) {
 	}
 }
 
+func TestInsertTask_DefaultRolloutColumnsPreserveSingleTaskSemantics(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.InsertTask(TaskRecord{
+		ID:        "task-single",
+		Repo:      "org/repo",
+		IssueNum:  41,
+		AgentName: "dev-agent",
+		Status:    TaskStatusPending,
+	}); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+
+	task, err := s.GetTask("task-single")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if task.RolloutIndex != 0 {
+		t.Fatalf("rollout_index = %d, want 0", task.RolloutIndex)
+	}
+	if task.RolloutsTotal != 1 {
+		t.Fatalf("rollouts_total = %d, want 1", task.RolloutsTotal)
+	}
+	if task.RolloutGroupID != "" {
+		t.Fatalf("rollout_group_id = %q, want empty", task.RolloutGroupID)
+	}
+}
+
 // TestIncrementTransitionAtomic verifies that concurrent IncrementTransition
 // calls produce the correct final count (no lost updates).
 func TestIncrementTransitionAtomic(t *testing.T) {

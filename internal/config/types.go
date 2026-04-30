@@ -162,6 +162,16 @@ type WorkflowTrigger struct {
 	IssueLabel string `yaml:"issue_label"`
 }
 
+// JoinConfig controls how a state's sibling tasks converge.
+//
+// Legacy scalar YAML such as `join: all_passed` still decodes via State's
+// custom UnmarshalYAML implementation. Rollout joins use `strategy: rollouts`
+// with optional `min_successes`.
+type JoinConfig struct {
+	Strategy     string `yaml:"strategy,omitempty"`
+	MinSuccesses int    `yaml:"min_successes,omitempty"`
+}
+
 // State defines a single state in the workflow state machine. Transitions are
 // modeled as a label→target-state-name map: the key is the issue label whose
 // arrival drives the transition, the value is the target state name. Empty
@@ -170,7 +180,8 @@ type State struct {
 	EnterLabel  string            `yaml:"enter_label"`
 	Agent       string            `yaml:"agent,omitempty"`
 	Agents      []string          `yaml:"agents,omitempty"`
-	Join        string            `yaml:"join,omitempty"`
+	Join        JoinConfig        `yaml:"join,omitempty"`
+	Rollouts    int               `yaml:"rollouts,omitempty"`
 	Transitions map[string]string `yaml:"transitions"`
 }
 

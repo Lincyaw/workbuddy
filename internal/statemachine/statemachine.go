@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/Lincyaw/workbuddy/internal/alertbus"
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/dependency"
@@ -35,11 +37,14 @@ type ChangeEvent struct {
 
 // DispatchRequest is sent to the Task Router when an agent needs to run.
 type DispatchRequest struct {
-	Repo      string
-	IssueNum  int
-	AgentName string
-	Workflow  string
-	State     string
+	Repo           string
+	IssueNum       int
+	AgentName      string
+	Workflow       string
+	State          string
+	RolloutIndex   int
+	RolloutsTotal  int
+	RolloutGroupID string
 }
 
 // EventRecorder abstracts event logging so tests can use a fake.
@@ -51,7 +56,7 @@ type EventRecorder interface {
 // if a label hasn't changed after an agent completes.
 const StuckTimeout = 5 * time.Minute
 
-const defaultJoinStrategy = config.JoinAllPassed
+var defaultJoinConfig = config.JoinConfig{Strategy: config.JoinAllPassed}
 
 // MaxConsecutiveAgentFailures is the number of back-to-back failed or timed-out
 // tasks the same agent may accumulate on one issue before the coordinator
@@ -105,30 +110,30 @@ type CycleCapInfo struct {
 type dispatchGroup struct {
 	workflow string
 	state    string
-	join     string
-	agents   map[string]struct{}
+	join     config.JoinConfig
+	slots    map[string]string // dispatch slot key -> agent name
 
-	dispatchedAgents map[string]struct{}
+	dispatchedSlots  map[string]struct{}
 	completedTaskIDs map[string]struct{}
-	completedAgents  map[string]struct{}
-	successAgents    map[string]struct{}
-	failedAgents     map[string]struct{}
+	completedSlots   map[string]struct{}
+	successSlots     map[string]struct{}
+	failedSlots      map[string]struct{}
 }
 
-func newDispatchGroup(wf, state, join string, agents []string) *dispatchGroup {
+func newDispatchGroup(wf, state string, join config.JoinConfig, slots map[string]string) *dispatchGroup {
 	g := &dispatchGroup{
 		workflow:         wf,
 		state:            state,
 		join:             join,
-		agents:           make(map[string]struct{}, len(agents)),
-		dispatchedAgents: make(map[string]struct{}, len(agents)),
+		slots:            make(map[string]string, len(slots)),
+		dispatchedSlots:  make(map[string]struct{}, len(slots)),
 		completedTaskIDs: make(map[string]struct{}),
-		completedAgents:  make(map[string]struct{}),
-		successAgents:    make(map[string]struct{}),
-		failedAgents:     make(map[string]struct{}),
+		completedSlots:   make(map[string]struct{}, len(slots)),
+		successSlots:     make(map[string]struct{}, len(slots)),
+		failedSlots:      make(map[string]struct{}, len(slots)),
 	}
-	for _, a := range agents {
-		g.agents[a] = struct{}{}
+	for key, agentName := range slots {
+		g.slots[key] = agentName
 	}
 	return g
 }
@@ -383,7 +388,7 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 			}
 		}
 
-		return sm.dispatchStateAgents(ctx, event.Repo, event.IssueNum, wf.Name, currentStateName, currentState)
+		return sm.dispatchStateAgents(ctx, event.Repo, event.IssueNum, wf.Name, currentStateName, currentState, event.Labels)
 	}
 
 	if stateEntryDetected {
@@ -493,7 +498,7 @@ func (sm *StateMachine) evaluateTransitions(ctx context.Context, wf *config.Work
 
 	// If the target state has agents, dispatch them.
 	if sm.stateHasAgents(targetState) {
-		if err := sm.dispatchStateAgents(ctx, event.Repo, event.IssueNum, wf.Name, targetStateName, targetState); err != nil {
+		if err := sm.dispatchStateAgents(ctx, event.Repo, event.IssueNum, wf.Name, targetStateName, targetState, event.Labels); err != nil {
 			return true, err
 		}
 	}
@@ -668,7 +673,7 @@ func (sm *StateMachine) DispatchAgent(ctx context.Context, repo string, issueNum
 	} else if blocked {
 		return nil
 	}
-	return sm.dispatchSingleAgent(ctx, repo, issueNum, agentName, workflow, state)
+	return sm.dispatchSingleAgent(ctx, DispatchRequest{Repo: repo, IssueNum: issueNum, AgentName: agentName, Workflow: workflow, State: state})
 }
 
 // isBlockedByIssueClaim acquires (or extends) the persistent per-issue claim
@@ -881,8 +886,25 @@ func (sm *StateMachine) isBlockedByDependency(repo string, issueNum int, agentFo
 
 // dispatchSingleAgent sends a dispatch request for one agent.
 // Caller must have already checked dependency state.
-func (sm *StateMachine) dispatchSingleAgent(ctx context.Context, repo string, issueNum int, agentName, workflow, state string) error {
+func rolloutSlotKey(index int) string {
+	return fmt.Sprintf("rollout:%d", index)
+}
+
+func dispatchSlotKey(req DispatchRequest) string {
+	if req.RolloutIndex > 0 {
+		return rolloutSlotKey(req.RolloutIndex)
+	}
+	return req.AgentName
+}
+
+func (sm *StateMachine) dispatchSingleAgent(ctx context.Context, req DispatchRequest) error {
+	repo := req.Repo
+	issueNum := req.IssueNum
+	agentName := req.AgentName
+	workflow := req.Workflow
+	state := req.State
 	issueKey := sm.issueKey(repo, issueNum)
+	slotKey := dispatchSlotKey(req)
 
 	sm.inflightMu.Lock()
 	if existing, ok := sm.inflight[issueKey]; ok {
@@ -892,32 +914,37 @@ func (sm *StateMachine) dispatchSingleAgent(ctx context.Context, repo string, is
 				map[string]string{"agent": agentName, "reason": "different state/workflow already running", "state": state, "workflow": workflow})
 			return nil
 		}
-		// Same workflow+state: block if this agent was already dispatched.
-		if _, dispatched := existing.dispatchedAgents[agentName]; dispatched {
+		// Same workflow+state: block if this slot was already dispatched.
+		if _, dispatched := existing.dispatchedSlots[slotKey]; dispatched {
 			sm.inflightMu.Unlock()
 			sm.eventlog.Log(eventlog.TypeDispatchSkippedInflight, repo, issueNum,
 				map[string]string{"agent": agentName, "reason": "agent already dispatched", "state": state, "workflow": workflow})
 			return nil
 		}
-		existing.dispatchedAgents[agentName] = struct{}{}
+		existing.dispatchedSlots[slotKey] = struct{}{}
 	} else {
-		// Create a single-agent inflight group to prevent duplicate dispatches.
-		sm.inflight[issueKey] = newDispatchGroup(workflow, state, defaultJoinStrategy, []string{agentName})
+		sm.inflight[issueKey] = newDispatchGroup(workflow, state, defaultJoinConfig, map[string]string{slotKey: agentName})
+		sm.inflight[issueKey].dispatchedSlots[slotKey] = struct{}{}
 	}
 	sm.inflightMu.Unlock()
 
 	sm.eventlog.Log(eventlog.TypeDispatch, repo, issueNum, map[string]any{
-		"agent_name": agentName,
-		"workflow":   workflow,
-		"state":      state,
+		"agent_name":     agentName,
+		"workflow":       workflow,
+		"state":          state,
+		"rollout_index":  req.RolloutIndex,
+		"rollouts_total": req.RolloutsTotal,
+		"group_id":       req.RolloutGroupID,
 	})
-
-	req := DispatchRequest{
-		Repo:      repo,
-		IssueNum:  issueNum,
-		AgentName: agentName,
-		Workflow:  workflow,
-		State:     state,
+	if req.RolloutIndex > 0 && sm.eventlog != nil {
+		sm.eventlog.Log(eventlog.TypeRolloutDispatched, repo, issueNum, map[string]any{
+			"agent_name":     agentName,
+			"workflow":       workflow,
+			"state":          state,
+			"rollout_index":  req.RolloutIndex,
+			"rollouts_total": req.RolloutsTotal,
+			"group_id":       req.RolloutGroupID,
+		})
 	}
 	select {
 	case sm.dispatch <- req:
@@ -929,8 +956,8 @@ func (sm *StateMachine) dispatchSingleAgent(ctx context.Context, repo string, is
 		released := false
 		sm.inflightMu.Lock()
 		if g, ok := sm.inflight[issueKey]; ok {
-			delete(g.dispatchedAgents, agentName)
-			if len(g.dispatchedAgents) == 0 {
+			delete(g.dispatchedSlots, slotKey)
+			if len(g.dispatchedSlots) == 0 {
 				delete(sm.inflight, issueKey)
 				released = true
 			}
@@ -946,7 +973,7 @@ func (sm *StateMachine) dispatchSingleAgent(ctx context.Context, repo string, is
 	return nil
 }
 
-func (sm *StateMachine) dispatchStateAgents(ctx context.Context, repo string, issueNum int, wfName, state string, stateDef *config.State) error {
+func (sm *StateMachine) dispatchStateAgents(ctx context.Context, repo string, issueNum int, wfName, state string, stateDef *config.State, labels []string) error {
 	agents := sm.stateAgents(stateDef)
 	if len(agents) == 0 {
 		return nil
@@ -970,12 +997,47 @@ func (sm *StateMachine) dispatchStateAgents(ctx context.Context, repo string, is
 	}
 
 	issueKey := sm.issueKey(repo, issueNum)
+	rollouts, err := resolveStateRollouts(stateDef, labels)
+	if err != nil {
+		return err
+	}
 	join := stateDef.Join // already normalized by config loader
-	if join == "" {
-		join = defaultJoinStrategy
+	if strings.TrimSpace(join.Strategy) == "" {
+		join = defaultJoinConfig
+	}
+	slots := make(map[string]string)
+	requests := make([]DispatchRequest, 0)
+	if rollouts > 1 {
+		groupID := uuid.NewString()
+		for idx := 1; idx <= rollouts; idx++ {
+			req := DispatchRequest{
+				Repo:           repo,
+				IssueNum:       issueNum,
+				AgentName:      agents[0],
+				Workflow:       wfName,
+				State:          state,
+				RolloutIndex:   idx,
+				RolloutsTotal:  rollouts,
+				RolloutGroupID: groupID,
+			}
+			slots[dispatchSlotKey(req)] = req.AgentName
+			requests = append(requests, req)
+		}
+	} else {
+		for _, agent := range agents {
+			req := DispatchRequest{
+				Repo:      repo,
+				IssueNum:  issueNum,
+				AgentName: agent,
+				Workflow:  wfName,
+				State:     state,
+			}
+			slots[dispatchSlotKey(req)] = req.AgentName
+			requests = append(requests, req)
+		}
 	}
 
-	group := newDispatchGroup(wfName, state, join, agents)
+	group := newDispatchGroup(wfName, state, join, slots)
 
 	sm.inflightMu.Lock()
 	if existing, ok := sm.inflight[issueKey]; ok {
@@ -991,12 +1053,12 @@ func (sm *StateMachine) dispatchStateAgents(ctx context.Context, repo string, is
 	sm.inflight[issueKey] = group
 	sm.inflightMu.Unlock()
 
-	for _, agent := range agents {
-		if err := sm.dispatchSingleAgent(ctx, repo, issueNum, agent, wfName, state); err != nil {
+	for _, req := range requests {
+		if err := sm.dispatchSingleAgent(ctx, req); err != nil {
 			// Don't remove the inflight group — agents already dispatched before
 			// this failure are still running and need tracking. Log the error
 			// and let those agents complete normally.
-			log.Printf("[statemachine] partial dispatch failure for %s (agent %s): %v", issueKey, agent, err)
+			log.Printf("[statemachine] partial dispatch failure for %s (agent %s): %v", issueKey, req.AgentName, err)
 			return err
 		}
 	}
@@ -1043,6 +1105,20 @@ func (sm *StateMachine) isBackEdge(repo string, issueNum int, targetState string
 func (sm *StateMachine) MarkAgentCompleted(repo string, issueNum int, taskID, agentName string, exitCode int, currentLabels []string) {
 	issueKey := sm.issueKey(repo, issueNum)
 	agentName = sm.canonicalAgentName(taskID, agentName)
+	slotKey := agentName
+	rolloutGroupID := ""
+	rolloutIndex := 0
+	rolloutsTotal := 1
+	if sm.store != nil && strings.TrimSpace(taskID) != "" {
+		if task, err := sm.store.GetTask(taskID); err == nil && task != nil {
+			rolloutGroupID = task.RolloutGroupID
+			rolloutIndex = task.RolloutIndex
+			rolloutsTotal = task.RolloutsTotal
+			if rolloutIndex > 0 {
+				slotKey = rolloutSlotKey(rolloutIndex)
+			}
+		}
+	}
 
 	sm.inflightMu.Lock()
 	group := sm.inflight[issueKey]
@@ -1064,62 +1140,99 @@ func (sm *StateMachine) MarkAgentCompleted(repo string, issueNum int, taskID, ag
 		group.completedTaskIDs[taskKey] = struct{}{}
 	}
 
-	// Verify agent belongs to this dispatch group.
-	if _, belongs := group.agents[agentName]; !belongs {
+	// Verify the completed slot belongs to this dispatch group.
+	if _, belongs := group.slots[slotKey]; !belongs {
 		sm.inflightMu.Unlock()
-		log.Printf("[statemachine] warning: agent %q completed for %s but is not in inflight group, skipping update", agentName, issueKey)
+		log.Printf("[statemachine] warning: slot %q completed for %s but is not in inflight group, skipping update", slotKey, issueKey)
 		sm.logCompletionEvent(repo, issueNum, taskID, agentName, exitCode)
 		return
 	}
 
-	agentCompletedAlready := false
-	if _, seen := group.completedAgents[agentName]; seen {
-		agentCompletedAlready = true
+	slotCompletedAlready := false
+	if _, seen := group.completedSlots[slotKey]; seen {
+		slotCompletedAlready = true
 	}
 
-	if !agentCompletedAlready {
-		group.completedAgents[agentName] = struct{}{}
+	if !slotCompletedAlready {
+		group.completedSlots[slotKey] = struct{}{}
 		if exitCode == 0 {
-			group.successAgents[agentName] = struct{}{}
+			group.successSlots[slotKey] = struct{}{}
 		} else {
-			group.failedAgents[agentName] = struct{}{}
+			group.failedSlots[slotKey] = struct{}{}
 		}
 	}
 
-	// group.join is guaranteed normalized by dispatchStateAgents / newDispatchGroup.
-	join := group.join
+	if rolloutIndex > 0 && sm.eventlog != nil {
+		status := store.TaskStatusFailed
+		if exitCode == 0 {
+			status = store.TaskStatusCompleted
+		}
+		sm.eventlog.Log(eventlog.TypeRolloutCompleted, repo, issueNum, map[string]any{
+			"agent_name":     agentName,
+			"workflow":       group.workflow,
+			"state":          group.state,
+			"rollout_index":  rolloutIndex,
+			"rollouts_total": rolloutsTotal,
+			"group_id":       rolloutGroupID,
+			"status":         status,
+		})
+	}
 
 	shouldAdvance := false
 	passed := false
+	join := group.join.Strategy
 	switch join {
+	case config.JoinRollouts:
+		if rolloutGroupID == "" {
+			if len(group.completedSlots) >= len(group.slots) {
+				shouldAdvance = true
+				passed = len(group.failedSlots) == 0
+			}
+			break
+		}
+		summary, err := sm.store.SummarizeRolloutGroup(rolloutGroupID)
+		if err != nil {
+			log.Printf("[statemachine] rollout summary failed for %s: %v", rolloutGroupID, err)
+			break
+		}
+		if summary != nil {
+			minSuccesses := group.join.MinSuccesses
+			if minSuccesses <= 0 {
+				minSuccesses = summary.RolloutsTotal
+			}
+			if summary.TerminalCount >= summary.RolloutsTotal {
+				shouldAdvance = true
+				passed = summary.SuccessCount >= minSuccesses
+			}
+		}
 	case config.JoinAnyPassed:
-		if !agentCompletedAlready && exitCode == 0 {
-			if len(group.successAgents) > 0 {
+		if !slotCompletedAlready && exitCode == 0 {
+			if len(group.successSlots) > 0 {
 				shouldAdvance = true
 				passed = true
 			}
 		}
-		if !shouldAdvance && len(group.completedAgents) >= len(group.agents) {
+		if !shouldAdvance && len(group.completedSlots) >= len(group.slots) {
 			shouldAdvance = true
 			passed = false
 		}
 	case config.JoinAllPassed:
-		if !agentCompletedAlready && exitCode != 0 {
+		if !slotCompletedAlready && exitCode != 0 {
 			shouldAdvance = true
 			passed = false
 		}
-		if len(group.completedAgents) >= len(group.agents) {
+		if len(group.completedSlots) >= len(group.slots) {
 			shouldAdvance = true
-			if len(group.failedAgents) == 0 {
+			if len(group.failedSlots) == 0 {
 				passed = true
 			} else {
 				passed = false
 			}
 		}
 	default:
-		if len(group.completedAgents) >= len(group.agents) {
+		if len(group.completedSlots) >= len(group.slots) {
 			shouldAdvance = true
-			passed = len(group.failedAgents) == 0
+			passed = len(group.failedSlots) == 0
 		}
 	}
 
@@ -1142,10 +1255,14 @@ func (sm *StateMachine) MarkAgentCompleted(repo string, issueNum int, taskID, ag
 			}
 		} else {
 			sm.eventlog.Log(eventlog.TypeTransitionToFailed, repo, issueNum,
-				map[string]any{"state": group.state, "issue": issueNum, "join": join})
+				map[string]any{"state": group.state, "issue": issueNum, "join": join, "needs_human": join == config.JoinRollouts})
+			if join == config.JoinRollouts {
+				log.Printf("[statemachine] rollout join failed for %s#%d state=%s group=%s", repo, issueNum, group.state, rolloutGroupID)
+			}
 			sm.publishAlert(alertbus.KindTransitionToFailed, alertbus.SeverityError, repo, issueNum, "", map[string]any{
-				"state": group.state,
-				"join":  join,
+				"state":       group.state,
+				"join":        join,
+				"needs_human": join == config.JoinRollouts,
 			})
 			sm.recordStuckCandidate(issueKey, currentLabels)
 		}
@@ -1296,6 +1413,34 @@ func (sm *StateMachine) stateHasAgents(state *config.State) bool {
 	return len(sm.stateAgents(state)) > 0
 }
 
+func resolveStateRollouts(state *config.State, labels []string) (int, error) {
+	defaultRollouts := 1
+	if state != nil && state.Rollouts > 0 {
+		defaultRollouts = state.Rollouts
+	}
+	override := 0
+	for _, label := range labels {
+		label = strings.TrimSpace(label)
+		if !strings.HasPrefix(label, "rollouts:") {
+			continue
+		}
+		switch label {
+		case "rollouts:2", "rollouts:3", "rollouts:4", "rollouts:5":
+			n, _ := strconv.Atoi(strings.TrimPrefix(label, "rollouts:"))
+			if override != 0 && override != n {
+				return 0, fmt.Errorf("statemachine: conflicting rollout labels: %q", label)
+			}
+			override = n
+		default:
+			return 0, fmt.Errorf("statemachine: invalid rollout label %q (expected literal rollouts:2..rollouts:5)", label)
+		}
+	}
+	if override > 0 {
+		return override, nil
+	}
+	return defaultRollouts, nil
+}
+
 func (sm *StateMachine) issueKey(repo string, issueNum int) string {
 	return fmt.Sprintf("%s#%d", repo, issueNum)
 }
@@ -1335,9 +1480,9 @@ func (sm *StateMachine) detectNoWorkflowMatchHazard(event ChangeEvent) {
 	}
 	triggers := sm.workflowTriggerLabels()
 	sm.eventlog.Log(eventlog.TypeIssueNoWorkflowMatch, event.Repo, event.IssueNum, map[string]any{
-		"labels":             append([]string(nil), event.Labels...),
-		"workflow_triggers":  triggers,
-		"hint":               "add one of the workflow trigger labels (e.g. workbuddy) to opt this issue into the pipeline",
+		"labels":            append([]string(nil), event.Labels...),
+		"workflow_triggers": triggers,
+		"hint":              "add one of the workflow trigger labels (e.g. workbuddy) to opt this issue into the pipeline",
 	})
 }
 
@@ -1381,10 +1526,10 @@ func (sm *StateMachine) detectDependencyUnenteredHazard(wf *config.WorkflowConfi
 		return
 	}
 	sm.eventlog.Log(eventlog.TypeIssueDependencyUnentered, event.Repo, event.IssueNum, map[string]any{
-		"workflow":    wf.Name,
-		"labels":      append([]string(nil), event.Labels...),
-		"depends_on":  deps,
-		"hint":        "add status:blocked so the dependency gate can evaluate, or status:developing if the deps are already satisfied",
+		"workflow":   wf.Name,
+		"labels":     append([]string(nil), event.Labels...),
+		"depends_on": deps,
+		"hint":       "add status:blocked so the dependency gate can evaluate, or status:developing if the deps are already satisfied",
 	})
 }
 

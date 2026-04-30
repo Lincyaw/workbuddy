@@ -53,6 +53,8 @@ const (
 	TypeDevReviewCycleCapReached    = "dev_review_cycle_cap_reached"
 	TypeDevReviewCycleCountReset    = "dev_review_cycle_count_reset"
 	TypeLongFlightStuck             = "long_flight_stuck_detected"
+	TypeRolloutDispatched           = "rollout_dispatched"
+	TypeRolloutCompleted            = "rollout_completed"
 	// TypeIssueNoWorkflowMatch fires when poller observes an issue carrying a
 	// status:* label but none of the configured workflow trigger labels match,
 	// i.e. the issue cannot enter the state machine. Idempotent per
@@ -118,6 +120,8 @@ var AllEventTypes = []string{
 	TypeDevReviewCycleCapReached,
 	TypeDevReviewCycleCountReset,
 	TypeLongFlightStuck,
+	TypeRolloutDispatched,
+	TypeRolloutCompleted,
 	TypeIssueNoWorkflowMatch,
 	TypeIssueDependencyUnentered,
 	TypeCoordinatorStarted,
