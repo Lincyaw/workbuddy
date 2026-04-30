@@ -3382,3 +3382,43 @@ requirements:
       - internal/worker/resume_test.go
     deps:
       - REQ-096
+    title: deploy install --bundle + deploy uninstall + v0.4→v0.5 migration doc (#235)
+    description: >
+      Phase 1 step 3 of #224. `workbuddy deploy install --bundle` installs
+      the three v0.5 systemd user units in one shot:
+      `workbuddy-supervisor.service` (`Type=notify`, `KillMode=process`,
+      `Restart=always`, `ExecStart=workbuddy supervisor`), then
+      `workbuddy-coordinator.service` and `workbuddy-worker.service` with
+      `After=workbuddy-supervisor.service` ordering. Per-unit ExecStart
+      extras flow through `--supervisor-args`, `--coordinator-args`, and
+      `--worker-args` (each repeatable); `--env-file` applies to all three.
+      The supervisor process now responds to `NOTIFY_SOCKET` with
+      `READY=1` so `Type=notify` actually completes activation.
+      A new `deploy uninstall` subcommand stops/disables/deletes the three
+      bundle units, removes their manifests, and (unless `--keep-state` is
+      set) wipes the supervisor unix socket and on-disk state directory.
+      `deploy upgrade --bundle` detects a v0.4-style install (only
+      coordinator+worker manifests present) and backfills the missing
+      supervisor unit using env-files harvested from the existing
+      manifests. Operator runbook lives at
+      `docs/upgrade-v0.4-to-v0.5.md` covering the recommended upgrade
+      order (stop worker → upgrade binaries → install supervisor →
+      restart) plus a rollback procedure.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-098-1: `workbuddy deploy install --bundle` emits <unit-dir>/workbuddy-supervisor.service with `Type=notify`, `KillMode=process`, `Restart=always`, `ExecStart=...workbuddy supervisor`, and the env-files supplied via --env-file."
+      - "AC-098-2: bundle install also emits coordinator and worker units carrying `After=network-online.target workbuddy-supervisor.service`, and runs systemctl daemon-reload + enable + start for each of the three units in the install scope."
+      - "AC-098-3: `workbuddy deploy uninstall` removes all three bundle units, their manifests, the supervisor unix socket, and the on-disk supervisor state directory; `--keep-state` retains the socket+state-dir; the binary is left in place."
+      - "AC-098-4: `workbuddy deploy upgrade --bundle` against a v0.4 install (coordinator+worker manifests, no supervisor manifest) installs the missing supervisor unit using the env-files recorded in the existing manifests; it is idempotent on a v0.5 install."
+      - "AC-098-5: `workbuddy supervisor` writes `READY=1` to `$NOTIFY_SOCKET` once the IPC server starts, so the Type=notify unit reaches `active (running)` instead of timing out at activation."
+      - "AC-098-6: `docs/upgrade-v0.4-to-v0.5.md` documents the recommended upgrade order, the bundle install command, the uninstall command, and a rollback procedure to v0.4."
+    code:
+      - cmd/deploy.go
+      - cmd/deploy_bundle.go
+      - cmd/supervisor.go
+      - docs/upgrade-v0.4-to-v0.5.md
+    tests:
+      - cmd/deploy_bundle_test.go
+    deps: [REQ-092, REQ-096, REQ-097]

@@ -105,6 +105,17 @@ type deploymentSystemd struct {
 	Started          bool              `json:"started"`
 	Environment      map[string]string `json:"environment,omitempty"`
 	EnvironmentFiles []string          `json:"environment_files,omitempty"`
+	// Type is the systemd Type= value (e.g. "simple", "notify", "exec").
+	// Defaults to "simple" when empty (back-compat with v0.4 manifests).
+	Type string `json:"type,omitempty"`
+	// KillMode overrides the unit's KillMode= setting (e.g. "process").
+	// Empty means systemd default ("control-group").
+	KillMode string `json:"kill_mode,omitempty"`
+	// Restart overrides the Restart= setting (e.g. "always"). Empty
+	// keeps the legacy "on-failure" used by v0.4 deployments.
+	Restart string `json:"restart,omitempty"`
+	// After lists additional unit names to add to After= ordering.
+	After []string `json:"after,omitempty"`
 }
 
 type deployScopePaths struct {
@@ -147,6 +158,12 @@ var deployInstallCmd = &cobra.Command{
 	Use:   "install [-- workbuddy args...]",
 	Short: "Install the current binary and optionally create a systemd unit",
 	Example: strings.TrimSpace(`
+  # v0.5 bundled install: supervisor + coordinator + worker user units
+  workbuddy deploy install --bundle --scope user \
+    --env-file /home/ddq/.config/workbuddy/worker.env \
+    --coordinator-args=--listen=127.0.0.1:8081 --coordinator-args=--auth \
+    --worker-args=--coordinator=http://127.0.0.1:8081 --worker-args=--token=$WORKBUDDY_TOKEN
+
   # Single-process deploy (default command is "serve")
   workbuddy deploy install --name workbuddy --scope user --systemd
 
@@ -251,17 +268,31 @@ func init() {
 	deployUpgradeCmd.Flags().Bool("all", false, "Operate on every deployment in the requested scope")
 	deployUpgradeCmd.Flags().Bool("force", false, "Skip confirmation prompts for destructive actions")
 	deployUpgradeCmd.Flags().Bool("dry-run", false, "Print the actions that would be taken without executing them")
+	deployUpgradeCmd.Flags().Bool("bundle", false, "After upgrading, ensure the v0.5 supervisor unit is installed (used to migrate a v0.4 install that only has coordinator+worker)")
 
 	deployCmd.AddCommand(deployInstallCmd, deployListCmd, deployRedeployCmd, deployStopCmd, deployStartCmd, deployDeleteCmd, deployUpgradeCmd)
 	rootCmd.AddCommand(deployCmd)
 }
 
 func runDeployInstallCmd(cmd *cobra.Command, args []string) error {
-	opts, err := parseDeployInstallFlags(cmd, args)
-	if err != nil {
+	if err := requireWritable(cmd, "deploy install"); err != nil {
 		return err
 	}
-	if err := requireWritable(cmd, "deploy install"); err != nil {
+	if bundleEnabled(cmd) {
+		bundleOpts, err := parseBundleInstallFlags(cmd)
+		if err != nil {
+			return err
+		}
+		if len(args) > 0 {
+			return fmt.Errorf("deploy install: --bundle does not accept trailing -- args (use --supervisor-args/--coordinator-args/--worker-args)")
+		}
+		if cmd.Flags().Changed("name") {
+			return fmt.Errorf("deploy install: --bundle ignores --name; remove the flag")
+		}
+		return runDeployBundleInstallWithOpts(cmd.Context(), bundleOpts, cmdStdout(cmd))
+	}
+	opts, err := parseDeployInstallFlags(cmd, args)
+	if err != nil {
 		return err
 	}
 	return runDeployInstallWithOpts(cmd.Context(), opts, cmdStdout(cmd))
@@ -329,11 +360,17 @@ func runDeployUpgradeCmd(cmd *cobra.Command, _ []string) error {
 	}
 	version, _ := cmd.Flags().GetString("version")
 	repository, _ := cmd.Flags().GetString("repository")
-	return runDeployUpgradeWithOpts(cmd.Context(), &deployUpgradeOpts{
+	if err := runDeployUpgradeWithOpts(cmd.Context(), &deployUpgradeOpts{
 		deployLookupOpts: *lookup,
 		version:          strings.TrimSpace(version),
 		repository:       strings.TrimSpace(repository),
-	}, cmdStdout(cmd))
+	}, cmdStdout(cmd)); err != nil {
+		return err
+	}
+	if bundle, _ := cmd.Flags().GetBool("bundle"); bundle {
+		return ensureSupervisorUnitForUpgrade(cmd.Context(), lookup.scope, cmdStdout(cmd))
+	}
+	return nil
 }
 
 func parseDeployListFlags(cmd *cobra.Command) (*deployListOpts, error) {
@@ -1446,15 +1483,28 @@ func renderSystemdUnit(manifest *deploymentManifest, wantedBy string) (string, e
 	var b strings.Builder
 	b.WriteString("[Unit]\n")
 	fmt.Fprintf(&b, "Description=%s\n", escapeUnitValue(manifest.Systemd.Description))
-	b.WriteString("After=network-online.target\n")
+	afterUnits := append([]string{"network-online.target"}, trimStringSlice(manifest.Systemd.After)...)
+	fmt.Fprintf(&b, "After=%s\n", strings.Join(afterUnits, " "))
 	b.WriteString("Wants=network-online.target\n\n")
 
+	unitType := strings.TrimSpace(manifest.Systemd.Type)
+	if unitType == "" {
+		unitType = "simple"
+	}
+	restart := strings.TrimSpace(manifest.Systemd.Restart)
+	if restart == "" {
+		restart = "on-failure"
+	}
+
 	b.WriteString("[Service]\n")
-	b.WriteString("Type=simple\n")
+	fmt.Fprintf(&b, "Type=%s\n", unitType)
 	fmt.Fprintf(&b, "WorkingDirectory=%s\n", systemdSingleValue(manifest.WorkingDirectory))
 	fmt.Fprintf(&b, "ExecStart=%s\n", joinSystemdCommand(execArgs))
-	b.WriteString("Restart=on-failure\n")
+	fmt.Fprintf(&b, "Restart=%s\n", restart)
 	b.WriteString("RestartSec=5s\n")
+	if km := strings.TrimSpace(manifest.Systemd.KillMode); km != "" {
+		fmt.Fprintf(&b, "KillMode=%s\n", km)
+	}
 
 	keys := make([]string, 0, len(manifest.Systemd.Environment))
 	for key := range manifest.Systemd.Environment {
