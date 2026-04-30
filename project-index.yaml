@@ -3218,3 +3218,38 @@ requirements:
     tests:
       - internal/statemachine/statemachine_test.go
     deps: []
+
+  - id: REQ-095
+    title: Pull-based release watcher (`workbuddy deploy watch` + rollback) — Phase 2 step 2 of #224
+    description: >
+      Add `workbuddy deploy watch`, a long-running poller that periodically
+      checks the configured GitHub repository for the newest release and, on a
+      newer tag, downloads the matching `linux-${ARCH}` archive, verifies the
+      SHA256 entry from `checksums.txt`, atomically replaces the deployed
+      `workbuddy` binary (default `/usr/local/bin/workbuddy`), backs up the
+      previous binary into `<state-dir>/previous-binary`, and `systemctl
+      restart`s the listed units. State (current installed tag, previous
+      binary) lives under `$XDG_STATE_HOME/workbuddy/updater` so a NAT-bound
+      deployment can pull updates without exposing inbound CICD. A companion
+      `workbuddy deploy rollback` swaps the previous binary back into place.
+      `--dry-run` performs a check without download/replace/restart;
+      checksum mismatches leave the existing binary untouched and surface as
+      logged errors that the loop retries on the next interval.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-095-1: `workbuddy deploy watch --repo owner/name` polls every --interval (default 5m) and compares the latest GitHub release tag against `<state-dir>/current-version`."
+      - "AC-095-2: When a newer tag is found, the command downloads the linux-${ARCH} archive plus checksums.txt, verifies SHA256, atomically replaces the target binary, and writes the previous binary to `<state-dir>/previous-binary`."
+      - "AC-095-3: After a successful upgrade the command runs `systemctl --<scope> restart` for each `--restart-units` entry; supervisor units are NOT restarted by default."
+      - "AC-095-4: SHA256 mismatches do not touch the deployed binary; the error is reported and the next interval retries."
+      - "AC-095-5: When the deployed version already matches latest the command logs a no-op and exits the iteration without download or restart."
+      - "AC-095-6: `--dry-run` performs the latest-release check but never downloads, never replaces, and never restarts."
+      - "AC-095-7: `workbuddy deploy rollback` swaps `<state-dir>/previous-binary` back into the target binary path and restarts the listed units."
+      - "AC-095-8: `workbuddy deploy watch --help` documents every flag (--repo, --interval, --restart-units, --state-dir, --binary, --systemctl-scope, --dry-run, --once)."
+    code:
+      - cmd/deploy_watch.go
+      - cmd/deploy.go
+    tests:
+      - cmd/deploy_watch_test.go
+    deps: [REQ-062]
