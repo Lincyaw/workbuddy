@@ -1,10 +1,13 @@
 package statemachine
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -730,6 +733,108 @@ func TestDispatchBlockedByDependencyVerdict(t *testing.T) {
 	case req := <-dispatch:
 		t.Fatalf("unexpected dispatch: %+v", req)
 	default:
+	}
+}
+
+// captureLog redirects the standard logger output to a buffer for the duration
+// of the test. Returns the buffer and a cleanup function.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	prev := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prev)
+		log.SetFlags(prevFlags)
+	})
+	return buf
+}
+
+// TestStateEntryLogWordingAndDispatchedLog covers issue #241:
+//   - state entry log uses neutral "candidate agents=" wording (intent), not
+//     "dispatching agents" (outcome).
+//   - on the gate-passed path, a "[statemachine] dispatched ..." line is
+//     emitted, proving the agent actually entered the dispatch channel.
+func TestStateEntryLogWordingAndDispatchedLog(t *testing.T) {
+	sm, _, dispatch := newTestSM(t)
+	buf := captureLog(t)
+
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
+		Type:     poller.EventLabelAdded,
+		Repo:     "test/repo",
+		IssueNum: 241,
+		Labels:   []string{"workbuddy", "status:developing"},
+		Detail:   "status:developing",
+	}); err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+
+	// Drain dispatch so the goroutine doesn't block.
+	select {
+	case <-dispatch:
+	case <-time.After(time.Second):
+		t.Fatalf("expected dispatch on gate-passed path")
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "candidate agents=") {
+		t.Errorf("expected neutral 'candidate agents=' wording in log, got:\n%s", out)
+	}
+	if strings.Contains(out, "dispatching agents") {
+		t.Errorf("old 'dispatching agents' wording must be removed; got:\n%s", out)
+	}
+	if !strings.Contains(out, "dispatched dev-agent for test/repo#241 state=developing") {
+		t.Errorf("expected '[statemachine] dispatched ...' line on gate-passed path, got:\n%s", out)
+	}
+}
+
+// TestDispatchBlockedByDependencyLogsReason covers issue #241:
+// when the dependency gate blocks dispatch, a human-readable log line should
+// be emitted in addition to the existing dispatch_blocked_by_dependency event,
+// and the "dispatched ..." line must NOT appear (ascend_dispatched=false).
+func TestDispatchBlockedByDependencyLogsReason(t *testing.T) {
+	sm, rec, dispatch := newTestSM(t)
+	if err := sm.store.UpsertIssueDependencyState(store.IssueDependencyState{
+		Repo:     "test/repo",
+		IssueNum: 241,
+		Verdict:  store.DependencyVerdictBlocked,
+	}); err != nil {
+		t.Fatalf("UpsertIssueDependencyState: %v", err)
+	}
+	buf := captureLog(t)
+
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
+		Type:     poller.EventLabelAdded,
+		Repo:     "test/repo",
+		IssueNum: 241,
+		Labels:   []string{"workbuddy", "status:developing"},
+		Detail:   "status:developing",
+	}); err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+
+	select {
+	case req := <-dispatch:
+		t.Fatalf("unexpected dispatch on gate-blocked path: %+v", req)
+	default:
+	}
+
+	// The pre-existing event must still be recorded (backward compat).
+	if got := rec.find(eventlog.TypeDispatchBlockedByDependency); len(got) != 1 {
+		t.Fatalf("expected 1 dispatch_blocked_by_dependency event, got %d", len(got))
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "dispatch blocked by dependency") {
+		t.Errorf("expected '[statemachine] dispatch blocked by dependency ...' log, got:\n%s", out)
+	}
+	if !strings.Contains(out, "verdict=blocked") {
+		t.Errorf("expected verdict=blocked in log, got:\n%s", out)
+	}
+	if strings.Contains(out, "[statemachine] dispatched ") {
+		t.Errorf("'dispatched ...' line must not appear on gate-blocked path; got:\n%s", out)
 	}
 }
 
