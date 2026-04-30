@@ -3540,3 +3540,34 @@ requirements:
       - internal/eventlog/eventlog_test.go
       - cmd/hooks_test.go
     deps: []
+
+  - id: REQ-102
+    title: webui responsive layout for phone and tablet (issue #260)
+    description: >
+      Make the webui SPA usable on ≤480px (phone) and 481–768px (tablet)
+      viewports without horizontal page scroll, while reusing the desktop
+      route/component tree via CSS media queries. Topbar collapses to a
+      hamburger drawer on phones and a single-row scrollable chip strip on
+      tablets. Wide tables overflow inside their panel with a sticky first
+      column (owner/repo#num) so the identity stays visible while the rest
+      scrolls. Session detail metadata stacks above the timeline at full
+      width and the Pretty-mode turn boundary thins out so tool_use /
+      tool_result bodies get the room. Form inputs (login, search,
+      password) get font-size:16px to suppress iOS Safari auto-zoom.
+    priority: P2
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-102-1: styles.css declares @media (max-width:480px) and (max-width:768px) breakpoints and they override topbar, table, timeline, and meta-grid layout for the same routes desktop uses."
+      - "AC-102-2: Layout.tsx renders a hamburger button (.topbar-toggle) with aria-expanded and aria-controls; clicking it toggles .menu-open which the ≤480px CSS uses to reveal the stacked nav."
+      - "AC-102-3: ≤768px CSS pins the first table column with position:sticky so wide tables can scroll horizontally inside .panel without losing the identity column."
+      - "AC-102-4: ≤768px CSS sets font-size:16px on text/search/password/email/textarea/select inputs, and the server-rendered /login template inlines the same rule plus a viewport meta tag."
+      - "AC-102-5: ≤768px CSS collapses .wb-meta-grid to a single column and thins .wb-turn-group to a 1px left rule so timeline content reclaims width."
+      - "AC-102-6: vitest in web/src/components/Layout.test.tsx asserts the hamburger toggle, menu-open class, primary nav links, and the responsive CSS contract (breakpoints, sticky first column, 16px input rule, single-column meta grid, thinned turn boundary)."
+    code:
+      - web/src/styles.css
+      - web/src/components/Layout.tsx
+      - internal/app/auth_handlers.go
+    tests:
+      - web/src/components/Layout.test.tsx
+    deps: []
