@@ -3167,3 +3167,44 @@ requirements:
     tests:
       - internal/supervisor/supervisor_test.go
     deps: []
+
+  - id: REQ-093
+    title: CICD pipeline (pull-based) — ci.yml + release.yml + PR template
+    description: >
+      GitHub Actions for fast PR feedback and pull-based release artifacts.
+      `ci.yml` runs on PR + push to main: setup-go (from go.mod) + setup-node
+      with corepack + pnpm, `make build` (SPA + go build), `go vet`,
+      `go test ./... -count=1`, `golangci-lint run`, `go run . validate-docs
+      --strict`, and an inline yaml validator
+      (`scripts/validate_index.py`) since the autoharness script is not
+      available on the runner. `release.yml` is triggered by the CI workflow
+      finishing successfully on main (and by tag pushes for manual
+      releases): it computes the next version from a `VERSION` file or by
+      bumping the latest `v*` tag's patch component, cross-compiles
+      linux-amd64 + linux-arm64 with `CGO_ENABLED=0`, generates
+      `SHA256SUMS`, builds release notes from the commit log between the
+      previous tag and HEAD, and calls `gh release create vX.Y.Z` with the
+      tarballs + checksum file. The PR template gains a schema/API
+      compatibility checkbox per the parent issue's compatibility contract.
+      The release artifacts are the contract surface that Phase 2.2's
+      `deploy watch` consumes.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-093-1: `.github/workflows/ci.yml` triggers on `pull_request` and `push` to `main`, runs setup-go (go-version-file: go.mod), setup-node@22 with corepack enabled, `pnpm -C web install --frozen-lockfile`, `make build`, `go vet ./...`, `go test ./... -count=1`, `golangci-lint run`, `go run . validate-docs --strict`, and `python3 scripts/validate_index.py project-index.yaml`."
+      - "AC-093-2: `.github/workflows/release.yml` fires on `workflow_run` of `ci` completing successfully on `main` (and on `v*` tag push), only proceeds when `workflow_run.conclusion == 'success'`, and skips cleanly if the resolved tag already exists."
+      - "AC-093-3: Release job resolves the next version by reading a `VERSION` file when present and otherwise bumping the patch component of the most recent `v*` tag (or `0.1.0` if no tags exist)."
+      - "AC-093-4: Release job cross-compiles linux/amd64 and linux/arm64 with `CGO_ENABLED=0`, packages each as `workbuddy_<version>_linux_<arch>.tar.gz`, generates `SHA256SUMS`, builds release notes from `git log <prev-tag>..HEAD --pretty=format:'- %s'`, and uploads the tarballs + `SHA256SUMS` via `gh release create`."
+      - "AC-093-5: `.github/pull_request_template.md` contains the schema/API compatibility checkbox `- [ ] schema/API 兼容（只加列、加端点，不删/不改字段）`."
+      - "AC-093-6: `scripts/validate_index.py` exists in-repo, validates required fields, unique IDs, valid priority/status, and existing code/test paths, exits non-zero on violations, and passes against the current `project-index.yaml`."
+    code:
+      - .github/workflows/ci.yml
+      - .github/workflows/release.yml
+      - .github/pull_request_template.md
+      - scripts/validate_index.py
+    tests:
+      - .github/workflows/ci.yml
+      - scripts/validate_index.py
+    related_docs: []
+    deps: []
