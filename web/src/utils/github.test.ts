@@ -1,6 +1,6 @@
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
-import { githubIssueURL, githubIssueURLFromSlug, splitRepoSlug } from './github.ts';
+import { githubIssueURL, githubIssueURLFromSlug, splitRepoSlug } from './github';
 
 test('githubIssueURL builds canonical github issue URL', () => {
   assert.equal(

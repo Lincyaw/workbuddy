@@ -3101,10 +3101,12 @@ requirements:
       - web/src/lib/format.ts
       - web/src/pages/Sessions.tsx
       - web/src/pages/SessionDetail.tsx
+      - web/src/utils/sessionGroups.ts
     tests:
       - internal/webui/handler_test.go
       - internal/auditapi/handler_test.go
       - cmd/coordinator_sessions_spa_test.go
+      - web/src/utils/sessionGroups.test.ts
     deps: [REQ-089]
 
   - id: REQ-092

@@ -619,3 +619,53 @@ table.clickable tbody tr:hover {
   color: #57606a;
 }
 .gh-issue-link-icon:hover { color: #0969da; }
+
+/* Session groups (issue-aggregated /sessions view) */
+.wb-session-group {
+  background: #fff;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+.wb-session-group-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: #f6f8fa;
+  border: 0;
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+}
+.wb-session-group-header:hover { background: #eaeef2; }
+.wb-session-group-header .caret {
+  display: inline-block;
+  width: 12px;
+  color: #57606a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.wb-session-group-header .issue-num { font-weight: 600; }
+.wb-session-group-header .repo { color: #57606a; }
+.wb-session-group-header .count {
+  margin-left: auto;
+  color: #57606a;
+  font-size: 12px;
+}
+.wb-session-group .wb-table { border: 0; border-radius: 0; }
+.wb-session-group .wb-table th { background: #fff; }
+
+.wb-role-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-right: 6px;
+}
+.wb-role-dev { background: #ddf4ff; color: #0550a0; }
+.wb-role-review { background: #efe2fa; color: #5a32a3; }
+.wb-role-other { background: #eef1f4; color: #57606a; }
+.wb-cycle { color: #57606a; font-size: 12px; }
