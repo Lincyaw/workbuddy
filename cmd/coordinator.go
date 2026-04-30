@@ -20,6 +20,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/auditapi"
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/hooks"
 	"github.com/Lincyaw/workbuddy/internal/metrics"
 	"github.com/Lincyaw/workbuddy/internal/operator"
 	"github.com/Lincyaw/workbuddy/internal/poller"
@@ -66,6 +67,7 @@ type coordinatorOpts struct {
 	// as the prefix of session links. Required when --listen is non-loopback;
 	// optional (defaults to http://<listen>) when --listen is loopback.
 	reportBaseURL string
+	hooksConfig   string
 }
 
 type tokenCreateOpts struct {
@@ -195,6 +197,7 @@ func parseCoordinatorFlags(cmd *cobra.Command) (*coordinatorOpts, error) {
 	trustedAuthorsSet := cmd.Flags().Changed("trusted-authors")
 	cookieInsecure, _ := cmd.Flags().GetBool("cookie-insecure")
 	reportBaseURL, _ := cmd.Flags().GetString("report-base-url")
+	hooksConfig, _ := cmd.Flags().GetString(flagHooksConfig)
 	if strings.TrimSpace(listenAddr) == "" {
 		return nil, fmt.Errorf("coordinator: --listen is required")
 	}
@@ -220,6 +223,7 @@ func parseCoordinatorFlags(cmd *cobra.Command) (*coordinatorOpts, error) {
 		trustedAuthorsSet: trustedAuthorsSet,
 		cookieInsecure:    cookieInsecure,
 		reportBaseURL:     resolvedReportURL,
+		hooksConfig:       hooksConfig,
 	}, nil
 }
 
@@ -371,6 +375,15 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	app.LogSecurityPosture(secRuntime.Current())
 
 	evlog := eventlog.NewEventLoggerWithWriter(st, log.Writer())
+	hooksDispatcher, err := initHooksDispatcher(opts.hooksConfig, evlog)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if hooksDispatcher != nil {
+			hooksDispatcher.Stop()
+		}
+	}()
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
 	rep.SetEventRecorder(evlog)
 	if base := strings.TrimRight(strings.TrimSpace(opts.reportBaseURL), "/"); base != "" {
@@ -380,6 +393,10 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 
 	ctx, cancel, sigCh := buildRunContext(parentCtx)
 	defer cancel()
+
+	if hooksDispatcher != nil {
+		hooksDispatcher.Start(ctx)
+	}
 
 	var notifCfg config.NotificationsConfig
 	if bootstrapCfg != nil {
@@ -623,6 +640,36 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 	// (login, /api/, /sessions/, etc.) wins over the embedded bundle.
 	mux.Handle("/", api.WrapAuth(spa))
 	return mux
+}
+
+// initHooksDispatcher loads ~/.config/workbuddy/hooks.yaml (or the override),
+// builds the dispatcher, and attaches it to the eventlog. A missing file is
+// a soft no-op; parse errors are fatal so operators notice them at boot.
+func initHooksDispatcher(configFlag string, evlog *eventlog.EventLogger) (*hooks.Dispatcher, error) {
+	path := ResolveHooksConfigPath(configFlag)
+	cfg, warnings, err := hooks.LoadConfig(path)
+	if err != nil {
+		return nil, fmt.Errorf("coordinator: load hooks config: %w", err)
+	}
+	for _, w := range warnings {
+		log.Printf("[coordinator] hooks warning: %s", w)
+	}
+	if cfg == nil || len(cfg.Hooks) == 0 {
+		log.Printf("[coordinator] hooks: no hooks configured (looked at %s)", path)
+		return nil, nil
+	}
+	dispatcher, dispatchWarnings, err := hooks.NewDispatcher(cfg, hooks.DefaultActionRegistry(), hooks.WithLogger(log.Default()))
+	if err != nil {
+		return nil, fmt.Errorf("coordinator: build hooks dispatcher: %w", err)
+	}
+	for _, w := range dispatchWarnings {
+		log.Printf("[coordinator] hooks warning: %s", w)
+	}
+	if evlog != nil {
+		evlog.SetPublisher(dispatcher)
+	}
+	log.Printf("[coordinator] hooks: %d hook(s) registered", len(dispatcher.Hooks()))
+	return dispatcher, nil
 }
 
 func mustRepoRoot() string {

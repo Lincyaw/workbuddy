@@ -3490,3 +3490,53 @@ requirements:
     tests:
       - internal/store/store_test.go
     deps: []
+
+  - id: REQ-101
+    title: hook system phase 1a — config + dispatcher + webhook action
+    description: >
+      Operator-owned event hook system: declarative event→action bindings
+      configured in ~/.config/workbuddy/hooks.yaml. Phase 1a ships the
+      package skeleton, YAML loader, async bounded-channel dispatcher,
+      ActionRegistry, webhook action, stable v1 event payload envelope,
+      and `workbuddy hooks list`. command action and timeouts are deferred
+      to Phase 1b. See docs/decisions/2026-04-30-hook-system.md.
+    rationale: >
+      The hardcoded internal/notifier only fires on alert + task done with
+      a fixed channel set. Operators need declarative routing for every
+      eventlog type (state_entry, dispatch, dev_review_cycle_cap_reached,
+      …) and for arbitrary destinations (custom webhook, DingTalk,
+      PagerDuty). Per-repo .github/workbuddy/hooks/ would let any PR
+      contributor inject command actions; restricting hooks to
+      ~/.config/workbuddy/ keeps trust on the operator filesystem.
+    status: tested
+    acceptance:
+      - "AC-101-1: internal/hooks/config.go parses ~/.config/workbuddy/hooks.yaml against schemas/hook.schema.json v1; missing file is a soft no-op, parse errors fail-fast."
+      - "AC-101-2: internal/hooks/dispatcher.go uses a 1024-deep central channel + per-hook worker; Publish never blocks; central overflow increments a counter and per-hook queue-full drops are tracked separately."
+      - "AC-101-3: internal/hooks/action.go defines `Action interface { Execute(ctx, payload) error }` and `ActionRegistry`; new types register without touching the dispatcher."
+      - "AC-101-4: internal/hooks/webhook.go POSTs application/json; 2xx = success, anything else (including timeouts) = failure."
+      - "AC-101-5: internal/hooks/eventpayload.go builds the stable v1 envelope (schema_version=1, event_type, ts, repo, issue_num, data); fields are append-only."
+      - "AC-101-6: internal/eventlog/eventlog.go Log() forwards to the dispatcher after the SQLite insert via SetPublisher(); dispatcher filters `hook_*` events to prevent self-amplification."
+      - "AC-101-7: `workbuddy hooks list` prints registered hooks (name / events / action.type / enabled)."
+      - "AC-101-8: Coordinator startup loads hooks config; missing file logs and continues; parse failure exits with error."
+      - "AC-101-9: Webhook headers support `${ENV_VAR}` substitution at startup; missing env vars resolve to empty string and emit a startup warning."
+      - "AC-101-10: `--hooks-config <path>` flag overrides default path on `serve`, `coordinator`, and `hooks` subcommands; `WORKBUDDY_HOOKS_CONFIG` env var is the secondary fallback."
+      - "AC-101-11: Unit tests cover config parsing (valid / missing fields / unknown action type), eventpayload conversion, dispatcher async behaviour (1000 events without blocking), overflow accounting, webhook success/4xx/timeout, and hook_* self-filter."
+      - "AC-101-12: internal/notifier is untouched; both notifier and hooks run in parallel."
+    priority: P1
+    code:
+      - internal/hooks/config.go
+      - internal/hooks/dispatcher.go
+      - internal/hooks/action.go
+      - internal/hooks/webhook.go
+      - internal/hooks/eventpayload.go
+      - internal/eventlog/eventlog.go
+      - cmd/hooks.go
+      - cmd/coordinator.go
+      - cmd/serve.go
+    tests:
+      - internal/hooks/config_test.go
+      - internal/hooks/dispatcher_test.go
+      - internal/hooks/eventpayload_test.go
+      - internal/eventlog/eventlog_test.go
+      - cmd/hooks_test.go
+    deps: []

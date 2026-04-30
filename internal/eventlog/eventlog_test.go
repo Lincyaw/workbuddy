@@ -3,11 +3,52 @@ package eventlog
 import (
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
+
+type capturingPublisher struct {
+	mu     sync.Mutex
+	events []string
+	count  atomic.Int64
+}
+
+func (c *capturingPublisher) PublishFromRaw(eventType, _ string, _ int, _ string) {
+	c.mu.Lock()
+	c.events = append(c.events, eventType)
+	c.mu.Unlock()
+	c.count.Add(1)
+}
+
+func TestLogPublishesToHookDispatcher(t *testing.T) {
+	logger := newTestLogger(t)
+	pub := &capturingPublisher{}
+	logger.SetPublisher(pub)
+
+	logger.Log(TypeAlert, "x/y", 1, map[string]string{"k": "v"})
+	// hook_* events still write to SQLite but the publisher decides what to
+	// do with them. Filtering happens inside the dispatcher.
+	logger.Log("hook_overflow", "", 0, nil)
+
+	if pub.count.Load() != 2 {
+		t.Fatalf("expected 2 publishes, got %d", pub.count.Load())
+	}
+	pub.mu.Lock()
+	defer pub.mu.Unlock()
+	if pub.events[0] != TypeAlert {
+		t.Fatalf("expected first event %s, got %s", TypeAlert, pub.events[0])
+	}
+}
+
+func TestLogWithoutPublisherDoesNotPanic(t *testing.T) {
+	logger := newTestLogger(t)
+	logger.Log(TypeAlert, "x/y", 1, nil)
+	logger.SetPublisher(nil)
+	logger.Log(TypeAlert, "x/y", 1, nil)
+}
 
 func newTestLogger(t *testing.T) *EventLogger {
 	t.Helper()
