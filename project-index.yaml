@@ -3344,3 +3344,41 @@ requirements:
     tests:
       - cmd/deploy_test.go
     deps: [REQ-095]
+
+  - id: REQ-098
+    title: Stateless worker boot resumes supervisor agents (issue #245, #234 slice 2)
+    description: >
+      Second slice of the #234 stateless-worker rewire. After a worker boot
+      the process must reattach to every supervisor-managed agent it still
+      owns instead of orphaning the in-flight subprocesses. The Coordinator
+      Store gains `InFlightTasksForWorker(workerID)` that returns the
+      running tasks belonging to the booting worker together with the
+      latest session row's `events-v1.jsonl` path. The worker package gains
+      a `ResumeInFlightTasks` orchestrator that fans out one goroutine per
+      task, calls the supervisor IPC `Status` endpoint to probe liveness,
+      then either re-subscribes to the SSE stream from the offset matching
+      what is already on disk (so events-v1.jsonl continues without
+      duplicates), or marks the task failed when the supervisor returns 404
+      (the agent is gone; nothing to resume), or runs the finalize callback
+      when the supervisor reports the agent already exited. Cross-host
+      migration and supervisor-internal restart re-attach are explicitly
+      out of scope (handled by #231/#240).
+    priority: P1
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-098-1: `Store.InFlightTasksForWorker(workerID)` returns `{TaskID, SessionID, SupervisorAgentID, EventsV1Path}` rows for status=running tasks claimed by workerID; rows lacking supervisor_agent_id are skipped because there is no agent for the resumer to attach to."
+      - "AC-098-2: `worker.ResumeInFlightTasks` runs one goroutine per task (concurrent, does not block the boot loop) and probes each agent via `supclient.Status`."
+      - "AC-098-3: 200 + status=running causes a `StreamEvents` resume with `from_offset` equal to the line count already in events-v1.jsonl, and appended lines are strictly monotonic in offset (no duplicates of pre-existing lines)."
+      - "AC-098-4: 200 + status=exited triggers the finalize callback (`OnExited`)."
+      - "AC-098-5: `ErrAgentNotFound` (404) marks the task failed via `OnFailed` with a reason that names the missing agent id; transport errors are not retried in-line and do NOT mark failed."
+      - "AC-098-6: Three E2E tests in `internal/worker/resume_test.go` cover (a) full SSE stream + finalize, (b) simulated worker restart resuming from `from_offset=N` with strictly monotonic appended offsets, (c) supervisor 404 marking the task failed."
+      - "AC-098-7: `Store.InFlightTasksForWorker` is covered by a store test that asserts worker_id filtering, status=running filtering, omission of rows missing supervisor_agent_id, and EventsV1Path derivation."
+    code:
+      - internal/store/queries.go
+      - internal/worker/resume.go
+    tests:
+      - internal/store/store_inflight_for_worker_test.go
+      - internal/worker/resume_test.go
+    deps:
+      - REQ-096
