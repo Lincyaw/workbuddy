@@ -18,7 +18,7 @@ func TestRunRuntimeWithOpts_UsesLauncher(t *testing.T) {
 	mockRT := &mockRuntime{name: config.RuntimeClaudeShot, resultFn: func(ctx context.Context, agent *config.AgentConfig, task *launcher.TaskContext) (*launcher.Result, error) {
 		return &launcher.Result{ExitCode: 0, LastMessage: "review complete", SessionPath: filepath.Join(task.WorkDir, "artifact.jsonl")}, nil
 	}}
-	lnch := launcher.NewLauncher()
+	lnch := launcher.NewLauncher(nil, nil)
 	lnch.Register(mockRT, config.RuntimeClaudeCode, config.RuntimeClaudeShot)
 
 	var out bytes.Buffer
@@ -49,7 +49,7 @@ func TestRunRuntimeWithOpts_FailsOnNonZeroExit(t *testing.T) {
 	mockRT := &mockRuntime{name: config.RuntimeCodex, resultFn: func(ctx context.Context, agent *config.AgentConfig, task *launcher.TaskContext) (*launcher.Result, error) {
 		return &launcher.Result{ExitCode: 23, LastMessage: "review failed", SessionPath: filepath.Join(task.WorkDir, "artifact.jsonl")}, nil
 	}}
-	lnch := launcher.NewLauncher()
+	lnch := launcher.NewLauncher(nil, nil)
 	lnch.Register(mockRT, config.RuntimeCodex, config.RuntimeCodex)
 
 	var out bytes.Buffer
@@ -117,7 +117,7 @@ func TestRunRuntime_CodexPromptE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	lnch := launcher.NewLauncher()
+	lnch := launcher.NewLauncher(nil, nil)
 	var out bytes.Buffer
 	var errOut bytes.Buffer
 	err := runRuntimeWithOpts(context.Background(), &runOpts{

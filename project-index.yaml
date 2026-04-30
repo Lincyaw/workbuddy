@@ -3287,9 +3287,23 @@ requirements:
       - internal/supervisor/supervisor.go
       - internal/store/store.go
       - internal/store/types.go
+      - internal/runtime/process.go
+      - internal/runtime/claude_stream.go
+      - internal/runtime/claude.go
+      - internal/runtime/registry.go
+      - internal/launcher/launcher.go
+      - internal/launcher/supervisor_inproc.go
+      - cmd/worker.go
+      - cmd/run.go
     tests:
       - internal/supervisor/client/client_test.go
       - internal/store/store_supervisor_agent_id_test.go
+      - internal/launcher/launcher_test.go
+      - internal/launcher/process_test.go
+      - internal/launcher/claude_stream_test.go
+      - internal/launcher/permissions_test.go
+      - internal/launcher/test_helper_test.go
+      - internal/launcher/supervisor_ipc_test.go
     deps:
       - REQ-092
 

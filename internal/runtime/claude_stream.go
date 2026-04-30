@@ -1,20 +1,14 @@
 package runtime
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"io/fs"
-	"os/exec"
 	"strings"
-	"sync"
-	"syscall"
 	"time"
 
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
+	supclient "github.com/Lincyaw/workbuddy/internal/supervisor/client"
 )
 
 type ClaudeToolCall struct {
@@ -185,107 +179,81 @@ func (m *ClaudeStreamEventMapper) makeEvent(seq *uint64, kind launcherevents.Eve
 }
 
 func (s *ProcessSession) runClaudeStream(ctx context.Context, timeout time.Duration, events chan<- launcherevents.Event) (*Result, error) {
+	if s.Client == nil {
+		infra := &Result{ExitCode: -1, Meta: map[string]string{}}
+		MarkInfraFailure(infra, "supervisor client not configured")
+		return infra, fmt.Errorf("runtime: %s: supervisor client not configured", s.RuntimeName)
+	}
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd, err := s.BuildCommand(execCtx)
+	spec, err := s.BuildSpec()
 	if err != nil {
 		infra := &Result{ExitCode: -1, Meta: map[string]string{}}
 		MarkInfraFailure(infra, "build command failed (template render)")
 		return infra, err
 	}
-	if s.Task.WorkDir != "" {
-		cmd.Dir = s.Task.WorkDir
-	}
-	cmd.Env = BuildScopedEnv(s.Agent, s.Task)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = 10 * time.Second
 
-	stdoutPipe, err := cmd.StdoutPipe()
+	start := time.Now()
+	var seq uint64
+	mapper := NewClaudeStreamEventMapper(s.Task.Session.ID)
+	EmitPermissionEvent(events, &seq, s.Task.Session.ID, mapper.EffectiveTurnID(), s.Agent, EmitEvent)
+
+	startResp, err := s.Client.StartAgent(execCtx, s.startRequestFor(spec))
 	if err != nil {
-		infra := &Result{ExitCode: -1, Meta: map[string]string{}}
-		MarkInfraFailure(infra, "stdout pipe setup failed")
-		return infra, fmt.Errorf("runtime: %s: stdout pipe: %w", s.RuntimeName, err)
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		infra := &Result{ExitCode: -1, Meta: map[string]string{}}
-		MarkInfraFailure(infra, "stderr pipe setup failed")
-		return infra, fmt.Errorf("runtime: %s: stderr pipe: %w", s.RuntimeName, err)
-	}
-	if err := cmd.Start(); err != nil {
 		infra := &Result{ExitCode: -1, Meta: map[string]string{}}
 		reason := "claude process start failed"
-		if IsExecStartError(err) {
+		if isExecStartFailure(err) {
 			reason = "claude binary not runnable (exec start error)"
 		}
 		MarkInfraFailure(infra, reason)
 		return infra, fmt.Errorf("runtime: %s: start: %w", s.RuntimeName, err)
 	}
+	agentID := startResp.AgentID
+	if s.OnAgentStarted != nil && s.Task != nil && s.Task.Session.TaskID != "" {
+		s.OnAgentStarted(s.Task.Session.TaskID, agentID)
+	}
 
-	start := time.Now()
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	var seq uint64
-	mapper := NewClaudeStreamEventMapper(s.Task.Session.ID)
-	EmitPermissionEvent(events, &seq, s.Task.Session.ID, mapper.EffectiveTurnID(), s.Agent, EmitEvent)
+	cancelDone := make(chan struct{})
+	go s.watchCancel(execCtx, agentID, cancelDone)
+	defer close(cancelDone)
 
-	var wg sync.WaitGroup
-	var stdoutErr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		dec := json.NewDecoder(stdoutPipe)
-		for {
-			var raw json.RawMessage
-			if err := dec.Decode(&raw); err != nil {
-				if !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, fs.ErrClosed) {
-					stdoutErr = err
-				}
-				return
-			}
-			stdout.Write(raw)
-			stdout.WriteByte('\n')
+	streamErr := s.Client.StreamEvents(execCtx, agentID, 0, func(ev supclient.StreamEvent) error {
+		raw := json.RawMessage(ev.Line)
+		if handle := s.Task.SessionHandle(); handle != nil {
+			_ = handle.WriteStdout(append(append([]byte(nil), raw...), '\n'))
+		}
+		for _, evt := range mapper.Map(raw, &seq) {
 			if handle := s.Task.SessionHandle(); handle != nil {
-				_ = handle.WriteStdout(append(append([]byte(nil), raw...), '\n'))
+				_ = PersistToolCallEvent(handle, "claude-code", evt)
 			}
-			for _, evt := range mapper.Map(raw, &seq) {
-				if handle := s.Task.SessionHandle(); handle != nil {
-					_ = PersistToolCallEvent(handle, "claude-code", evt)
-				}
-				if events != nil {
-					select {
-					case events <- evt:
-					case <-ctx.Done():
-						return
-					}
+			if events != nil {
+				select {
+				case events <- evt:
+				case <-ctx.Done():
+					return ctx.Err()
 				}
 			}
 		}
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		_, _ = stderr.ReadFrom(stderrPipe)
-	}()
-
-	wg.Wait()
-	runErr := cmd.Wait()
+		return nil
+	})
 	duration := time.Since(start)
 
-	if stdoutErr != nil {
+	status, statusErr := s.Client.Status(context.Background(), agentID)
+	if statusErr != nil {
 		infra := &Result{
-			ExitCode: -1,
-			Stdout:   stdout.String(),
-			Stderr:   stderr.String(),
-			Duration: duration,
-			Meta:     map[string]string{},
+			ExitCode:    -1,
+			Duration:    duration,
+			Meta:        map[string]string{},
+			LastMessage: mapper.LastMessageValue,
+			TokenUsage:  mapper.TokenUsageValue,
+			SessionRef:  mapper.SessionRefValue,
 		}
-		MarkInfraFailure(infra, "stdout stream read error")
-		return infra, fmt.Errorf("runtime: %s: read stdout: %w", s.RuntimeName, stdoutErr)
+		MarkInfraFailure(infra, "supervisor status lookup failed")
+		return infra, fmt.Errorf("runtime: %s: status: %w", s.RuntimeName, statusErr)
 	}
+	stdoutBytes := readFileIfExists(status.StdoutPath)
+	stderrBytes := readFileIfExists(status.StderrPath)
 
 	if execCtx.Err() == context.DeadlineExceeded {
 		if events != nil {
@@ -295,8 +263,8 @@ func (s *ProcessSession) runClaudeStream(ctx context.Context, timeout time.Durat
 		}
 		return &Result{
 			ExitCode:    -1,
-			Stdout:      stdout.String(),
-			Stderr:      stderr.String(),
+			Stdout:      string(stdoutBytes),
+			Stderr:      string(stderrBytes),
 			Duration:    duration,
 			Meta:        map[string]string{"timeout": "true"},
 			LastMessage: mapper.LastMessageValue,
@@ -304,7 +272,6 @@ func (s *ProcessSession) runClaudeStream(ctx context.Context, timeout time.Durat
 			SessionRef:  mapper.SessionRefValue,
 		}, fmt.Errorf("runtime: %s: timeout after %s: %w", s.RuntimeName, timeout, execCtx.Err())
 	}
-
 	if ctx.Err() != nil {
 		if events != nil {
 			EmitEvent(events, &seq, s.Task.Session.ID, mapper.EffectiveTurnID(), launcherevents.KindError, launcherevents.ErrorPayload{Code: "cancelled", Message: ctx.Err().Error(), Recoverable: false}, nil)
@@ -313,72 +280,70 @@ func (s *ProcessSession) runClaudeStream(ctx context.Context, timeout time.Durat
 		}
 		return &Result{
 			ExitCode:    -1,
-			Stdout:      stdout.String(),
-			Stderr:      stderr.String(),
+			Stdout:      string(stdoutBytes),
+			Stderr:      string(stderrBytes),
 			Duration:    duration,
 			LastMessage: mapper.LastMessageValue,
 			TokenUsage:  mapper.TokenUsageValue,
 			SessionRef:  mapper.SessionRefValue,
 		}, fmt.Errorf("runtime: %s: cancelled: %w", s.RuntimeName, ctx.Err())
 	}
-
-	exitCode := 0
-	if runErr != nil {
-		exitErr, ok := runErr.(*exec.ExitError)
-		if !ok {
-			infra := &Result{
-				ExitCode:    -1,
-				Stdout:      stdout.String(),
-				Stderr:      stderr.String(),
-				Duration:    duration,
-				LastMessage: mapper.LastMessageValue,
-				TokenUsage:  mapper.TokenUsageValue,
-				SessionRef:  mapper.SessionRefValue,
-				Meta:        map[string]string{},
-			}
-			MarkInfraFailure(infra, "claude wait error (non-exit)")
-			return infra, fmt.Errorf("runtime: %s: wait: %w", s.RuntimeName, runErr)
+	if streamErr != nil {
+		infra := &Result{
+			ExitCode:    -1,
+			Stdout:      string(stdoutBytes),
+			Stderr:      string(stderrBytes),
+			Duration:    duration,
+			LastMessage: mapper.LastMessageValue,
+			TokenUsage:  mapper.TokenUsageValue,
+			SessionRef:  mapper.SessionRefValue,
+			Meta:        map[string]string{},
 		}
-		exitCode = exitErr.ExitCode()
+		MarkInfraFailure(infra, "stdout stream read error")
+		return infra, fmt.Errorf("runtime: %s: read stdout: %w", s.RuntimeName, streamErr)
+	}
+	exitCode := 0
+	if status.ExitCode != nil {
+		exitCode = *status.ExitCode
 	}
 
 	if events != nil && !mapper.TurnCompleteSaw {
-		status := "ok"
+		statusName := "ok"
 		if exitCode != 0 {
-			status = "error"
+			statusName = "error"
 			EmitEvent(events, &seq, s.Task.Session.ID, mapper.EffectiveTurnID(), launcherevents.KindError, launcherevents.ErrorPayload{
 				Code:        "claude_exit",
 				Message:     fmt.Sprintf("claude exited %d without assistant.message_stop", exitCode),
 				Recoverable: false,
 			}, nil)
 		}
-		EmitEvent(events, &seq, s.Task.Session.ID, mapper.EffectiveTurnID(), launcherevents.KindTurnCompleted, launcherevents.TurnCompletedPayload{TurnID: mapper.EffectiveTurnID(), Status: status}, nil)
+		EmitEvent(events, &seq, s.Task.Session.ID, mapper.EffectiveTurnID(), launcherevents.KindTurnCompleted, launcherevents.TurnCompletedPayload{TurnID: mapper.EffectiveTurnID(), Status: statusName}, nil)
 	}
 
 	sessionPath := ""
 	if s.FindSession != nil {
 		sessionPath = s.FindSession(s.SessionLookupPath())
 	}
-	if events != nil && stderr.Len() > 0 {
+	if events != nil && len(stderrBytes) > 0 {
 		if handle := s.Task.SessionHandle(); handle != nil {
-			_ = handle.WriteStderr(stderr.Bytes())
+			_ = handle.WriteStderr(stderrBytes)
 		}
-		for _, line := range splitLines(stderr.String()) {
+		for _, line := range splitLines(string(stderrBytes)) {
 			EmitEvent(events, &seq, s.Task.Session.ID, mapper.EffectiveTurnID(), launcherevents.KindLog, launcherevents.LogPayload{Stream: "stderr", Line: line}, nil)
 		}
 	}
 
 	result := &Result{
 		ExitCode:    exitCode,
-		Stdout:      stdout.String(),
-		Stderr:      stderr.String(),
+		Stdout:      string(stdoutBytes),
+		Stderr:      string(stderrBytes),
 		Duration:    duration,
 		SessionPath: sessionPath,
 		LastMessage: mapper.LastMessageValue,
 		TokenUsage:  mapper.TokenUsageValue,
 		SessionRef:  mapper.SessionRefValue,
 	}
-	if exitCode != 0 && !mapper.TurnCompleteSaw && mapper.LastMessageValue == "" && StderrLooksLikeRuntimePanic(stderr.String()) {
+	if exitCode != 0 && !mapper.TurnCompleteSaw && mapper.LastMessageValue == "" && StderrLooksLikeRuntimePanic(string(stderrBytes)) {
 		MarkInfraFailure(result, "claude runtime panic/abort before agent output")
 	}
 	return result, nil

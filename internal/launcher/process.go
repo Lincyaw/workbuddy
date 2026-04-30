@@ -1,21 +1,10 @@
 package launcher
 
 import (
-	"context"
-	"os/exec"
-
 	"github.com/Lincyaw/workbuddy/internal/config"
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 )
-
-func newProcessSession(runtimeName string, agent *config.AgentConfig, task *TaskContext, findSession runtimepkg.SessionFinder) Session {
-	return runtimepkg.NewProcessSession(runtimeName, agent, task, findSession)
-}
-
-func newClaudePromptCommand(execCtx context.Context, prompt string, extraArgs []string, policy config.PolicyConfig) *exec.Cmd {
-	return runtimepkg.NewClaudePromptCommand(execCtx, prompt, extraArgs, policy)
-}
 
 func hasPrintFlag(args []string) bool {
 	return runtimepkg.HasPrintFlag(args)

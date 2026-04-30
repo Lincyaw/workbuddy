@@ -254,7 +254,7 @@ func TestWorkerRejectsInvalidToken(t *testing.T) {
 		pollTimeout:       100 * time.Millisecond,
 		heartbeatInterval: 50 * time.Millisecond,
 		shutdownTimeout:   time.Second,
-	}, launcher.NewLauncher(), &mockGHReader{})
+	}, launcher.NewLauncher(nil, nil), &mockGHReader{})
 	if err == nil {
 		t.Fatal("expected invalid token error")
 	}
@@ -535,7 +535,7 @@ func TestWorkerPairsWithCoordinatorAndCompletesTask(t *testing.T) {
 			Meta:        map[string]string{},
 		}, nil
 	}}
-	lnch := launcher.NewLauncher()
+	lnch := launcher.NewLauncher(nil, nil)
 	lnch.Register(mockRT, config.RuntimeClaudeCode)
 
 	ctxWorker, cancelWorker := context.WithCancel(context.Background())
@@ -663,7 +663,7 @@ func TestWorkerUsesTaskRepoConfigForMultiRepoBindings(t *testing.T) {
 		}
 		return &launcher.Result{ExitCode: 0, LastMessage: "done", Meta: map[string]string{}}, nil
 	}}
-	lnch := launcher.NewLauncher()
+	lnch := launcher.NewLauncher(nil, nil)
 	lnch.Register(mockRT, config.RuntimeClaudeCode)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -749,7 +749,7 @@ func TestWorkerShutdownRequeuesInFlightTask(t *testing.T) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}}
-	lnch := launcher.NewLauncher()
+	lnch := launcher.NewLauncher(nil, nil)
 	lnch.Register(mockRT, config.RuntimeClaudeCode)
 
 	ctxWorker, cancelWorker := context.WithCancel(context.Background())
@@ -874,7 +874,7 @@ func TestWorkerUsesMappedRepoPathAndCleansAddrFile(t *testing.T) {
 		}
 		return &launcher.Result{ExitCode: 0, LastMessage: "done", Meta: map[string]string{}}, nil
 	}}
-	lnch := launcher.NewLauncher()
+	lnch := launcher.NewLauncher(nil, nil)
 	lnch.Register(mockRT, config.RuntimeClaudeCode)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -977,7 +977,7 @@ func TestWorkerRegistersMgmtPublicURL(t *testing.T) {
 			pollTimeout:       20 * time.Millisecond,
 			heartbeatInterval: 20 * time.Millisecond,
 			shutdownTimeout:   100 * time.Millisecond,
-		}, launcher.NewLauncher(), &mockGHReader{}, ctx)
+		}, launcher.NewLauncher(nil, nil), &mockGHReader{}, ctx)
 	}()
 
 	select {
@@ -1051,7 +1051,7 @@ func TestWorkerReleasesUnmappedTask(t *testing.T) {
 			pollTimeout:       20 * time.Millisecond,
 			heartbeatInterval: 20 * time.Millisecond,
 			shutdownTimeout:   100 * time.Millisecond,
-		}, launcher.NewLauncher(), &mockGHReader{}, ctx)
+		}, launcher.NewLauncher(nil, nil), &mockGHReader{}, ctx)
 	}()
 
 	select {
@@ -1133,7 +1133,7 @@ func TestWorkerDynamicRepoAddUpdatesCoordinatorAndDispatchesTask(t *testing.T) {
 		}
 		return &launcher.Result{ExitCode: 0, LastMessage: "done", Meta: map[string]string{}}, nil
 	}}
-	lnch := launcher.NewLauncher()
+	lnch := launcher.NewLauncher(nil, nil)
 	lnch.Register(mockRT, config.RuntimeClaudeCode)
 
 	ctxWorker, cancelWorker := context.WithCancel(context.Background())
@@ -1287,7 +1287,7 @@ func TestExecuteRemoteTaskStopsHeartbeatAfterKilledProcess(t *testing.T) {
 		<-firstHeartbeat
 		return nil, errors.New("signal: killed")
 	}}
-	lnch := launcher.NewLauncher()
+	lnch := launcher.NewLauncher(nil, nil)
 	lnch.Register(mockRT, config.RuntimeClaudeCode)
 
 	rep := reporter.NewReporter(&mockCommentWriter{})
@@ -1379,7 +1379,7 @@ func TestExecuteRemoteTaskRequeuesWorktreeSetupFailure(t *testing.T) {
 		task,
 		client,
 		cfg,
-		workerexec.NewExecutor(launcher.NewLauncher(), reader),
+		workerexec.NewExecutor(launcher.NewLauncher(nil, nil), reader),
 		recorder,
 		rep,
 		reader,
@@ -1485,7 +1485,7 @@ func TestWorkerRecoversAfterKilledTaskWhenResultSubmitFails(t *testing.T) {
 			return &launcher.Result{ExitCode: 0, Meta: map[string]string{}}, nil
 		}
 	}}
-	lnch := launcher.NewLauncher()
+	lnch := launcher.NewLauncher(nil, nil)
 	lnch.Register(mockRT, config.RuntimeClaudeCode)
 
 	ctx, cancel := context.WithCancel(context.Background())
