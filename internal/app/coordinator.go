@@ -412,6 +412,9 @@ func (s *FullCoordinatorServer) HandlePollTask(w http.ResponseWriter, r *http.Re
 		CoordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown worker"})
 		return
 	}
+	// Every poll counts as a liveness signal — bump heartbeat up front so an
+	// idle worker (no task to claim) doesn't get flagged as missing.
+	_ = s.Registry.Heartbeat(worker.ID)
 
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()

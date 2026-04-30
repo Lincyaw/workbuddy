@@ -3464,3 +3464,28 @@ requirements:
       - web/src/lib/streamMessages.test.ts
       - web/src/components/StreamMessage.test.tsx
     deps: [REQ-093]
+
+  - id: REQ-100
+    title: worker idle/restart heartbeat refresh
+    description: >
+      Workers must show a fresh `last_heartbeat` after coordinator restart and
+      while idle. Pre-fix, `Store.InsertWorker` re-registration kept the old
+      `last_heartbeat` and `HandlePollTask` only bumped on successful task
+      claim, so an embedded `serve` deployment or any worker without traffic
+      tripped continuous `worker_missing` alerts even though the process was
+      alive.
+    rationale: >
+      Surfaced while observing #250 dispatch on a freshly-deployed v0.5.0
+      build (#252). Stale heartbeat made dashboards mislead operators and
+      prevented a clean diagnostic baseline.
+    status: tested
+    acceptance:
+      - "AC-100-1: `Store.InsertWorker` ON CONFLICT updates `last_heartbeat = CURRENT_TIMESTAMP` so re-registration on restart counts as a heartbeat."
+      - "AC-100-2: `HandlePollTask` calls `Registry.Heartbeat` on every poll (not only when a task is returned), so an idle worker's heartbeat refreshes at the long-poll cadence."
+      - "AC-100-3: Unit test asserts that a stale heartbeat advances after re-registration."
+    code:
+      - internal/store/store.go
+      - internal/app/coordinator.go
+    tests:
+      - internal/store/store_test.go
+    deps: []
