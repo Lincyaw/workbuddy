@@ -18,7 +18,7 @@ type blockingAction struct {
 }
 
 func (a *blockingAction) Type() string { return "blocking" }
-func (a *blockingAction) Execute(ctx context.Context, _ []byte) error {
+func (a *blockingAction) Execute(ctx context.Context, _ Event, _ []byte) error {
 	a.count.Add(1)
 	select {
 	case <-a.gate:
@@ -35,7 +35,7 @@ type countingAction struct {
 }
 
 func (a *countingAction) Type() string { return "counting" }
-func (a *countingAction) Execute(_ context.Context, _ []byte) error {
+func (a *countingAction) Execute(_ context.Context, _ Event, _ []byte) error {
 	a.count.Add(1)
 	a.once.Do(func() { close(a.done) })
 	return nil
@@ -190,7 +190,7 @@ func TestWebhookActionNon2xxIsError(t *testing.T) {
 	}))
 	defer srv.Close()
 	w := &WebhookAction{url: srv.URL, method: "POST", client: http.DefaultClient}
-	if err := w.Execute(context.Background(), []byte(`{}`)); err == nil {
+	if err := w.Execute(context.Background(), Event{}, []byte(`{}`)); err == nil {
 		t.Fatalf("expected non-2xx error")
 	}
 }
@@ -207,7 +207,7 @@ func TestWebhookActionTimeoutIsError(t *testing.T) {
 	w := &WebhookAction{url: srv.URL, method: "POST", client: http.DefaultClient}
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	if err := w.Execute(ctx, []byte(`{}`)); err == nil {
+	if err := w.Execute(ctx, Event{}, []byte(`{}`)); err == nil {
 		t.Fatalf("expected timeout/cancelled error")
 	}
 }

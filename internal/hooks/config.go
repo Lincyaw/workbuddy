@@ -151,9 +151,7 @@ func finalizeAction(h *Hook) ([]string, error) {
 	case ActionTypeWebhook:
 		return finalizeWebhookAction(h)
 	case ActionTypeCommand:
-		// command action lands in Phase 1b; reject for now so users don't
-		// silently mis-configure.
-		return nil, fmt.Errorf("hooks: hook %q: action type %q not yet supported (Phase 1b)", h.Name, h.Action.Type)
+		return finalizeCommandAction(h)
 	default:
 		return nil, fmt.Errorf("hooks: hook %q: unknown action type %q", h.Name, h.Action.Type)
 	}
