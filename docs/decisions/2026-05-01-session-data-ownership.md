@@ -1,8 +1,8 @@
 # Session Data Ownership: Worker Owns, Coordinator Proxies
 
 - Date: 2026-05-01
-- Status: accepted (Phase 1 + Phase 2 implemented)
-- Tracks: REQ-120, REQ-121
+- Status: accepted (Phase 1 + Phase 2 + Phase 3 implemented)
+- Tracks: REQ-120, REQ-121, REQ-122
 
 ## Context
 
@@ -140,10 +140,38 @@ the URL the reporter already posted into the original GitHub comment.
   this commit (in `internal/sessionproxy`, `cmd/coordinator.go`,
   `cmd/coordinator_session_proxy.go`) and act on each one.
 
-### Phase 3 — delete legacy paths (NOT in this PR)
+### Phase 3 — delete legacy paths (REQ-122, implemented 2026-05-01)
 
-- Remove `listDiskOnlySessions`, `buildDegradedFromDisk`, `StatusAbortedBeforeStart`, `degradedReasonNoDBRow`, the disk-walk metadata reader, and the synthesis tests once Phase 2 has been live long enough for the operator playbooks to retire.
-- The coordinator DB no longer holds session rows; we can drop the `sessions` table on the coordinator side (the `agent_sessions` legacy table goes too, if no other reader survives). Migration deferred to its own ADR.
+- **Backend deletions** (~400 LOC removed from `internal/auditapi/handler.go`):
+  - `listDiskOnlySessions`, `buildDegradedFromDisk`, `readDiskSessionMetadata`, `synthesizeDegradedSummary`, `metaStatusRunning`, `nullableMetaTime`, `firstNonZeroExitCode`, the local `diskSessionMetadata` struct.
+  - `StatusAbortedBeforeStart` constant + every reference (test fixtures, `isTerminalSessionStatus`).
+  - `degradedReasonNoDBRow` constant + every reference.
+  - `Handler.disableDiskOnlySynthesis` field + setter (no caller remained: both worker-side audit server and coordinator already set it true).
+  - The companion no_db_row tests (`TestDashboardSessionDetail_DegradedFromDiskMetadata`, `TestDashboardSessionsList_IncludesDegradedDiskOnlyRow`, `TestSessionDetailNoDBRowRunningWithEventsIsNotDegraded`, `TestDashboardSessionsList_LiveDiskOnlyRowIsNotDegraded`).
+  - `sessionsDir` field stays on the handler — still used by `buildSessionDetail` to point artefact paths and by the worker audit server.
+- **Coordinator session-proxy decision** (`cmd/coordinator_session_proxy.go`): chose **option (a)** from the Phase 2 ADR. The legacy `mgmt_base_url`-based HTML reverse-proxy (~135 LOC) is replaced with a 30-line 302 redirect that maps `/workers/<id>/sessions/<sid>[suffix]` to the SPA's canonical `/sessions/<sid>[suffix]` route. Existing GitHub-comment URLs (the reporter still emits them via `sessionref.BuildURL`) keep working — the browser receives the redirect, the SPA reads JSON via the audit_url-driven `internal/sessionproxy`, no worker mgmt HTML round-trip. Test renamed to `TestCoordinatorWorkerSessionProxyRedirectsToSPA`. The `mgmt_base_url` column on `workers` is left in place; nothing reads it for sessions any longer.
+- **Coordinator DB schema migration**: `internal/store.NewCoordinatorStore` is the new entry point used by the standalone `workbuddy coordinator` command. It runs `createTables` (so `serve` and tests still see the same schema), then idempotently `DROP INDEX IF EXISTS` + `DROP TABLE IF EXISTS sessions, agent_sessions`. The companion `Store.coordinatorMode` flag short-circuits every session-table read method (`GetSession`, `ListSessions`, `ListSessionsForAPI`, `QueryAgentSessions` via `ListSessions`, `CountActiveSessions`, `CountTerminalSessionsSince`, `AggregateSessionMetrics`, `CountSessionsByAgent`, `migrateLegacySessions`) to "no rows / not found" instead of erroring on the missing table. `workbuddy serve` keeps `NewStore` (not `NewCoordinatorStore`) because the in-process worker still writes session rows to the same DB. Tradeoff: legacy `sessions` rows on the coordinator host become permanently unreachable through the API; the events file on disk under `.workbuddy/sessions/<id>/` is preserved.
+- **Issue-detail rerouting**: `auditapi.Handler` gained `SetIssueSessionsLister(lister IssueSessionsLister)`. The coordinator wires it to `sessionproxy.Handler.ListSessionsForRepoIssue`, which fans out across worker `audit_url`s the same way `/api/v1/sessions` does. Worker-side audit handlers don't set the lister and continue to read from their local store directly.
+- **Cache invalidation hook**: `FullCoordinatorServer.OnWorkerMembershipChange` is fired after `Registry.Register` and `Registry.Unregister` succeed; `cmd/coordinator.go` wires it to `sessionproxy.Handler.InvalidateCache`. New unit test `TestFanoutCacheInvalidationOnWorkerRegister` asserts the cache drops after invalidation and the next call observes a freshly-added worker. Without the hook, a registered worker stayed invisible for up to the 5s TTL.
+- **Frontend offline UX** (REQ-122 acceptance):
+  - `web/src/api/sessions.ts`: `fetchSessions` now returns `{rows, offlineWorkers}` (parsed from the `X-Workbuddy-Worker-Offline` response header). Both `SessionListItem` and `SessionDetail` typed `degraded_reason` against a `DegradedReason` union enumerating `no_events_file | worker_offline | no_db_row | string`.
+  - `DegradedSessionCard.tsx` now distinguishes three cases: gray info card (`role=status`, `wb-degraded-card-info`) for `worker_offline`; the existing red alert card for `no_events_file` and inferred-empty rows; a defensive copy-only fallback for legacy `no_db_row`. `SessionStatusBadge` renders a gray `wb-badge-offline` pill (no ⚠️) for `worker_offline` rows.
+  - `Sessions.tsx`: shows a small banner above the table when `offlineWorkers` is non-empty; existing issue-grouping + dropdown filters preserved.
+  - `SessionDetail.tsx`: when `fetchSession` errors with HTTP 503 + `degraded_reason: 'worker_offline'`, renders a polite info panel with the worker ID and skips opening the SSE stream entirely (which would 503 too). All other detail-page UX (pretty timeline, events, kind filters) unchanged.
+  - `DispatchTicker.tsx` and the Layout/Dashboard call sites updated to match the new fetchSessions shape; tests refreshed.
+  - 10 DegradedSessionCard tests cover both the worker_offline gray-pill rendering and the legacy fallback paths.
+
+#### Open questions, closed
+
+- **"Will Phase 3 lose the legacy disk-only sessions on the coordinator host?"** Yes, intentionally. The events files on disk are preserved — only the DB rows go. Documented in the migration tradeoff above; release notes for v0.5.x should call this out so operators don't go hunting.
+- **"Is the redirect URL stable enough to not break GitHub comments?"** The redirect is server-side 302 to a route the SPA already serves at `/sessions/:id`. Existing comment URLs in the form `<base>/workers/<wid>/sessions/<sid>` continue to land on the right session — the SPA's data fetch is keyed on session ID alone.
+- **"Why keep `mgmt_base_url` on the workers table?"** Operator visibility via the admin API and possible future use as a worker management surface. No code reads it for sessions any longer.
+
+### Followups
+
+- Aggregate worker-side metrics into a coordinator-level `/api/v1/metrics` rollup. Today, after Phase 3, that endpoint reports zero session-derived counts on a standalone coordinator.
+- Drop the `mgmt_base_url` column entirely once the admin tooling that surfaces it confirms it's never needed.
+- The dispatchHook hook on `sessionproxy.Handler` is a test-only seam; can be deleted once Phase 3 stabilises.
 
 ## Phase 1 boundaries that Phase 2 must respect
 

@@ -4412,13 +4412,74 @@ requirements:
       - "AC-121-2: SSE /api/v1/sessions/{id}/stream preserves event:/id:/data: framing with per-chunk Flush(); browser disconnects (request-context cancellation) propagate to the upstream worker."
       - "AC-121-3: dial errors / non-2xx upstream produce 503 {\"degraded_reason\":\"worker_offline\",\"worker_id\":\"...\"} for JSON paths and a single event: error frame for SSE."
       - "AC-121-4: /api/v1/sessions fans out across all candidate workers (filtered by repo when set), pushes the same filters down to each worker, merges results, dedupes by session_id, sorts created_at desc, paginates, and surfaces offline workers via header without failing the call."
-      - "AC-121-5: a 5-second in-memory cache fronts the listing, cached only when no upstream errors occurred; coordinator-side disableDiskOnlySynthesis is turned on."
+      - "AC-121-5: a 5-second in-memory cache fronts the listing, cached only when no upstream errors occurred."
     code:
       - internal/sessionproxy/resolver.go
       - internal/sessionproxy/handler.go
       - cmd/coordinator.go
-      - cmd/coordinator_session_proxy.go
     tests:
       - internal/sessionproxy/handler_test.go
     deps:
       - REQ-120
+
+  - id: REQ-122
+    title: Drop legacy session paths + frontend offline UX (Phase 3 of session-data ownership refactor)
+    description: >
+      Phase 3 of the session-data ownership refactor (REQ-120, REQ-121).
+      Deletes the disk-only synthesis paths in internal/auditapi/handler.go
+      (listDiskOnlySessions, buildDegradedFromDisk, readDiskSessionMetadata,
+      synthesizeDegradedSummary, the StatusAbortedBeforeStart constant, the
+      degradedReasonNoDBRow constant, the disableDiskOnlySynthesis field +
+      setter), drops the coordinator's `sessions` and `agent_sessions`
+      tables idempotently via a new internal/store.NewCoordinatorStore
+      factory, replaces the legacy `mgmt_base_url` HTML reverse-proxy in
+      cmd/coordinator_session_proxy.go with a 302 redirect onto the SPA's
+      canonical /sessions/{id} route, wires the existing
+      sessionproxy.Handler.InvalidateCache to fire on
+      worker_registered/unregistered events for sub-second freshness,
+      surfaces worker_offline degraded state in the SPA (gray pill +
+      polite info panel + offline-workers banner driven by
+      X-Workbuddy-Worker-Offline), and routes the coordinator's
+      issue-detail session list through sessionproxy fan-out instead of
+      the now-dropped local table. See
+      docs/decisions/2026-05-01-session-data-ownership.md.
+    priority: P0
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-122-1: dead code removed: listDiskOnlySessions, buildDegradedFromDisk, readDiskSessionMetadata, synthesizeDegradedSummary, metaStatusRunning, nullableMetaTime, firstNonZeroExitCode, the diskSessionMetadata struct, StatusAbortedBeforeStart, degradedReasonNoDBRow, Handler.disableDiskOnlySynthesis. `git grep` returns no callers."
+      - "AC-122-2: cmd/coordinator_session_proxy.go redirects /workers/<id>/sessions/<sid>[/suffix][?query] to /sessions/<sid>[/suffix][?query] with HTTP 302; bearer-auth still gated by api.WrapAuth; existing GitHub-comment URLs (sessionref.BuildURL output) keep landing on the SPA's session detail."
+      - "AC-122-3: standalone `workbuddy coordinator` opens its DB via internal/store.NewCoordinatorStore which idempotently DROPs the legacy `sessions` and `agent_sessions` tables (and their indexes); coordinator-mode short-circuits make GetSession/ListSessions/ListSessionsForAPI/CountActiveSessions/CountTerminalSessionsSince/AggregateSessionMetrics/CountSessionsByAgent/QueryAgentSessions return empty without erroring; `workbuddy serve` keeps NewStore (workers in the same process still write session rows)."
+      - "AC-122-4: FullCoordinatorServer.OnWorkerMembershipChange fires after Registry.Register and Registry.Unregister succeed; cmd/coordinator.go wires it to sessionproxy.Handler.InvalidateCache; a unit test (TestFanoutCacheInvalidationOnWorkerRegister) confirms a freshly-registered worker is visible on the next listing call without waiting for the 5s TTL."
+      - "AC-122-5: the SPA distinguishes three degraded reasons. DegradedSessionCard renders a gray info panel (role=status) for worker_offline, the existing red alert for no_events_file, and a defensive fallback for legacy no_db_row. Sessions.tsx shows an offline-workers banner sourced from the X-Workbuddy-Worker-Offline header. SessionDetail.tsx renders a polite worker-offline info panel on 503 + degraded_reason=worker_offline and skips opening the SSE stream. SessionStatusBadge renders a gray wb-badge-offline pill for worker_offline rows. fetchSessions returns {rows, offlineWorkers}."
+      - "AC-122-6: the coordinator's issue-detail endpoint (auditapi.Handler.buildIssueDetailResponse) routes its session list through sessionproxy.Handler.ListSessionsForRepoIssue (fan-out across worker audit_urls) instead of reading from the dropped local table; worker-side audit handlers continue to read from the local store."
+    code:
+      - internal/auditapi/handler.go
+      - internal/sessionproxy/handler.go
+      - internal/sessionproxy/resolver.go
+      - internal/store/store.go
+      - internal/store/queries.go
+      - internal/app/coordinator.go
+      - internal/worker/audit/server.go
+      - cmd/coordinator.go
+      - cmd/coordinator_session_proxy.go
+      - cmd/serve.go
+      - web/src/api/sessions.ts
+      - web/src/components/DegradedSessionCard.tsx
+      - web/src/components/DispatchTicker.tsx
+      - web/src/pages/Sessions.tsx
+      - web/src/pages/SessionDetail.tsx
+      - web/src/pages/Dashboard.tsx
+      - web/src/styles.css
+      - docs/decisions/2026-05-01-session-data-ownership.md
+    tests:
+      - internal/auditapi/handler_test.go
+      - internal/sessionproxy/handler_test.go
+      - internal/worker/audit/server_test.go
+      - cmd/coordinator_audit_test.go
+      - web/src/components/DegradedSessionCard.test.tsx
+      - web/src/components/DispatchTicker.test.tsx
+      - web/src/components/Layout.test.tsx
+    deps:
+      - REQ-120
+      - REQ-121
