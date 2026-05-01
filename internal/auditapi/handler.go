@@ -70,6 +70,16 @@ type rolloutPRReader interface {
 	DiffPullRequest(ctx context.Context, repo string, prNum int) (string, error)
 }
 
+func hasRolloutMetadata(index, total int, groupID string) bool {
+	if strings.TrimSpace(groupID) != "" {
+		return true
+	}
+	if index > 0 {
+		return true
+	}
+	return total > 1
+}
+
 type cachedPRDiff struct {
 	body      string
 	expiresAt time.Time
@@ -742,9 +752,11 @@ func (h *Handler) buildIssueDetailResponse(cache store.IssueCache) (issueDetailR
 			TaskID:     sess.TaskID,
 		}
 		if task != nil {
-			row.RolloutIndex = task.RolloutIndex
-			row.RolloutsTotal = task.RolloutsTotal
-			row.RolloutGroupID = task.RolloutGroupID
+			if hasRolloutMetadata(task.RolloutIndex, task.RolloutsTotal, task.RolloutGroupID) {
+				row.RolloutIndex = task.RolloutIndex
+				row.RolloutsTotal = task.RolloutsTotal
+				row.RolloutGroupID = task.RolloutGroupID
+			}
 			if row.WorkerID == "" {
 				row.WorkerID = task.WorkerID
 			}
@@ -1535,9 +1547,11 @@ func (h *Handler) listSessions(p sessionListParams) ([]sessionListResponse, erro
 				row.TaskStatus = task.Status
 				row.Workflow = task.Workflow
 				row.CurrentState = task.State
-				row.RolloutIndex = task.RolloutIndex
-				row.RolloutsTotal = task.RolloutsTotal
-				row.RolloutGroupID = task.RolloutGroupID
+				if hasRolloutMetadata(task.RolloutIndex, task.RolloutsTotal, task.RolloutGroupID) {
+					row.RolloutIndex = task.RolloutIndex
+					row.RolloutsTotal = task.RolloutsTotal
+					row.RolloutGroupID = task.RolloutGroupID
+				}
 			}
 		}
 		if row.CurrentState == "" {

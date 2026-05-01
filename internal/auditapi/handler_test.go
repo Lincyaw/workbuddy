@@ -316,6 +316,61 @@ func TestHandleAPIIssueDetailIncludesRolloutMetadataOnSessions(t *testing.T) {
 	}
 }
 
+func TestHandleAPIIssueDetailOmitsDefaultRolloutMetadataOnSessions(t *testing.T) {
+	st := newTestStore(t)
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     "owner/repo",
+		IssueNum: 295,
+		Body:     "Regular issue",
+		Labels:   `["workbuddy","status:reviewing"]`,
+		State:    "open",
+	}); err != nil {
+		t.Fatalf("UpsertIssueCache: %v", err)
+	}
+	if err := st.InsertTask(store.TaskRecord{
+		ID:          "task-regular-1",
+		Repo:        "owner/repo",
+		IssueNum:    295,
+		AgentName:   "dev-agent",
+		WorkerID:    "worker-a",
+		Status:      store.TaskStatusCompleted,
+		SessionRefs: `["session-regular-1"]`,
+	}); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+	if _, err := st.InsertAgentSession(store.AgentSession{
+		SessionID:  "session-regular-1",
+		TaskID:     "task-regular-1",
+		Repo:       "owner/repo",
+		IssueNum:   295,
+		AgentName:  "dev-agent",
+		TaskStatus: store.TaskStatusCompleted,
+	}); err != nil {
+		t.Fatalf("InsertAgentSession: %v", err)
+	}
+
+	h := NewHandler(st)
+	mux := http.NewServeMux()
+	h.RegisterDashboard(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/issues/owner/repo/295", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var resp issueDetailResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(resp.Sessions))
+	}
+	if resp.Sessions[0].RolloutIndex != 0 || resp.Sessions[0].RolloutsTotal != 0 || resp.Sessions[0].RolloutGroupID != "" {
+		t.Fatalf("regular issue session should omit rollout fields, got %+v", resp.Sessions[0])
+	}
+}
+
 func TestHandleAPIIssueRolloutsBuildsGroupedView(t *testing.T) {
 	st := newTestStore(t)
 	evlog := eventlog.NewEventLogger(st)
@@ -1265,6 +1320,9 @@ func TestDashboardSessionsEndpoint_AddedFields(t *testing.T) {
 	}
 	if s40.TaskStatus == "" {
 		t.Fatalf("task_status = %q", s40.TaskStatus)
+	}
+	if s40.RolloutIndex != 0 || s40.RolloutsTotal != 0 || s40.RolloutGroupID != "" {
+		t.Fatalf("non-rollout session should omit rollout fields, got %+v", *s40)
 	}
 }
 
