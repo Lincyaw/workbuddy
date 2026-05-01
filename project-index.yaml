@@ -4317,6 +4317,7 @@ requirements:
       - internal/auditapi/handler.go
       - internal/eventlog/eventlog.go
       - internal/ghadapter/ghcli.go
+      - internal/hooks/config.go
       - internal/statemachine/statemachine.go
       - internal/store/store.go
       - web/src/App.tsx
@@ -4333,7 +4334,9 @@ requirements:
       - cmd/worker_test.go
       - internal/auditapi/handler_test.go
       - internal/ghadapter/ghcli_test.go
+      - internal/hooks/config_test.go
       - internal/statemachine/statemachine_test.go
+      - web/src/pages/Hooks.test.tsx
       - internal/store/store_test.go
       - web/src/components/RolloutGroupPanel.test.tsx
     deps:

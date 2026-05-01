@@ -929,7 +929,7 @@ func parseSynthOutcomeEvent(ev store.Event, groupID string, prByRollout map[int]
 		return nil, false
 	}
 	outcome := &rolloutSynthOutcomeResponse{
-		Decision:      stringValue(payload["decision"]),
+		Decision:      firstNonEmptyString(payload["decision"], payload["outcome"]),
 		ChosenPR:      intValue(payload["chosen_pr"]),
 		SynthPR:       intValue(payload["synth_pr"]),
 		ChosenRollout: intValue(payload["chosen_rollout_index"]),
@@ -952,6 +952,15 @@ func parseSynthOutcomeEvent(ev store.Event, groupID string, prByRollout map[int]
 		return nil, false
 	}
 	return outcome, true
+}
+
+func firstNonEmptyString(values ...any) string {
+	for _, value := range values {
+		if s := stringValue(value); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 func indexIssueTasks(tasks []store.TaskRecord) (map[string]*store.TaskRecord, map[string]*store.TaskRecord) {

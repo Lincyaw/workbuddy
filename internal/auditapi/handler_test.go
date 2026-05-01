@@ -354,7 +354,7 @@ func TestHandleAPIIssueRolloutsBuildsGroupedView(t *testing.T) {
 	insert("rollout-3", 3, store.TaskStatusCompleted, "worker-c", "session-c", now.Add(2*time.Minute))
 	evlog.Log("synthesis_decision", "owner/repo", 294, map[string]any{
 		"group_id":             "group-294",
-		"decision":             "pick",
+		"outcome":              "pick",
 		"chosen_rollout_index": 3,
 		"reason":               "best test coverage",
 		"ts":                   now.Add(10 * time.Minute).Format(time.RFC3339),

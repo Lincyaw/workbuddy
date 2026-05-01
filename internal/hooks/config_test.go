@@ -156,3 +156,16 @@ hooks:
 		t.Fatalf("wildcard hook missing: %+v", cfg)
 	}
 }
+
+func TestHookMatchesEventGlob(t *testing.T) {
+	hook := Hook{Events: []string{"rollout_*"}}
+	if !hook.MatchesEvent("rollout_group_started") {
+		t.Fatalf("expected rollout_* to match rollout_group_started")
+	}
+	if !hook.MatchesEvent("rollout_group_resolved") {
+		t.Fatalf("expected rollout_* to match rollout_group_resolved")
+	}
+	if hook.MatchesEvent("dispatch") {
+		t.Fatalf("did not expect rollout_* to match dispatch")
+	}
+}
