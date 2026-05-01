@@ -64,6 +64,16 @@ var coordinatorIssueClaimPattern = regexp.MustCompile(`^coordinator-.*-pid-(\d+)
 type Store struct {
 	db      *sql.DB
 	nowFunc func() time.Time
+	// coordinatorMode is true when this Store backs the coordinator's DB
+	// (NewCoordinatorStore). Phase 3 of the session-data ownership
+	// refactor (REQ-122): the coordinator drops the legacy `sessions` and
+	// `agent_sessions` tables on startup and skips their re-creation.
+	// Session-table read paths (GetSession, ListSessions,
+	// ListSessionsForAPI, QueryAgentSessions) check this flag and
+	// short-circuit to "no rows" so the proxy's local-fallback returns
+	// 404 / empty instead of erroring on the missing table. Worker DBs
+	// open via NewStore and ignore this field entirely.
+	coordinatorMode bool
 }
 
 type TaskFilter struct {
@@ -75,6 +85,36 @@ type TaskFilter struct {
 // creates the parent directory if needed, enables WAL mode,
 // and ensures all tables exist.
 func NewStore(dbPath string) (*Store, error) {
+	return openStore(dbPath, storeMode{})
+}
+
+// NewCoordinatorStore is the coordinator-side variant of NewStore.
+// Phase 3 of the session-data ownership refactor (REQ-122): the
+// coordinator no longer owns session data — workers do. This variant
+// drops the `sessions` and `agent_sessions` tables idempotently, and
+// suppresses their re-creation by createTables so they stay gone.
+//
+// All session reads on the coordinator route through internal/sessionproxy
+// (fan-out to workers); attempting to read from these tables on the
+// coordinator was always going to be wrong post-Phase-2, so we drop
+// them outright. Worker DBs use NewStore unchanged.
+//
+// Idempotent: safe to call on a fresh DB and on a coordinator that has
+// already migrated. The companion guard `Store.coordinatorMode` then
+// makes per-method graceful: GetSession / ListSessions / ListSessionsForAPI
+// short-circuit to "no rows / not found" instead of erroring on the
+// missing table.
+func NewCoordinatorStore(dbPath string) (*Store, error) {
+	return openStore(dbPath, storeMode{coordinator: true})
+}
+
+type storeMode struct {
+	// coordinator suppresses the sessions/agent_sessions table creation
+	// (Phase 3) and drops any pre-existing rows on startup.
+	coordinator bool
+}
+
+func openStore(dbPath string, mode storeMode) (*Store, error) {
 	dir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("store: create dir: %w", err)
@@ -92,12 +132,19 @@ func NewStore(dbPath string) (*Store, error) {
 	}
 
 	s := &Store{
-		db:      db,
-		nowFunc: time.Now,
+		db:              db,
+		nowFunc:         time.Now,
+		coordinatorMode: mode.coordinator,
 	}
 	if err := s.createTables(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("store: create tables: %w", err)
+	}
+	if mode.coordinator {
+		if err := s.dropLegacySessionTables(); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("store: drop legacy session tables: %w", err)
+		}
 	}
 	return s, nil
 }
@@ -176,6 +223,7 @@ func (s *Store) createTables() error {
 			runtime TEXT NOT NULL DEFAULT '',
 			hostname TEXT,
 			mgmt_base_url TEXT NOT NULL DEFAULT '',
+			audit_url TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL DEFAULT 'online',
 			token_kid TEXT,
 			token_hash TEXT,
@@ -229,6 +277,13 @@ func (s *Store) createTables() error {
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (repo, issue_num)
 		)`,
+		// Phase 3 (REQ-122): the agent_sessions and sessions tables are
+		// owned by workers, not the coordinator. The CREATE statements
+		// stay here unconditionally so worker DBs (NewStore) get them;
+		// coordinator DBs (NewCoordinatorStore) drop them again
+		// post-createTables via dropLegacySessionTables. The IF NOT EXISTS
+		// guards keep this re-create cheap for tests / single-process
+		// `serve` (which still shares one DB between coord and worker).
 		`CREATE TABLE IF NOT EXISTS agent_sessions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			session_id TEXT NOT NULL,
@@ -340,6 +395,13 @@ func (s *Store) createTables() error {
 	if _, err := s.db.Exec(`ALTER TABLE workers ADD COLUMN mgmt_base_url TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("store: alter workers add mgmt_base_url: %w", err)
 	}
+	// Phase 1 of the session-data ownership refactor (REQ-120): persist
+	// the worker-advertised audit_url so Phase 2 can proxy session reads
+	// to the worker that owns the data. Existing rows default to '' which
+	// the coordinator simply ignores.
+	if _, err := s.db.Exec(`ALTER TABLE workers ADD COLUMN audit_url TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("store: alter workers add audit_url: %w", err)
+	}
 	if _, err := s.db.Exec(`ALTER TABLE issue_cycle_state ADD COLUMN synth_cycle_count INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("store: alter issue_cycle_state add synth_cycle_count: %w", err)
 	}
@@ -386,6 +448,13 @@ func (s *Store) createTables() error {
 }
 
 func (s *Store) migrateLegacySessions() error {
+	if s.coordinatorMode {
+		// Phase 3 (REQ-122): coordinator drops both tables right after
+		// createTables — populating sessions from agent_sessions only to
+		// drop both seconds later wastes I/O and can trip "no such
+		// table" if the createTables IF-NOT-EXISTS guard ever drifts.
+		return nil
+	}
 	_, err := s.db.Exec(`
 		INSERT OR IGNORE INTO sessions (
 			session_id, task_id, repo, issue_num, agent_name,
@@ -406,6 +475,38 @@ func (s *Store) migrateLegacySessions() error {
 	`)
 	if err != nil {
 		return fmt.Errorf("store: migrate legacy sessions: %w", err)
+	}
+	return nil
+}
+
+// dropLegacySessionTables drops the `sessions` and `agent_sessions`
+// tables on the coordinator-side DB. Invoked by NewCoordinatorStore
+// after createTables runs (so legacy CREATE TABLE IF NOT EXISTS
+// statements have nothing to short-circuit on the next coordinator
+// boot — they re-create empty, then we drop again).
+//
+// Idempotent: DROP IF EXISTS handles fresh DBs and already-migrated
+// coordinators alike. Companion guards on the read methods short-
+// circuit cleanly when the table is gone (the read returns "no rows"
+// instead of erroring).
+//
+// Tradeoff: legacy `sessions` rows on the coordinator host become
+// unreachable through the API. Documented in the ADR
+// (docs/decisions/2026-05-01-session-data-ownership.md). The events
+// file on disk under .workbuddy/sessions/<id>/ is preserved — only
+// the DB rows go.
+func (s *Store) dropLegacySessionTables() error {
+	stmts := []string{
+		`DROP INDEX IF EXISTS idx_sessions_repo_issue`,
+		`DROP INDEX IF EXISTS idx_sessions_agent`,
+		`DROP INDEX IF EXISTS idx_sessions_worker_status`,
+		`DROP TABLE IF EXISTS sessions`,
+		`DROP TABLE IF EXISTS agent_sessions`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("store: drop coordinator session tables (%s): %w", stmt, err)
+		}
 	}
 	return nil
 }
@@ -1161,8 +1262,8 @@ func (s *Store) InsertWorker(w WorkerRecord) error {
 		w.ReposJSON = "[]"
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO workers (id, repo, repos_json, roles, runtime, hostname, mgmt_base_url, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO workers (id, repo, repos_json, roles, runtime, hostname, mgmt_base_url, audit_url, status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		 repo = excluded.repo,
 		 repos_json = excluded.repos_json,
@@ -1170,9 +1271,10 @@ func (s *Store) InsertWorker(w WorkerRecord) error {
 		 runtime = excluded.runtime,
 		 hostname = excluded.hostname,
 		 mgmt_base_url = excluded.mgmt_base_url,
+		 audit_url = excluded.audit_url,
 		 status = excluded.status,
 		 last_heartbeat = CURRENT_TIMESTAMP`,
-		w.ID, w.Repo, w.ReposJSON, w.Roles, w.Runtime, w.Hostname, w.MgmtBaseURL, w.Status,
+		w.ID, w.Repo, w.ReposJSON, w.Roles, w.Runtime, w.Hostname, w.MgmtBaseURL, w.AuditURL, w.Status,
 	)
 	if err != nil {
 		return fmt.Errorf("store: insert worker: %w", err)
@@ -1182,7 +1284,7 @@ func (s *Store) InsertWorker(w WorkerRecord) error {
 
 // QueryWorkers returns workers filtered by repo (empty = all).
 func (s *Store) QueryWorkers(repo string) ([]WorkerRecord, error) {
-	rows, err := s.db.Query(`SELECT id, repo, repos_json, roles, runtime, hostname, mgmt_base_url, status, last_heartbeat, registered_at FROM workers ORDER BY id`)
+	rows, err := s.db.Query(`SELECT id, repo, repos_json, roles, runtime, hostname, mgmt_base_url, audit_url, status, last_heartbeat, registered_at FROM workers ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("store: query workers: %w", err)
 	}
@@ -1192,7 +1294,7 @@ func (s *Store) QueryWorkers(repo string) ([]WorkerRecord, error) {
 	for rows.Next() {
 		var w WorkerRecord
 		var hb, ra string
-		if err := rows.Scan(&w.ID, &w.Repo, &w.ReposJSON, &w.Roles, &w.Runtime, &w.Hostname, &w.MgmtBaseURL, &w.Status, &hb, &ra); err != nil {
+		if err := rows.Scan(&w.ID, &w.Repo, &w.ReposJSON, &w.Roles, &w.Runtime, &w.Hostname, &w.MgmtBaseURL, &w.AuditURL, &w.Status, &hb, &ra); err != nil {
 			return nil, fmt.Errorf("store: scan worker: %w", err)
 		}
 		w.LastHeartbeat, _ = ParseTimestamp(hb, "worker.last_heartbeat")
@@ -1207,10 +1309,10 @@ func (s *Store) QueryWorkers(repo string) ([]WorkerRecord, error) {
 
 // GetWorker returns a single registered worker by ID, or nil when absent.
 func (s *Store) GetWorker(workerID string) (*WorkerRecord, error) {
-	row := s.db.QueryRow(`SELECT id, repo, repos_json, roles, runtime, hostname, mgmt_base_url, status, last_heartbeat, registered_at FROM workers WHERE id = ?`, workerID)
+	row := s.db.QueryRow(`SELECT id, repo, repos_json, roles, runtime, hostname, mgmt_base_url, audit_url, status, last_heartbeat, registered_at FROM workers WHERE id = ?`, workerID)
 	var w WorkerRecord
 	var hb, ra string
-	if err := row.Scan(&w.ID, &w.Repo, &w.ReposJSON, &w.Roles, &w.Runtime, &w.Hostname, &w.MgmtBaseURL, &w.Status, &hb, &ra); err != nil {
+	if err := row.Scan(&w.ID, &w.Repo, &w.ReposJSON, &w.Roles, &w.Runtime, &w.Hostname, &w.MgmtBaseURL, &w.AuditURL, &w.Status, &hb, &ra); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -1624,6 +1726,12 @@ func (s *Store) UpdateSession(record SessionRecord) error {
 }
 
 func (s *Store) GetSession(sessionID string) (*SessionRecord, error) {
+	if s.coordinatorMode {
+		// Phase 3 (REQ-122): coordinator's `sessions` table is dropped.
+		// Treat the missing table as "no session" so the proxy's local
+		// fallback path returns 404 instead of 500.
+		return nil, nil
+	}
 	row := s.db.QueryRow(
 		`SELECT s.id, s.session_id, s.task_id, s.repo, s.issue_num, s.agent_name, s.runtime, s.worker_id, s.attempt,
 		        COALESCE(t.status, s.status),
@@ -1644,6 +1752,14 @@ func (s *Store) GetSession(sessionID string) (*SessionRecord, error) {
 }
 
 func (s *Store) ListSessions(f SessionFilter) ([]SessionRecord, error) {
+	if s.coordinatorMode {
+		// Phase 3 (REQ-122): coordinator's `sessions` table is dropped.
+		// Sessions live on each owning worker; return empty so the
+		// in-process fallback path (issue-detail, etc.) renders cleanly.
+		// Coordinator-side issue-detail goes through the sessionproxy
+		// fan-out via Handler.SetIssueSessionsLister instead.
+		return nil, nil
+	}
 	q := `SELECT s.id, s.session_id, s.task_id, s.repo, s.issue_num, s.agent_name, s.runtime, s.worker_id, s.attempt,
 	             COALESCE(t.status, s.status),
 	             s.dir, s.stdout_path, s.stderr_path, s.tool_calls_path, s.metadata_path, s.summary, s.raw_path, s.created_at, s.closed_at

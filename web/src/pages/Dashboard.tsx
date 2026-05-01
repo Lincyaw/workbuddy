@@ -54,7 +54,10 @@ export function Dashboard() {
         setState({
           status,
           rows: rows || [],
-          sessions: sessions || [],
+          // Phase 3 (REQ-122): fetchSessions returns {rows, offlineWorkers}.
+          // Dashboard only needs the rows; the offline-worker banner
+          // lives on the Sessions page.
+          sessions: sessions.rows || [],
           error: null,
           loading: false,
         });

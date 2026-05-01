@@ -29,16 +29,23 @@ import (
 // HTTP handler's 1-hour rule.
 const stuckThresholdSeconds = int64(3600)
 
-// StatusAbortedBeforeStart is the synthesized status reported for sessions
-// where the runtime aborted before any events were recorded, so neither the
-// agent_sessions DB row nor the events-v1.jsonl file ever materialized. The
-// API surfaces it (instead of "completed"/"running") whenever degraded
-// fallback to disk metadata is the only available signal.
-const StatusAbortedBeforeStart = "aborted_before_start"
-
 // degradedReason values populate the SessionDetail.DegradedReason field.
+//
+// Phase 3 of the session-data ownership refactor (REQ-122) deleted the
+// disk-only synthesis path. Two reasons remain:
+//
+//   - no_events_file: the worker's DB row exists and the session reached a
+//     terminal status, but events-v1.jsonl never got any content. Real
+//     signal — the agent crashed before producing any tool calls.
+//   - worker_offline: emitted by the coordinator's sessionproxy (NOT this
+//     handler) when the owning worker can't be dialled. Surfaced here only
+//     in comments and the SPA copy.
+//
+// The legacy `no_db_row` reason and its `aborted_before_start` synthesized
+// status were removed: with worker-owned session data, a missing DB row
+// is a real 404, not a "we lost the row but kept the disk artefact"
+// degraded shape.
 const (
-	degradedReasonNoDBRow      = "no_db_row"
 	degradedReasonNoEventsFile = "no_events_file"
 )
 
@@ -50,19 +57,29 @@ type badRequestError struct {
 
 func (e *badRequestError) Error() string { return e.msg }
 
+// IssueSessionsLister returns the sessions for a single repo+issue. It's
+// the seam the coordinator uses to fan out across worker audit_urls
+// instead of reading from its own (now-dropped) sessions table. The
+// worker-side audit handler does NOT set this — it falls back to the
+// store's local ListSessions, which is authoritative on the worker DB.
+type IssueSessionsLister interface {
+	ListSessionsForRepoIssue(ctx context.Context, repo string, issueNum int) ([]map[string]any, []string, error)
+}
+
 // Handler serves the JSON audit API.
 type Handler struct {
-	store           *store.Store
-	events          *eventlog.EventLogger
-	sessionsDir     string
-	reportBaseURL   string
-	now             func() time.Time
-	sessionEventsFn http.HandlerFunc
-	sessionStreamFn http.HandlerFunc
-	gh              rolloutPRReader
-	prDiffTTL       time.Duration
-	prDiffMu        sync.Mutex
-	prDiffCache     map[string]cachedPRDiff
+	store               *store.Store
+	events              *eventlog.EventLogger
+	sessionsDir         string
+	reportBaseURL       string
+	now                 func() time.Time
+	sessionEventsFn     http.HandlerFunc
+	sessionStreamFn     http.HandlerFunc
+	gh                  rolloutPRReader
+	prDiffTTL           time.Duration
+	prDiffMu            sync.Mutex
+	prDiffCache         map[string]cachedPRDiff
+	issueSessionsLister IssueSessionsLister
 }
 
 type rolloutPRReader interface {
@@ -139,6 +156,15 @@ func (h *Handler) SetRolloutPRReader(reader rolloutPRReader) {
 	h.gh = reader
 }
 
+// SetIssueSessionsLister injects the source for issue-detail's session
+// list. Coordinators wire this to internal/sessionproxy.Handler so the
+// detail endpoint fans out to live workers instead of reading from the
+// coordinator's own (Phase 3-dropped) sessions table. Pass nil to
+// restore the local-store fallback.
+func (h *Handler) SetIssueSessionsLister(lister IssueSessionsLister) {
+	h.issueSessionsLister = lister
+}
+
 func (h *Handler) SetPRDiffTTL(ttl time.Duration) {
 	if ttl <= 0 {
 		h.prDiffTTL = 30 * time.Second
@@ -179,6 +205,15 @@ func (h *Handler) RegisterDashboard(mux *http.ServeMux) {
 // another handler such as audit.HTTPHandler).
 func (h *Handler) RegisterSessionsOnly(mux *http.ServeMux) {
 	mux.HandleFunc("/sessions/", h.handleSession)
+}
+
+// RegisterAPISessions mounts only the /api/v1/sessions and
+// /api/v1/sessions/{id...} JSON endpoints. Used by worker-side audit
+// servers that expose just the session subset of the dashboard API
+// (Phase 1 of the session-data ownership refactor).
+func (h *Handler) RegisterAPISessions(mux *http.ServeMux) {
+	mux.HandleFunc("/api/v1/sessions", h.handleAPISessions)
+	mux.HandleFunc("/api/v1/sessions/", h.handleAPISession)
 }
 
 type eventsResponse struct {
@@ -540,15 +575,12 @@ func (h *Handler) serveSessionDetail(w http.ResponseWriter, sessionID string) {
 		return
 	}
 	if record == nil {
-		// Issue #275: if no agent_sessions DB row exists, attempt to
-		// reconstruct a degraded response from the on-disk metadata.json
-		// so the operator can still see what happened. The response is
-		// flagged degraded=true so the SPA renders a "never produced any
-		// events" warning instead of an empty-looking normal session.
-		if resp, ok := h.buildDegradedFromDisk(sessionID); ok {
-			writeJSON(w, http.StatusOK, resp)
-			return
-		}
+		// Phase 3 (REQ-122) deleted the disk-only synthesis fallback. The
+		// owning worker is authoritative for session existence; a missing
+		// row is a real 404. Coordinator callers reach this handler only
+		// via the sessionproxy local-fallback branch (legacy pre-bundle
+		// rows on the coordinator host), where 404 is also the right
+		// answer when the row is gone.
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
@@ -724,24 +756,54 @@ func (h *Handler) buildIssueDetailResponse(cache store.IssueCache) (issueDetailR
 			Count:     c.Count,
 		})
 	}
-	sessions, err := h.store.ListSessions(store.SessionFilter{Repo: cache.Repo, IssueNum: cache.IssueNum})
-	if err != nil {
-		return issueDetailResponse{}, fmt.Errorf("failed to list sessions")
-	}
 	tasks, err := h.store.ListTasksForIssue(cache.Repo, cache.IssueNum)
 	if err != nil {
 		return issueDetailResponse{}, fmt.Errorf("failed to list tasks: %w", err)
 	}
 	taskBySession, taskByID := indexIssueTasks(tasks)
+
+	sessionRows, sessionsErr := h.collectIssueSessions(cache.Repo, cache.IssueNum, taskBySession, taskByID)
+	if sessionsErr != nil {
+		return issueDetailResponse{}, sessionsErr
+	}
+	resp.Sessions = append(resp.Sessions, sessionRows...)
+	return resp, nil
+}
+
+// collectIssueSessions resolves the per-issue session list. When an
+// issueSessionsLister is wired (coordinator path, Phase 3) it fans out
+// across workers via internal/sessionproxy; otherwise (worker path or
+// tests with a local DB) it reads from the local store directly. Both
+// branches converge on the same issueSessionRefResponse shape.
+func (h *Handler) collectIssueSessions(
+	repo string,
+	issueNum int,
+	taskBySession map[string]*store.TaskRecord,
+	taskByID map[string]*store.TaskRecord,
+) ([]issueSessionRefResponse, error) {
+	if h.issueSessionsLister != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		rows, _, err := h.issueSessionsLister.ListSessionsForRepoIssue(ctx, repo, issueNum)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list sessions: %w", err)
+		}
+		out := make([]issueSessionRefResponse, 0, len(rows))
+		for _, row := range rows {
+			ref := issueSessionRefFromRow(row)
+			fillRolloutFromTask(&ref, taskBySession, taskByID)
+			out = append(out, ref)
+		}
+		return out, nil
+	}
+	sessions, err := h.store.ListSessions(store.SessionFilter{Repo: repo, IssueNum: issueNum})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list sessions")
+	}
+	out := make([]issueSessionRefResponse, 0, len(sessions))
 	for _, sess := range sessions {
 		exitCode, _, finishedAt, _ := h.sessionTaskStats(sess)
-		var task *store.TaskRecord
-		if t := taskBySession[sess.SessionID]; t != nil {
-			task = t
-		} else if t := taskByID[sess.TaskID]; t != nil {
-			task = t
-		}
-		row := issueSessionRefResponse{
+		ref := issueSessionRefResponse{
 			SessionID:  sess.SessionID,
 			Agent:      sess.AgentName,
 			StartedAt:  sess.CreatedAt,
@@ -751,19 +813,83 @@ func (h *Handler) buildIssueDetailResponse(cache store.IssueCache) (issueDetailR
 			WorkerID:   sess.WorkerID,
 			TaskID:     sess.TaskID,
 		}
-		if task != nil {
-			if hasRolloutMetadata(task.RolloutIndex, task.RolloutsTotal, task.RolloutGroupID) {
-				row.RolloutIndex = task.RolloutIndex
-				row.RolloutsTotal = task.RolloutsTotal
-				row.RolloutGroupID = task.RolloutGroupID
-			}
-			if row.WorkerID == "" {
-				row.WorkerID = task.WorkerID
-			}
-		}
-		resp.Sessions = append(resp.Sessions, row)
+		fillRolloutFromTask(&ref, taskBySession, taskByID)
+		out = append(out, ref)
 	}
-	return resp, nil
+	return out, nil
+}
+
+// issueSessionRefFromRow translates a sessionproxy row (raw map[string]any
+// shaped by the worker's session list response) into the typed
+// issueSessionRefResponse the issue-detail endpoint serves.
+func issueSessionRefFromRow(row map[string]any) issueSessionRefResponse {
+	ref := issueSessionRefResponse{
+		SessionID: stringField(row, "session_id"),
+		Agent:     stringField(row, "agent_name"),
+		Status:    stringField(row, "status"),
+		WorkerID:  stringField(row, "worker_id"),
+		TaskID:    stringField(row, "task_id"),
+		ExitCode:  intField(row, "exit_code"),
+	}
+	if started, ok := timeField(row, "created_at"); ok {
+		ref.StartedAt = started
+	}
+	if finished, ok := timeField(row, "finished_at"); ok && !finished.IsZero() {
+		t := finished
+		ref.FinishedAt = &t
+	}
+	return ref
+}
+
+func fillRolloutFromTask(ref *issueSessionRefResponse, taskBySession, taskByID map[string]*store.TaskRecord) {
+	var task *store.TaskRecord
+	if t := taskBySession[ref.SessionID]; t != nil {
+		task = t
+	} else if t := taskByID[ref.TaskID]; t != nil {
+		task = t
+	}
+	if task == nil {
+		return
+	}
+	if hasRolloutMetadata(task.RolloutIndex, task.RolloutsTotal, task.RolloutGroupID) {
+		ref.RolloutIndex = task.RolloutIndex
+		ref.RolloutsTotal = task.RolloutsTotal
+		ref.RolloutGroupID = task.RolloutGroupID
+	}
+	if ref.WorkerID == "" {
+		ref.WorkerID = task.WorkerID
+	}
+}
+
+func stringField(row map[string]any, key string) string {
+	if v, ok := row[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func intField(row map[string]any, key string) int {
+	switch v := row[key].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	}
+	return 0
+}
+
+func timeField(row map[string]any, key string) (time.Time, bool) {
+	raw, ok := row[key].(string)
+	if !ok || raw == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return t, true
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
 }
 
 func splitRepoIssue(trimmed string) (string, int, bool) {
@@ -1518,10 +1644,8 @@ func (h *Handler) listSessions(p sessionListParams) ([]sessionListResponse, erro
 	}
 
 	out := make([]sessionListResponse, 0, len(records))
-	seen := make(map[string]struct{}, len(records))
 	for i := range records {
 		record := records[i]
-		seen[record.SessionID] = struct{}{}
 		exitCode, _, finishedAt, err := h.sessionTaskStats(record)
 		if err != nil {
 			return nil, err
@@ -1578,102 +1702,11 @@ func (h *Handler) listSessions(p sessionListParams) ([]sessionListResponse, erro
 		}
 		out = append(out, row)
 	}
-	// Issue #275: surface disk-only sessions (metadata.json with no DB row)
-	// so the operator can find and drill into them. They are always tagged
-	// degraded=no_db_row. Skipped when sessionsDir is unset (tests / split
-	// deployments without a sessions directory) or when filters were used —
-	// disk-walk filtering would be lossy and surprising.
-	if h.sessionsDir != "" && p.Repo == "" && p.AgentName == "" && p.IssueNum == 0 {
-		out = append(out, h.listDiskOnlySessions(seen)...)
-	}
+	// Phase 3 (REQ-122) deleted the disk-only listDiskOnlySessions branch.
+	// Sessions live on the worker that produced them; the coordinator's
+	// sessionproxy fans out to every worker for this repo, and each worker
+	// reads from its own DB authoritatively.
 	return out, nil
-}
-
-// listDiskOnlySessions enumerates sessionsDir for per-session metadata.json
-// files whose session_id is not present in `seen` (the DB-backed listing).
-// Each match becomes a degraded sessionListResponse row. Errors are
-// swallowed: a missing/unreadable directory simply returns no extra rows.
-func (h *Handler) listDiskOnlySessions(seen map[string]struct{}) []sessionListResponse {
-	if h.sessionsDir == "" {
-		return nil
-	}
-	entries, err := os.ReadDir(h.sessionsDir)
-	if err != nil {
-		return nil
-	}
-	out := make([]sessionListResponse, 0)
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		sessionID := entry.Name()
-		if !isValidSessionID(sessionID) {
-			continue
-		}
-		if _, ok := seen[sessionID]; ok {
-			continue
-		}
-		meta, ok := readDiskSessionMetadata(filepath.Join(h.sessionsDir, sessionID, "metadata.json"))
-		if !ok {
-			continue
-		}
-		// Issue #282: a session whose DB row hasn't been written yet but is
-		// actively streaming events is *live*, not aborted. Surface it as a
-		// running row so the SPA does not paint a misleading degraded badge.
-		eventsPath := filepath.Join(h.sessionsDir, sessionID, "events-v1.jsonl")
-		if metaStatusRunning(meta.Status) && eventsFileHasContent(eventsPath) {
-			out = append(out, sessionListResponse{
-				SessionID:  sessionID,
-				TaskID:     meta.TaskID,
-				Repo:       meta.Repo,
-				IssueNum:   meta.IssueNum,
-				AgentName:  meta.AgentName,
-				Runtime:    meta.Runtime,
-				WorkerID:   meta.WorkerID,
-				Attempt:    meta.Attempt,
-				Status:     store.TaskStatusRunning,
-				TaskStatus: store.TaskStatusRunning,
-				ExitCode:   0,
-				Duration:   sessionDuration(meta.CreatedAt, nullableMetaTime(meta.ClosedAt)),
-				CreatedAt:  meta.CreatedAt,
-				FinishedAt: nullableMetaTime(meta.ClosedAt),
-				Summary:    meta.Summary,
-			})
-			continue
-		}
-		row := sessionListResponse{
-			SessionID:      sessionID,
-			TaskID:         meta.TaskID,
-			Repo:           meta.Repo,
-			IssueNum:       meta.IssueNum,
-			AgentName:      meta.AgentName,
-			Runtime:        meta.Runtime,
-			WorkerID:       meta.WorkerID,
-			Attempt:        meta.Attempt,
-			Status:         StatusAbortedBeforeStart,
-			TaskStatus:     StatusAbortedBeforeStart,
-			ExitCode:       firstNonZeroExitCode(meta.ExitCode, -1),
-			Duration:       sessionDuration(meta.CreatedAt, nullableMetaTime(meta.ClosedAt)),
-			CreatedAt:      meta.CreatedAt,
-			FinishedAt:     nullableMetaTime(meta.ClosedAt),
-			Summary:        meta.Summary,
-			Degraded:       true,
-			DegradedReason: degradedReasonNoDBRow,
-		}
-		out = append(out, row)
-	}
-	return out
-}
-
-// firstNonZeroExitCode returns `recorded` when it is non-zero (so an
-// explicitly-recorded -1 or other failure code wins) and falls back to
-// `fallback` otherwise. Used to default disk-only rows to -1 instead of a
-// misleading 0.
-func firstNonZeroExitCode(recorded, fallback int) int {
-	if recorded != 0 {
-		return recorded
-	}
-	return fallback
 }
 
 func (h *Handler) buildSessionDetail(record store.SessionRecord) (sessionDetailResponse, error) {
@@ -1726,189 +1759,19 @@ func (h *Handler) buildSessionDetail(record store.SessionRecord) (sessionDetailR
 	return resp, nil
 }
 
-// buildDegradedFromDisk reconstructs a sessionDetailResponse from a
-// per-session metadata.json on disk when the agent_sessions DB row is
-// missing. Returns ok=false (so the caller can return 404) when the on-disk
-// metadata is unreadable or unusable. Issue #275.
-func (h *Handler) buildDegradedFromDisk(sessionID string) (sessionDetailResponse, bool) {
-	if h.sessionsDir == "" {
-		return sessionDetailResponse{}, false
-	}
-	dir := filepath.Join(h.sessionsDir, sessionID)
-	meta, ok := readDiskSessionMetadata(filepath.Join(dir, "metadata.json"))
-	if !ok {
-		return sessionDetailResponse{}, false
-	}
-	stdoutPath := meta.StdoutPath
-	if stdoutPath == "" {
-		stdoutPath = filepath.Join(dir, "stdout")
-	}
-	stderrPath := meta.StderrPath
-	if stderrPath == "" {
-		stderrPath = filepath.Join(dir, "stderr")
-	}
-	artifactPaths := SessionArtifactPaths{
-		SessionDir: dir,
-		EventsV1:   filepath.Join(dir, "events-v1.jsonl"),
-	}
-	stderrSummary := readArtifactSummary(stderrPath, 4096)
-	// Issue #282: a session whose DB row hasn't been written yet but is
-	// actively streaming events to events-v1.jsonl is still live. Surface
-	// it as running/non-degraded so the SPA renders the timeline normally
-	// instead of the red "aborted_before_start" warning card.
-	if metaStatusRunning(meta.Status) && eventsFileHasContent(artifactPaths.EventsV1) {
-		return sessionDetailResponse{
-			SessionID:     sessionID,
-			TaskID:        meta.TaskID,
-			Repo:          meta.Repo,
-			IssueNum:      meta.IssueNum,
-			AgentName:     meta.AgentName,
-			Runtime:       meta.Runtime,
-			WorkerID:      meta.WorkerID,
-			Attempt:       meta.Attempt,
-			Status:        store.TaskStatusRunning,
-			ExitCode:      0,
-			Duration:      sessionDuration(meta.CreatedAt, nullableMetaTime(meta.ClosedAt)),
-			CreatedAt:     meta.CreatedAt,
-			FinishedAt:    nullableMetaTime(meta.ClosedAt),
-			Summary:       strings.TrimSpace(meta.Summary),
-			StdoutSummary: readArtifactSummary(stdoutPath, 4096),
-			StderrSummary: stderrSummary,
-			ArtifactPaths: artifactPaths,
-		}, true
-	}
-	summary := strings.TrimSpace(meta.Summary)
-	if summary == "" {
-		summary = synthesizeDegradedSummary(meta, stderrSummary)
-	}
-	exitCode := meta.ExitCode
-	// When SessionManager.Create wrote metadata.json but Close() never ran,
-	// status remains "running" and exit_code defaults to zero. Surface a
-	// distinct -1 placeholder so the UI does not display a misleading
-	// "exit 0 / completed" pair.
-	if exitCode == 0 && !isTerminalSessionStatus(meta.Status) {
-		exitCode = -1
-	}
-	finishedAt := nullableMetaTime(meta.ClosedAt)
-	resp := sessionDetailResponse{
-		SessionID:      sessionID,
-		TaskID:         meta.TaskID,
-		Repo:           meta.Repo,
-		IssueNum:       meta.IssueNum,
-		AgentName:      meta.AgentName,
-		Runtime:        meta.Runtime,
-		WorkerID:       meta.WorkerID,
-		Attempt:        meta.Attempt,
-		Status:         StatusAbortedBeforeStart,
-		ExitCode:       exitCode,
-		Duration:       sessionDuration(meta.CreatedAt, finishedAt),
-		CreatedAt:      meta.CreatedAt,
-		FinishedAt:     finishedAt,
-		Summary:        summary,
-		StdoutSummary:  readArtifactSummary(stdoutPath, 4096),
-		StderrSummary:  stderrSummary,
-		ArtifactPaths:  artifactPaths,
-		Degraded:       true,
-		DegradedReason: degradedReasonNoDBRow,
-	}
-	return resp, true
-}
-
-// diskSessionMetadata mirrors the runtime SessionManager's metadata.json
-// schema. Defined locally to avoid an import cycle with internal/runtime
-// and to insulate the API from future schema changes.
-type diskSessionMetadata struct {
-	SessionID  string    `json:"session_id"`
-	TaskID     string    `json:"task_id,omitempty"`
-	Repo       string    `json:"repo"`
-	IssueNum   int       `json:"issue_num"`
-	AgentName  string    `json:"agent_name"`
-	Runtime    string    `json:"runtime,omitempty"`
-	WorkerID   string    `json:"worker_id,omitempty"`
-	Attempt    int       `json:"attempt"`
-	Status     string    `json:"status"`
-	CreatedAt  time.Time `json:"created_at"`
-	ClosedAt   time.Time `json:"closed_at,omitempty"`
-	StdoutPath string    `json:"stdout_path,omitempty"`
-	StderrPath string    `json:"stderr_path,omitempty"`
-	// ExitCode and Summary are not part of the canonical metadata schema
-	// today, but the fields are reserved here so writers (the supervisor /
-	// session manager) can populate them in the future and the API will
-	// surface them automatically.
-	ExitCode int    `json:"exit_code,omitempty"`
-	Summary  string `json:"summary,omitempty"`
-}
-
-func readDiskSessionMetadata(path string) (diskSessionMetadata, bool) {
-	if path == "" {
-		return diskSessionMetadata{}, false
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return diskSessionMetadata{}, false
-	}
-	var meta diskSessionMetadata
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return diskSessionMetadata{}, false
-	}
-	if meta.SessionID == "" && meta.Repo == "" && meta.AgentName == "" {
-		return diskSessionMetadata{}, false
-	}
-	return meta, true
-}
-
-func nullableMetaTime(t time.Time) *time.Time {
-	if t.IsZero() {
-		return nil
-	}
-	ts := t.UTC()
-	return &ts
-}
-
-// synthesizeDegradedSummary builds a markdown summary mirroring the shape
-// produced by audit.buildMinimalSummary so the SPA's warning card has
-// something useful to render even when the metadata.json itself does not
-// carry an explicit summary field.
-func synthesizeDegradedSummary(meta diskSessionMetadata, stderrExcerpt string) string {
-	var b strings.Builder
-	b.WriteString("## Session Summary (no session file)\n\n")
-	b.WriteString("- DB row: missing — response synthesized from metadata.json\n")
-	if meta.Status != "" {
-		fmt.Fprintf(&b, "- Recorded status: %s\n", meta.Status)
-	}
-	if meta.ExitCode != 0 {
-		fmt.Fprintf(&b, "- Exit code: %d\n", meta.ExitCode)
-	} else {
-		b.WriteString("- Exit code: -1 (unknown — runtime aborted before reporting)\n")
-	}
-	if !meta.CreatedAt.IsZero() {
-		fmt.Fprintf(&b, "- Created at: %s\n", meta.CreatedAt.UTC().Format(time.RFC3339))
-	}
-	if !meta.ClosedAt.IsZero() {
-		fmt.Fprintf(&b, "- Closed at: %s\n", meta.ClosedAt.UTC().Format(time.RFC3339))
-	}
-	if stderrExcerpt != "" {
-		b.WriteString("\n### Stderr (excerpt)\n```\n")
-		b.WriteString(stderrExcerpt)
-		b.WriteString("\n```\n")
-	}
-	return b.String()
-}
+// Phase 3 (REQ-122) deleted buildDegradedFromDisk, readDiskSessionMetadata,
+// synthesizeDegradedSummary, metaStatusRunning, nullableMetaTime,
+// firstNonZeroExitCode and the diskSessionMetadata struct. They reconstructed
+// a synthetic "aborted_before_start" response from on-disk metadata.json when
+// the DB row was missing. With worker-owned session data, the worker is
+// authoritative for session existence; a missing row is a real 404.
 
 func isTerminalSessionStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case store.TaskStatusCompleted, store.TaskStatusFailed, store.TaskStatusTimeout, StatusAbortedBeforeStart:
+	case store.TaskStatusCompleted, store.TaskStatusFailed, store.TaskStatusTimeout:
 		return true
 	}
 	return false
-}
-
-// metaStatusRunning reports whether a metadata.json status field marks the
-// session as still in flight. Issue #282: used together with
-// eventsFileHasContent to distinguish a live no-DB-row session from a real
-// aborted-before-start one.
-func metaStatusRunning(status string) bool {
-	return strings.ToLower(strings.TrimSpace(status)) == store.TaskStatusRunning
 }
 
 // eventsFileHasContent reports whether the events-v1.jsonl artefact at

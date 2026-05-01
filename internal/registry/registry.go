@@ -45,11 +45,14 @@ func (r *Registry) SetPollInterval(pollInterval time.Duration) {
 // Register adds a worker to the registry.
 // roles is stored as a JSON array string in the DB.
 func (r *Registry) Register(id, repo string, roles []string, runtime string, hostname string) error {
-	return r.RegisterWithRepos(id, repo, []string{repo}, roles, runtime, hostname, "")
+	return r.RegisterWithRepos(id, repo, []string{repo}, roles, runtime, hostname, "", "")
 }
 
 // RegisterWithRepos adds a worker to the registry with explicit repo bindings.
-func (r *Registry) RegisterWithRepos(id, repo string, repos []string, roles []string, runtime, hostname, mgmtBaseURL string) error {
+// auditURL is optional and persisted for Phase 2 of the session-data
+// ownership refactor (REQ-120); empty values are tolerated and ignored by
+// today's coordinator code paths.
+func (r *Registry) RegisterWithRepos(id, repo string, repos []string, roles []string, runtime, hostname, mgmtBaseURL, auditURL string) error {
 	rolesJSON, err := json.Marshal(roles)
 	if err != nil {
 		return fmt.Errorf("registry: marshal roles: %w", err)
@@ -66,6 +69,7 @@ func (r *Registry) RegisterWithRepos(id, repo string, repos []string, roles []st
 		Runtime:     runtime,
 		Hostname:    hostname,
 		MgmtBaseURL: mgmtBaseURL,
+		AuditURL:    auditURL,
 		Status:      "online",
 	})
 }

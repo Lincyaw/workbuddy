@@ -154,18 +154,19 @@ func runServeWithOutput(opts *serveOpts, ghReader poller.GHReader, launcherOverr
 	coordErrCh := make(chan error, 1)
 	go func() {
 		coordErrCh <- runCoordinatorWithOpts(&coordinatorOpts{
-			dbPath:            opts.dbPath,
-			listenAddr:        listenAddr,
-			loopbackOnly:      opts.loopbackOnly,
-			port:              cfg.Global.Port,
-			pollInterval:      cfg.Global.PollInterval,
-			configDir:         opts.configDir,
-			auth:              opts.auth,
-			trustedAuthors:    opts.trustedAuthors,
-			trustedAuthorsSet: opts.trustedAuthorsSet,
-			cookieInsecure:    opts.cookieInsecure,
-			reportBaseURL:     resolvedReportBaseURL,
-			hooksConfig:       opts.hooksConfig,
+			dbPath:                opts.dbPath,
+			listenAddr:            listenAddr,
+			loopbackOnly:          opts.loopbackOnly,
+			port:                  cfg.Global.Port,
+			pollInterval:          cfg.Global.PollInterval,
+			configDir:             opts.configDir,
+			auth:                  opts.auth,
+			trustedAuthors:        opts.trustedAuthors,
+			trustedAuthorsSet:     opts.trustedAuthorsSet,
+			cookieInsecure:        opts.cookieInsecure,
+			reportBaseURL:         resolvedReportBaseURL,
+			hooksConfig:           opts.hooksConfig,
+			sharedStoreWithWorker: true, // serve = single-process coord+worker on one DB.
 		}, ghReader, ctx)
 	}()
 
