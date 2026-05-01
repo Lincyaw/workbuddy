@@ -61,11 +61,11 @@ const (
 	// i.e. the issue cannot enter the state machine. Idempotent per
 	// (labels) fingerprint via the issue_pipeline_hazards table. See REQ #255.
 	TypeIssueNoWorkflowMatch = "issue_no_workflow_match"
-	// TypeIssueDependencyUnentered fires when an issue carries a workflow
-	// trigger label and a workbuddy.depends_on declaration but no status:*
-	// label, so the state machine cannot enter the issue and the dependency
-	// gate cannot release downstream work. Idempotent per (labels+depends_on)
-	// fingerprint. See REQ #255.
+	// TypeIssueDependencyUnentered fires when dependency declarations are
+	// present but cannot fully enter the normal dependency flow: either the
+	// issue lacks a status:* label, or at least one depends_on ref is
+	// malformed and dropped. Idempotent per hazard fingerprint. See REQ #255
+	// and #303.
 	TypeIssueDependencyUnentered = "issue_dependency_unentered"
 	// TypeCoordinatorStarted is emitted at the tail of coordinator/serve startup
 	// (after the HTTP listener is reserved). Payload carries listen address,

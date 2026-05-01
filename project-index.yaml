@@ -4257,3 +4257,35 @@ requirements:
       - internal/validate/template_schema_test.go
     deps:
       - REQ-115
+
+  - id: REQ-118
+    title: "Normalize escaped depends_on refs and surface malformed entries (#303)"
+    description: >
+      Issue #303 hardens the dependency declaration parser against shell- or
+      JSON-escaped issue refs that leak into issue-body YAML literally (for
+      example `\\\"#292\\\"`). The parser now normalizes surrounding quotes
+      and backslash-quoted quotes at the parsing boundary, validates the
+      resulting ref shape, records malformed entries with structured
+      `issue_dependency_unentered` warning payloads, persists a
+      `malformed-dependency-ref` pipeline hazard for diagnose/status
+      surfaces, and points operators at the offending issue-body line.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-118-1: dependency.ParseDeclaration / normalizeDependency trims whitespace, unescapes `\\\"` and `\\'`, strips one matching surrounding quote pair, and resolves `\\\"#292\\\"`, `\"#292\"`, and `#292` to the same local dependency target."
+      - "AC-118-2: dependency refs are accepted only when they match `#<int>` or `<owner>/<repo>#<int>` after normalization (anchored regex `^#[1-9][0-9]*$`); malformed refs like `#292garbage` are reported via `issue_dependency_unentered` with `reason=unparseable_ref` plus per-entry parse metadata."
+      - "AC-118-3: unit tests cover escaped/local/fq refs and invalid garbage input including suffix garbage, plus malformed-entry warning payloads and persisted dependency rows."
+      - "AC-118-4: malformed refs create a `pipeline_hazard` / `malformed-dependency-ref` diagnose finding with `severity=warn` and a suggested fix that points to the offending issue-body line."
+      - "AC-118-5: `go build ./...`, `go vet ./...`, and `go test ./... -count=1` pass after the change."
+    code:
+      - internal/dependency/dependency.go
+      - internal/eventlog/eventlog.go
+      - internal/store/pipeline_hazards.go
+      - internal/statemachine/statemachine.go
+      - internal/diagnose/diagnose.go
+      - project-index.yaml
+    tests:
+      - internal/dependency/dependency_test.go
+      - internal/diagnose/diagnose_test.go
+    deps: []
