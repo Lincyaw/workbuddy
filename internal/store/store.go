@@ -689,6 +689,11 @@ func (s *Store) ListIssueTasks(repo string, issueNum int) ([]TaskRecord, error) 
 	return out, nil
 }
 
+// ListTasksForIssue is a backward-compatible alias used by newer audit code.
+func (s *Store) ListTasksForIssue(repo string, issueNum int) ([]TaskRecord, error) {
+	return s.ListIssueTasks(repo, issueNum)
+}
+
 // UpdateTaskSupervisorAgentID writes the supervisor-managed agent id onto a
 // task row. Used by the worker immediately after POSTing to the supervisor
 // IPC API so a coordinator-side resume path can find the agent on restart

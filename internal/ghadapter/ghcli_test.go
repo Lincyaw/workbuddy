@@ -2,6 +2,7 @@ package ghadapter
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -69,5 +70,43 @@ func TestReadIssueNormalizesStateFields(t *testing.T) {
 	}
 	if !issue.ClosedByLinkedPR {
 		t.Fatal("ClosedByLinkedPR = false, want true")
+	}
+}
+
+func TestFindPullRequestByBranchReturnsNotFound(t *testing.T) {
+	t.Parallel()
+
+	cli := NewCLIWithRunner(func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+		return []byte("no pull requests found for branch \"workbuddy/issue-294/rollout-1\""), errors.New("exit status 1")
+	})
+
+	_, err := cli.FindPullRequestByBranch(context.Background(), "owner/repo", "workbuddy/issue-294/rollout-1")
+	if !errors.Is(err, ErrPullRequestNotFound) {
+		t.Fatalf("err = %v, want ErrPullRequestNotFound", err)
+	}
+}
+
+func TestDiffPullRequestPassesThroughOutput(t *testing.T) {
+	t.Parallel()
+
+	var gotArgs []string
+	cli := NewCLIWithRunner(func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if name != "gh" {
+			t.Fatalf("name = %q, want gh", name)
+		}
+		gotArgs = append([]string(nil), args...)
+		return []byte("diff --git a/a.txt b/a.txt\n"), nil
+	})
+
+	diff, err := cli.DiffPullRequest(context.Background(), "owner/repo", 17)
+	if err != nil {
+		t.Fatalf("DiffPullRequest: %v", err)
+	}
+	if diff == "" || !strings.Contains(diff, "diff --git") {
+		t.Fatalf("diff = %q", diff)
+	}
+	joined := strings.Join(gotArgs, " ")
+	if !strings.Contains(joined, "pr diff 17 --repo owner/repo") {
+		t.Fatalf("args = %q", joined)
 	}
 }

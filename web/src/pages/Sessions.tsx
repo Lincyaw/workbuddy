@@ -3,8 +3,11 @@ import { useLocation } from 'preact-iso';
 import { Layout } from '../components/Layout';
 import { EmptyState } from '../components/EmptyState';
 import { fetchSessions, type SessionListItem, type SessionListQuery } from '../api/sessions';
+import { getIssueRollouts } from '../api/client';
 import { copyText, formatClock, formatDuration, formatTimestamp, shortID } from '../lib/format';
 import { SessionStatusBadge } from '../components/DegradedSessionCard';
+import { RolloutGroupPanel } from '../components/RolloutGroupPanel';
+import type { RolloutGroup } from '../api/types';
 
 const PAGE_LIMIT = 50;
 const REFRESH_INTERVAL_MS = 20_000;
@@ -44,6 +47,7 @@ export function Sessions() {
   const [error, setError] = useState<string | null>(null);
   const [liveConnected, setLiveConnected] = useState(false);
   const [flashMap, setFlashMap] = useState<Record<string, boolean>>({});
+  const [rolloutPanels, setRolloutPanels] = useState<Array<{ key: string; repo: string; issueNum: number; group: RolloutGroup }>>([]);
   const [form, setForm] = useState({ repo: filter.repo, agent: filter.agent, issue: filter.issue });
   const previousRows = useRef<Record<string, SessionListItem>>({});
 
@@ -82,11 +86,33 @@ export function Sessions() {
         }
       }
       previousRows.current = Object.fromEntries(nextRows.map((row) => [row.session_id, row]));
+      const rolloutIssueKeys = [...new Set(
+        nextRows
+          .filter((row) => (row.rollout_group_id || '').trim() !== '' && (row.rollouts_total || 0) > 1)
+          .map((row) => `${row.repo}#${row.issue_num}`),
+      )];
+      const panels = await Promise.all(
+        rolloutIssueKeys.map(async (key) => {
+          const [repo, issueStr] = key.split('#');
+          const issueNum = Number(issueStr || '0');
+          const { owner, name } = splitRepo(repo);
+          try {
+            const group = await getIssueRollouts(owner, name, issueNum);
+            return { key, repo, issueNum, group };
+          } catch {
+            return null;
+          }
+        }),
+      );
       setSessions(nextRows);
+      setRolloutPanels(
+        panels.filter((panel): panel is { key: string; repo: string; issueNum: number; group: RolloutGroup } => panel !== null && panel.group.members.length > 1),
+      );
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'request failed');
       setSessions([]);
+      setRolloutPanels([]);
     } finally {
       setLoading(false);
     }
@@ -204,6 +230,17 @@ export function Sessions() {
 
       {error ? <div class="error-banner">Failed to load sessions: {error}</div> : null}
 
+      {rolloutPanels.map((panel) => (
+        <RolloutGroupPanel
+          key={panel.key}
+          repo={panel.repo}
+          issueNum={panel.issueNum}
+          group={panel.group}
+          compareHref={buildCompareHref(panel)}
+          title="Rollout parent issue"
+        />
+      ))}
+
       <section class="surface-card table-card">
         {loading && sessions.length === 0 ? (
           <div class="loading-copy">Loading session lanes…</div>
@@ -283,6 +320,22 @@ export function Sessions() {
       </div>
     </Layout>
   );
+}
+
+function splitRepo(repo: string): { owner: string; name: string } {
+  const [owner = '', name = ''] = repo.split('/', 2);
+  return { owner, name };
+}
+
+function buildCompareHref(panel: { repo: string; issueNum: number; group: RolloutGroup }): string | undefined {
+  const { owner, name } = splitRepo(panel.repo);
+  if (!owner || !name || panel.group.members.length < 2) return undefined;
+  const params = new URLSearchParams();
+  const chosen = panel.group.members.slice(0, 3);
+  if (chosen[0]) params.set('a', String(chosen[0].rollout_index));
+  if (chosen[1]) params.set('b', String(chosen[1].rollout_index));
+  if (chosen[2]) params.set('c', String(chosen[2].rollout_index));
+  return `/issues/${owner}/${name}/${panel.issueNum}/rollouts/compare?${params.toString()}`;
 }
 
 export default Sessions;

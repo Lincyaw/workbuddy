@@ -1457,9 +1457,16 @@ func TestRolloutDispatch_UsesLabelOverrideAndSharedGroupID(t *testing.T) {
 	if extra := len(rec.find(eventlog.TypeRolloutDispatched)); extra != 3 {
 		t.Fatalf("rollout_dispatched events = %d, want 3", extra)
 	}
+	started := rec.find(eventlog.TypeRolloutGroupStarted)
+	if len(started) != 1 {
+		t.Fatalf("rollout_group_started events = %d, want 1", len(started))
+	}
 	groupID := got[0].RolloutGroupID
 	if groupID == "" {
 		t.Fatal("expected rollout group id")
+	}
+	if payload, ok := started[0].Payload.(map[string]any); !ok || payload["group_id"] != groupID {
+		t.Fatalf("rollout_group_started payload = %#v", started[0].Payload)
 	}
 	for i, req := range got {
 		if req.RolloutIndex != i+1 {
@@ -1592,6 +1599,13 @@ func TestRolloutCompletion_TransitionsAfterMinSuccessesAndTerminalSiblings(t *te
 	if got := len(rec.find(eventlog.TypeRolloutCompleted)); got != 3 {
 		t.Fatalf("rollout_completed events = %d, want 3", got)
 	}
+	resolved := rec.find(eventlog.TypeRolloutGroupResolved)
+	if len(resolved) != 1 {
+		t.Fatalf("rollout_group_resolved events = %d, want 1", len(resolved))
+	}
+	if payload, ok := resolved[0].Payload.(map[string]any); !ok || payload["decision"] != "join_satisfied" {
+		t.Fatalf("rollout_group_resolved payload = %#v", resolved[0].Payload)
+	}
 	transitions := rec.find(eventlog.TypeTransition)
 	if len(transitions) != 1 {
 		t.Fatalf("transitions = %d, want 1", len(transitions))
@@ -1707,6 +1721,13 @@ func TestRolloutCompletion_FailedThresholdTransitionsWorkflowToBlocked(t *testin
 	failed := rec.find(eventlog.TypeTransitionToFailed)
 	if len(failed) != 1 {
 		t.Fatalf("transition_to_failed events = %d, want 1", len(failed))
+	}
+	resolved := rec.find(eventlog.TypeRolloutGroupResolved)
+	if len(resolved) != 1 {
+		t.Fatalf("rollout_group_resolved events = %d, want 1", len(resolved))
+	}
+	if payload, ok := resolved[0].Payload.(map[string]any); !ok || payload["decision"] != "min_successes_unmet" {
+		t.Fatalf("rollout_group_resolved payload = %#v", resolved[0].Payload)
 	}
 	if payload := fmt.Sprint(failed[0].Payload); !strings.Contains(payload, "needs_human:true") {
 		t.Fatalf("transition_to_failed payload = %s, want needs_human=true", payload)

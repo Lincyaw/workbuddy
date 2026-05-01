@@ -4289,3 +4289,55 @@ requirements:
       - internal/dependency/dependency_test.go
       - internal/diagnose/diagnose_test.go
     deps: []
+
+  - id: REQ-119
+    title: "Rollout observability surfaces grouped runs, diff compare, and outcome sparkline (#294)"
+    description: >
+      Issue #294 makes rollout-based creative runs legible to operators.
+      Coordinator read APIs now expose rollout grouping metadata on issue and
+      session rows plus dedicated rollout-group and rollout-diff endpoints;
+      eventlog records rollout_group_started / rollout_group_resolved; and the
+      web UI renders a rollout group panel, side-by-side diff compare route,
+      and a minimal inline-SVG success-rate sparkline on the Hooks page.
+    rationale: >
+      Parallel rollouts only help when operators can see what fan-out
+      happened, inspect candidates without leaving the SPA, and quickly judge
+      whether the rollout strategy is paying off.
+    priority: P1
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-119-1: `/api/v1/sessions` and `/api/v1/issues/{owner}/{repo}/{num}` expose rollout_index, rollouts_total, and rollout_group_id on populated session/task rows without changing non-rollout shapes."
+      - "AC-119-2: `GET /api/v1/issues/{owner}/{repo}/{num}/rollouts` returns the latest rollout group with grouped member rows plus optional synth_outcome, and returns 200 with empty members for non-rollout issues."
+      - "AC-119-3: `GET /api/v1/issues/{owner}/{repo}/{num}/rollouts/{k}/diff` proxies `gh pr diff` with a short-lived cache so the SPA never calls GitHub directly."
+      - "AC-119-4: eventlog adds `rollout_group_started` / `rollout_group_resolved`, and rollout joins emit them with the documented payload contracts."
+      - "AC-119-5: the web UI renders a read-only rollout group panel on issue detail and rollout-parent session views, a `/issues/{owner}/{repo}/{num}/rollouts/compare` route, and a no-library inline-SVG rollout outcome sparkline on Hooks."
+      - "AC-119-6: vitest covers rollout panel rendering for success, partial failure, escalate, and hidden non-rollout cases; Go tests cover rollout API/detail/diff/event surfaces."
+    code:
+      - internal/auditapi/handler.go
+      - internal/eventlog/eventlog.go
+      - internal/ghadapter/ghcli.go
+      - internal/hooks/config.go
+      - internal/statemachine/statemachine.go
+      - internal/store/store.go
+      - web/src/App.tsx
+      - web/src/api/client.ts
+      - web/src/api/types.ts
+      - web/src/components/RolloutGroupPanel.tsx
+      - web/src/components/RolloutOutcomeSparkline.tsx
+      - web/src/pages/Hooks.tsx
+      - web/src/pages/IssueDetail.tsx
+      - web/src/pages/RolloutCompare.tsx
+      - web/src/pages/Sessions.tsx
+      - web/src/styles.css
+    tests:
+      - cmd/worker_test.go
+      - internal/auditapi/handler_test.go
+      - internal/ghadapter/ghcli_test.go
+      - internal/hooks/config_test.go
+      - internal/statemachine/statemachine_test.go
+      - web/src/pages/Hooks.test.tsx
+      - internal/store/store_test.go
+      - web/src/components/RolloutGroupPanel.test.tsx
+    deps:
+      - REQ-117

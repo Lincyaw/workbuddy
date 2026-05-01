@@ -1,6 +1,7 @@
 import type {
   InFlightIssue,
   IssueDetail,
+  RolloutGroup,
   StatusResponse,
 } from './types';
 
@@ -68,6 +69,32 @@ export function getIssueDetail(
 ): Promise<IssueDetail> {
   const path = `/api/v1/issues/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(String(num))}`;
   return apiJSON<IssueDetail>(path);
+}
+
+export function getIssueRollouts(
+  owner: string,
+  repo: string,
+  num: number | string,
+): Promise<RolloutGroup> {
+  const path = `/api/v1/issues/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(String(num))}/rollouts`;
+  return apiJSON<RolloutGroup>(path);
+}
+
+export async function getIssueRolloutDiff(
+  owner: string,
+  repo: string,
+  num: number | string,
+  rolloutIndex: number,
+): Promise<string> {
+  const path = `/api/v1/issues/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(String(num))}/rollouts/${encodeURIComponent(String(rolloutIndex))}/diff`;
+  const resp = await apiFetch(path, {
+    headers: { Accept: 'text/plain' },
+  });
+  const text = await resp.text();
+  if (!resp.ok) {
+    throw new Error(text || `request failed: ${resp.status}`);
+  }
+  return text;
 }
 
 // logout posts to /logout. The server clears the cookie and returns a 302

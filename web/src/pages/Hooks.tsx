@@ -4,23 +4,56 @@ import { Layout } from '../components/Layout';
 import { HookList } from '../components/HookList';
 import { ReloadButton } from '../components/ReloadButton';
 import { EmptyState } from '../components/EmptyState';
+import { apiJSON } from '../api/client';
 import {
   fetchHookInvocations,
   fetchHooks,
   reloadHooks,
   type HooksListResponse,
 } from '../api/hooks';
+import { RolloutOutcomeSparkline } from '../components/RolloutOutcomeSparkline';
 
 const POLL_INTERVAL_MS = 30_000;
+
+interface RolloutResolvedEvent {
+  payload?: unknown;
+}
+
+interface RolloutResolvedEventsResponse {
+  events?: RolloutResolvedEvent[];
+}
+
+type RolloutResolvedEventsPayload =
+  | RolloutResolvedEvent[]
+  | RolloutResolvedEventsResponse
+  | null
+  | undefined;
 
 interface FetchState {
   data: HooksListResponse | null;
   latencySamples: Record<string, number[]>;
+  rolloutOutcomes: boolean[];
   error: string | null;
   loading: boolean;
 }
 
-const INITIAL: FetchState = { data: null, latencySamples: {}, error: null, loading: true };
+const INITIAL: FetchState = { data: null, latencySamples: {}, rolloutOutcomes: [], error: null, loading: true };
+
+export function extractRolloutOutcomes(response: RolloutResolvedEventsPayload): boolean[] {
+  const events = Array.isArray(response)
+    ? response
+    : Array.isArray(response?.events)
+      ? response.events
+      : [];
+  return events
+    .map((event) => event.payload)
+    .map((payload) => {
+      if (!payload || typeof payload !== 'object') return false;
+      const decision = String((payload as Record<string, unknown>).decision || '');
+      return decision === 'join_satisfied';
+    })
+    .slice(-50);
+}
 
 export function Hooks() {
   const { route } = useLocation();
@@ -42,7 +75,14 @@ export function Hooks() {
           }),
         ),
       );
-      setState({ data, latencySamples: samples, error: null, loading: false });
+      let rolloutOutcomes: boolean[] = [];
+      try {
+        const rolloutEvents = await apiJSON<RolloutResolvedEvent[] | RolloutResolvedEventsResponse>('/api/v1/events?type=rollout_group_resolved');
+        rolloutOutcomes = extractRolloutOutcomes(rolloutEvents);
+      } catch {
+        rolloutOutcomes = [];
+      }
+      setState({ data, latencySamples: samples, rolloutOutcomes, error: null, loading: false });
     } catch (err) {
       setState((prev) => ({
         ...prev,
@@ -100,6 +140,12 @@ export function Hooks() {
         <div class="hook-summary-line">
           <span>per-hook drops</span>
           <strong>{state.data?.dropped_total ?? 0}</strong>
+        </div>
+        <div class="hook-summary-line hook-summary-line-stack">
+          <span>rollout groups</span>
+          <div class="hook-card-sparkline">
+            <RolloutOutcomeSparkline outcomes={state.rolloutOutcomes} />
+          </div>
         </div>
       </section>
 

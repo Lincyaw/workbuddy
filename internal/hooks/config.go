@@ -29,13 +29,13 @@ type Config struct {
 
 // Hook is one declarative event → action binding.
 type Hook struct {
-	Name    string        `yaml:"name"`
-	Enabled *bool         `yaml:"enabled,omitempty"`
-	Events  []string      `yaml:"events"`
-	Match   *MatchFilter  `yaml:"match,omitempty"`
-	Timeout time.Duration `yaml:"-"`
-	RawTimeout string     `yaml:"timeout,omitempty"`
-	Action  ActionConfig  `yaml:"action"`
+	Name       string        `yaml:"name"`
+	Enabled    *bool         `yaml:"enabled,omitempty"`
+	Events     []string      `yaml:"events"`
+	Match      *MatchFilter  `yaml:"match,omitempty"`
+	Timeout    time.Duration `yaml:"-"`
+	RawTimeout string        `yaml:"timeout,omitempty"`
+	Action     ActionConfig  `yaml:"action"`
 }
 
 // MatchFilter narrows the events a hook receives. Filters AND together: an
@@ -53,12 +53,12 @@ type MatchFilter struct {
 // ActionConfig holds the raw YAML for an action; the concrete instance is
 // constructed by the ActionRegistry at load time.
 type ActionConfig struct {
-	Type    string         `yaml:"type"`
-	URL     string         `yaml:"url,omitempty"`
+	Type    string            `yaml:"type"`
+	URL     string            `yaml:"url,omitempty"`
 	Headers map[string]string `yaml:"headers,omitempty"`
-	Method  string         `yaml:"method,omitempty"`
-	Cmd     []string       `yaml:"cmd,omitempty"`
-	Cwd     string         `yaml:"cwd,omitempty"`
+	Method  string            `yaml:"method,omitempty"`
+	Cmd     []string          `yaml:"cmd,omitempty"`
+	Cwd     string            `yaml:"cwd,omitempty"`
 }
 
 // IsEnabled returns the effective enabled flag (default true).
@@ -265,6 +265,12 @@ func (h *Hook) MatchesEvent(eventType string) bool {
 	for _, ev := range h.Events {
 		if ev == "*" || ev == eventType {
 			return true
+		}
+		if strings.ContainsAny(ev, "*?[") {
+			matched, err := path.Match(ev, eventType)
+			if err == nil && matched {
+				return true
+			}
 		}
 	}
 	return false
