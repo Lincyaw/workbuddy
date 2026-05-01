@@ -35,3 +35,4 @@ coverage.out
 .claude/worktrees/
 .remember
 __pycache__/
+.workbuddy.backup*

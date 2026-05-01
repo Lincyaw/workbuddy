@@ -90,6 +90,8 @@ Codex plugin for operating [workbuddy](https://github.com/Lincyaw/workbuddy) —
 | `setup-repo` | Configure a repository for workbuddy orchestration |
 | `pipeline-monitor` | Inspect stuck or unhealthy agent execution pipelines |
 | `merge-flow` | Merge a batch of approved workbuddy PRs with design-intent checks |
+| `deploy` | Bundle vs serve topology, systemd install, rolling restart |
+| `web-debug` | End-to-end SPA validation with headless browser |
 
 ## Source of truth
 
