@@ -1119,6 +1119,7 @@ a:hover {
   border: 1px solid var(--border-hairline);
   border-radius: 4px;
   background: color-mix(in srgb, var(--bg-elev) 92%, transparent);
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.45;
 }
