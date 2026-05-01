@@ -254,7 +254,23 @@ func (h *Handler) proxyStream(w http.ResponseWriter, r *http.Request, workerID, 
 	if h.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+h.authToken)
 	}
-	req.Header.Set("Accept", "text/event-stream")
+	// Forward SSE-relevant headers from the browser. Last-Event-ID drives
+	// EventSource resume: without it, an automatic reconnect restarts the
+	// stream from cursor 0 and the SPA renders duplicates. We also pass
+	// through Accept and Cache-Control if the browser explicitly sent
+	// them; otherwise default Accept to text/event-stream so a misconfigured
+	// reverse proxy doesn't strip the worker's content negotiation.
+	if v := strings.TrimSpace(r.Header.Get("Last-Event-ID")); v != "" {
+		req.Header.Set("Last-Event-ID", v)
+	}
+	if v := strings.TrimSpace(r.Header.Get("Cache-Control")); v != "" {
+		req.Header.Set("Cache-Control", v)
+	}
+	if v := strings.TrimSpace(r.Header.Get("Accept")); v != "" {
+		req.Header.Set("Accept", v)
+	} else {
+		req.Header.Set("Accept", "text/event-stream")
+	}
 
 	resp, err := h.client.Do(req)
 	if err != nil {

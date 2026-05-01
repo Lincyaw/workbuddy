@@ -613,3 +613,51 @@ func TestFanoutEmptyAuditURLNoLocalHandlerMarksOffline(t *testing.T) {
 	}
 }
 
+// TestProxySSEForwardsLastEventID verifies that the SSE reverse-proxy
+// forwards the browser-supplied Last-Event-ID header so EventSource
+// reconnects don't restart from cursor 0 (which produces duplicate
+// events in the SPA). Cache-Control and Accept are forwarded too, with
+// Accept defaulting to text/event-stream when the browser didn't
+// specify it.
+func TestProxySSEForwardsLastEventID(t *testing.T) {
+	var seenLastEventID, seenCacheControl, seenAccept string
+	worker := newFakeWorker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenLastEventID = r.Header.Get("Last-Event-ID")
+		seenCacheControl = r.Header.Get("Cache-Control")
+		seenAccept = r.Header.Get("Accept")
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl := w.(http.Flusher)
+		_, _ = w.Write([]byte("id: 100\ndata: ok\n\n"))
+		fl.Flush()
+	}))
+	st := newTestStore(t, "sess-resume", "worker-a", worker.URL())
+	h := NewHandler(HandlerConfig{Resolver: NewResolver(st), AuthToken: "tok"})
+
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/v1/sessions/sess-resume/stream", nil)
+	req.Header.Set("Last-Event-ID", "99")
+	req.Header.Set("Cache-Control", "no-store")
+	req.Header.Set("Accept", "text/event-stream, application/json;q=0.5")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.ReadAll(resp.Body)
+
+	if seenLastEventID != "99" {
+		t.Fatalf("worker saw Last-Event-ID = %q, want 99", seenLastEventID)
+	}
+	if seenCacheControl != "no-store" {
+		t.Fatalf("worker saw Cache-Control = %q, want no-store", seenCacheControl)
+	}
+	if !strings.Contains(seenAccept, "text/event-stream") {
+		t.Fatalf("worker saw Accept = %q, want forwarded with text/event-stream", seenAccept)
+	}
+}
+
