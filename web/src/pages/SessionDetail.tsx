@@ -4,6 +4,7 @@ import { Layout } from '../components/Layout';
 import { DegradedSessionCard } from '../components/DegradedSessionCard';
 import { EmptyState } from '../components/EmptyState';
 import { GitHubIssueLink } from '../components/GitHubIssueLink';
+import { StreamMessageView } from '../components/StreamMessage';
 import {
   fetchSession,
   fetchSessionEvents,
@@ -11,6 +12,7 @@ import {
   type SessionDetail as SessionDetailMeta,
   type SessionEvent,
 } from '../api/sessions';
+import { buildPrettyTimeline } from '../lib/sessionPretty';
 import { copyText, formatClock, formatDuration, formatTimestamp, shortID, statusBadgeClass } from '../lib/format';
 import { splitRepoSlug } from '../utils/github';
 import { mergeSessionEvents } from '../utils/sessionEvents';
@@ -21,10 +23,10 @@ const INITIAL_LIMIT = 200;
 
 function classifyKind(kind: string): KindOption {
   const normalized = (kind || '').toLowerCase();
-  if (normalized.includes('tool.call') || normalized === 'tool_call') return 'tool_call';
+  if (normalized.includes('tool.call') || normalized === 'tool_call' || normalized === 'command.exec') return 'tool_call';
   if (normalized.includes('tool.result') || normalized === 'tool_result') return 'tool_result';
   if (normalized.includes('message') || normalized === 'reasoning' || normalized === 'agent.message') return 'message';
-  if (normalized.includes('system') || normalized.includes('turn.') || normalized === 'log' || normalized.includes('token')) return 'system';
+  if (normalized.includes('system') || normalized.includes('turn.') || normalized === 'log' || normalized.includes('token') || normalized === 'permission') return 'system';
   return 'other';
 }
 
@@ -60,6 +62,11 @@ function kindIcon(kind: KindOption): string {
   }
 }
 
+function turnLabel(turnId: string, index: number): string {
+  if (!turnId) return `turn ${index + 1}`;
+  return `turn ${shortID(turnId, 12)}`;
+}
+
 export function SessionDetail() {
   const { params } = useRoute();
   const sessionID = params.id || '';
@@ -72,6 +79,7 @@ export function SessionDetail() {
   const [follow, setFollow] = useState(true);
   const [streamLive, setStreamLive] = useState(false);
   const [search, setSearch] = useState('');
+  const [pretty, setPretty] = useState(true);
   const [enabledKinds, setEnabledKinds] = useState<Record<KindOption, boolean>>({
     tool_call: true,
     tool_result: true,
@@ -114,7 +122,7 @@ export function SessionDetail() {
         for (const event of response.events || []) {
           if (event.index > lastIndexRef.current) lastIndexRef.current = event.index;
         }
-        setEvents(mergeSessionEvents([], response.events || [], seenRef.current));
+        setEvents((current) => mergeSessionEvents(current, response.events || [], seenRef.current));
         setEventsTotal(typeof response.total === 'number' ? response.total : 0);
       })
       .catch((err) => {
@@ -171,6 +179,24 @@ export function SessionDetail() {
       );
     });
   }, [enabledKinds, events, search]);
+
+  const prettyGroups = useMemo(() => {
+    const runtime = meta?.runtime === 'codex' ? 'codex' : meta?.runtime === 'claude' ? 'claude' : 'unknown';
+    const items = buildPrettyTimeline(filteredEvents, {
+      runtime,
+      summarizeEvent: eventTitle,
+    });
+    const groups: Array<{ key: string; turnId: string; items: typeof items }> = [];
+    for (const item of items) {
+      const previous = groups[groups.length - 1];
+      if (!previous || previous.turnId !== item.turnId) {
+        groups.push({ key: `${item.turnId || 'turnless'}:${groups.length}`, turnId: item.turnId, items: [item] });
+      } else {
+        previous.items.push(item);
+      }
+    }
+    return groups;
+  }, [filteredEvents, meta?.runtime]);
 
   if (!sessionID) {
     return (
@@ -255,7 +281,7 @@ export function SessionDetail() {
             <div class="timeline-toolbar">
               <div class="timeline-toolbar-title">
                 <p class="section-kicker">timeline</p>
-                <h2>{filteredEvents.length} visible events</h2>
+                <h2>{pretty ? prettyGroups.reduce((count, group) => count + group.items.length, 0) : filteredEvents.length} visible events</h2>
               </div>
               <input
                 type="search"
@@ -270,6 +296,22 @@ export function SessionDetail() {
               >
                 {follow ? 'follow tail armed' : 'follow tail idle'}
               </button>
+              <div class="kind-pill-group">
+                <button
+                  type="button"
+                  class={`filter-pill button-pill${pretty ? ' active' : ''}`}
+                  onClick={() => setPretty(true)}
+                >
+                  Pretty
+                </button>
+                <button
+                  type="button"
+                  class={`filter-pill button-pill${pretty ? '' : ' active'}`}
+                  onClick={() => setPretty(false)}
+                >
+                  Raw
+                </button>
+              </div>
               <div class="kind-pill-group">
                 {KIND_OPTIONS.map((kind) => (
                   <button
@@ -288,7 +330,39 @@ export function SessionDetail() {
           {loadError ? <div class="error-banner">Events: {loadError}</div> : null}
 
           <div class="surface-card session-timeline-card">
-            {filteredEvents.length === 0 ? (
+            {pretty ? (
+              prettyGroups.length === 0 ? (
+                <EmptyState
+                  title="no events matched this view"
+                  detail="clear a filter or leave tail-follow armed and wait for the next tool call."
+                  inline
+                />
+              ) : (
+                <div class="timeline-list wb-pretty-timeline" ref={timelineRef}>
+                  {prettyGroups.map((group, groupIndex) => (
+                    <section key={group.key} class="wb-turn-group">
+                      <div class="wb-turn-label">{turnLabel(group.turnId, groupIndex)}</div>
+                      <div class="wb-turn-stack">
+                        {group.items.map((item) => {
+                          const lastEvent = item.events[item.events.length - 1];
+                          return (
+                            <article key={item.key} class={`wb-pretty-entry kind-${classifyKind(item.kind)}`}>
+                              <div class="wb-pretty-meta">
+                                <span class="mono-chip">{item.kind}</span>
+                                <span class="muted">#{item.events[0].index}</span>
+                                {item.events.length > 1 ? <span class="muted">+{item.events.length - 1} merged</span> : null}
+                                <span class="timeline-time">{formatClock(lastEvent.ts)}</span>
+                              </div>
+                              <StreamMessageView msg={item.msg} />
+                            </article>
+                          );
+                        })}
+                      </div>
+                    </section>
+                  ))}
+                </div>
+              )
+            ) : filteredEvents.length === 0 ? (
               <EmptyState
                 title="no events matched this view"
                 detail="clear a filter or leave tail-follow armed and wait for the next tool call."

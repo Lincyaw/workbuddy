@@ -3455,14 +3455,20 @@ requirements:
       - "AC-099-5: codex worker output (`{method, params}` JSON-RPC) routes to a codex-specific renderer when `meta.runtime === 'codex'`."
       - "AC-099-6: consecutive timeline events that share a `turn_id` are grouped under a single turn boundary."
       - "AC-099-7: vitest covers the parser (system / user / assistant / tool_result / result / codex / malformed) and the renderer (each message kind + collapsed long body + ERROR badge)."
+      - "AC-099-8: codex structured session events (`agent.message`, `reasoning`, `command.exec`, `tool.result`) render through the same Pretty timeline cards as claude sessions, with `command.output` suppressed to avoid duplicate output and assistant deltas collapsed per turn."
+      - "AC-099-9: vitest covers the codex structured-event adapter plus a SessionDetail integration fixture for codex, while a claude log fixture proves the existing `kind=log` pretty rendering remains unchanged."
     code:
       - web/src/lib/streamMessages.ts
+      - web/src/lib/sessionPretty.ts
       - web/src/components/StreamMessage.tsx
       - web/src/pages/SessionDetail.tsx
       - web/src/styles.css
+      - web/package.json
     tests:
       - web/src/lib/streamMessages.test.ts
+      - web/src/lib/sessionPretty.test.ts
       - web/src/components/StreamMessage.test.tsx
+      - web/src/pages/SessionDetail.test.tsx
     deps: [REQ-093]
 
   - id: REQ-100
