@@ -22,8 +22,16 @@ states:
     enter_label: "status:developing"
     agent: dev-agent
     transitions:
+      "status:synthesizing": synthesizing
       "status:reviewing": reviewing
       "status:blocked": blocked
+
+  synthesizing:
+    enter_label: "status:synthesizing"
+    agent: review-agent
+    mode: synthesize
+    transitions:
+      "status:reviewing": reviewing
 
   reviewing:
     enter_label: "status:reviewing"
@@ -49,6 +57,10 @@ states:
 
 `failed` 仍然是 workflow schema 中可识别的终态 label，但当前 Go runtime 不会在 retry 超限时直接写入
 `status:failed` 或 `needs-human`；它只记录 retry/failure intent，后续 label 写回仍由 agent 或人工执行。
+
+The `developing` state is conditional:
+- if `rollouts > 1`, dev runs fan out and the successful sibling set must move to `status:synthesizing`;
+- if `rollouts <= 1`, the legacy fast path stays `status:reviewing` with no synth step.
 
 `status:done` is the post-merge terminal label; the review-agent (or the human
 who merged the PR) is responsible for closing the issue. The state machine

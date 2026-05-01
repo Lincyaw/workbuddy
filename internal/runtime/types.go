@@ -75,6 +75,7 @@ type TaskContext struct {
 	RelatedPRs     []PRSummary
 	RelatedPRsText string
 	Rollout        RolloutContext
+	Synthesis      *SynthesisContext
 	sessionHandle  *ManagedSession
 
 	// stateName / state carry the workflow state metadata used to synthesize
@@ -85,6 +86,7 @@ type TaskContext struct {
 	// state metadata leaks into the rendered prompt.
 	stateName string
 	state     *stateMetadata
+	stateMode string
 }
 
 // stateMetadata mirrors the subset of *config.State that the footer renderer
@@ -117,8 +119,32 @@ type PRSummary struct {
 	Title       string
 	HeadRefName string
 	BaseRefName string
+	HeadSHA     string
 	URL         string
 	IsDraft     bool
+}
+
+type SynthesisContext struct {
+	SourceState  string
+	MinSuccesses int
+	Candidates   []SynthesisCandidate
+}
+
+type SynthesisCandidate struct {
+	TaskID         string
+	RolloutIndex   int
+	PullRequest    PRSummary
+	SessionSummary string
+	SessionURL     string
+	Diff           string
+}
+
+type SynthesisDecision struct {
+	Outcome     string `json:"outcome"`
+	ChosenPR    int    `json:"chosen_pr,omitempty"`
+	SynthPR     int    `json:"synth_pr,omitempty"`
+	RejectedPRs []int  `json:"rejected_prs,omitempty"`
+	Reason      string `json:"reason"`
 }
 
 type PRContext struct {
@@ -198,6 +224,20 @@ func (t *TaskContext) WorkflowStateMetadata() (enterLabel string, transitions ma
 	return t.state.EnterLabel, cloned
 }
 
+func (t *TaskContext) SetWorkflowStateMode(mode string) {
+	if t == nil {
+		return
+	}
+	t.stateMode = mode
+}
+
+func (t *TaskContext) WorkflowStateMode() string {
+	if t == nil {
+		return ""
+	}
+	return t.stateMode
+}
+
 type SessionRef struct {
 	ID   string `json:"id,omitempty"`
 	Kind string `json:"kind,omitempty"`
@@ -216,8 +256,9 @@ type Result struct {
 	SessionPath string
 	// RawSessionPath preserves the runtime-native artifact path (if any)
 	// when SessionPath has been overridden with the normalized v1 stream.
-	RawSessionPath string
-	LastMessage    string
-	TokenUsage     *launcherevents.TokenUsagePayload
-	SessionRef     SessionRef
+	RawSessionPath    string
+	LastMessage       string
+	TokenUsage        *launcherevents.TokenUsagePayload
+	SessionRef        SessionRef
+	SynthesisDecision *SynthesisDecision
 }

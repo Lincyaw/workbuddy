@@ -306,8 +306,10 @@ func (s *Store) createTables() error {
 			repo TEXT NOT NULL,
 			issue_num INTEGER NOT NULL,
 			dev_review_cycle_count INTEGER NOT NULL DEFAULT 0,
+			synth_cycle_count INTEGER NOT NULL DEFAULT 0,
 			first_dispatch_at DATETIME,
 			cap_hit_at DATETIME,
+			synth_cap_hit_at DATETIME,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (repo, issue_num)
 		)`,
@@ -337,6 +339,12 @@ func (s *Store) createTables() error {
 	}
 	if _, err := s.db.Exec(`ALTER TABLE workers ADD COLUMN mgmt_base_url TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("store: alter workers add mgmt_base_url: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE issue_cycle_state ADD COLUMN synth_cycle_count INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("store: alter issue_cycle_state add synth_cycle_count: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE issue_cycle_state ADD COLUMN synth_cap_hit_at DATETIME`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("store: alter issue_cycle_state add synth_cap_hit_at: %w", err)
 	}
 	taskQueueMigrations := []string{
 		`ALTER TABLE task_queue ADD COLUMN role TEXT NOT NULL DEFAULT ''`,

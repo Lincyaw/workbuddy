@@ -320,7 +320,7 @@ func (c *CLI) ListRelatedPRs(repo string, issueNum int) ([]runtimepkg.PRSummary,
 		"--repo", repo,
 		"--state", "all",
 		"--search", fmt.Sprintf("%d in:title,body", issueNum),
-		"--json", "number,state,title,headRefName,baseRefName,url,isDraft",
+		"--json", "number,state,title,headRefName,headRefOid,baseRefName,url,isDraft",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("gh pr list: %w", err)
@@ -330,6 +330,7 @@ func (c *CLI) ListRelatedPRs(repo string, issueNum int) ([]runtimepkg.PRSummary,
 		State       string `json:"state"`
 		Title       string `json:"title"`
 		HeadRefName string `json:"headRefName"`
+		HeadRefOID  string `json:"headRefOid"`
 		BaseRefName string `json:"baseRefName"`
 		URL         string `json:"url"`
 		IsDraft     bool   `json:"isDraft"`
@@ -339,9 +340,47 @@ func (c *CLI) ListRelatedPRs(repo string, issueNum int) ([]runtimepkg.PRSummary,
 	}
 	prs := make([]runtimepkg.PRSummary, 0, len(raw))
 	for _, pr := range raw {
-		prs = append(prs, runtimepkg.PRSummary{Number: pr.Number, State: pr.State, Title: pr.Title, HeadRefName: pr.HeadRefName, BaseRefName: pr.BaseRefName, URL: pr.URL, IsDraft: pr.IsDraft})
+		prs = append(prs, runtimepkg.PRSummary{Number: pr.Number, State: pr.State, Title: pr.Title, HeadRefName: pr.HeadRefName, HeadSHA: pr.HeadRefOID, BaseRefName: pr.BaseRefName, URL: pr.URL, IsDraft: pr.IsDraft})
 	}
 	return prs, nil
+}
+
+func (c *CLI) ReadPullRequestDetail(repo string, prNum int) (runtimepkg.PRSummary, string, error) {
+	out, err := c.runCommand(nil, "gh", "pr", "view",
+		strconv.Itoa(prNum),
+		"--repo", repo,
+		"--json", "number,state,title,headRefName,headRefOid,baseRefName,url,isDraft",
+	)
+	if err != nil {
+		return runtimepkg.PRSummary{}, "", fmt.Errorf("gh pr view: %w", err)
+	}
+	var raw struct {
+		Number      int    `json:"number"`
+		State       string `json:"state"`
+		Title       string `json:"title"`
+		HeadRefName string `json:"headRefName"`
+		HeadRefOID  string `json:"headRefOid"`
+		BaseRefName string `json:"baseRefName"`
+		URL         string `json:"url"`
+		IsDraft     bool   `json:"isDraft"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return runtimepkg.PRSummary{}, "", fmt.Errorf("gh pr view: parse: %w", err)
+	}
+	diffOut, err := c.runCommand(nil, "gh", "pr", "diff", strconv.Itoa(prNum), "--repo", repo)
+	if err != nil {
+		return runtimepkg.PRSummary{}, "", fmt.Errorf("gh pr diff: %w", err)
+	}
+	return runtimepkg.PRSummary{
+		Number:      raw.Number,
+		State:       raw.State,
+		Title:       raw.Title,
+		HeadRefName: raw.HeadRefName,
+		HeadSHA:     raw.HeadRefOID,
+		BaseRefName: raw.BaseRefName,
+		URL:         raw.URL,
+		IsDraft:     raw.IsDraft,
+	}, string(diffOut), nil
 }
 
 func (c *CLI) WriteIssueComment(ctx context.Context, repo string, issueNum int, body string) error {

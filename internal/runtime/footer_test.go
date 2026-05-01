@@ -138,6 +138,30 @@ func TestRenderAgentPrompt_E2E(t *testing.T) {
 	}
 }
 
+func TestRenderAgentPrompt_DevelopingRolloutShowsSynthTransition(t *testing.T) {
+	body := "Repo: {{.Repo}}"
+	task := &TaskContext{
+		Repo:    "octo/x",
+		Issue:   IssueContext{Number: 7},
+		Rollout: RolloutContext{Index: 1, Total: 3, GroupID: "g"},
+	}
+	task.SetWorkflowState("developing", "status:developing", map[string]string{
+		"status:synthesizing": "synthesizing",
+		"status:reviewing":    "reviewing",
+		"status:blocked":      "blocked",
+	})
+	got, err := RenderAgentPrompt(body, task)
+	if err != nil {
+		t.Fatalf("RenderAgentPrompt: %v", err)
+	}
+	if !strings.Contains(got, "`status:synthesizing` | `synthesizing`") {
+		t.Fatalf("expected synth transition in rollout prompt:\n%s", got)
+	}
+	if strings.Contains(got, "`status:reviewing` | `reviewing`") {
+		t.Fatalf("unexpected review transition in rollout prompt:\n%s", got)
+	}
+}
+
 func TestAssembleAgentPrompt_PrependsRolloutPreludeOnce(t *testing.T) {
 	body := "Repo: {{.Repo}}"
 	task := &TaskContext{

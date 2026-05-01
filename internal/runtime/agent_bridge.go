@@ -240,7 +240,7 @@ func (s *AgentBridgeSession) Close() error {
 }
 
 func resolvePrompt(agentCfg *config.AgentConfig, task *TaskContext) string {
-	if p := strings.TrimSpace(agentCfg.Prompt); p != "" {
+	if p := ResolvePromptBody(agentCfg, task); p != "" {
 		rendered, err := RenderAgentPrompt(p, task)
 		if err == nil {
 			return rendered

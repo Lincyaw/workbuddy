@@ -18,6 +18,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
 	"github.com/Lincyaw/workbuddy/internal/router"
+	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 	"github.com/Lincyaw/workbuddy/internal/security"
 	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
@@ -482,13 +483,17 @@ func (pm *PollerManager) IsRegistered(repo string) (bool, error) {
 // MarkAgentCompleted forwards an agent completion signal to the state
 // machine of the target repo, when one is running.
 func (pm *PollerManager) MarkAgentCompleted(repo string, issueNum int, taskID, agentName string, exitCode int, currentLabels []string) {
+	pm.MarkAgentCompletedWithDecision(repo, issueNum, taskID, agentName, exitCode, currentLabels, nil)
+}
+
+func (pm *PollerManager) MarkAgentCompletedWithDecision(repo string, issueNum int, taskID, agentName string, exitCode int, currentLabels []string, decision *runtimepkg.SynthesisDecision) {
 	pm.mu.RLock()
 	runtime := pm.runtimes[repo]
 	pm.mu.RUnlock()
 	if runtime == nil {
 		return
 	}
-	runtime.StateMachine.MarkAgentCompleted(repo, issueNum, taskID, agentName, exitCode, currentLabels)
+	runtime.StateMachine.MarkAgentCompletedWithDecision(repo, issueNum, taskID, agentName, exitCode, currentLabels, decision)
 }
 
 // ClearInflight removes one repo runtime's in-memory inflight entry.

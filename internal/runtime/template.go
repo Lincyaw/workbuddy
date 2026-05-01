@@ -96,6 +96,7 @@ func AssembleAgentPrompt(promptBody string, task *TaskContext) string {
 		body = strings.TrimRight(prelude+"\n"+body, "\n")
 	}
 	enterLabel, transitions := task.WorkflowStateMetadata()
+	transitions = filterTransitionsForTask(task, transitions)
 	footer := BuildTransitionFooter(task.WorkflowStateName(), enterLabel, transitions)
 	return AssemblePrompt(body, footer)
 }
@@ -115,6 +116,27 @@ func rolloutInvocationArgs(task *TaskContext) []string {
 		"--rollout-index", strconv.Itoa(task.Rollout.Index),
 		"--rollouts-total", strconv.Itoa(task.Rollout.Total),
 	}
+}
+
+func filterTransitionsForTask(task *TaskContext, transitions map[string]string) map[string]string {
+	if task == nil || len(transitions) == 0 {
+		return transitions
+	}
+	if task.WorkflowStateName() != "developing" {
+		return transitions
+	}
+	filtered := make(map[string]string, len(transitions))
+	for label, target := range transitions {
+		switch {
+		case task.Rollout.Total > 1 && target == "reviewing":
+			continue
+		case task.Rollout.Total <= 1 && target == "synthesizing":
+			continue
+		default:
+			filtered[label] = target
+		}
+	}
+	return filtered
 }
 
 // RenderAgentPrompt is a convenience wrapper that assembles body+footer and

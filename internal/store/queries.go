@@ -884,6 +884,23 @@ func (s *Store) IncrementDevReviewCycleCount(repo string, issueNum int) (int, er
 	return count, nil
 }
 
+func (s *Store) IncrementSynthCycleCount(repo string, issueNum int) (int, error) {
+	var count int
+	err := s.db.QueryRow(
+		`INSERT INTO issue_cycle_state (repo, issue_num, synth_cycle_count, updated_at)
+		 VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+		 ON CONFLICT (repo, issue_num)
+		 DO UPDATE SET synth_cycle_count = synth_cycle_count + 1,
+		               updated_at = CURRENT_TIMESTAMP
+		 RETURNING synth_cycle_count`,
+		repo, issueNum,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("store: increment synth_cycle_count: %w", err)
+	}
+	return count, nil
+}
+
 // TouchIssueFirstDispatch records the first time an agent was dispatched for
 // (repo, issueNum). Subsequent calls are no-ops. Used by the long-flight
 // stuck detector to measure total in-flight time independent of per-state
@@ -920,20 +937,35 @@ func (s *Store) MarkIssueCycleCapHit(repo string, issueNum int) error {
 	return nil
 }
 
+func (s *Store) MarkIssueSynthCycleCapHit(repo string, issueNum int) error {
+	_, err := s.db.Exec(
+		`INSERT INTO issue_cycle_state (repo, issue_num, synth_cap_hit_at, updated_at)
+		 VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		 ON CONFLICT (repo, issue_num)
+		 DO UPDATE SET synth_cap_hit_at = COALESCE(issue_cycle_state.synth_cap_hit_at, CURRENT_TIMESTAMP),
+		               updated_at = CURRENT_TIMESTAMP`,
+		repo, issueNum,
+	)
+	if err != nil {
+		return fmt.Errorf("store: mark issue synth cycle cap hit: %w", err)
+	}
+	return nil
+}
+
 // QueryIssueCycleState returns the per-issue cycle counter and timing. Returns
 // (nil, nil) when no row exists for the issue.
 func (s *Store) QueryIssueCycleState(repo string, issueNum int) (*IssueCycleState, error) {
 	row := s.db.QueryRow(
-		`SELECT repo, issue_num, dev_review_cycle_count,
-		        first_dispatch_at, cap_hit_at, updated_at
+		`SELECT repo, issue_num, dev_review_cycle_count, synth_cycle_count,
+		        first_dispatch_at, cap_hit_at, synth_cap_hit_at, updated_at
 		 FROM issue_cycle_state
 		 WHERE repo = ? AND issue_num = ?`,
 		repo, issueNum,
 	)
 	var rec IssueCycleState
-	var firstDispatch, capHit, updated sql.NullString
-	err := row.Scan(&rec.Repo, &rec.IssueNum, &rec.DevReviewCycleCount,
-		&firstDispatch, &capHit, &updated)
+	var firstDispatch, capHit, synthCapHit, updated sql.NullString
+	err := row.Scan(&rec.Repo, &rec.IssueNum, &rec.DevReviewCycleCount, &rec.SynthCycleCount,
+		&firstDispatch, &capHit, &synthCapHit, &updated)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -945,6 +977,9 @@ func (s *Store) QueryIssueCycleState(repo string, issueNum int) (*IssueCycleStat
 	}
 	if capHit.Valid {
 		rec.CapHitAt, _ = ParseTimestamp(capHit.String, "issue_cycle_state.cap_hit_at")
+	}
+	if synthCapHit.Valid {
+		rec.SynthCapHitAt, _ = ParseTimestamp(synthCapHit.String, "issue_cycle_state.synth_cap_hit_at")
 	}
 	if updated.Valid {
 		rec.UpdatedAt, _ = ParseTimestamp(updated.String, "issue_cycle_state.updated_at")

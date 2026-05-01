@@ -55,6 +55,7 @@ const (
 	TypeLongFlightStuck             = "long_flight_stuck_detected"
 	TypeRolloutDispatched           = "rollout_dispatched"
 	TypeRolloutCompleted            = "rollout_completed"
+	TypeSynthesisDecision           = "synthesis_decision"
 	// TypeIssueNoWorkflowMatch fires when poller observes an issue carrying a
 	// status:* label but none of the configured workflow trigger labels match,
 	// i.e. the issue cannot enter the state machine. Idempotent per
@@ -122,6 +123,7 @@ var AllEventTypes = []string{
 	TypeLongFlightStuck,
 	TypeRolloutDispatched,
 	TypeRolloutCompleted,
+	TypeSynthesisDecision,
 	TypeIssueNoWorkflowMatch,
 	TypeIssueDependencyUnentered,
 	TypeCoordinatorStarted,

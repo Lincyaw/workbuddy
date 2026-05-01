@@ -57,6 +57,7 @@ type Decision struct {
 	Agent          *config.AgentConfig
 	Workflow       string
 	State          string
+	SourceState    string
 	RolloutIndex   int
 	RolloutsTotal  int
 	RolloutGroupID string
@@ -196,8 +197,16 @@ func (p *Preparer) Prepare(ctx context.Context, d Decision) error {
 	// in no footer (BuildTransitionFooter returns "").
 	if d.StateDef != nil {
 		taskCtx.SetWorkflowState(d.State, d.StateDef.EnterLabel, d.StateDef.Transitions)
+		taskCtx.SetWorkflowStateMode(d.StateDef.Mode)
 	} else {
 		taskCtx.SetWorkflowState(d.State, "", nil)
+	}
+	if synthStore, ok := p.store.(synthesisStore); ok {
+		if synth, err := BuildSynthesisContext(d.Repo, d.IssueNum, d.Workflow, d.SourceState, d.StateDef, synthStore, p.gh, relatedPRs); err != nil {
+			log.Printf("[taskprep] warning: could not build synthesis context for %s#%d: %v", d.Repo, d.IssueNum, err)
+		} else {
+			taskCtx.Synthesis = synth
+		}
 	}
 
 	task := WorkerTask{

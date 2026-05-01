@@ -3,6 +3,8 @@ package config
 import (
 	"encoding/json"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // TestJoinConfigJSONLegacyScalar pins down the round-trip path used by
@@ -57,5 +59,29 @@ func TestStateJSONLegacyScalarJoin(t *testing.T) {
 	}
 	if s.Join.Strategy != "all_passed" {
 		t.Fatalf("join.strategy = %q", s.Join.Strategy)
+	}
+}
+
+func TestStateYAMLModeValidation(t *testing.T) {
+	var state State
+	if err := yaml.Unmarshal([]byte(`
+enter_label: status:synthesizing
+agent: review-agent
+mode: synthesize
+transitions:
+  status:reviewing: reviewing
+`), &state); err != nil {
+		t.Fatalf("valid synth mode must decode: %v", err)
+	}
+	if state.Mode != StateModeSynth {
+		t.Fatalf("mode = %q, want %q", state.Mode, StateModeSynth)
+	}
+
+	if err := yaml.Unmarshal([]byte(`
+enter_label: status:synthesizing
+mode: invalid
+transitions: {}
+`), &state); err == nil {
+		t.Fatal("expected invalid mode to be rejected")
 	}
 }

@@ -4188,3 +4188,62 @@ requirements:
       - REQ-060
       - REQ-061
       - REQ-086
+
+  - id: REQ-117
+    title: "Rollout synthesis reduce step promotes one final PR (#293)"
+    description: >
+      Issue #293 adds the reduce phase after parallel rollout development:
+      workflow states may declare `mode: synthesize` on the existing
+      review-agent, the coordinator assembles rollout candidate PR diffs +
+      session summaries into a dedicated synth prompt, and the state machine
+      advances from developing -> synthesizing -> reviewing only when the
+      previous state actually fanned out into multiple rollouts. The
+      coordinator records `synthesis_decision` events, treats malformed
+      synth output as an escalate-to-human fallback, and tracks a separate
+      `synth_cycle_count` so repeated synth review loops cannot burn the
+      legacy dev-review cycle budget.
+    rationale: >
+      Rollout fan-out is only useful when the system can reduce the sibling
+      candidates back into one reviewable PR. Reusing review-agent in a
+      dedicated synth mode preserves the two-role model while keeping the
+      final choice auditable and human-overridable.
+    priority: P1
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-117-1: workflow state YAML accepts `mode: review|synthesize`, rejects unknown modes, and the default workflow inserts `synthesizing` between `developing` and `reviewing` only when rollouts > 1."
+      - "AC-117-2: synth-mode dispatch uses a dedicated runtime prompt that includes the issue body, candidate PR metadata (number/title/branch/head SHA), full diffs, dev session summaries, session-detail links, and min_successes."
+      - "AC-117-3: synth-mode final output is validated as exactly one of pick/cherry-pick/escalate, malformed output falls back to an escalate-style blocked outcome, and successful synth completions emit `synthesis_decision` with the chosen payload."
+      - "AC-117-4: issue_cycle_state persists `synth_cycle_count` / `synth_cap_hit_at`, and a reviewing rejection after a synth pass increments the synth counter instead of the legacy dev_review counter."
+      - "AC-117-5: rollout state-machine tests cover pick, escalate, and malformed synth-output flows from developing -> synthesizing -> reviewing/blocked."
+    code:
+      - .github/workbuddy/workflows/default.md
+      - cmd/initdata/workflows/default.md
+      - schemas/workflow.schema.json
+      - internal/config/types.go
+      - internal/config/state_join.go
+      - internal/runtime/prompts.go
+      - internal/runtime/output_contract.go
+      - internal/runtime/template.go
+      - internal/runtime/types.go
+      - internal/taskprep/taskprep.go
+      - internal/taskprep/synthesis.go
+      - internal/ghadapter/ghcli.go
+      - internal/app/coordinator.go
+      - internal/app/repo_runtime.go
+      - internal/eventlog/eventlog.go
+      - internal/statemachine/statemachine.go
+      - internal/store/store.go
+      - internal/store/queries.go
+      - internal/store/types.go
+      - internal/worker/distributed.go
+      - internal/workerclient/client.go
+      - internal/router/router.go
+    tests:
+      - internal/config/state_join_test.go
+      - internal/runtime/footer_test.go
+      - internal/runtime/prompts_test.go
+      - internal/statemachine/synthesis_test.go
+      - internal/validate/template_schema_test.go
+    deps:
+      - REQ-115
