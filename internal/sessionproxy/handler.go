@@ -448,6 +448,19 @@ func (h *Handler) fanOutListing(parent context.Context, q map[string][]string) (
 		return nil, nil, false, lookupErr
 	}
 
+	// Push limit down to workers, but NOT offset. Per-worker offset is
+	// incoherent under the merge: with offset=20 across 3 workers that each
+	// returned 10 rows from their *own* offset 20, the global merge would
+	// then apply offset=20 again, double-skipping. Instead each worker
+	// returns rows starting at 0 up to (offset+limit) — enough to feed the
+	// final slice on line ~540 — and the global offset is applied once on
+	// the merged sort.
+	downstreamQ := copyQuery(q)
+	downstreamQ["offset"] = []string{"0"}
+	if limit := parseIntOr(limitRaw, 0); limit > 0 {
+		downstreamQ["limit"] = []string{strconv.Itoa(limit + parseIntOr(offsetRaw, 0))}
+	}
+
 	type workerResult struct {
 		workerID string
 		rows     []map[string]any
@@ -474,7 +487,7 @@ func (h *Handler) fanOutListing(parent context.Context, q map[string][]string) (
 		wg.Add(1)
 		go func(workerID, base string) {
 			defer wg.Done()
-			rows, ferr := h.fetchWorkerListing(ctx, workerID, base, q)
+			rows, ferr := h.fetchWorkerListing(ctx, workerID, base, downstreamQ)
 			if h.dispatchHook != nil {
 				h.dispatchHook(workerID)
 			}
@@ -491,7 +504,7 @@ func (h *Handler) fanOutListing(parent context.Context, q map[string][]string) (
 			wg.Add(1)
 			go func(workerID string) {
 				defer wg.Done()
-				rows, ferr := h.fetchLocalListing(ctx, q)
+				rows, ferr := h.fetchLocalListing(ctx, downstreamQ)
 				if h.dispatchHook != nil {
 					h.dispatchHook(workerID)
 				}
@@ -533,8 +546,10 @@ func (h *Handler) fanOutListing(parent context.Context, q map[string][]string) (
 		return rowCreatedAt(merged[i]).After(rowCreatedAt(merged[j]))
 	})
 
-	// Apply limit/offset on the merged result. Each worker already had
-	// limit/offset pushed down so we have at most N*<limit> rows here.
+	// Apply limit/offset on the merged result. Workers were called with
+	// offset=0 and limit=(originalOffset+originalLimit), so each contributed
+	// up to that many rows; the global offset is applied here on the sorted
+	// merge.
 	limit := parseIntOr(limitRaw, 0)
 	offset := parseIntOr(offsetRaw, 0)
 	if offset > 0 {
@@ -586,6 +601,16 @@ func (h *Handler) ListSessionsForRepoIssue(ctx context.Context, repo string, iss
 
 // firstQueryValue returns q[key][0] or "" — pulls the first non-empty
 // value out of a parsed query map.
+// copyQuery returns a shallow-mutable copy of q so callers can rewrite
+// keys without touching the request's parsed form.
+func copyQuery(q map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(q))
+	for k, v := range q {
+		out[k] = v
+	}
+	return out
+}
+
 func firstQueryValue(q map[string][]string, key string) string {
 	if vs, ok := q[key]; ok && len(vs) > 0 {
 		return strings.TrimSpace(vs[0])

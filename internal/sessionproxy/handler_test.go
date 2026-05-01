@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -270,7 +271,24 @@ type fanoutWorker struct {
 func startFanoutWorker(t *testing.T, id string, rows []map[string]any) *fanoutWorker {
 	w := newFakeWorker(t, http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		rw.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(rw).Encode(rows)
+		// Respect downstream offset/limit so the test can exercise the
+		// fan-out's pagination contract (workers must receive offset=0
+		// and a limit that covers offset+limit; coordinator applies the
+		// global offset on the merged sort).
+		off, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		lim, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		out := rows
+		if off > 0 {
+			if off >= len(out) {
+				out = nil
+			} else {
+				out = out[off:]
+			}
+		}
+		if lim > 0 && len(out) > lim {
+			out = out[:lim]
+		}
+		_ = json.NewEncoder(rw).Encode(out)
 	}))
 	return &fanoutWorker{id: id, rows: rows, w: w}
 }
@@ -661,3 +679,65 @@ func TestProxySSEForwardsLastEventID(t *testing.T) {
 	}
 }
 
+
+func TestFanoutPaginationOffsetAppliedOnGlobalMerge(t *testing.T) {
+	now := time.Now().UTC()
+	// Workers each have 4 rows. Global created_at desc order is:
+	// 0:a-0 (now-0m), 1:b-0 (now-15s), 2:a-1 (now-30s), 3:b-1 (now-45s),
+	// 4:a-2 (now-1m), 5:b-2 (now-1m15s), 6:a-3 (now-1m30s), 7:b-3 (now-1m45s).
+	mk := func(prefix string, baseOffset int) []map[string]any {
+		rows := make([]map[string]any, 4)
+		for i := 0; i < 4; i++ {
+			ts := now.Add(-time.Duration(baseOffset+i*30) * time.Second).Format(time.RFC3339)
+			rows[i] = map[string]any{
+				"session_id": fmt.Sprintf("%s-%d", prefix, i),
+				"created_at": ts,
+				"agent_name": "dev",
+			}
+		}
+		return rows
+	}
+	a := startFanoutWorker(t, "worker-a", mk("a", 0))
+	b := startFanoutWorker(t, "worker-b", mk("b", 15))
+
+	st, err := store.NewStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	for _, w := range []struct {
+		id, url string
+	}{
+		{"worker-a", a.w.URL()},
+		{"worker-b", b.w.URL()},
+	} {
+		if err := st.InsertWorker(store.WorkerRecord{ID: w.id, Repo: "org/repo", AuditURL: w.url, Status: "online"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := NewHandler(HandlerConfig{Resolver: NewResolver(st), AuthToken: "tok"})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions?offset=3&limit=2", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Global rank 3,4 of created_at desc = b-1, a-2. Pre-fix the result
+	// would be empty or wrong because per-worker offset=3 + post-merge
+	// offset=3 double-skipped.
+	want := []string{"b-1", "a-2"}
+	if len(rows) != len(want) {
+		t.Fatalf("rows = %d (%v), want %d (%v)", len(rows), rows, len(want), want)
+	}
+	for i, sid := range want {
+		got, _ := rows[i]["session_id"].(string)
+		if got != sid {
+			t.Fatalf("rows[%d].session_id = %s, want %s", i, got, sid)
+		}
+	}
+}
