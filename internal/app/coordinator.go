@@ -72,6 +72,21 @@ type WorkerRegisterRequest struct {
 	// reads to the owning worker. Today's read paths still serve from
 	// the coordinator's own DB.
 	AuditURL string `json:"audit_url,omitempty"`
+	// OpenSessions re-seeds the coordinator's session_routes index when
+	// the worker (re-)registers — covers the case where the coordinator
+	// restarted and lost its in-memory hint cache, or where an earlier
+	// AnnounceSession call failed transiently. ON CONFLICT DO NOTHING
+	// keeps the upsert cheap; pre-existing rows survive.
+	OpenSessions []SessionAnnouncePayload `json:"open_sessions,omitempty"`
+}
+
+// SessionAnnouncePayload is the wire shape for both the standalone
+// /api/v1/workers/{id}/sessions/announce call and the OpenSessions
+// element of WorkerRegisterRequest.
+type SessionAnnouncePayload struct {
+	SessionID string `json:"session_id"`
+	Repo      string `json:"repo"`
+	IssueNum  int    `json:"issue_num"`
 }
 
 // TaskPollResponse is returned from GET /api/v1/tasks/poll when a task is
@@ -379,8 +394,16 @@ func (s *FullCoordinatorServer) HandleRepoByPath(w http.ResponseWriter, r *http.
 	}
 }
 
-// HandleWorkerByPath serves DELETE /api/v1/workers/{worker_id}.
+// HandleWorkerByPath serves DELETE /api/v1/workers/{worker_id} and
+// dispatches /api/v1/workers/{id}/sessions/announce to
+// HandleAnnounceSession (one path-prefix mount keeps cmd/coordinator.go
+// simpler — the alternative is a separate mux entry that ServeMux's
+// longest-prefix rule would steal at the wrong granularity).
 func (s *FullCoordinatorServer) HandleWorkerByPath(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, "/sessions/announce") {
+		s.HandleAnnounceSession(w, r)
+		return
+	}
 	workerID := strings.TrimPrefix(r.URL.Path, "/api/v1/workers/")
 	workerID = strings.TrimSpace(workerID)
 	if workerID == "" {
@@ -469,6 +492,27 @@ func (s *FullCoordinatorServer) HandleRegisterWorker(w http.ResponseWriter, r *h
 		CoordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	if len(req.OpenSessions) > 0 && s.Store != nil {
+		routes := make([]store.SessionRoute, 0, len(req.OpenSessions))
+		for _, ann := range req.OpenSessions {
+			sid := strings.TrimSpace(ann.SessionID)
+			if sid == "" {
+				continue
+			}
+			routes = append(routes, store.SessionRoute{
+				SessionID: sid,
+				WorkerID:  req.WorkerID,
+				Repo:      strings.TrimSpace(ann.Repo),
+				IssueNum:  ann.IssueNum,
+			})
+		}
+		if err := s.Store.BulkUpsertSessionRoutes(routes); err != nil {
+			// Don't fail the register: a missed re-seed is recoverable
+			// (per-session AnnounceSession populates rows on the hot
+			// path). Log and proceed so the worker stays online.
+			log.Printf("[coordinator] re-seed session routes for %s: %v", req.WorkerID, err)
+		}
+	}
 	s.Eventlog.Log(eventlog.TypeWorkerRegistered, req.Repo, 0, map[string]any{
 		"worker_id": req.WorkerID,
 		"roles":     req.Roles,
@@ -485,6 +529,78 @@ func (s *FullCoordinatorServer) HandleRegisterWorker(w http.ResponseWriter, r *h
 		hook()
 	}
 	CoordWriteJSON(w, http.StatusCreated, map[string]string{"status": "registered"})
+}
+
+// HandleAnnounceSession serves
+// POST /api/v1/workers/{worker_id}/sessions/announce. The worker calls
+// this immediately after CreateSession so the coordinator's
+// sessionproxy can route /api/v1/sessions/{id} reads to the owning
+// worker. Idempotent: a re-announce for the same session_id is a no-op.
+func (s *FullCoordinatorServer) HandleAnnounceSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		CoordWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	workerID, ok := parseAnnounceSessionPath(r.URL.Path)
+	if !ok {
+		CoordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid path; expect /api/v1/workers/<id>/sessions/announce"})
+		return
+	}
+	var ann SessionAnnouncePayload
+	if err := json.NewDecoder(r.Body).Decode(&ann); err != nil {
+		CoordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	ann.SessionID = strings.TrimSpace(ann.SessionID)
+	ann.Repo = strings.TrimSpace(ann.Repo)
+	if ann.SessionID == "" {
+		CoordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "session_id is required"})
+		return
+	}
+	if s.Store == nil {
+		CoordWriteJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "store unavailable"})
+		return
+	}
+	// Confirm the worker is registered. Without this, a misconfigured or
+	// rogue worker could plant arbitrary session_id → worker_id rows the
+	// proxy would later trust. The auth middleware already guards token
+	// validity; this guards routing integrity.
+	if worker, err := s.Store.GetWorker(workerID); err != nil {
+		CoordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	} else if worker == nil {
+		CoordWriteJSON(w, http.StatusNotFound, map[string]string{"error": "worker not registered"})
+		return
+	}
+	route := store.SessionRoute{
+		SessionID: ann.SessionID,
+		WorkerID:  workerID,
+		Repo:      ann.Repo,
+		IssueNum:  ann.IssueNum,
+	}
+	if err := s.Store.UpsertSessionRoute(route); err != nil {
+		CoordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	CoordWriteJSON(w, http.StatusCreated, map[string]string{"status": "announced"})
+}
+
+// parseAnnounceSessionPath extracts <worker_id> from
+// /api/v1/workers/<worker_id>/sessions/announce. Returns ("", false) when
+// the path doesn't match — the route mux only mounts on the matching
+// prefix so this is mostly a safety net for malformed suffix paths.
+func parseAnnounceSessionPath(path string) (string, bool) {
+	const prefix = "/api/v1/workers/"
+	const suffix = "/sessions/announce"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return "", false
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	id = strings.TrimSpace(id)
+	if id == "" || strings.Contains(id, "/") {
+		return "", false
+	}
+	return id, true
 }
 
 // HandlePollTask serves GET /api/v1/tasks/poll with long-polling.

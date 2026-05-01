@@ -616,6 +616,11 @@ func TestWorkerUsesTaskRepoConfigForMultiRepoBindings(t *testing.T) {
 			taskDoneOnce.Do(func() { close(taskDone) })
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/release"):
 			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/sessions/announce"):
+			// REQ-123: workers POST a session route on every CreateSession.
+			// Tests that don't otherwise care about announces just ack 201 so
+			// the worker proceeds with the task under test.
+			w.WriteHeader(http.StatusCreated)
 		default:
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
@@ -825,6 +830,11 @@ func TestWorkerUsesMappedRepoPathAndCleansAddrFile(t *testing.T) {
 			close(taskCompleted)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"status":"completed"}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/sessions/announce"):
+			// REQ-123: workers POST a session route on every CreateSession.
+			// Tests that don't otherwise care about announces just ack 201 so
+			// the worker proceeds with the task under test.
+			w.WriteHeader(http.StatusCreated)
 		default:
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
@@ -924,6 +934,11 @@ func TestWorkerRegistersMgmtPublicURL(t *testing.T) {
 			default:
 			}
 			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/sessions/announce"):
+			// REQ-123: workers POST a session route on every CreateSession.
+			// Tests that don't otherwise care about announces just ack 201 so
+			// the worker proceeds with the task under test.
+			w.WriteHeader(http.StatusCreated)
 		default:
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
@@ -1000,6 +1015,11 @@ func TestWorkerReleasesUnmappedTask(t *testing.T) {
 			releasedReason = req.Reason
 			released <- req.WorkerID
 			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/sessions/announce"):
+			// REQ-123: workers POST a session route on every CreateSession.
+			// Tests that don't otherwise care about announces just ack 201 so
+			// the worker proceeds with the task under test.
+			w.WriteHeader(http.StatusCreated)
 		default:
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
@@ -1222,6 +1242,11 @@ func TestExecuteRemoteTaskStopsHeartbeatAfterKilledProcess(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"status":"failed"}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/sessions/announce"):
+			// REQ-123: workers POST a session route on every CreateSession.
+			// Tests that don't otherwise care about announces just ack 201 so
+			// the worker proceeds with the task under test.
+			w.WriteHeader(http.StatusCreated)
 		default:
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
@@ -1307,6 +1332,11 @@ func TestExecuteRemoteTaskRequeuesWorktreeSetupFailure(t *testing.T) {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/result"):
 			resultCount++
 			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/sessions/announce"):
+			// REQ-123: workers POST a session route on every CreateSession.
+			// Tests that don't otherwise care about announces just ack 201 so
+			// the worker proceeds with the task under test.
+			w.WriteHeader(http.StatusCreated)
 		default:
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
@@ -1426,6 +1456,11 @@ func TestWorkerRecoversAfterKilledTaskWhenResultSubmitFails(t *testing.T) {
 			})
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"status":"completed"}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/sessions/announce"):
+			// REQ-123: workers POST a session route on every CreateSession.
+			// Tests that don't otherwise care about announces just ack 201 so
+			// the worker proceeds with the task under test.
+			w.WriteHeader(http.StatusCreated)
 		default:
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}

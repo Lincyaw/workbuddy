@@ -319,6 +319,21 @@ func (s *Store) createTables() error {
 		`CREATE INDEX IF NOT EXISTS idx_sessions_repo_issue ON sessions(repo, issue_num, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_name, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_worker_status ON sessions(worker_id, status, id)`,
+		// session_routes maps session_id → owning worker. Lives on every
+		// store (worker DBs harmlessly carry it; coordinator depends on
+		// it). Workers populate it via the announce RPC; the resolver
+		// reads it to choose which worker to proxy a session detail /
+		// events / stream request to. Survives the legacy `sessions`
+		// table being dropped on the coordinator (REQ-122) — this is the
+		// thin index the proxy needs to function in split topology.
+		`CREATE TABLE IF NOT EXISTS session_routes (
+			session_id TEXT PRIMARY KEY,
+			worker_id  TEXT NOT NULL,
+			repo       TEXT NOT NULL,
+			issue_num  INTEGER NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_routes_worker ON session_routes(worker_id)`,
 		`CREATE TABLE IF NOT EXISTS issue_dependencies (
 			repo TEXT NOT NULL,
 			issue_num INTEGER NOT NULL,
@@ -1930,6 +1945,93 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// ---------------------------------------------------------------------------
+// Session Routes
+// ---------------------------------------------------------------------------
+
+// UpsertSessionRoute records that sessionID is owned by workerID.
+// Idempotent: a re-announce for an existing session_id is a no-op (the
+// owning worker doesn't change). Worker DBs may also call this; it just
+// caches the same row a worker would have populated locally.
+func (s *Store) UpsertSessionRoute(route SessionRoute) error {
+	if strings.TrimSpace(route.SessionID) == "" {
+		return fmt.Errorf("store: upsert session route: session_id required")
+	}
+	if strings.TrimSpace(route.WorkerID) == "" {
+		return fmt.Errorf("store: upsert session route: worker_id required")
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO session_routes (session_id, worker_id, repo, issue_num)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT(session_id) DO NOTHING`,
+		route.SessionID, route.WorkerID, route.Repo, route.IssueNum,
+	)
+	if err != nil {
+		return fmt.Errorf("store: upsert session route: %w", err)
+	}
+	return nil
+}
+
+// BulkUpsertSessionRoutes inserts a batch of routes in one transaction.
+// Used on worker re-Register to re-seed the coordinator's index after a
+// coordinator restart wipes any in-memory state. ON CONFLICT DO NOTHING
+// keeps the call cheap on the hot path (workers re-announce their open
+// sessions on every register; existing routes survive untouched).
+func (s *Store) BulkUpsertSessionRoutes(routes []SessionRoute) error {
+	if len(routes) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: begin bulk upsert session routes: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.Prepare(
+		`INSERT INTO session_routes (session_id, worker_id, repo, issue_num)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT(session_id) DO NOTHING`,
+	)
+	if err != nil {
+		return fmt.Errorf("store: prepare bulk upsert session routes: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+	for _, route := range routes {
+		if strings.TrimSpace(route.SessionID) == "" || strings.TrimSpace(route.WorkerID) == "" {
+			continue
+		}
+		if _, err := stmt.Exec(route.SessionID, route.WorkerID, route.Repo, route.IssueNum); err != nil {
+			return fmt.Errorf("store: bulk upsert session route %q: %w", route.SessionID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit bulk upsert session routes: %w", err)
+	}
+	return nil
+}
+
+// GetSessionRoute returns the route for sessionID, or (nil, nil) when none
+// exists. The resolver translates a missing row to ErrSessionNotRouted.
+func (s *Store) GetSessionRoute(sessionID string) (*SessionRoute, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, nil
+	}
+	row := s.db.QueryRow(
+		`SELECT session_id, worker_id, repo, issue_num, created_at
+		 FROM session_routes
+		 WHERE session_id = ?`,
+		sessionID,
+	)
+	var route SessionRoute
+	if err := row.Scan(&route.SessionID, &route.WorkerID, &route.Repo, &route.IssueNum, &route.CreatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("store: get session route: %w", err)
+	}
+	return &route, nil
 }
 
 // ---------------------------------------------------------------------------

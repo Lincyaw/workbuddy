@@ -1,8 +1,10 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -11,9 +13,25 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
+// SessionAnnouncer publishes a freshly-created session_id → worker_id
+// route to the coordinator. Implementations are typically a thin
+// adapter around workerclient.AnnounceSession; SessionManager calls it
+// best-effort with a short timeout so the agent run isn't blocked on
+// transient HTTP errors. Routes are also re-seeded on the next Register
+// (Phase 4: bulk announce), so a single announce miss self-heals.
+type SessionAnnouncer interface {
+	AnnounceSession(ctx context.Context, sessionID, repo string, issueNum int) error
+}
+
+// announceTimeout caps the synchronous announce call. Long enough to
+// tolerate a slow loopback HTTP round-trip in `serve` mode, short
+// enough to keep agent boot snappy when the coordinator is wedged.
+const announceTimeout = 3 * time.Second
+
 type SessionManager struct {
-	baseDir string
-	store   *store.Store
+	baseDir   string
+	store     *store.Store
+	announcer SessionAnnouncer
 }
 
 type SessionCreateInput struct {
@@ -59,6 +77,17 @@ type ManagedSession struct {
 
 func NewSessionManager(baseDir string, st *store.Store) *SessionManager {
 	return &SessionManager{baseDir: baseDir, store: st}
+}
+
+// SetAnnouncer wires the announcer used by Create after the store row is
+// written. nil disables announcing — used by tests and by callers that
+// share a DB with the coordinator (in which case Create's UpsertSessionRoute
+// already covers the index).
+func (m *SessionManager) SetAnnouncer(a SessionAnnouncer) {
+	if m == nil {
+		return
+	}
+	m.announcer = a
 }
 
 func (m *SessionManager) Create(input SessionCreateInput) (*ManagedSession, error) {
@@ -113,6 +142,32 @@ func (m *SessionManager) Create(input SessionCreateInput) (*ManagedSession, erro
 	if m.store != nil {
 		if _, err := m.store.CreateSession(record); err != nil {
 			return nil, err
+		}
+		// Local index: in `serve` mode the coordinator and worker share
+		// this DB, so writing session_routes here lets the resolver find
+		// the owning worker even before AnnounceSession completes (and
+		// without the loopback HTTP round-trip). In split topology the
+		// worker DB carries a harmless duplicate row; coordinator gets
+		// its copy via the announce RPC below.
+		if err := m.store.UpsertSessionRoute(store.SessionRoute{
+			SessionID: record.SessionID,
+			WorkerID:  record.WorkerID,
+			Repo:      record.Repo,
+			IssueNum:  record.IssueNum,
+		}); err != nil {
+			log.Printf("[session] upsert local route for %s: %v", record.SessionID, err)
+		}
+	}
+	if m.announcer != nil && record.WorkerID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), announceTimeout)
+		err := m.announcer.AnnounceSession(ctx, record.SessionID, record.Repo, record.IssueNum)
+		cancel()
+		if err != nil {
+			// Best-effort: a missed announce self-heals on the next
+			// Register (workers re-send their open sessions there).
+			// Surface as a log warning so the operator can correlate
+			// transient coordinator outages with delayed UI routing.
+			log.Printf("[session] announce %s to coordinator: %v", record.SessionID, err)
 		}
 	}
 	return handle, nil
