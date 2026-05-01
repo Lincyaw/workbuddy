@@ -196,7 +196,16 @@ func (s *Store) QueryIssueTransitions(repo string, issueNum int) ([]IssueTransit
 // LatestSessionForIssue returns the newest session row for the (repo,issue)
 // pair, or nil when no session has been created. Used to populate
 // last_session_id / last_session_url on the in-flight dashboard.
+//
+// Phase 3 (REQ-122): the coordinator's `sessions` table is dropped at
+// startup. Short-circuit to (nil, nil) so the SQL driver does not emit
+// "no such table: sessions" into the logs on every /api/v1/status hit
+// (auditapi callers silently discard the error, but the noise still
+// reaches stderr). Same pattern as CountTerminalSessionsSince et al.
 func (s *Store) LatestSessionForIssue(repo string, issueNum int) (*SessionRecord, error) {
+	if s.coordinatorMode {
+		return nil, nil
+	}
 	row := s.db.QueryRow(
 		`SELECT s.id, s.session_id, s.task_id, s.repo, s.issue_num, s.agent_name, s.runtime, s.worker_id, s.attempt,
 		        COALESCE(t.status, s.status),

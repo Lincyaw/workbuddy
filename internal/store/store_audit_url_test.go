@@ -59,6 +59,29 @@ func TestWorkerAuditURLRoundtrip(t *testing.T) {
 	}
 }
 
+// TestLatestSessionForIssueCoordinatorMode verifies that the
+// coordinatorMode short-circuit on LatestSessionForIssue (REQ-122 Phase
+// 3) returns (nil, nil) cleanly without touching the dropped `sessions`
+// table. Without this guard the SQL driver emits "no such table:
+// sessions" into stderr on every /api/v1/status hit because the
+// auditapi caller silently swallows the error.
+func TestLatestSessionForIssueCoordinatorMode(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "coord.db")
+	s, err := NewCoordinatorStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewCoordinatorStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	got, err := s.LatestSessionForIssue("org/repo", 42)
+	if err != nil {
+		t.Fatalf("LatestSessionForIssue under coordinatorMode: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("LatestSessionForIssue under coordinatorMode = %+v, want nil", got)
+	}
+}
+
 // TestWorkerAuditURLAddedByMigration verifies that opening a store created
 // before the audit_url column existed (simulated here by dropping the
 // column and reopening) results in the migration adding it back without
