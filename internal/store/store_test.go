@@ -373,6 +373,38 @@ func TestLatestRolloutGroupSummaryForIssueState_ReturnsNewestMatchingGroup(t *te
 	}
 }
 
+func TestListTasksForIssue_IncludesCompletedHistory(t *testing.T) {
+	s := newTestStore(t)
+
+	insert := func(id string, issueNum int, status string) {
+		t.Helper()
+		if err := s.InsertTask(TaskRecord{
+			ID:        id,
+			Repo:      "org/repo",
+			IssueNum:  issueNum,
+			AgentName: "dev-agent",
+			Status:    status,
+		}); err != nil {
+			t.Fatalf("InsertTask(%s): %v", id, err)
+		}
+	}
+
+	insert("task-a", 90, TaskStatusCompleted)
+	insert("task-b", 90, TaskStatusFailed)
+	insert("task-c", 91, TaskStatusPending)
+
+	tasks, err := s.ListTasksForIssue("org/repo", 90)
+	if err != nil {
+		t.Fatalf("ListTasksForIssue: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("len(tasks) = %d, want 2", len(tasks))
+	}
+	if tasks[0].ID != "task-a" || tasks[1].ID != "task-b" {
+		t.Fatalf("tasks = %+v", tasks)
+	}
+}
+
 // TestIncrementTransitionAtomic verifies that concurrent IncrementTransition
 // calls produce the correct final count (no lost updates).
 func TestIncrementTransitionAtomic(t *testing.T) {

@@ -1209,6 +1209,16 @@ func (sm *StateMachine) dispatchStateAgents(ctx context.Context, repo string, is
 	sm.inflight[issueKey] = group
 	sm.inflightMu.Unlock()
 
+	if len(requests) > 1 && requests[0].RolloutGroupID != "" && sm.eventlog != nil {
+		sm.eventlog.Log(eventlog.TypeRolloutGroupStarted, repo, issueNum, map[string]any{
+			"group_id":       requests[0].RolloutGroupID,
+			"rollouts_total": len(requests),
+			"issue_num":      issueNum,
+			"role":           inferAgentRole(requests[0].AgentName),
+			"state":          state,
+		})
+	}
+
 	for _, req := range requests {
 		if err := sm.dispatchSingleAgent(ctx, req); err != nil {
 			// Don't remove the inflight group — agents already dispatched before
@@ -1379,6 +1389,7 @@ func (sm *StateMachine) MarkAgentCompletedWithDecision(repo string, issueNum int
 	shouldAdvance := false
 	passed := false
 	join := group.join.Strategy
+	rolloutSummary := (*store.RolloutGroupSummary)(nil)
 	switch join {
 	case config.JoinRollouts:
 		if rolloutGroupID == "" {
@@ -1394,6 +1405,7 @@ func (sm *StateMachine) MarkAgentCompletedWithDecision(repo string, issueNum int
 			break
 		}
 		if summary != nil {
+			rolloutSummary = summary
 			minSuccesses := group.join.MinSuccesses
 			if minSuccesses <= 0 {
 				minSuccesses = summary.RolloutsTotal
@@ -1447,6 +1459,24 @@ func (sm *StateMachine) MarkAgentCompletedWithDecision(repo string, issueNum int
 	sm.logSynthesisDecision(repo, issueNum, group, exitCode, decision)
 
 	if shouldAdvance {
+		if join == config.JoinRollouts && sm.eventlog != nil {
+			successCount := len(group.successSlots)
+			failedCount := len(group.failedSlots)
+			if rolloutSummary != nil {
+				successCount = rolloutSummary.SuccessCount
+				failedCount = rolloutSummary.FailedCount
+			}
+			resolution := "join_satisfied"
+			if !passed {
+				resolution = "min_successes_unmet"
+			}
+			sm.eventlog.Log(eventlog.TypeRolloutGroupResolved, repo, issueNum, map[string]any{
+				"group_id":      rolloutGroupID,
+				"success_count": successCount,
+				"failed_count":  failedCount,
+				"decision":      resolution,
+			})
+		}
 		if stateModeFromGroup(group) == config.StateModeSynth && shouldEscalateSynthDecision(exitCode, decision) {
 			if decision == nil && sm.synthNeedsHumanReporter != nil {
 				if err := sm.synthNeedsHumanReporter.ReportSynthesisNeedsHuman(context.Background(), repo, issueNum, "malformed_or_missing_synthesis_output"); err != nil {
@@ -1915,6 +1945,18 @@ func transitionAllowedForState(currentStateName string, currentState *config.Sta
 		return rollouts <= 1
 	}
 	return true
+}
+
+func inferAgentRole(agentName string) string {
+	name := strings.ToLower(strings.TrimSpace(agentName))
+	switch {
+	case strings.Contains(name, "review"):
+		return "review"
+	case strings.Contains(name, "dev"):
+		return "dev"
+	default:
+		return "other"
+	}
 }
 
 func resolveStateRollouts(state *config.State, labels []string) (int, error) {

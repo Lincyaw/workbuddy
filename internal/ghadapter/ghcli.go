@@ -3,6 +3,7 @@ package ghadapter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -33,9 +34,13 @@ type Reaction struct {
 }
 
 type PullRequest struct {
+	Number      int    `json:"number"`
+	URL         string `json:"url"`
 	State       string `json:"state"`
 	HeadRefName string `json:"headRefName"`
 }
+
+var ErrPullRequestNotFound = errors.New("pull request not found")
 
 func NewCLI() *CLI {
 	return &CLI{run: defaultRunCommand, runCombined: defaultRunCombined}
@@ -456,7 +461,7 @@ func (c *CLI) DeleteIssueReaction(ctx context.Context, repo string, issueNum int
 }
 
 func (c *CLI) ReadPullRequest(ctx context.Context, repo string, prNum int) (PullRequest, error) {
-	out, err := c.runCommand(ctx, "gh", "pr", "view", strconv.Itoa(prNum), "--repo", repo, "--json", "state,headRefName")
+	out, err := c.runCommand(ctx, "gh", "pr", "view", strconv.Itoa(prNum), "--repo", repo, "--json", "number,url,state,headRefName")
 	if err != nil {
 		return PullRequest{}, fmt.Errorf("gh pr view: %w", err)
 	}
@@ -465,6 +470,30 @@ func (c *CLI) ReadPullRequest(ctx context.Context, repo string, prNum int) (Pull
 		return PullRequest{}, fmt.Errorf("gh pr view: parse: %w", err)
 	}
 	return pr, nil
+}
+
+func (c *CLI) FindPullRequestByBranch(ctx context.Context, repo, branch string) (PullRequest, error) {
+	out, err := c.runCommandCombined(ctx, "gh", "pr", "view", branch, "--repo", repo, "--json", "number,url,state,headRefName")
+	if err != nil {
+		msg := strings.ToLower(strings.TrimSpace(string(out)))
+		if strings.Contains(msg, "no pull requests found") || strings.Contains(msg, "could not resolve to a pull request") {
+			return PullRequest{}, ErrPullRequestNotFound
+		}
+		return PullRequest{}, fmt.Errorf("gh pr view branch: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	var pr PullRequest
+	if err := json.Unmarshal(out, &pr); err != nil {
+		return PullRequest{}, fmt.Errorf("gh pr view branch: parse: %w", err)
+	}
+	return pr, nil
+}
+
+func (c *CLI) DiffPullRequest(ctx context.Context, repo string, prNum int) (string, error) {
+	out, err := c.runCommandCombined(ctx, "gh", "pr", "diff", strconv.Itoa(prNum), "--repo", repo)
+	if err != nil {
+		return "", fmt.Errorf("gh pr diff: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return string(out), nil
 }
 
 func repoOwner(repo string) string {

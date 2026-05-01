@@ -4,10 +4,11 @@ import { Layout } from '../components/Layout';
 import { StateBadge } from '../components/StateBadge';
 import { GitHubIssueLink } from '../components/GitHubIssueLink';
 import { EmptyState } from '../components/EmptyState';
-import { getIssueDetail } from '../api/client';
-import type { IssueDetail as IssueDetailDTO } from '../api/types';
+import { getIssueDetail, getIssueRollouts } from '../api/client';
+import type { IssueDetail as IssueDetailDTO, RolloutGroup } from '../api/types';
 import { formatTimestamp } from '../lib/format';
 import { splitRepoSlug } from '../utils/github';
+import { RolloutGroupPanel } from '../components/RolloutGroupPanel';
 
 export function IssueDetail() {
   const { params } = useRoute();
@@ -15,6 +16,7 @@ export function IssueDetail() {
   const repo = params.repo;
   const num = Number(params.num || '0');
   const [detail, setDetail] = useState<IssueDetailDTO | null>(null);
+  const [rollouts, setRollouts] = useState<RolloutGroup | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -25,10 +27,14 @@ export function IssueDetail() {
       return;
     }
     let cancelled = false;
-    getIssueDetail(owner, repo, num)
-      .then((response) => {
+    Promise.allSettled([getIssueDetail(owner, repo, num), getIssueRollouts(owner, repo, num)])
+      .then(([detailResult, rolloutResult]) => {
         if (!cancelled) {
-          setDetail(response);
+          if (detailResult.status !== 'fulfilled') {
+            throw detailResult.reason;
+          }
+          setDetail(detailResult.value);
+          setRollouts(rolloutResult.status === 'fulfilled' ? rolloutResult.value : null);
           setError(null);
         }
       })
@@ -55,14 +61,15 @@ export function IssueDetail() {
       {loading && !detail ? (
         <div class="loading-copy">Loading issue telemetry…</div>
       ) : detail ? (
-        <IssueDetailBody detail={detail} />
+        <IssueDetailBody detail={detail} rollouts={rollouts} />
       ) : null}
     </Layout>
   );
 }
 
-function IssueDetailBody({ detail }: { detail: IssueDetailDTO }) {
+function IssueDetailBody({ detail, rollouts }: { detail: IssueDetailDTO; rollouts: RolloutGroup | null }) {
   const { owner, name } = splitRepoSlug(detail.repo);
+  const compareHref = buildCompareHref(owner, name, detail.issue_num, rollouts);
   return (
     <div class="issue-detail-grid">
       <section class="surface-card">
@@ -82,6 +89,13 @@ function IssueDetailBody({ detail }: { detail: IssueDetailDTO }) {
           </dd>
         </dl>
       </section>
+
+      <RolloutGroupPanel
+        repo={detail.repo}
+        issueNum={detail.issue_num}
+        group={rollouts}
+        compareHref={compareHref}
+      />
 
       <section class="surface-card">
         <div class="section-heading compact-heading">
@@ -153,4 +167,14 @@ function IssueDetailBody({ detail }: { detail: IssueDetailDTO }) {
       </section>
     </div>
   );
+}
+
+function buildCompareHref(owner: string, repo: string, issueNum: number, rollouts: RolloutGroup | null): string | undefined {
+  if (!rollouts || rollouts.members.length < 2) return undefined;
+  const params = new URLSearchParams();
+  const chosen = rollouts.members.slice(0, 3);
+  if (chosen[0]) params.set('a', String(chosen[0].rollout_index));
+  if (chosen[1]) params.set('b', String(chosen[1].rollout_index));
+  if (chosen[2]) params.set('c', String(chosen[2].rollout_index));
+  return `/issues/${owner}/${repo}/${issueNum}/rollouts/compare?${params.toString()}`;
 }

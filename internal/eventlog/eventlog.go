@@ -53,9 +53,17 @@ const (
 	TypeDevReviewCycleCapReached    = "dev_review_cycle_cap_reached"
 	TypeDevReviewCycleCountReset    = "dev_review_cycle_count_reset"
 	TypeLongFlightStuck             = "long_flight_stuck_detected"
-	TypeRolloutDispatched           = "rollout_dispatched"
-	TypeRolloutCompleted            = "rollout_completed"
-	TypeSynthesisDecision           = "synthesis_decision"
+	// TypeRolloutGroupStarted fires once per rollout fan-out group when the
+	// state machine dispatches the sibling rollouts. Payload:
+	// {group_id, rollouts_total, issue_num, role, state}.
+	TypeRolloutGroupStarted = "rollout_group_started"
+	// TypeRolloutGroupResolved fires once per rollout group when the join gate
+	// reaches a terminal decision. Payload:
+	// {group_id, success_count, failed_count, decision}.
+	TypeRolloutGroupResolved = "rollout_group_resolved"
+	TypeRolloutDispatched    = "rollout_dispatched"
+	TypeRolloutCompleted     = "rollout_completed"
+	TypeSynthesisDecision    = "synthesis_decision"
 	// TypeIssueNoWorkflowMatch fires when poller observes an issue carrying a
 	// status:* label but none of the configured workflow trigger labels match,
 	// i.e. the issue cannot enter the state machine. Idempotent per
@@ -121,6 +129,8 @@ var AllEventTypes = []string{
 	TypeDevReviewCycleCapReached,
 	TypeDevReviewCycleCountReset,
 	TypeLongFlightStuck,
+	TypeRolloutGroupStarted,
+	TypeRolloutGroupResolved,
 	TypeRolloutDispatched,
 	TypeRolloutCompleted,
 	TypeSynthesisDecision,

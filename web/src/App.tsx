@@ -12,6 +12,9 @@ const Hooks = lazy(() => import('./pages/Hooks').then((m) => m.default));
 const HookDetail = lazy(() =>
   import('./pages/HookDetail').then((m) => m.default),
 );
+const RolloutCompare = lazy(() =>
+  import('./pages/RolloutCompare').then((m) => m.default),
+);
 
 export function App() {
   return (
@@ -22,6 +25,7 @@ export function App() {
           <Route path="/dashboard" component={Dashboard} />
           <Route path="/sessions" component={Sessions} />
           <Route path="/sessions/:id" component={SessionDetail} />
+          <Route path="/issues/:owner/:repo/:num/rollouts/compare" component={RolloutCompare} />
           <Route path="/issues/:owner/:repo/:num" component={IssueDetail} />
           <Route path="/hooks" component={Hooks} />
           <Route path="/hooks/:name" component={HookDetail} />

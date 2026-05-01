@@ -2,7 +2,10 @@ package auditapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/ghadapter"
 	"github.com/Lincyaw/workbuddy/internal/operator"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/store"
@@ -229,6 +233,210 @@ func TestSessionResponseJSONTime(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "2026-04-15T10:00:00Z") {
 		t.Fatalf("json = %s", string(data))
+	}
+}
+
+type fakeRolloutPRReader struct {
+	prs       map[string]ghadapter.PullRequest
+	diffs     map[int]string
+	diffCalls int
+}
+
+func (f *fakeRolloutPRReader) FindPullRequestByBranch(_ context.Context, _ string, branch string) (ghadapter.PullRequest, error) {
+	pr, ok := f.prs[branch]
+	if !ok {
+		return ghadapter.PullRequest{}, ghadapter.ErrPullRequestNotFound
+	}
+	return pr, nil
+}
+
+func (f *fakeRolloutPRReader) DiffPullRequest(_ context.Context, _ string, prNum int) (string, error) {
+	f.diffCalls++
+	if diff, ok := f.diffs[prNum]; ok {
+		return diff, nil
+	}
+	return "", errors.New("missing diff")
+}
+
+func TestHandleAPIIssueDetailIncludesRolloutMetadataOnSessions(t *testing.T) {
+	st := newTestStore(t)
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     "owner/repo",
+		IssueNum: 294,
+		Body:     "Rollout issue",
+		Labels:   `["workbuddy","status:reviewing"]`,
+		State:    "open",
+	}); err != nil {
+		t.Fatalf("UpsertIssueCache: %v", err)
+	}
+	if err := st.InsertTask(store.TaskRecord{
+		ID:             "task-rollout-1",
+		Repo:           "owner/repo",
+		IssueNum:       294,
+		AgentName:      "dev-agent",
+		WorkerID:       "worker-a",
+		Status:         store.TaskStatusCompleted,
+		SessionRefs:    `["session-rollout-1"]`,
+		RolloutIndex:   1,
+		RolloutsTotal:  3,
+		RolloutGroupID: "group-294",
+	}); err != nil {
+		t.Fatalf("InsertTask: %v", err)
+	}
+	if _, err := st.InsertAgentSession(store.AgentSession{
+		SessionID:  "session-rollout-1",
+		TaskID:     "task-rollout-1",
+		Repo:       "owner/repo",
+		IssueNum:   294,
+		AgentName:  "dev-agent",
+		TaskStatus: store.TaskStatusCompleted,
+	}); err != nil {
+		t.Fatalf("InsertAgentSession: %v", err)
+	}
+
+	h := NewHandler(st)
+	mux := http.NewServeMux()
+	h.RegisterDashboard(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/issues/owner/repo/294", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var resp issueDetailResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(resp.Sessions))
+	}
+	if resp.Sessions[0].RolloutIndex != 1 || resp.Sessions[0].RolloutsTotal != 3 || resp.Sessions[0].RolloutGroupID != "group-294" {
+		t.Fatalf("session rollout fields = %+v", resp.Sessions[0])
+	}
+}
+
+func TestHandleAPIIssueRolloutsBuildsGroupedView(t *testing.T) {
+	st := newTestStore(t)
+	evlog := eventlog.NewEventLogger(st)
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     "owner/repo",
+		IssueNum: 294,
+		Body:     "Rollout issue",
+		Labels:   `["workbuddy","status:reviewing"]`,
+		State:    "open",
+	}); err != nil {
+		t.Fatalf("UpsertIssueCache: %v", err)
+	}
+	now := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	insert := func(id string, rolloutIndex int, status string, workerID, sessionID string, created time.Time) {
+		t.Helper()
+		if err := st.InsertTask(store.TaskRecord{
+			ID:             id,
+			Repo:           "owner/repo",
+			IssueNum:       294,
+			AgentName:      "dev-agent",
+			WorkerID:       workerID,
+			Status:         status,
+			SessionRefs:    fmt.Sprintf(`["%s"]`, sessionID),
+			RolloutIndex:   rolloutIndex,
+			RolloutsTotal:  3,
+			RolloutGroupID: "group-294",
+			CreatedAt:      created,
+			CompletedAt:    created.Add(5 * time.Minute),
+			UpdatedAt:      created.Add(5 * time.Minute),
+		}); err != nil {
+			t.Fatalf("InsertTask(%s): %v", id, err)
+		}
+	}
+	insert("rollout-1", 1, store.TaskStatusCompleted, "worker-a", "session-a", now)
+	insert("rollout-2", 2, store.TaskStatusFailed, "worker-b", "session-b", now.Add(1*time.Minute))
+	insert("rollout-3", 3, store.TaskStatusCompleted, "worker-c", "session-c", now.Add(2*time.Minute))
+	evlog.Log("synthesis_decision", "owner/repo", 294, map[string]any{
+		"group_id":             "group-294",
+		"decision":             "pick",
+		"chosen_rollout_index": 3,
+		"reason":               "best test coverage",
+		"ts":                   now.Add(10 * time.Minute).Format(time.RFC3339),
+	})
+
+	reader := &fakeRolloutPRReader{
+		prs: map[string]ghadapter.PullRequest{
+			"workbuddy/issue-294/rollout-1": {Number: 401, URL: "https://example/pr/401"},
+			"workbuddy/issue-294/rollout-2": {Number: 402, URL: "https://example/pr/402"},
+			"workbuddy/issue-294/rollout-3": {Number: 403, URL: "https://example/pr/403"},
+		},
+	}
+
+	h := NewHandler(st)
+	h.events = evlog
+	h.SetRolloutPRReader(reader)
+	h.SetNowFunc(func() time.Time { return now.Add(15 * time.Minute) })
+	mux := http.NewServeMux()
+	h.RegisterDashboard(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/issues/owner/repo/294/rollouts", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var resp rolloutGroupResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.GroupID != "group-294" || resp.RolloutsTotal != 3 {
+		t.Fatalf("group = %+v", resp)
+	}
+	if len(resp.Members) != 3 {
+		t.Fatalf("members = %d, want 3", len(resp.Members))
+	}
+	if resp.Members[1].PRNumber != 402 || resp.Members[1].Status != store.TaskStatusFailed {
+		t.Fatalf("member[1] = %+v", resp.Members[1])
+	}
+	if resp.SynthOutcome == nil || resp.SynthOutcome.ChosenPR != 403 || resp.SynthOutcome.Decision != "pick" {
+		t.Fatalf("synth_outcome = %+v", resp.SynthOutcome)
+	}
+}
+
+func TestHandleAPIIssueRolloutDiffCachesPRDiff(t *testing.T) {
+	st := newTestStore(t)
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     "owner/repo",
+		IssueNum: 294,
+		Body:     "Rollout issue",
+		Labels:   `["workbuddy","status:reviewing"]`,
+		State:    "open",
+	}); err != nil {
+		t.Fatalf("UpsertIssueCache: %v", err)
+	}
+	reader := &fakeRolloutPRReader{
+		prs: map[string]ghadapter.PullRequest{
+			"workbuddy/issue-294/rollout-2": {Number: 402},
+		},
+		diffs: map[int]string{
+			402: "diff --git a/file.txt b/file.txt\n",
+		},
+	}
+	h := NewHandler(st)
+	h.SetRolloutPRReader(reader)
+	h.SetPRDiffTTL(30 * time.Second)
+	mux := http.NewServeMux()
+	h.RegisterDashboard(mux)
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/issues/owner/repo/294/rollouts/2/diff", nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+		}
+		if body := w.Body.String(); !strings.Contains(body, "diff --git") {
+			t.Fatalf("body = %q", body)
+		}
+	}
+	if reader.diffCalls != 1 {
+		t.Fatalf("diffCalls = %d, want 1 cached call", reader.diffCalls)
 	}
 }
 

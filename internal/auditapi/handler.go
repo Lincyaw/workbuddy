@@ -2,6 +2,7 @@
 package auditapi
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -9,11 +10,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/ghadapter"
 	"github.com/Lincyaw/workbuddy/internal/operator"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/sessionref"
@@ -55,14 +59,31 @@ type Handler struct {
 	now             func() time.Time
 	sessionEventsFn http.HandlerFunc
 	sessionStreamFn http.HandlerFunc
+	gh              rolloutPRReader
+	prDiffTTL       time.Duration
+	prDiffMu        sync.Mutex
+	prDiffCache     map[string]cachedPRDiff
+}
+
+type rolloutPRReader interface {
+	FindPullRequestByBranch(ctx context.Context, repo, branch string) (ghadapter.PullRequest, error)
+	DiffPullRequest(ctx context.Context, repo string, prNum int) (string, error)
+}
+
+type cachedPRDiff struct {
+	body      string
+	expiresAt time.Time
 }
 
 // NewHandler constructs a Handler backed by the given store.
 func NewHandler(st *store.Store) *Handler {
 	return &Handler{
-		store:  st,
-		events: eventlog.NewEventLogger(st),
-		now:    time.Now,
+		store:       st,
+		events:      eventlog.NewEventLogger(st),
+		now:         time.Now,
+		gh:          ghadapter.NewCLI(),
+		prDiffTTL:   30 * time.Second,
+		prDiffCache: make(map[string]cachedPRDiff),
 	}
 }
 
@@ -98,6 +119,22 @@ func (h *Handler) SetSessionEventsHandler(fn http.HandlerFunc) {
 // /api/v1/sessions/{id}/stream (SSE).
 func (h *Handler) SetSessionStreamHandler(fn http.HandlerFunc) {
 	h.sessionStreamFn = fn
+}
+
+func (h *Handler) SetRolloutPRReader(reader rolloutPRReader) {
+	if reader == nil {
+		h.gh = ghadapter.NewCLI()
+		return
+	}
+	h.gh = reader
+}
+
+func (h *Handler) SetPRDiffTTL(ttl time.Duration) {
+	if ttl <= 0 {
+		h.prDiffTTL = 30 * time.Second
+		return
+	}
+	h.prDiffTTL = ttl
 }
 
 // Register mounts the audit API routes.
@@ -322,12 +359,17 @@ type issueTransitionResponse struct {
 
 // issueSessionRefResponse is one session row in the issue-detail endpoint.
 type issueSessionRefResponse struct {
-	SessionID  string     `json:"session_id"`
-	Agent      string     `json:"agent"`
-	StartedAt  time.Time  `json:"started_at"`
-	FinishedAt *time.Time `json:"finished_at,omitempty"`
-	Status     string     `json:"status,omitempty"`
-	ExitCode   int        `json:"exit_code"`
+	SessionID      string     `json:"session_id"`
+	Agent          string     `json:"agent"`
+	StartedAt      time.Time  `json:"started_at"`
+	FinishedAt     *time.Time `json:"finished_at,omitempty"`
+	Status         string     `json:"status,omitempty"`
+	ExitCode       int        `json:"exit_code"`
+	WorkerID       string     `json:"worker_id,omitempty"`
+	TaskID         string     `json:"task_id,omitempty"`
+	RolloutIndex   int        `json:"rollout_index,omitempty"`
+	RolloutsTotal  int        `json:"rollouts_total,omitempty"`
+	RolloutGroupID string     `json:"rollout_group_id,omitempty"`
 }
 
 // issueDetailResponse is the body of /api/v1/issues/{repo}/{num}.
@@ -340,6 +382,33 @@ type issueDetailResponse struct {
 	Transitions      []issueTransitionResponse `json:"transitions"`
 	TransitionCounts []transitionCountResponse `json:"transition_counts"`
 	Sessions         []issueSessionRefResponse `json:"sessions"`
+}
+
+type rolloutGroupResponse struct {
+	GroupID       string                       `json:"group_id"`
+	RolloutsTotal int                          `json:"rollouts_total"`
+	Members       []rolloutMemberResponse      `json:"members"`
+	SynthOutcome  *rolloutSynthOutcomeResponse `json:"synth_outcome,omitempty"`
+}
+
+type rolloutMemberResponse struct {
+	RolloutIndex    int        `json:"rollout_index"`
+	PRNumber        int        `json:"pr_number"`
+	Status          string     `json:"status"`
+	SessionID       string     `json:"session_id,omitempty"`
+	WorkerID        string     `json:"worker_id,omitempty"`
+	StartedAt       time.Time  `json:"started_at"`
+	EndedAt         *time.Time `json:"ended_at,omitempty"`
+	DurationSeconds int64      `json:"duration_seconds"`
+}
+
+type rolloutSynthOutcomeResponse struct {
+	Decision      string    `json:"decision"`
+	ChosenPR      int       `json:"chosen_pr,omitempty"`
+	SynthPR       int       `json:"synth_pr,omitempty"`
+	ChosenRollout int       `json:"chosen_rollout_index,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+	TS            time.Time `json:"ts"`
 }
 
 func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -563,7 +632,7 @@ func (h *Handler) handleAPIIssueDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	repo, issueNum, ok := splitRepoIssue(rest)
+	repo, issueNum, suffix, ok := splitRepoIssueSuffix(rest)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid issue path; expect /api/v1/issues/<owner>/<repo>/<num>")
 		return
@@ -577,6 +646,40 @@ func (h *Handler) handleAPIIssueDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "issue not found")
 		return
 	}
+	switch suffix {
+	case "":
+		resp, err := h.buildIssueDetailResponse(*cache)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	case "rollouts":
+		resp, err := h.buildRolloutGroupResponse(repo, issueNum)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	default:
+		if strings.HasPrefix(suffix, "rollouts/") && strings.HasSuffix(suffix, "/diff") {
+			indexRaw := strings.TrimSuffix(strings.TrimPrefix(suffix, "rollouts/"), "/diff")
+			rolloutIndex, err := strconv.Atoi(strings.Trim(indexRaw, "/"))
+			if err != nil || rolloutIndex <= 0 {
+				writeError(w, http.StatusBadRequest, "invalid rollout index")
+				return
+			}
+			h.serveRolloutDiff(w, r, repo, issueNum, rolloutIndex)
+			return
+		}
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+}
+
+func (h *Handler) buildIssueDetailResponse(cache store.IssueCache) (issueDetailResponse, error) {
 	labels := decodeLabels(cache.Labels)
 	resp := issueDetailResponse{
 		Repo:             cache.Repo,
@@ -588,10 +691,9 @@ func (h *Handler) handleAPIIssueDetail(w http.ResponseWriter, r *http.Request) {
 		TransitionCounts: []transitionCountResponse{},
 		Sessions:         []issueSessionRefResponse{},
 	}
-	transitions, err := h.store.QueryIssueTransitions(repo, issueNum)
+	transitions, err := h.store.QueryIssueTransitions(cache.Repo, cache.IssueNum)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to query transitions")
-		return
+		return issueDetailResponse{}, fmt.Errorf("failed to query transitions")
 	}
 	for _, t := range transitions {
 		resp.Transitions = append(resp.Transitions, issueTransitionResponse{
@@ -601,10 +703,9 @@ func (h *Handler) handleAPIIssueDetail(w http.ResponseWriter, r *http.Request) {
 			By:   t.By,
 		})
 	}
-	counts, err := h.store.QueryTransitionCounts(repo, issueNum)
+	counts, err := h.store.QueryTransitionCounts(cache.Repo, cache.IssueNum)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to query transition counts")
-		return
+		return issueDetailResponse{}, fmt.Errorf("failed to query transition counts")
 	}
 	for _, c := range counts {
 		resp.TransitionCounts = append(resp.TransitionCounts, transitionCountResponse{
@@ -613,23 +714,44 @@ func (h *Handler) handleAPIIssueDetail(w http.ResponseWriter, r *http.Request) {
 			Count:     c.Count,
 		})
 	}
-	sessions, err := h.store.ListSessions(store.SessionFilter{Repo: repo, IssueNum: issueNum})
+	sessions, err := h.store.ListSessions(store.SessionFilter{Repo: cache.Repo, IssueNum: cache.IssueNum})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to list sessions")
-		return
+		return issueDetailResponse{}, fmt.Errorf("failed to list sessions")
 	}
+	tasks, err := h.store.ListTasksForIssue(cache.Repo, cache.IssueNum)
+	if err != nil {
+		return issueDetailResponse{}, fmt.Errorf("failed to list tasks: %w", err)
+	}
+	taskBySession, taskByID := indexIssueTasks(tasks)
 	for _, sess := range sessions {
 		exitCode, _, finishedAt, _ := h.sessionTaskStats(sess)
-		resp.Sessions = append(resp.Sessions, issueSessionRefResponse{
+		var task *store.TaskRecord
+		if t := taskBySession[sess.SessionID]; t != nil {
+			task = t
+		} else if t := taskByID[sess.TaskID]; t != nil {
+			task = t
+		}
+		row := issueSessionRefResponse{
 			SessionID:  sess.SessionID,
 			Agent:      sess.AgentName,
 			StartedAt:  sess.CreatedAt,
 			FinishedAt: finishedAt,
 			Status:     sess.Status,
 			ExitCode:   exitCode,
-		})
+			WorkerID:   sess.WorkerID,
+			TaskID:     sess.TaskID,
+		}
+		if task != nil {
+			row.RolloutIndex = task.RolloutIndex
+			row.RolloutsTotal = task.RolloutsTotal
+			row.RolloutGroupID = task.RolloutGroupID
+			if row.WorkerID == "" {
+				row.WorkerID = task.WorkerID
+			}
+		}
+		resp.Sessions = append(resp.Sessions, row)
 	}
-	writeJSON(w, http.StatusOK, resp)
+	return resp, nil
 }
 
 func splitRepoIssue(trimmed string) (string, int, bool) {
@@ -647,6 +769,312 @@ func splitRepoIssue(trimmed string) (string, int, bool) {
 		return "", 0, false
 	}
 	return repo, issueNum, true
+}
+
+func splitRepoIssueSuffix(trimmed string) (string, int, string, bool) {
+	base := trimmed
+	suffix := ""
+	if idx := strings.Index(trimmed, "/rollouts"); idx >= 0 {
+		base = trimmed[:idx]
+		suffix = strings.TrimPrefix(trimmed[idx:], "/")
+	}
+	repo, issueNum, ok := splitRepoIssue(base)
+	return repo, issueNum, suffix, ok
+}
+
+func (h *Handler) buildRolloutGroupResponse(repo string, issueNum int) (rolloutGroupResponse, error) {
+	resp := rolloutGroupResponse{Members: []rolloutMemberResponse{}}
+	tasks, err := h.store.ListTasksForIssue(repo, issueNum)
+	if err != nil {
+		return resp, fmt.Errorf("failed to list issue tasks: %w", err)
+	}
+	groupID := latestRolloutGroupID(tasks)
+	if groupID == "" {
+		return resp, nil
+	}
+	groupTasks, err := h.store.ListTasksByRolloutGroup(groupID)
+	if err != nil {
+		return resp, fmt.Errorf("failed to list rollout group tasks: %w", err)
+	}
+	if len(groupTasks) == 0 {
+		return resp, nil
+	}
+
+	resp.GroupID = groupID
+	resp.RolloutsTotal = maxRolloutsTotal(groupTasks)
+
+	latestByRollout := make(map[int]store.TaskRecord)
+	for _, task := range groupTasks {
+		if task.RolloutIndex <= 0 {
+			continue
+		}
+		prev, ok := latestByRollout[task.RolloutIndex]
+		if !ok || task.CreatedAt.After(prev.CreatedAt) || (task.CreatedAt.Equal(prev.CreatedAt) && task.UpdatedAt.After(prev.UpdatedAt)) {
+			latestByRollout[task.RolloutIndex] = task
+		}
+	}
+
+	prByRollout := make(map[int]int, len(latestByRollout))
+	for rolloutIndex := range latestByRollout {
+		pr, err := h.findRolloutPullRequest(context.Background(), repo, issueNum, rolloutIndex)
+		if err != nil {
+			if !errors.Is(err, ghadapter.ErrPullRequestNotFound) {
+				return resp, fmt.Errorf("failed to look up rollout PR %d: %w", rolloutIndex, err)
+			}
+			continue
+		}
+		prByRollout[rolloutIndex] = pr.Number
+	}
+
+	indices := make([]int, 0, len(latestByRollout))
+	for idx := range latestByRollout {
+		indices = append(indices, idx)
+	}
+	sort.Ints(indices)
+	for _, rolloutIndex := range indices {
+		task := latestByRollout[rolloutIndex]
+		sessionID := latestSessionRef(task.SessionRefs)
+		startedAt := task.CreatedAt
+		endedAt := timePtr(task.CompletedAt)
+		durationSeconds := durationSeconds(startedAt, endedAt, h.now())
+		resp.Members = append(resp.Members, rolloutMemberResponse{
+			RolloutIndex:    rolloutIndex,
+			PRNumber:        prByRollout[rolloutIndex],
+			Status:          task.Status,
+			SessionID:       sessionID,
+			WorkerID:        task.WorkerID,
+			StartedAt:       startedAt,
+			EndedAt:         endedAt,
+			DurationSeconds: durationSeconds,
+		})
+	}
+
+	if outcome, err := h.latestSynthOutcome(repo, issueNum, groupID, prByRollout); err != nil {
+		return resp, fmt.Errorf("failed to build synth outcome: %w", err)
+	} else {
+		resp.SynthOutcome = outcome
+	}
+	return resp, nil
+}
+
+func (h *Handler) serveRolloutDiff(w http.ResponseWriter, r *http.Request, repo string, issueNum, rolloutIndex int) {
+	pr, err := h.findRolloutPullRequest(r.Context(), repo, issueNum, rolloutIndex)
+	if err != nil {
+		if errors.Is(err, ghadapter.ErrPullRequestNotFound) {
+			writeError(w, http.StatusNotFound, "rollout PR not found")
+			return
+		}
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	diff, err := h.cachedPullRequestDiff(r.Context(), repo, pr.Number)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte(diff))
+}
+
+func (h *Handler) cachedPullRequestDiff(ctx context.Context, repo string, prNum int) (string, error) {
+	cacheKey := fmt.Sprintf("%s#%d", repo, prNum)
+	now := h.now()
+
+	h.prDiffMu.Lock()
+	if cached, ok := h.prDiffCache[cacheKey]; ok && now.Before(cached.expiresAt) {
+		h.prDiffMu.Unlock()
+		return cached.body, nil
+	}
+	h.prDiffMu.Unlock()
+
+	diff, err := h.gh.DiffPullRequest(ctx, repo, prNum)
+	if err != nil {
+		return "", err
+	}
+
+	h.prDiffMu.Lock()
+	h.prDiffCache[cacheKey] = cachedPRDiff{
+		body:      diff,
+		expiresAt: now.Add(h.prDiffTTL),
+	}
+	h.prDiffMu.Unlock()
+	return diff, nil
+}
+
+func (h *Handler) findRolloutPullRequest(ctx context.Context, repo string, issueNum, rolloutIndex int) (ghadapter.PullRequest, error) {
+	branch := fmt.Sprintf("workbuddy/issue-%d/rollout-%d", issueNum, rolloutIndex)
+	return h.gh.FindPullRequestByBranch(ctx, repo, branch)
+}
+
+func (h *Handler) latestSynthOutcome(repo string, issueNum int, groupID string, prByRollout map[int]int) (*rolloutSynthOutcomeResponse, error) {
+	events, err := h.events.Query(eventlog.EventFilter{Repo: repo, IssueNum: issueNum, Type: "synthesis_decision"})
+	if err != nil {
+		return nil, err
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		outcome, ok := parseSynthOutcomeEvent(events[i], groupID, prByRollout)
+		if ok {
+			return outcome, nil
+		}
+	}
+	return nil, nil
+}
+
+func parseSynthOutcomeEvent(ev store.Event, groupID string, prByRollout map[int]int) (*rolloutSynthOutcomeResponse, bool) {
+	payload, ok := decodeJSONOrString(ev.Payload).(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	if gid := stringValue(payload["group_id"]); gid != "" && groupID != "" && gid != groupID {
+		return nil, false
+	}
+	outcome := &rolloutSynthOutcomeResponse{
+		Decision:      stringValue(payload["decision"]),
+		ChosenPR:      intValue(payload["chosen_pr"]),
+		SynthPR:       intValue(payload["synth_pr"]),
+		ChosenRollout: intValue(payload["chosen_rollout_index"]),
+		Reason:        stringValue(payload["reason"]),
+		TS:            ev.TS,
+	}
+	if outcome.TS.IsZero() {
+		outcome.TS = time.Now().UTC()
+	}
+	if ts := timeValue(payload["ts"]); !ts.IsZero() {
+		outcome.TS = ts
+	}
+	if outcome.ChosenRollout == 0 {
+		outcome.ChosenRollout = intValue(payload["rollout_index"])
+	}
+	if outcome.ChosenPR == 0 && outcome.ChosenRollout > 0 {
+		outcome.ChosenPR = prByRollout[outcome.ChosenRollout]
+	}
+	if outcome.Decision == "" && outcome.Reason == "" && outcome.ChosenPR == 0 && outcome.SynthPR == 0 {
+		return nil, false
+	}
+	return outcome, true
+}
+
+func indexIssueTasks(tasks []store.TaskRecord) (map[string]*store.TaskRecord, map[string]*store.TaskRecord) {
+	bySession := make(map[string]*store.TaskRecord)
+	byID := make(map[string]*store.TaskRecord)
+	for i := range tasks {
+		task := &tasks[i]
+		byID[task.ID] = task
+		for _, sessionID := range decodeSessionRefs(task.SessionRefs) {
+			if sessionID == "" {
+				continue
+			}
+			bySession[sessionID] = task
+		}
+	}
+	return bySession, byID
+}
+
+func decodeSessionRefs(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var refs []string
+	if err := json.Unmarshal([]byte(raw), &refs); err != nil {
+		return nil
+	}
+	return refs
+}
+
+func latestSessionRef(raw string) string {
+	refs := decodeSessionRefs(raw)
+	if len(refs) == 0 {
+		return ""
+	}
+	return refs[len(refs)-1]
+}
+
+func latestRolloutGroupID(tasks []store.TaskRecord) string {
+	var chosen store.TaskRecord
+	found := false
+	for _, task := range tasks {
+		if strings.TrimSpace(task.RolloutGroupID) == "" {
+			continue
+		}
+		if !found || task.CreatedAt.After(chosen.CreatedAt) || (task.CreatedAt.Equal(chosen.CreatedAt) && task.UpdatedAt.After(chosen.UpdatedAt)) {
+			chosen = task
+			found = true
+		}
+	}
+	if !found {
+		return ""
+	}
+	return chosen.RolloutGroupID
+}
+
+func maxRolloutsTotal(tasks []store.TaskRecord) int {
+	max := 0
+	for _, task := range tasks {
+		if task.RolloutsTotal > max {
+			max = task.RolloutsTotal
+		}
+	}
+	return max
+}
+
+func timePtr(ts time.Time) *time.Time {
+	if ts.IsZero() {
+		return nil
+	}
+	cpy := ts
+	return &cpy
+}
+
+func durationSeconds(start time.Time, end *time.Time, now time.Time) int64 {
+	finish := now
+	if end != nil {
+		finish = *end
+	}
+	if finish.Before(start) {
+		return 0
+	}
+	return int64(finish.Sub(start).Seconds())
+}
+
+func stringValue(v any) string {
+	switch t := v.(type) {
+	case string:
+		return strings.TrimSpace(t)
+	default:
+		return ""
+	}
+}
+
+func intValue(v any) int {
+	switch t := v.(type) {
+	case float64:
+		return int(t)
+	case int:
+		return t
+	case int64:
+		return int(t)
+	case json.Number:
+		n, _ := t.Int64()
+		return int(n)
+	case string:
+		n, _ := strconv.Atoi(strings.TrimSpace(t))
+		return n
+	default:
+		return 0
+	}
+}
+
+func timeValue(v any) time.Time {
+	s, ok := v.(string)
+	if !ok || strings.TrimSpace(s) == "" {
+		return time.Time{}
+	}
+	ts, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return ts
 }
 
 func firstLine(s string) string {
