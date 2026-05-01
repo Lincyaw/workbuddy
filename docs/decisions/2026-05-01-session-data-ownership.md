@@ -1,8 +1,8 @@
 # Session Data Ownership: Worker Owns, Coordinator Proxies
 
 - Date: 2026-05-01
-- Status: accepted (Phase 1 implemented)
-- Tracks: REQ-120
+- Status: accepted (Phase 1 + Phase 2 implemented)
+- Tracks: REQ-120, REQ-121
 
 ## Context
 
@@ -40,12 +40,105 @@ The refactor ships in three phases. Only Phase 1 is implemented today.
 4. **Register-protocol extension.** `workerclient.RegisterRequest` gains `AuditURL string \`json:"audit_url,omitempty"\``. The worker computes its advertised URL: `--audit-public-url` wins; otherwise `http://<bind-host>:<bind-port>` derived from the resolved listener; `0.0.0.0`/`::` bind hosts are substituted with the worker hostname so coordinator-side proxying in Phase 2 has a reachable URL.
 5. **Coordinator persistence.** `internal/app/coordinator.go` reads the new field, `internal/registry.RegisterWithRepos` accepts it, `internal/store` migrates the `workers` table with `ALTER TABLE workers ADD COLUMN audit_url TEXT NOT NULL DEFAULT ''`. Existing rows survive with empty values; the coordinator's read paths are otherwise unchanged. **Phase 1 stores the URL but does not use it.**
 
-### Phase 2 — coordinator becomes a proxy (NOT in this PR)
+### Phase 2 — coordinator becomes a proxy (REQ-121, implemented 2026-05-01)
 
-- Coordinator-side `/api/v1/sessions[/{id}/events|/stream]` is rewritten to look up the owning worker by `(repo, session_id)` and reverse-proxy the request to that worker's `audit_url + path`, forwarding the bearer token.
-- For list endpoints (no session_id), fan out to all online workers bound to the requested repo (or all workers when repo filter is empty), merge results, sort by `created_at`. Per-worker errors degrade to a `degraded:worker_unreachable` row rather than a 500.
-- `coordinator_session_proxy.go` (which today proxies to `mgmt_base_url`) consolidates with the new path or is deprecated; whichever produces less code.
-- Web UI is unchanged — it still hits coordinator endpoints. Only the implementation moves.
+- New `internal/sessionproxy` package owns `/api/v1/sessions` (fan-out)
+  and `/api/v1/sessions/{id}[/events|/stream]` (single-session proxy).
+- `Resolver` chains `session_id → worker_id → audit_url` via the
+  coordinator's local sessions + workers tables (Phase 1 persisted the
+  audit_url). Sentinel errors `ErrSessionNotRouted`,
+  `ErrAuditURLMissing`, `ErrWorkerOffline` translate to 404 / 503 and
+  drive the local-fallback decision.
+- Single-session detail proxies the request to
+  `<audit_url>/api/v1/sessions/{id}[suffix]?<query>` and forwards the
+  coordinator's `WORKBUDDY_AUTH_TOKEN` as `Authorization: Bearer …`.
+  Status + body pass through; we copy `Content-Type` only — worker
+  cookies / arbitrary headers do not leak to the browser.
+- SSE pass-through pumps bytes through with per-chunk
+  `http.Flusher.Flush()`, never decoding/re-encoding. `r.Context()`
+  cancellation propagates to the upstream request, so a browser
+  disconnect closes both legs.
+- Fan-out listing: candidate workers come from `Store.QueryWorkers(repo)`
+  (which already filters by `workers.repos_json` / legacy `repo`). Each
+  worker is hit concurrently with a 3 s per-call timeout and a 6 s
+  overall budget. Slow / offline workers do not block the response;
+  their IDs go into the `X-Workbuddy-Worker-Offline` response header
+  (and a reserved envelope field for a future opt-in shape upgrade).
+  Results are deduped by `session_id`, sorted by `created_at` desc, and
+  paginated against the request's `limit`/`offset`.
+- A 5 s in-memory cache fronts the listing keyed on
+  `(repo, agent, issue, limit, offset)`. Cached only when no upstream
+  errors occurred — a partially-degraded response should not pin
+  itself for 5 s. `Handler.InvalidateCache()` is exported so a future
+  hook can drop on `worker_registered` events.
+- Local fallback: when `Resolve` returns a session whose row carries no
+  worker, or whose worker no longer exists, the request falls through
+  to the existing in-process audit handler so legacy pre-bundle
+  sessions on the coordinator host stay reachable. The optional
+  loopback short-circuit (audit_url points at 127.0.0.1 / the
+  coordinator's hostname) is opt-in via `WithLocalAuditFallback(true)`
+  — a worker bound on loopback is already a Phase-1 misconfiguration,
+  not something to compensate for in routing.
+- Coordinator-side `dashboardAPI.SetDisableDiskOnlySynthesis(true)` is
+  set: workers now report sessions truthfully, so the synthesized
+  `aborted_before_start` rows in `listDiskOnlySessions` /
+  `buildDegradedFromDisk` would actively mislead operators (a worker
+  briefly unreachable already produces the correct `worker_offline`
+  envelope from the proxy).
+- `cmd/coordinator_session_proxy.go` (HTML viewer over `mgmt_base_url`,
+  used by the GitHub-comment URLs reporter posts) is **left in place**
+  for Phase 2: it serves a different surface (HTML, not JSON) than the
+  new audit-url-driven proxy, and removing it would break existing
+  comment-link URLs. Phase 3 picks the consolidation path.
+- Web UI is unchanged — it still hits the coordinator's
+  `/api/v1/sessions[/...]` paths; only the implementation moved.
+
+#### Behavior of pre-bundle (Apr-29 / Apr-30) legacy sessions
+
+Sessions that pre-date the v0.5 cutover have rows in the coordinator's
+local DB but their owning worker either no longer exists in the
+`workers` table or never carried an `audit_url`. The `Resolve` chain
+flags both as Local=true so a session-detail click still hits the
+in-process handler and reads from the coordinator's own
+`sessions/<id>/` directory. They DO disappear from the **listing**
+endpoint, however: `/api/v1/sessions` now fans out only to live
+workers, and the coordinator-local synthesis fallback is off. This is
+intentional and called out in the release notes — those sessions are
+days old, archival-only, and adding a hidden coordinator-local listing
+branch for the long tail would re-introduce the disk-walk path Phase 3
+is about to delete. If an operator needs to find one, they can still
+hit `/api/v1/sessions/<id>` directly (the Local fallback path) using
+the URL the reporter already posted into the original GitHub comment.
+
+#### What Phase 3 still needs to do
+
+- Delete `listDiskOnlySessions`, `buildDegradedFromDisk`,
+  `StatusAbortedBeforeStart`, `degradedReasonNoDBRow`, the disk-walk
+  metadata reader, and their tests once the legacy data has aged out
+  enough that no operator playbook references them.
+- Consolidate or delete `cmd/coordinator_session_proxy.go` (HTML
+  viewer over `mgmt_base_url`). Either redirect
+  `/workers/{id}/sessions/{sid}` → `/sessions/{sid}` (SPA canonical)
+  and delete the proxy + worker-side mgmt HTML route, or refactor the
+  proxy onto `audit_url` after the worker audit server grows an HTML
+  view.
+- Drop the coordinator's `sessions` table (and the legacy
+  `agent_sessions` view) once Phase 3's session-list rewrite no longer
+  reads from them. Migration deferred to its own ADR — there is still
+  one cross-table read in `auditapi.handler` for issue detail pages
+  (`store.QueryAgentSessions`) that needs replacement before the
+  table can go.
+- Wire `Handler.InvalidateCache()` into the coordinator's
+  `worker_registered` eventlog hook for sub-second freshness on new
+  worker registration, then drop the exported method if no other
+  caller emerges.
+- Frontend offline UX: surface `X-Workbuddy-Worker-Offline` (and the
+  per-detail 503 `degraded_reason: worker_offline`) as a banner in
+  the SPA so operators see the difference between "worker briefly
+  unreachable" and "session truly missing".
+- Search the codebase for "Phase 3" / "REQ-121" comments planted by
+  this commit (in `internal/sessionproxy`, `cmd/coordinator.go`,
+  `cmd/coordinator_session_proxy.go`) and act on each one.
 
 ### Phase 3 — delete legacy paths (NOT in this PR)
 

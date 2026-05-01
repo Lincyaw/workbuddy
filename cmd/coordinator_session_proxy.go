@@ -1,5 +1,26 @@
 package cmd
 
+// This file pre-dates Phase 1 of the session-data ownership refactor
+// (REQ-120 / REQ-121). It serves the legacy `/workers/{id}/sessions[/{sid}]`
+// HTML viewer used by GitHub-comment links: the reporter posts a URL of
+// that shape into issue comments (see internal/sessionref) and a human
+// clicking the link gets the worker's HTML session UI proxied through
+// the coordinator. It proxies to the worker's `mgmt_base_url` — a
+// different surface than the JSON `/api/v1/sessions/...` proxy that
+// internal/sessionproxy now serves (audit_url-based, machine-readable).
+//
+// Phase 3 (next agent) should pick one of:
+//
+//   (a) Make the SPA the canonical session viewer and 30x redirect
+//       /workers/{id}/sessions/{sid} → /sessions/{sid}, then delete
+//       this file and the worker-side mgmt HTML route entirely.
+//   (b) Refactor this proxy onto `audit_url` once the worker audit
+//       server grows an HTML view (currently it's JSON-only).
+//
+// Either way, `mgmt_base_url` becomes deprecated. Until that decision
+// is made, leaving this overlay alone is the lowest-risk option:
+// existing GitHub-comment URLs keep working.
+
 import (
 	"io"
 	"net/http"

@@ -27,6 +27,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
 	"github.com/Lincyaw/workbuddy/internal/security"
+	"github.com/Lincyaw/workbuddy/internal/sessionproxy"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/tasknotify"
 	"github.com/Lincyaw/workbuddy/internal/webui"
@@ -613,6 +614,14 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 	dashboardAPI := auditapi.NewHandler(st)
 	sessionsDir := filepath.Join(filepath.Dir(dbPath), "sessions")
 	dashboardAPI.SetSessionsDir(sessionsDir)
+	// Phase 2 of the session-data ownership refactor (REQ-121): the worker
+	// audit listener now reports sessions truthfully, so the legacy
+	// listDiskOnlySessions / buildDegradedFromDisk fallbacks are turned off
+	// on the coordinator-side handler. They remain available behind the
+	// disableDiskOnlySynthesis=false code path for tests and the local
+	// fall-back used by sessionproxy when an audit_url points at this host.
+	// Phase 3 will delete the disk-walk synthesis entirely.
+	dashboardAPI.SetDisableDiskOnlySynthesis(true)
 
 	sessionUI := webui.NewHandler(st)
 	sessionUI.SetSessionsDir(sessionsDir)
@@ -622,8 +631,32 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 	dashboardMux := http.NewServeMux()
 	dashboardAPI.RegisterDashboard(dashboardMux)
 	mux.Handle("/api/v1/status", api.WrapAuth(dashboardMux))
-	mux.Handle("/api/v1/sessions", api.WrapAuth(dashboardMux))
-	mux.Handle("/api/v1/sessions/", api.WrapAuth(dashboardMux))
+
+	// /api/v1/sessions and /api/v1/sessions/{id}[/events|/stream] now go
+	// through the sessionproxy: it resolves session_id → owning worker via
+	// workers.audit_url and reverse-proxies. When the audit_url points at
+	// this coordinator's own host (loopback / explicit local-fallback),
+	// the request is dispatched back to dashboardMux so the existing
+	// in-process handler serves legacy pre-bundle data.
+	// Local fallback is opt-out: when an audit_url resolution fails (no
+	// row, no worker, no advertised URL) the proxy falls back to the
+	// in-process handler so legacy pre-bundle sessions on the
+	// coordinator host stay reachable. Loopback short-circuit is
+	// opt-IN via --local-audit-fallback (Phase 2 spec section 1); the
+	// flag is plumbed by the surrounding coordinator command if set.
+	// Phase 3 deletes both branches once legacy data has aged out.
+	resolver := sessionproxy.NewResolver(st)
+	if hostname, err := os.Hostname(); err == nil && strings.TrimSpace(hostname) != "" {
+		resolver.WithLocalHost(hostname)
+	}
+	sessionProxy := sessionproxy.NewHandler(sessionproxy.HandlerConfig{
+		Resolver:  resolver,
+		Local:     dashboardMux,
+		AuthToken: api.AuthToken,
+	})
+	mux.Handle("/api/v1/sessions", api.WrapAuth(http.HandlerFunc(sessionProxy.ServeHTTP)))
+	mux.Handle("/api/v1/sessions/", api.WrapAuth(http.HandlerFunc(sessionProxy.ServeHTTP)))
+
 	mux.Handle("/api/v1/events", api.WrapAuth(dashboardMux))
 	mux.Handle("/api/v1/alerts", api.WrapAuth(dashboardMux))
 	mux.Handle("/api/v1/metrics", api.WrapAuth(dashboardMux))

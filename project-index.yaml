@@ -4385,3 +4385,40 @@ requirements:
     deps:
       - REQ-019
       - REQ-028
+
+  - id: REQ-121
+    title: Coordinator session proxy + fan-out (Phase 2 of session-data ownership refactor)
+    description: >
+      Phase 2 of the session-data ownership refactor (REQ-120). Rewires the
+      coordinator-side /api/v1/sessions and /api/v1/sessions/{id}[/events|
+      /stream] handlers to resolve the owning worker via workers.audit_url
+      and reverse-proxy / fan-out to that worker, instead of reading from the
+      coordinator's own DB. Single-session detail and SSE pass-through
+      forward the coordinator's bearer token; SSE preserves event/id/data
+      framing with per-chunk flushes and propagates browser disconnects
+      upstream. The list endpoint fans out across all candidate workers
+      (filtered by repo when provided), merges + dedupes by session_id,
+      sorts by created_at desc, paginates, and surfaces unreachable workers
+      via an X-Workbuddy-Worker-Offline header (and reserved envelope
+      field) without failing the call. A 5-second in-memory cache fronts
+      the listing. Coordinator-side disk-only synthesis is turned off:
+      the worker now reports its sessions truthfully. See
+      docs/decisions/2026-05-01-session-data-ownership.md.
+    priority: P0
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-121-1: coordinator's /api/v1/sessions/{id} reverse-proxies to the owning worker's audit_url and forwards Authorization: Bearer <WORKBUDDY_AUTH_TOKEN>; status code + body pass through unchanged."
+      - "AC-121-2: SSE /api/v1/sessions/{id}/stream preserves event:/id:/data: framing with per-chunk Flush(); browser disconnects (request-context cancellation) propagate to the upstream worker."
+      - "AC-121-3: dial errors / non-2xx upstream produce 503 {\"degraded_reason\":\"worker_offline\",\"worker_id\":\"...\"} for JSON paths and a single event: error frame for SSE."
+      - "AC-121-4: /api/v1/sessions fans out across all candidate workers (filtered by repo when set), pushes the same filters down to each worker, merges results, dedupes by session_id, sorts created_at desc, paginates, and surfaces offline workers via header without failing the call."
+      - "AC-121-5: a 5-second in-memory cache fronts the listing, cached only when no upstream errors occurred; coordinator-side disableDiskOnlySynthesis is turned on."
+    code:
+      - internal/sessionproxy/resolver.go
+      - internal/sessionproxy/handler.go
+      - cmd/coordinator.go
+      - cmd/coordinator_session_proxy.go
+    tests:
+      - internal/sessionproxy/handler_test.go
+    deps:
+      - REQ-120
