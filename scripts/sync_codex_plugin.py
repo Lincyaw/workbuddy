@@ -14,12 +14,20 @@ ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / ".claude" / "plugins" / "workbuddy"
 DEST = ROOT / "plugins" / "workbuddy"
 MARKETPLACE = ROOT / ".agents" / "plugins" / "marketplace.json"
+CLAUDE_PLUGIN_JSON = SOURCE / ".claude-plugin" / "plugin.json"
 
 SKILL_HEADER_DROP_KEYS = {"user_invocable"}
 
+
+def _plugin_version() -> str:
+    """Read version from the Claude plugin manifest."""
+    data = json.loads(CLAUDE_PLUGIN_JSON.read_text(encoding="utf-8"))
+    return data.get("version", "0.1.0")
+
+
 PLUGIN_MANIFEST = {
     "name": "workbuddy",
-    "version": "0.1.0",
+    "version": _plugin_version(),
     "description": "Operate workbuddy from Codex with repo setup, pipeline monitoring, troubleshooting, and operator workflows.",
     "author": {
         "name": "Lincyaw",
