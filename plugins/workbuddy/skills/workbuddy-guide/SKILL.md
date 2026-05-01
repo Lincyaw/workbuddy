@@ -1,6 +1,6 @@
 ---
 name: workbuddy-guide
-description: "Explain and operate workbuddy: what it is, which command to reach for, and where to find deeper references. **Trigger whenever the user mentions 'workbuddy' in any context** — including operational requests (register/onboard a repo, add/bind a worker, 注册仓库, 加仓库, 接入新仓库, onboard repo, set up worker), explanatory questions (how to use workbuddy, workbuddy guide, teach me workbuddy, 怎么用workbuddy, 使用指南), and deployment/running/operating/debugging workbuddy. Invoke this skill before running workbuddy CLI commands so the documented onboarding flow (coordinator register + worker repos add) isn't missed."
+description: "Explain and operate workbuddy: what it is, which command to reach for, and where to find deeper references. **Trigger whenever the user mentions 'workbuddy' in any context** — including operational requests (register/onboard a repo, add/bind a worker, 注册仓库, 加仓库, 接入新仓库, onboard repo, set up worker), explanatory questions (how to use workbuddy, workbuddy guide, teach me workbuddy, 怎么用workbuddy, 使用指南), deployment/running/operating/debugging workbuddy, and questions about how issues/tasks are scheduled or how dependencies between issues work (depends_on, blocked, dependency gate, 依赖, 调度, 排队, '为什么没派发'), and questions about parallel-development workflows (rollouts:N fan-out, synthesize/synthesis reduce step, cherry-pick, '并行开发', '多个方案', 'rollout'). Invoke this skill before running workbuddy CLI commands so the documented onboarding flow (coordinator register + worker repos add) and the dependency/scheduling model aren't re-derived from scratch."
 ---
 
 # Workbuddy Guide
@@ -102,6 +102,124 @@ Impact for operators: if `diagnose` says "failed 3 times in a row", check
 the issue's comments — if they're "Infra Error", the bug is infrastructure
 (usually runtime/launcher), not the acceptance criteria. Fix infra and
 `workbuddy cache invalidate` to restart; don't rewrite the issue.
+
+## Dependencies & scheduling
+
+Workbuddy has no separate "scheduler" or DAG runner — scheduling falls
+out of three pieces working together. Knowing them avoids re-deriving
+this every time:
+
+1. **Polling.** The Coordinator polls each registered repo at
+   `poll_interval` (config.yaml). GitHub label changes drive the state
+   machine; nothing happens between polls. Force one with
+   `workbuddy cache invalidate --repo owner/name --issue N`.
+2. **Task queue + claim lease.** Eligible issues go into SQLite
+   `task_queue`. Workers long-poll the Coordinator and claim by
+   `claim_token` with a TTL, so two workers can never run the same task
+   concurrently (REQ-057/059). Parallelism is per-worker per-repo —
+   bind multiple workers (or `--repos owner/A=...,owner/B=...`) to fan
+   out across repos.
+3. **Dependency gate.** Declared in the issue **body**, not via labels:
+
+   ````markdown
+   ## Dependencies
+
+   ```yaml
+   workbuddy:
+     depends_on:
+       - "#26"
+       - "Lincyaw/workbuddy#27"
+     ```
+   ````
+
+   The Coordinator parses this every poll, computes a verdict
+   (`ready` / `blocked` / `override` / `needs_human`), and refuses
+   dispatch when blocked, logging a `dispatch_blocked_by_dependency`
+   event. UX signal on GitHub: a single 😕 reaction added when blocked,
+   removed on unblock. **No managed comment, no resolver agent** — the
+   gate lives entirely in Coordinator Go.
+
+   - Same-repo shorthand `#26` is normalized to `owner/repo#26`.
+   - `owner/repo#N` cross-repo refs are accepted but unsupported in v0.1
+     (verdict goes to `needs_human`).
+   - Cycles, malformed refs, or "trigger label present + depends_on
+     declared but no `status:*` label" all surface in `workbuddy diagnose`.
+   - Human override: add the `override:force-unblock` label — verdict
+     flips to `override` (treated as ready). Don't toggle `status:blocked`
+     by hand; the Coordinator owns it.
+
+   To see the verdict for one issue:
+   ```bash
+   workbuddy status --repo owner/name | grep "  N "      # CYCLES + DEPENDENCY columns
+   workbuddy status --events --type dispatch_blocked_by_dependency --since 1h
+   ```
+
+   To re-evaluate after editing a dependency declaration:
+   ```bash
+   workbuddy cache invalidate --repo owner/name --issue N
+   ```
+
+There is no priority queue, no cron, no time-based scheduling. If you
+want issue B to wait for issue A, declare it. If you want N tasks in
+parallel, run N workers (or one worker bound to N repos).
+
+## Parallel rollouts + synthesize (per-issue fan-out)
+
+Beyond cross-issue parallelism, **a single issue** can also be developed
+N ways in parallel and then reduced to one PR. This is opt-in per issue.
+
+Mental model:
+
+```
+  status:developing  ──fan-out──►  N parallel dev-agent runs
+       (rollouts:N label)            each on its own branch
+                                     workbuddy/issue-<N>/rollout-K
+                                     each opens its own PR labeled
+                                     rollout:K with "[rollout K/N]" title
+                                              │
+                          (≥ join.min_successes succeed)
+                                              ▼
+                                    status:synthesizing
+                                              │
+                                  review-agent runs in mode: synthesize
+                                  → reads all sibling PRs/branches
+                                  → emits a structured synthesis_decision:
+                                      • pick one rollout as-is, OR
+                                      • cherry-pick / merge the best
+                                        pieces across siblings into a
+                                        single result branch
+                                              ▼
+                                    status:reviewing
+                                  (normal AC review on the chosen artifact)
+                                              ▼
+                                       status:done
+```
+
+Key points worth knowing:
+
+- Triggered by adding a literal `rollouts:N` label (N in 2..5) to the
+  issue. No label, or `rollouts:1`, takes the legacy single-dev fast
+  path that skips `synthesizing` entirely.
+- Each rollout is a fully isolated dev run — its own worktree, branch,
+  PR, and session — so failures in one rollout don't block siblings.
+  `join.min_successes` (in the workflow YAML) decides when the join
+  fires.
+- The synthesize step is a **reduce**, not a vote. It runs the
+  review-agent in `mode: synthesize`; the agent must return a
+  structured decision (`chosen_rollout_index`, plus optional cherry-pick
+  instructions). If the structured output is malformed, the Coordinator
+  stops the reduce step rather than silently auto-picking — surfaces in
+  the issue as a synthesize failure for human attention.
+- Audit trail: `synthesis_decision` events plus per-rollout sessions
+  visible via the audit/web UI (rollout_index/rollouts_total/rollout_group_id).
+- The state graph is in `.github/workbuddy/workflows/default.md`; the
+  rollout fan-out and `mode: synthesize` are first-class in the
+  workflow YAML, not bolted on.
+
+Use this when the AC admits multiple plausible implementations and you
+want the agents to explore them in parallel, then keep the best one. For
+straightforward issues, leave `rollouts:N` off and stick with the
+single-dev path.
 
 ## Common workflows
 

@@ -226,6 +226,38 @@ workbuddy recover --prune-worktrees              # apply
 workbuddy issue restart --repo Owner/Repo --issue N
 ```
 
+### M. Issue not dispatching because a dependency is blocking it
+Symptom: issue is `status:developing` with the `workbuddy` label, no
+agent process, no `dispatch` event in `workbuddy status --events`. The
+issue may also carry a 😕 reaction added by workbuddy.
+
+The Coordinator gates dispatch on `workbuddy.depends_on` declared in the
+issue body (YAML block under `## Dependencies`). When verdict is
+`blocked` or `needs_human`, dispatch is refused and a
+`dispatch_blocked_by_dependency` event is logged.
+
+Diagnose:
+```bash
+workbuddy status --repo Owner/Repo            # CYCLES + DEPENDENCY columns
+workbuddy status --events --type dispatch_blocked_by_dependency --since 1h
+workbuddy diagnose --repo Owner/Repo          # surfaces malformed/cyclic deps
+gh issue view N -R Owner/Repo --json body --jq .body | grep -A5 'workbuddy:'
+```
+
+Fix by intent:
+- **Blocker really not done yet** → wait, or work the upstream issue.
+- **Blocker actually done, declaration stale** → edit the issue body to
+  drop the satisfied `depends_on` ref, then
+  `workbuddy cache invalidate --repo Owner/Repo --issue N`.
+- **Need to override a real dependency for one run** → add the
+  `override:force-unblock` label (verdict flips to `override`). Don't
+  hand-toggle `status:blocked` — the Coordinator owns that label.
+- **Malformed `depends_on` ref** → `diagnose` points at the offending
+  line; fix the YAML, `cache invalidate`.
+- **Cross-repo ref** (`owner/other#N`) — accepted-but-unsupported in
+  v0.1; verdict goes to `needs_human` until the upstream lands or the
+  ref is removed.
+
 ### L. Worker restart didn't kill agents — that's by design (bundle only)
 Bundle mode preserves agent runs across worker restarts via the
 supervisor socket. If you `systemctl --user restart workbuddy-worker`
