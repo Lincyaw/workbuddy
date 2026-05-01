@@ -1,6 +1,6 @@
 {
   "name": "workbuddy",
-  "version": "0.4.39",
+  "version": "0.5.1",
   "description": "Operate workbuddy from Codex with repo setup, pipeline monitoring, troubleshooting, and operator workflows.",
   "author": {
     "name": "Lincyaw",
