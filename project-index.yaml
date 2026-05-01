@@ -4243,6 +4243,7 @@ requirements:
       - internal/config/state_join_test.go
       - internal/runtime/footer_test.go
       - internal/runtime/prompts_test.go
+      - internal/taskprep/synthesis_test.go
       - internal/statemachine/synthesis_test.go
       - internal/validate/template_schema_test.go
     deps:

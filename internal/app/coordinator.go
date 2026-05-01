@@ -723,6 +723,7 @@ func (s *FullCoordinatorServer) buildSynthesisPayload(task *store.TaskRecord) *r
 		return nil
 	}
 	sourceState := ""
+	var sourceStateDef *config.State
 	for name, candidate := range wf.States {
 		if candidate == nil {
 			continue
@@ -730,6 +731,7 @@ func (s *FullCoordinatorServer) buildSynthesisPayload(task *store.TaskRecord) *r
 		for _, target := range candidate.Transitions {
 			if target == task.State {
 				sourceState = name
+				sourceStateDef = candidate
 				break
 			}
 		}
@@ -742,7 +744,7 @@ func (s *FullCoordinatorServer) buildSynthesisPayload(task *store.TaskRecord) *r
 	if err != nil {
 		return nil
 	}
-	synth, err := taskprep.BuildSynthesisContext(task.Repo, task.IssueNum, task.Workflow, sourceState, state, s.Store, gh, relatedPRs)
+	synth, err := taskprep.BuildSynthesisContext(task.Repo, task.IssueNum, task.Workflow, sourceState, state, sourceStateDef, s.Store, gh, relatedPRs)
 	if err != nil {
 		return nil
 	}

@@ -13,6 +13,23 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/workflow"
 )
 
+func assertTransitionTrail(t *testing.T, rec *fakeRecorder, want [][2]string) {
+	t.Helper()
+	events := rec.find(eventlog.TypeTransition)
+	if len(events) != len(want) {
+		t.Fatalf("transition events = %d, want %d", len(events), len(want))
+	}
+	for i, exp := range want {
+		payload, ok := events[i].Payload.(map[string]string)
+		if !ok {
+			t.Fatalf("transition payload[%d] type = %T", i, events[i].Payload)
+		}
+		if payload["from"] != exp[0] || payload["to"] != exp[1] {
+			t.Fatalf("transition[%d] = %v, want %q -> %q", i, payload, exp[0], exp[1])
+		}
+	}
+}
+
 func synthWorkflow() *config.WorkflowConfig {
 	wf := testWorkflow()
 	wf.MaxRetries = 99
@@ -124,6 +141,11 @@ func TestSynthesisFlow_PickTransitionsToReviewing(t *testing.T) {
 	if len(instances) != 1 || instances[0].CurrentState != "done" {
 		t.Fatalf("workflow current_state = %+v, want done", instances)
 	}
+	assertTransitionTrail(t, rec, [][2]string{
+		{"developing", "synthesizing"},
+		{"synthesizing", "reviewing"},
+		{"reviewing", "done"},
+	})
 }
 
 func TestSynthesisFlow_CherryPickTransitionsToReviewing(t *testing.T) {
@@ -178,10 +200,20 @@ func TestSynthesisFlow_CherryPickTransitionsToReviewing(t *testing.T) {
 	if got := payload["synth_pr"]; got != 201 {
 		t.Fatalf("synth_pr = %v, want 201", got)
 	}
+	assertTransitionTrail(t, rec, [][2]string{
+		{"synthesizing", "reviewing"},
+	})
 }
 
 func TestSynthesisFlow_EscalateBlocksFurtherDispatch(t *testing.T) {
 	sm, rec, dispatch := newSynthSM(t)
+	wm := workflow.NewManager(sm.store)
+	if err := wm.CreateIfMissing("test/repo", 9, "dev-flow", "developing"); err != nil {
+		t.Fatalf("CreateIfMissing: %v", err)
+	}
+	if err := wm.Advance("test/repo", 9, "dev-flow", "developing", "synthesizing", "review-agent"); err != nil {
+		t.Fatalf("Advance developing->synthesizing: %v", err)
+	}
 	if err := sm.store.InsertTask(store.TaskRecord{ID: "synth-esc", Repo: "test/repo", IssueNum: 9, AgentName: "review-agent", Workflow: "dev-flow", State: "synthesizing", Status: store.TaskStatusCompleted}); err != nil {
 		t.Fatalf("InsertTask: %v", err)
 	}
@@ -200,10 +232,20 @@ func TestSynthesisFlow_EscalateBlocksFurtherDispatch(t *testing.T) {
 	if len(rec.find(eventlog.TypeSynthesisDecision)) != 1 {
 		t.Fatalf("expected synthesis_decision event")
 	}
+	assertTransitionTrail(t, rec, [][2]string{
+		{"synthesizing", "blocked"},
+	})
 }
 
 func TestSynthesisFlow_MalformedOutputFallsBackToEscalate(t *testing.T) {
 	sm, rec, dispatch := newSynthSM(t)
+	wm := workflow.NewManager(sm.store)
+	if err := wm.CreateIfMissing("test/repo", 10, "dev-flow", "developing"); err != nil {
+		t.Fatalf("CreateIfMissing: %v", err)
+	}
+	if err := wm.Advance("test/repo", 10, "dev-flow", "developing", "synthesizing", "review-agent"); err != nil {
+		t.Fatalf("Advance developing->synthesizing: %v", err)
+	}
 	if err := sm.store.InsertTask(store.TaskRecord{ID: "synth-bad", Repo: "test/repo", IssueNum: 10, AgentName: "review-agent", Workflow: "dev-flow", State: "synthesizing", Status: store.TaskStatusFailed}); err != nil {
 		t.Fatalf("InsertTask: %v", err)
 	}
@@ -219,6 +261,9 @@ func TestSynthesisFlow_MalformedOutputFallsBackToEscalate(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("synthesis_decision events = %d, want 1", len(events))
 	}
+	assertTransitionTrail(t, rec, [][2]string{
+		{"synthesizing", "blocked"},
+	})
 }
 
 func TestSynthesisFlow_ReviewBounceIncrementsSynthCycleCount(t *testing.T) {

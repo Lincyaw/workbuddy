@@ -18,13 +18,20 @@ type pullRequestDetailReader interface {
 	ReadPullRequestDetail(repo string, prNum int) (runtimepkg.PRSummary, string, error)
 }
 
-func BuildSynthesisContext(repo string, issueNum int, workflow, sourceState string, stateDef *config.State, st synthesisStore, gh IssueDataReader, relatedPRs []runtimepkg.PRSummary) (*runtimepkg.SynthesisContext, error) {
-	if stateMode := stateMode(stateDef); stateMode != config.StateModeSynth {
+func BuildSynthesisContext(repo string, issueNum int, workflow, sourceState string, synthStateDef, sourceStateDef *config.State, st synthesisStore, gh IssueDataReader, relatedPRs []runtimepkg.PRSummary) (*runtimepkg.SynthesisContext, error) {
+	if stateMode := stateMode(synthStateDef); stateMode != config.StateModeSynth {
 		return nil, nil
+	}
+	minSuccesses := 0
+	if sourceStateDef != nil {
+		minSuccesses = sourceStateDef.Join.MinSuccesses
+	}
+	if minSuccesses <= 0 && synthStateDef != nil {
+		minSuccesses = synthStateDef.Join.MinSuccesses
 	}
 	ctx := &runtimepkg.SynthesisContext{
 		SourceState:  sourceState,
-		MinSuccesses: stateDef.Join.MinSuccesses,
+		MinSuccesses: minSuccesses,
 	}
 	if st == nil || strings.TrimSpace(sourceState) == "" {
 		return ctx, nil

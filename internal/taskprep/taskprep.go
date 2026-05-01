@@ -65,7 +65,8 @@ type Decision struct {
 	// synthesize the transition footer (issue #204 batch 3) without reaching
 	// back into the state-machine. May be nil for legacy callers; the
 	// preparer treats a nil StateDef as "no footer".
-	StateDef *config.State
+	StateDef       *config.State
+	SourceStateDef *config.State
 }
 
 // TaskStore is the narrow persistence surface the preparer needs.
@@ -202,7 +203,7 @@ func (p *Preparer) Prepare(ctx context.Context, d Decision) error {
 		taskCtx.SetWorkflowState(d.State, "", nil)
 	}
 	if synthStore, ok := p.store.(synthesisStore); ok {
-		if synth, err := BuildSynthesisContext(d.Repo, d.IssueNum, d.Workflow, d.SourceState, d.StateDef, synthStore, p.gh, relatedPRs); err != nil {
+		if synth, err := BuildSynthesisContext(d.Repo, d.IssueNum, d.Workflow, d.SourceState, d.StateDef, d.SourceStateDef, synthStore, p.gh, relatedPRs); err != nil {
 			log.Printf("[taskprep] warning: could not build synthesis context for %s#%d: %v", d.Repo, d.IssueNum, err)
 		} else {
 			taskCtx.Synthesis = synth
