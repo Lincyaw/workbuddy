@@ -41,6 +41,12 @@ type FullCoordinatorServer struct {
 	// false (Secure required); set true only for HTTP reverse-proxy fronts
 	// where TLS terminates upstream.
 	CookieInsecure bool
+	// OnWorkerMembershipChange is fired after a successful worker
+	// registration or unregistration. Phase 3 (REQ-122) uses this to
+	// invalidate sessionproxy.Handler's listing cache so a freshly-
+	// registered worker becomes visible immediately rather than after the
+	// 5s TTL. nil = no-op.
+	OnWorkerMembershipChange func()
 }
 
 // SessionCookieName is the HTTP cookie that carries the bearer token after
@@ -60,6 +66,12 @@ type WorkerRegisterRequest struct {
 	Repos       []string `json:"repos,omitempty"`
 	Hostname    string   `json:"hostname"`
 	MgmtBaseURL string   `json:"mgmt_base_url,omitempty"`
+	// AuditURL is the worker-advertised base URL of its audit HTTP
+	// server. Phase 1 of the session-data ownership refactor: the
+	// coordinator persists this verbatim so Phase 2 can proxy session
+	// reads to the owning worker. Today's read paths still serve from
+	// the coordinator's own DB.
+	AuditURL string `json:"audit_url,omitempty"`
 }
 
 // TaskPollResponse is returned from GET /api/v1/tasks/poll when a task is
@@ -388,6 +400,12 @@ func (s *FullCoordinatorServer) HandleWorkerByPath(w http.ResponseWriter, r *htt
 			}
 			return
 		}
+		// Phase 3 (REQ-122): drop the sessionproxy listing cache so the
+		// removed worker stops showing up in the next /api/v1/sessions
+		// call without waiting for the 5s TTL.
+		if hook := s.OnWorkerMembershipChange; hook != nil {
+			hook()
+		}
 		CoordWriteJSON(w, http.StatusOK, map[string]string{"status": "unregistered"})
 	default:
 		CoordWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -409,6 +427,20 @@ func (s *FullCoordinatorServer) HandleRegisterWorker(w http.ResponseWriter, r *h
 	req.Repo = strings.TrimSpace(req.Repo)
 	req.Runtime = strings.TrimSpace(req.Runtime)
 	req.MgmtBaseURL = strings.TrimRight(strings.TrimSpace(req.MgmtBaseURL), "/")
+	req.AuditURL = strings.TrimRight(strings.TrimSpace(req.AuditURL), "/")
+	// audit_url is optional (empty means "no audit listener configured" —
+	// the sessionproxy resolver falls back to the coordinator-local
+	// handler in that case). When provided, only http/https are
+	// accepted: the coordinator opens this URL with net/http.Client, so
+	// `javascript:`, `file:`, `data:` etc. are nonsense at best and
+	// confused-deputy bait at worst.
+	if req.AuditURL != "" {
+		parsed, perr := url.Parse(req.AuditURL)
+		if perr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			CoordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "audit_url must be an http or https URL with a host"})
+			return
+		}
+	}
 	if len(req.Repos) == 0 && req.Repo != "" {
 		req.Repos = []string{req.Repo}
 	}
@@ -433,7 +465,7 @@ func (s *FullCoordinatorServer) HandleRegisterWorker(w http.ResponseWriter, r *h
 			return
 		}
 	}
-	if err := s.Registry.RegisterWithRepos(req.WorkerID, req.Repo, req.Repos, req.Roles, req.Runtime, req.Hostname, req.MgmtBaseURL); err != nil {
+	if err := s.Registry.RegisterWithRepos(req.WorkerID, req.Repo, req.Repos, req.Roles, req.Runtime, req.Hostname, req.MgmtBaseURL, req.AuditURL); err != nil {
 		CoordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -444,7 +476,14 @@ func (s *FullCoordinatorServer) HandleRegisterWorker(w http.ResponseWriter, r *h
 		"repos":     req.Repos,
 		"hostname":  req.Hostname,
 		"mgmt_url":  req.MgmtBaseURL,
+		"audit_url": req.AuditURL,
 	})
+	// Phase 3 (REQ-122): drop the sessionproxy listing cache so the new
+	// worker shows up in the next /api/v1/sessions call without waiting
+	// for the 5s TTL.
+	if hook := s.OnWorkerMembershipChange; hook != nil {
+		hook()
+	}
 	CoordWriteJSON(w, http.StatusCreated, map[string]string{"status": "registered"})
 }
 

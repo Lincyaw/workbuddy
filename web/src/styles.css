@@ -376,25 +376,21 @@ a:hover {
   color: var(--text-tertiary);
 }
 
-.dispatch-ticker-inner,
-.dispatch-ticker-track,
-.dispatch-ticker-mobile {
-  height: 100%;
-}
-
-.dispatch-ticker-track {
-  display: inline-flex;
+.dispatch-ticker-inner {
+  display: flex;
   align-items: center;
-  gap: 40px;
-  padding-right: 40px;
+  height: 100%;
+  padding: 0 20px;
+  overflow: hidden;
   white-space: nowrap;
-  animation: ticker-scroll 64s linear infinite;
 }
 
-.dispatch-ticker.is-paused .dispatch-ticker-track,
-.dispatch-ticker:hover .dispatch-ticker-track,
-.dispatch-ticker:focus-within .dispatch-ticker-track {
-  animation-play-state: paused;
+.dispatch-ticker.is-flashing {
+  animation: ticker-flash 1.8s ease-in-out 1;
+}
+
+.dispatch-ticker.is-paused {
+  background: var(--bg-elev);
 }
 
 .dispatch-ticker-entry {
@@ -402,6 +398,12 @@ a:hover {
   align-items: center;
   gap: 8px;
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dispatch-ticker-empty {
+  color: var(--text-tertiary);
 }
 
 .dispatch-ticker-dot {
@@ -415,10 +417,6 @@ a:hover {
   color: var(--text-tertiary);
 }
 
-.dispatch-ticker-mobile,
-.dispatch-ticker-mobile-list {
-  display: none;
-}
 
 .page {
   max-width: var(--page-max);
@@ -713,9 +711,66 @@ a:hover {
   margin-bottom: 14px;
 }
 
-.filter-toolbar input {
+.filter-toolbar input,
+.filter-toolbar select {
   min-width: 180px;
   flex: 1 1 180px;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 2px;
+  background: var(--bg-elev);
+  color: var(--text-primary);
+}
+
+.issue-group-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.issue-group-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.issue-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-hairline);
+  background: var(--bg-elev);
+}
+
+.issue-group-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.issue-group-caret {
+  width: 14px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.issue-group-count {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.issue-group-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .filter-pill {
@@ -1268,6 +1323,63 @@ a:hover {
   font-size: 20px;
 }
 
+/* Phase 3 (REQ-122): worker_offline gets a polite info-style card.
+   Suppresses the danger-tinted background from the .wb-degraded-card
+   shorthand above. */
+.wb-degraded-card.wb-degraded-card-info {
+  background: color-mix(in srgb, var(--bg-canvas) 80%, var(--bg-panel));
+  border-color: var(--border-hairline);
+  color: var(--text-secondary);
+}
+
+.wb-degraded-card.wb-degraded-card-info h2 {
+  color: var(--text-primary);
+}
+
+/* Banner shown above the sessions table when one or more workers are
+   currently unreachable (X-Workbuddy-Worker-Offline). */
+.wb-offline-banner {
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-canvas) 80%, var(--bg-panel));
+  border: 1px solid var(--border-hairline);
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+/* Standalone panel rendered in SessionDetail when the proxy returns
+   503 worker_offline before any meta arrives. */
+.wb-offline-panel {
+  padding: 18px 20px;
+  border-color: var(--border-hairline);
+}
+
+.wb-offline-panel h2 {
+  margin: 0 0 8px;
+  font-size: 18px;
+  color: var(--text-primary);
+}
+
+.wb-offline-panel p {
+  margin: 0 0 6px;
+  color: var(--text-secondary);
+}
+
+.wb-offline-panel .muted {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* Per-row pill for worker_offline rows in the sessions list. Gray,
+   not danger — the worker being unreachable isn't the session's
+   fault. */
+.wb-badge.wb-badge-offline {
+  background: color-mix(in srgb, var(--bg-canvas) 80%, var(--border-hairline));
+  color: var(--text-muted);
+  border: 1px solid var(--border-hairline);
+}
+
 .wb-reload-dialog {
   position: fixed;
   inset: 0;
@@ -1322,12 +1434,14 @@ a:hover {
   justify-content: flex-end;
 }
 
-@keyframes ticker-scroll {
-  from {
-    transform: translate3d(0, 0, 0);
+@keyframes ticker-flash {
+  0%,
+  100% {
+    background: var(--bg-canvas);
   }
-  to {
-    transform: translate3d(-50%, 0, 0);
+  25%,
+  75% {
+    background: color-mix(in srgb, var(--accent) 22%, var(--bg-canvas));
   }
 }
 
@@ -1356,7 +1470,7 @@ a:hover {
 
 @media (prefers-reduced-motion: reduce) {
   .reveal-card,
-  .dispatch-ticker-track,
+  .dispatch-ticker.is-flashing,
   .live-pill-dot,
   .dispatch-ticker-dot {
     animation: none !important;
@@ -1419,53 +1533,6 @@ a:hover {
 
   .topbar-drawer a.active {
     color: var(--accent);
-  }
-
-  .dispatch-ticker-desktop {
-    display: none;
-  }
-
-  .dispatch-ticker-mobile {
-    width: 100%;
-    display: grid;
-    grid-template-columns: 92px minmax(0, 1fr);
-    gap: 10px;
-    align-items: center;
-    padding: 0 12px;
-    border: 0;
-    background: transparent;
-    color: inherit;
-    text-align: left;
-  }
-
-  .dispatch-ticker-mobile-label {
-    text-transform: uppercase;
-    font-size: 12px;
-    letter-spacing: 0.08em;
-    color: var(--text-tertiary);
-  }
-
-  .dispatch-ticker-mobile-summary {
-    overflow: hidden;
-    padding-right: 40px;
-  white-space: nowrap;
-    text-overflow: ellipsis;
-    font-size: 12px;
-  }
-
-  .dispatch-ticker-mobile-list {
-    display: grid;
-    gap: 6px;
-    padding: 10px 12px;
-    border-top: 1px solid var(--border-hairline);
-    background: var(--bg-panel);
-  }
-
-  .dispatch-ticker-mobile-row {
-    display: grid;
-    grid-template-columns: repeat(5, auto);
-    gap: 8px;
-    font-size: 12px;
   }
 
   .page {

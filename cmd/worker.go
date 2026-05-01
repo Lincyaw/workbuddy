@@ -64,6 +64,17 @@ type workerOpts struct {
 	shutdownTimeout   time.Duration
 	concurrency       int
 	supervisorSocket  string
+	// auditListen is the bind address for the worker-side session audit
+	// HTTP server. Default "127.0.0.1:0" (random port). Special values:
+	// "" or "disabled" turn the audit listener off, in which case the
+	// register payload's audit_url is empty. Phase 1 of the
+	// session-data ownership refactor (REQ-120).
+	auditListen string
+	// auditPublicURL, when set, overrides the URL the worker advertises
+	// to the coordinator (e.g. for split-host deployments behind a
+	// reverse proxy). Falls back to "http://<bind>:<port>" derived from
+	// the resolved listener address.
+	auditPublicURL string
 }
 
 type workerIssueReader interface {
@@ -92,6 +103,8 @@ func init() {
 	workerCmd.Flags().String("mgmt-auth-token", "", "Optional bearer token for worker management and session-viewer endpoints")
 	workerCmd.Flags().Int("concurrency", 1, "Maximum concurrent tasks per worker")
 	workerCmd.Flags().String("supervisor-socket", "", "Unix socket of the local agent supervisor (default: $XDG_RUNTIME_DIR/workbuddy-supervisor.sock)")
+	workerCmd.Flags().String("audit-listen", "127.0.0.1:0", "Bind address for the worker-side session audit HTTP server. \"\" or \"disabled\" turns the audit server off; \"127.0.0.1:0\" (default) lets the kernel pick a port; \"0.0.0.0:8091\" exposes it on all interfaces.")
+	workerCmd.Flags().String("audit-public-url", "", "Override the audit URL advertised to the coordinator (for split-host deployments behind a NAT/reverse proxy). Defaults to http://<bind-host>:<bind-port>; when --audit-listen binds 0.0.0.0/::, the worker hostname is substituted.")
 	_ = workerCmd.MarkFlagRequired("coordinator")
 
 	workerUnregisterCmd.Flags().String("coordinator", "", "Coordinator base URL")
@@ -161,6 +174,8 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	mgmtAuthToken, _ := cmd.Flags().GetString("mgmt-auth-token")
 	concurrency, _ := cmd.Flags().GetInt("concurrency")
 	supervisorSocket, _ := cmd.Flags().GetString("supervisor-socket")
+	auditListen, _ := cmd.Flags().GetString("audit-listen")
+	auditPublicURL, _ := cmd.Flags().GetString("audit-public-url")
 	if concurrency < 1 {
 		concurrency = 1
 	}
@@ -198,6 +213,8 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 		shutdownTimeout:   defaultWorkerShutdownDeadline,
 		concurrency:       concurrency,
 		supervisorSocket:  strings.TrimSpace(supervisorSocket),
+		auditListen:       strings.TrimSpace(auditListen),
+		auditPublicURL:    strings.TrimSpace(auditPublicURL),
 	}, nil
 }
 
@@ -390,6 +407,25 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 
 	addrFile := workerAddrFile(workDir)
 	var mgmtServer *workerMgmtServer
+	// Phase 1 of the session-data ownership refactor (REQ-120): start
+	// the worker-side audit HTTP server so external tooling and (in
+	// Phase 2) the coordinator can read session data straight from the
+	// worker's own DB. Empty/disabled means do not advertise audit_url.
+	auditServer, auditURL, auditErr := startWorkerAuditServer(opts, localStore)
+	if auditErr != nil {
+		return auditErr
+	}
+	if auditServer != nil {
+		log.Printf("[worker] audit server listening on %s (advertised %s)", auditServer.Addr(), auditURL)
+		defer func() {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), opts.shutdownTimeout)
+			defer shutdownCancel()
+			if err := auditServer.Shutdown(shutdownCtx); err != nil {
+				log.Printf("[worker] audit server shutdown failed: %v", err)
+			}
+		}()
+	}
+
 	reloadAndRegister := func(changeCtx context.Context) (*workerConfigReloadSummary, error) {
 		summary, err := configs.reload(bindings.list())
 		if err != nil {
@@ -399,7 +435,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 		if len(currentRoles) == 0 {
 			return nil, fmt.Errorf("worker: at least one role is required")
 		}
-		if err := registerWorkerRepos(changeCtx, client, workerID, currentRoles, publicRuntime, advertisedWorkerMgmtBaseURL(opts, mgmtServer.baseURL), bindings.list()); err != nil {
+		if err := registerWorkerRepos(changeCtx, client, workerID, currentRoles, publicRuntime, advertisedWorkerMgmtBaseURL(opts, mgmtServer.baseURL), auditURL, bindings.list()); err != nil {
 			return nil, err
 		}
 		return summary, nil
@@ -432,7 +468,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 		}
 	}()
 
-	if err := registerWorkerRepos(ctx, client, workerID, roles, publicRuntime, advertisedWorkerMgmtBaseURL(opts, mgmtServer.baseURL), bindings.list()); err != nil {
+	if err := registerWorkerRepos(ctx, client, workerID, roles, publicRuntime, advertisedWorkerMgmtBaseURL(opts, mgmtServer.baseURL), auditURL, bindings.list()); err != nil {
 		if errors.Is(err, workerclient.ErrUnauthorized) {
 			return &cliExitError{
 				msg:  "worker: coordinator rejected the provided token",

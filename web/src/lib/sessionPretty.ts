@@ -114,7 +114,7 @@ export function parseStructuredEvent(
     return { kind: 'system', summary, raw: payload };
   }
 
-  if (opts.runtime === 'codex') {
+  if (opts.runtime !== 'claude') {
     return { kind: 'system', summary, raw: payload };
   }
 

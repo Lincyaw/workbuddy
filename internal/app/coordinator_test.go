@@ -1,6 +1,8 @@
 package app
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -176,6 +178,84 @@ func TestHandleClearIssueInflight(t *testing.T) {
 	protected.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("second clear status = %d, want %d body=%s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+}
+
+// TestHandleRegisterWorkerAuditURLValidation guards the should-fix #2
+// behaviour: HandleRegisterWorker must reject audit_url values whose
+// scheme is not http/https or whose host is empty (the coordinator
+// dials this URL with net/http.Client, so `javascript:`, `file:`,
+// `data:` etc. are nonsense at best and confused-deputy bait at worst).
+// Empty audit_url stays accepted (means "no audit listener configured").
+//
+// We assert by wiring HandleRegisterWorker against a server with no
+// Pollers/Registry: the audit_url validation block runs before any of
+// those, so a 400 with the audit_url-specific error proves the check
+// fired. Fallthrough requests reach the WorkerID-required error
+// instead, which proves the validation block did NOT trip.
+func TestHandleRegisterWorkerAuditURLValidation(t *testing.T) {
+	server := &FullCoordinatorServer{}
+
+	cases := []struct {
+		name             string
+		auditURL         string
+		wantStatus       int
+		wantBodyContains string
+	}{
+		{
+			name:             "javascript scheme rejected",
+			auditURL:         "javascript:alert(1)",
+			wantStatus:       http.StatusBadRequest,
+			wantBodyContains: "audit_url must be an http or https URL",
+		},
+		{
+			name:             "file scheme rejected",
+			auditURL:         "file:///etc/passwd",
+			wantStatus:       http.StatusBadRequest,
+			wantBodyContains: "audit_url must be an http or https URL",
+		},
+		{
+			name:             "missing host rejected",
+			auditURL:         "http://",
+			wantStatus:       http.StatusBadRequest,
+			wantBodyContains: "audit_url must be an http or https URL",
+		},
+		{
+			name:             "empty audit_url accepted (falls through to worker_id check)",
+			auditURL:         "",
+			wantStatus:       http.StatusBadRequest,
+			wantBodyContains: "worker_id, repo, and roles are required",
+		},
+		{
+			name:             "valid http accepted (falls through to worker_id check)",
+			auditURL:         "http://worker:8091",
+			wantStatus:       http.StatusBadRequest,
+			wantBodyContains: "worker_id, repo, and roles are required",
+		},
+		{
+			name:             "valid https accepted (falls through to worker_id check)",
+			auditURL:         "https://worker.example.com:8443",
+			wantStatus:       http.StatusBadRequest,
+			wantBodyContains: "worker_id, repo, and roles are required",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := json.Marshal(WorkerRegisterRequest{AuditURL: tc.auditURL})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/workers/register", bytes.NewReader(body))
+			rec := httptest.NewRecorder()
+			server.HandleRegisterWorker(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d body=%s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if !bytes.Contains(rec.Body.Bytes(), []byte(tc.wantBodyContains)) {
+				t.Fatalf("body = %s, want substring %q", rec.Body.String(), tc.wantBodyContains)
+			}
+		})
 	}
 }
 

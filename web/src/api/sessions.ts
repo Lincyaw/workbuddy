@@ -1,4 +1,29 @@
-import { apiJSON } from './client';
+import { apiFetch, apiJSON } from './client';
+
+// DegradedReason mirrors the machine label the audit API attaches to a
+// session whose response can't be served normally. Phase 3 of the
+// session-data ownership refactor (REQ-122) consolidated the legal
+// values:
+//
+//   * 'no_events_file'  — the worker recorded a DB row and a terminal
+//                          status, but events-v1.jsonl never got any
+//                          content. Real signal: agent crashed before
+//                          producing any tool calls.
+//   * 'worker_offline'  — coordinator's sessionproxy could not dial the
+//                          owning worker (or the worker did not register
+//                          an audit_url). The session data lives on a
+//                          worker that is currently unreachable.
+//   * 'no_db_row'       — DEPRECATED. Pre-Phase-3 synthesis from disk
+//                          metadata. Should not appear on a coordinator
+//                          ≥ v0.5.x; kept in the union so the SPA
+//                          renders sensibly if it does.
+//
+// Anything else is rendered with a permissive fallback.
+export type DegradedReason =
+  | 'no_events_file'
+  | 'worker_offline'
+  | 'no_db_row'
+  | string;
 
 export interface SessionListItem {
   session_id: string;
@@ -25,7 +50,7 @@ export interface SessionListItem {
   // row at all). The SPA renders a ⚠️ badge so operators can spot
   // never-actually-ran sessions in the list at a glance.
   degraded?: boolean;
-  degraded_reason?: string;
+  degraded_reason?: DegradedReason;
 }
 
 export interface SessionDetail {
@@ -50,14 +75,10 @@ export interface SessionDetail {
     events_v1?: string;
     raw?: string;
   };
-  // Issue #275: degraded === true means the API could not produce a normal
-  // response — typically because the agent_sessions DB row was missing
-  // (response synthesized from disk metadata.json) or because no
-  // events-v1.jsonl file was ever produced. The SPA surfaces a red warning
-  // card with the summary/stderr instead of an empty-but-otherwise-normal
-  // timeline.
+  // degraded === true means the API could not produce a normal response.
+  // Legitimate reasons are enumerated by DegradedReason above.
   degraded?: boolean;
-  degraded_reason?: string;
+  degraded_reason?: DegradedReason;
 }
 
 export interface SessionEvent {
@@ -86,6 +107,14 @@ export interface SessionListQuery {
   offset?: number;
 }
 
+export interface SessionListResult {
+  rows: SessionListItem[];
+  // offlineWorkers carries the IDs the coordinator could not reach
+  // during fan-out, sourced from the X-Workbuddy-Worker-Offline response
+  // header. Empty array when every worker responded.
+  offlineWorkers: string[];
+}
+
 export function buildSessionsQuery(q: SessionListQuery): string {
   const sp = new URLSearchParams();
   if (q.repo) sp.set('repo', q.repo);
@@ -97,8 +126,36 @@ export function buildSessionsQuery(q: SessionListQuery): string {
   return s ? `?${s}` : '';
 }
 
-export function fetchSessions(q: SessionListQuery): Promise<SessionListItem[]> {
-  return apiJSON<SessionListItem[]>(`/api/v1/sessions${buildSessionsQuery(q)}`);
+// fetchSessions returns both the row list and the offline-workers
+// sidecar (lifted from the X-Workbuddy-Worker-Offline header). The
+// header was added in Phase 2; Phase 3 surfaces it in the UI.
+export async function fetchSessions(q: SessionListQuery): Promise<SessionListResult> {
+  const resp = await apiFetch(`/api/v1/sessions${buildSessionsQuery(q)}`);
+  const text = await resp.text();
+  if (!resp.ok) {
+    const err = new Error(`request failed: ${resp.status}`) as Error & {
+      status?: number;
+      body?: unknown;
+    };
+    err.status = resp.status;
+    err.body = text;
+    throw err;
+  }
+  let rows: SessionListItem[] = [];
+  if (text) {
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) rows = parsed as SessionListItem[];
+    } catch {
+      rows = [];
+    }
+  }
+  const header = resp.headers.get('X-Workbuddy-Worker-Offline') || '';
+  const offlineWorkers = header
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return { rows, offlineWorkers };
 }
 
 export function fetchSession(id: string): Promise<SessionDetail> {

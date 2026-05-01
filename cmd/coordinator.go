@@ -27,6 +27,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
 	"github.com/Lincyaw/workbuddy/internal/security"
+	"github.com/Lincyaw/workbuddy/internal/sessionproxy"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/tasknotify"
 	"github.com/Lincyaw/workbuddy/internal/webui"
@@ -68,6 +69,13 @@ type coordinatorOpts struct {
 	// optional (defaults to http://<listen>) when --listen is loopback.
 	reportBaseURL string
 	hooksConfig   string
+	// sharedStoreWithWorker is true when the coordinator is being run
+	// in-process alongside a worker that uses the same SQLite file
+	// (the `workbuddy serve` topology). Phase 3 (REQ-122): the
+	// coordinator otherwise drops the legacy `sessions` and
+	// `agent_sessions` tables on startup; in shared mode it must NOT
+	// drop them because the worker still writes session rows there.
+	sharedStoreWithWorker bool
 }
 
 type tokenCreateOpts struct {
@@ -345,7 +353,18 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 		log.Printf("[coordinator] warning: WORKBUDDY_AUTH_TOKEN is not set; worker API is running without authentication")
 	}
 
-	st, err := store.NewStore(opts.dbPath)
+	var st *store.Store
+	if opts.sharedStoreWithWorker {
+		// `workbuddy serve` topology: one DB, shared with the in-process
+		// worker. Phase 3 keeps the legacy session tables here because
+		// the worker side still writes to them.
+		st, err = store.NewStore(opts.dbPath)
+	} else {
+		// Standalone coordinator: drop the legacy sessions /
+		// agent_sessions tables and short-circuit their reads.
+		// REQ-122 / Phase 3 of the session-data ownership refactor.
+		st, err = store.NewCoordinatorStore(opts.dbPath)
+	}
 	if err != nil {
 		return fmt.Errorf("coordinator: init store: %w", err)
 	}
@@ -613,6 +632,11 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 	dashboardAPI := auditapi.NewHandler(st)
 	sessionsDir := filepath.Join(filepath.Dir(dbPath), "sessions")
 	dashboardAPI.SetSessionsDir(sessionsDir)
+	// Phase 3 (REQ-122) deleted the disk-only synthesis paths from
+	// auditapi.Handler entirely, so no per-handler opt-out remains. The
+	// coordinator's local handler now serves only sessions whose rows
+	// physically exist in the coordinator DB (legacy pre-bundle data). The
+	// sessionproxy fan-out reaches live sessions on each owning worker.
 
 	sessionUI := webui.NewHandler(st)
 	sessionUI.SetSessionsDir(sessionsDir)
@@ -622,8 +646,36 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 	dashboardMux := http.NewServeMux()
 	dashboardAPI.RegisterDashboard(dashboardMux)
 	mux.Handle("/api/v1/status", api.WrapAuth(dashboardMux))
-	mux.Handle("/api/v1/sessions", api.WrapAuth(dashboardMux))
-	mux.Handle("/api/v1/sessions/", api.WrapAuth(dashboardMux))
+
+	// /api/v1/sessions and /api/v1/sessions/{id}[/events|/stream] go
+	// through the sessionproxy: it resolves session_id → owning worker via
+	// workers.audit_url and reverse-proxies. When Resolve says the
+	// session has no worker (legacy pre-bundle row), the proxy falls back
+	// to the in-process dashboard handler. Loopback short-circuit (an
+	// audit_url that points back at this coordinator's hostname) is
+	// opt-IN via WithLocalAuditFallback; the flag is plumbed by the
+	// surrounding coordinator command if set.
+	resolver := sessionproxy.NewResolver(st)
+	if hostname, err := os.Hostname(); err == nil && strings.TrimSpace(hostname) != "" {
+		resolver.WithLocalHost(hostname)
+	}
+	sessionProxy := sessionproxy.NewHandler(sessionproxy.HandlerConfig{
+		Resolver:  resolver,
+		Local:     dashboardMux,
+		AuthToken: api.AuthToken,
+	})
+	// Phase 3 (REQ-122): the coordinator's issue-detail endpoint used to
+	// read sessions from the local store. Now that the coordinator drops
+	// its sessions table on startup, route the issue-detail's session
+	// list through the same fan-out used by /api/v1/sessions.
+	dashboardAPI.SetIssueSessionsLister(sessionProxy)
+	// Phase 3 (REQ-122): drop the sessionproxy listing cache whenever a
+	// worker (re-)registers or unregisters. Without this hook, a freshly
+	// registered worker remains invisible for up to the cache TTL (5s).
+	api.OnWorkerMembershipChange = sessionProxy.InvalidateCache
+	mux.Handle("/api/v1/sessions", api.WrapAuth(http.HandlerFunc(sessionProxy.ServeHTTP)))
+	mux.Handle("/api/v1/sessions/", api.WrapAuth(http.HandlerFunc(sessionProxy.ServeHTTP)))
+
 	mux.Handle("/api/v1/events", api.WrapAuth(dashboardMux))
 	mux.Handle("/api/v1/alerts", api.WrapAuth(dashboardMux))
 	mux.Handle("/api/v1/metrics", api.WrapAuth(dashboardMux))

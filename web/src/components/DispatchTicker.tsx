@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { fetchSessions, type SessionListItem } from '../api/sessions';
 
 export interface DispatchTickerEntry {
@@ -13,7 +13,7 @@ export interface DispatchTickerEntry {
 
 export const TICKER_POLL_MS = 5_000;
 const MAX_TICKER_ENTRIES = 10;
-const MOBILE_VISIBLE_ENTRIES = 3;
+const FLASH_MS = 1_800;
 
 function formatClock(ts?: string | null): string {
   if (!ts) return '--:--:--';
@@ -142,9 +142,11 @@ export function DispatchTicker() {
   const [entries, setEntries] = useState<DispatchTickerEntry[]>([]);
   const [degraded, setDegraded] = useState(false);
   const [paused, setPaused] = useState(false);
-  const [expanded, setExpanded] = useState(false);
+  const [flashing, setFlashing] = useState(false);
   const previousRef = useRef<Record<string, SessionListItem>>({});
   const inFlightRef = useRef(false);
+  const lastTopIdRef = useRef<string | null>(null);
+  const flashTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -153,13 +155,27 @@ export function DispatchTicker() {
       if (inFlightRef.current) return;
       inFlightRef.current = true;
       try {
-        const sessions = await fetchSessions({ limit: 40 });
+        const result = await fetchSessions({ limit: 40 });
         if (cancelled) return;
-        setEntries((current) =>
-          buildTickerEntries(sessions || [], previousRef.current, current),
-        );
+        const sessions = result.rows || [];
+        setEntries((current) => {
+          const next = buildTickerEntries(sessions, previousRef.current, current);
+          const topId = next[0]?.id ?? null;
+          if (topId && lastTopIdRef.current !== null && topId !== lastTopIdRef.current) {
+            setFlashing(true);
+            if (flashTimerRef.current !== null) {
+              window.clearTimeout(flashTimerRef.current);
+            }
+            flashTimerRef.current = window.setTimeout(() => {
+              setFlashing(false);
+              flashTimerRef.current = null;
+            }, FLASH_MS);
+          }
+          lastTopIdRef.current = topId;
+          return next;
+        });
         previousRef.current = Object.fromEntries(
-          (sessions || []).map((session) => [session.session_id, session]),
+          sessions.map((session) => [session.session_id, session]),
         );
         setDegraded(false);
       } catch {
@@ -178,85 +194,41 @@ export function DispatchTicker() {
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      if (flashTimerRef.current !== null) {
+        window.clearTimeout(flashTimerRef.current);
+      }
     };
   }, []);
 
-  const marqueeEntries = useMemo(() => [...entries, ...entries], [entries]);
-  const mobileEntries = entries.slice(0, MOBILE_VISIBLE_ENTRIES);
+  const latest = entries[0];
 
   return (
     <section
-      class={`dispatch-ticker${degraded ? ' dispatch-ticker--degraded' : ''}${paused ? ' is-paused' : ''}${expanded ? ' is-expanded' : ''}`}
-      aria-label="Recent dispatch activity"
-      tabIndex={0}
+      class={`dispatch-ticker${degraded ? ' dispatch-ticker--degraded' : ''}${paused ? ' is-paused' : ''}${flashing ? ' is-flashing' : ''}`}
+      aria-label="Latest dispatch activity"
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
-      onFocusCapture={() => setPaused(true)}
-      onBlurCapture={(event) => {
-        const next = event.relatedTarget as Node | null;
-        if (!next || !event.currentTarget.contains(next)) {
-          setPaused(false);
-        }
-      }}
-      onKeyDown={(event) => {
-        if (event.key === 'Escape') {
-          setPaused(false);
-          (event.currentTarget as HTMLElement).blur();
-        }
-      }}
     >
-      <div class="dispatch-ticker-inner dispatch-ticker-desktop" aria-live="polite">
-        <div class="dispatch-ticker-track">
-          {marqueeEntries.length > 0 ? (
-            marqueeEntries.map((entry, index) => (
-              <span class="dispatch-ticker-entry" key={`${entry.id}:${index}`}>
-                <span class="dispatch-ticker-dot" aria-hidden="true" />
-                {formatClock(entry.ts)}
-                <span class="dispatch-ticker-sep">·</span>
-                {entry.label}
-                <span class="dispatch-ticker-sep">·</span>
-                #{entry.issue}
-                <span class="dispatch-ticker-sep">·</span>
-                {entry.agent}
-                <span class="dispatch-ticker-sep">·</span>
-                {entry.workerId}
-              </span>
-            ))
-          ) : (
-            <span class="dispatch-ticker-entry">waiting for the next dispatch pulse…</span>
-          )}
-        </div>
+      <div class="dispatch-ticker-inner" aria-live="polite">
+        {latest ? (
+          <span class="dispatch-ticker-entry">
+            <span class="dispatch-ticker-dot" aria-hidden="true" />
+            {formatClock(latest.ts)}
+            <span class="dispatch-ticker-sep">·</span>
+            {latest.label}
+            <span class="dispatch-ticker-sep">·</span>
+            #{latest.issue}
+            <span class="dispatch-ticker-sep">·</span>
+            {latest.agent}
+            <span class="dispatch-ticker-sep">·</span>
+            {latest.workerId}
+          </span>
+        ) : (
+          <span class="dispatch-ticker-entry dispatch-ticker-empty">
+            waiting for the next dispatch pulse…
+          </span>
+        )}
       </div>
-
-      <button
-        type="button"
-        class="dispatch-ticker-mobile"
-        aria-expanded={expanded}
-        onClick={() => setExpanded((value) => !value)}
-      >
-        <span class="dispatch-ticker-mobile-label">dispatch feed</span>
-        <span class="dispatch-ticker-mobile-summary">
-          {mobileEntries.length > 0
-            ? mobileEntries
-                .map((entry) => `${formatClock(entry.ts)} ${entry.label} #${entry.issue}`)
-                .join(' / ')
-            : 'waiting for the next dispatch pulse…'}
-        </span>
-      </button>
-
-      {expanded ? (
-        <div class="dispatch-ticker-mobile-list">
-          {entries.map((entry) => (
-            <div class="dispatch-ticker-mobile-row" key={entry.id}>
-              <strong>{formatClock(entry.ts)}</strong>
-              <span>{entry.label}</span>
-              <span>#{entry.issue}</span>
-              <span>{entry.agent}</span>
-              <span>{entry.workerId}</span>
-            </div>
-          ))}
-        </div>
-      ) : null}
     </section>
   );
 }
