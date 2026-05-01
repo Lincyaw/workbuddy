@@ -115,7 +115,7 @@ func (s *GHASession) Run(ctx context.Context, events chan<- launcherevents.Event
 		EmitEvent(events, &seq, s.Task.Session.ID, s.Task.Session.ID, launcherevents.KindTurnCompleted, launcherevents.TurnCompletedPayload{TurnID: s.Task.Session.ID, Status: "error"}, nil)
 		return parseResult, err
 	}
-	if err := ValidateOutputContract(s.Agent, result); err != nil {
+	if err := ValidateResolvedOutputContract(s.Agent, s.Task, result); err != nil {
 		EmitOutputContractFailure(events, &seq, s.Task.Session.ID, s.Task.Session.ID, err, EmitEvent)
 		return result, err
 	}

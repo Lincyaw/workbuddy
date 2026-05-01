@@ -57,6 +57,7 @@ type Decision struct {
 	Agent          *config.AgentConfig
 	Workflow       string
 	State          string
+	SourceState    string
 	RolloutIndex   int
 	RolloutsTotal  int
 	RolloutGroupID string
@@ -64,7 +65,8 @@ type Decision struct {
 	// synthesize the transition footer (issue #204 batch 3) without reaching
 	// back into the state-machine. May be nil for legacy callers; the
 	// preparer treats a nil StateDef as "no footer".
-	StateDef *config.State
+	StateDef       *config.State
+	SourceStateDef *config.State
 }
 
 // TaskStore is the narrow persistence surface the preparer needs.
@@ -196,8 +198,16 @@ func (p *Preparer) Prepare(ctx context.Context, d Decision) error {
 	// in no footer (BuildTransitionFooter returns "").
 	if d.StateDef != nil {
 		taskCtx.SetWorkflowState(d.State, d.StateDef.EnterLabel, d.StateDef.Transitions)
+		taskCtx.SetWorkflowStateMode(d.StateDef.Mode)
 	} else {
 		taskCtx.SetWorkflowState(d.State, "", nil)
+	}
+	if synthStore, ok := p.store.(synthesisStore); ok {
+		if synth, err := BuildSynthesisContext(d.Repo, d.IssueNum, d.Workflow, d.SourceState, d.StateDef, d.SourceStateDef, synthStore, p.gh, relatedPRs); err != nil {
+			log.Printf("[taskprep] warning: could not build synthesis context for %s#%d: %v", d.Repo, d.IssueNum, err)
+		} else {
+			taskCtx.Synthesis = synth
+		}
 	}
 
 	task := WorkerTask{

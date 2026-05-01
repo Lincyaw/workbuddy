@@ -21,6 +21,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/dependency"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/poller"
+	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/workflow"
 )
@@ -42,6 +43,7 @@ type DispatchRequest struct {
 	AgentName      string
 	Workflow       string
 	State          string
+	SourceState    string
 	RolloutIndex   int
 	RolloutsTotal  int
 	RolloutGroupID string
@@ -80,6 +82,7 @@ const DefaultIssueClaimLease = 30 * time.Minute
 // round-trips (developing→reviewing→developing) used when a workflow does
 // not specify max_review_cycles in its frontmatter. See REQ-085.
 const DefaultMaxReviewCycles = 3
+const DefaultMaxSynthCycles = 2
 
 // State names recognized by the dev↔review cycle counter. These match the
 // canonical default workflow shipped in `.github/workbuddy/workflows/default.md`.
@@ -103,6 +106,12 @@ type CycleCapReporter interface {
 	ReportDevReviewCycleCap(ctx context.Context, repo string, issueNum int, info CycleCapInfo) error
 }
 
+// SynthesisNeedsHumanReporter posts a coordinator-side needs-human comment
+// when synthesize mode produced malformed or missing structured output.
+type SynthesisNeedsHumanReporter interface {
+	ReportSynthesisNeedsHuman(ctx context.Context, repo string, issueNum int, reason string) error
+}
+
 // CycleCapInfo carries the data the Reporter needs to assemble the
 // needs-human comment posted on cap-hit. The rejection-trail digest is
 // expected to be assembled by Coordinator Go code (no agent re-invocation).
@@ -116,6 +125,7 @@ type CycleCapInfo struct {
 type dispatchGroup struct {
 	workflow string
 	state    string
+	mode     string
 	join     config.JoinConfig
 	slots    map[string]string // dispatch slot key -> agent name
 
@@ -126,10 +136,11 @@ type dispatchGroup struct {
 	failedSlots      map[string]struct{}
 }
 
-func newDispatchGroup(wf, state string, join config.JoinConfig, slots map[string]string) *dispatchGroup {
+func newDispatchGroup(wf, state, mode string, join config.JoinConfig, slots map[string]string) *dispatchGroup {
 	g := &dispatchGroup{
 		workflow:         wf,
 		state:            state,
+		mode:             mode,
 		join:             join,
 		slots:            make(map[string]string, len(slots)),
 		dispatchedSlots:  make(map[string]struct{}, len(slots)),
@@ -210,6 +221,9 @@ type StateMachine struct {
 	// dev↔review cycle cap. Optional; when nil, cap-hit still records an
 	// event + alert but no GitHub comment is written.
 	capReporter CycleCapReporter
+	// synthNeedsHumanReporter posts the coordinator-side needs-human comment
+	// when synthesize mode returns malformed or missing structured output.
+	synthNeedsHumanReporter SynthesisNeedsHumanReporter
 
 	// issueClaim configuration (REQ-057). When claimerID is empty, per-issue
 	// claim acquisition is skipped — useful for tests that don't care and for
@@ -261,6 +275,13 @@ func NewStateMachine(
 // the comment side-effect (event + alert still fire).
 func (sm *StateMachine) SetCycleCapReporter(r CycleCapReporter) {
 	sm.capReporter = r
+}
+
+// SetSynthesisNeedsHumanReporter installs the callback used to post a
+// needs-human comment when synthesize mode returns malformed output. Pass nil
+// to disable the comment side-effect (event + blocked transition still fire).
+func (sm *StateMachine) SetSynthesisNeedsHumanReporter(r SynthesisNeedsHumanReporter) {
+	sm.synthNeedsHumanReporter = r
 }
 
 // SetIssueClaim enables per-issue dispatch-claim acquisition (REQ-057). When
@@ -479,6 +500,9 @@ func (sm *StateMachine) evaluateTransitions(ctx context.Context, wf *config.Work
 	if !ok {
 		return false, nil
 	}
+	if !transitionAllowedForState(currentStateName, currentState, addedLabel, targetStateName, event.Labels) {
+		return false, nil
+	}
 
 	targetState, ok := wf.States[targetStateName]
 	if !ok {
@@ -593,6 +617,11 @@ func (sm *StateMachine) applyDevReviewCycleCap(ctx context.Context, wf *config.W
 		return false, nil
 	}
 
+	reviewSource := sm.latestTransitionIntoState(wf.Name, repo, issueNum, stateNameReviewing)
+	if reviewSource == "synthesizing" {
+		return sm.applySynthCycleCap(ctx, wf, repo, issueNum)
+	}
+
 	cycleCount, err := sm.store.IncrementDevReviewCycleCount(repo, issueNum)
 	if err != nil {
 		return false, fmt.Errorf("statemachine: increment dev_review_cycle_count: %w", err)
@@ -643,6 +672,38 @@ func (sm *StateMachine) applyDevReviewCycleCap(ctx context.Context, wf *config.W
 	return false, nil
 }
 
+func (sm *StateMachine) applySynthCycleCap(ctx context.Context, wf *config.WorkflowConfig, repo string, issueNum int) (bool, error) {
+	cycleCount, err := sm.store.IncrementSynthCycleCount(repo, issueNum)
+	if err != nil {
+		return false, fmt.Errorf("statemachine: increment synth_cycle_count: %w", err)
+	}
+	maxCycles := DefaultMaxSynthCycles
+	payload := map[string]any{
+		"workflow":          wf.Name,
+		"synth_cycle_count": cycleCount,
+		"max_synth_cycles":  maxCycles,
+	}
+	if cycleCount >= maxCycles {
+		if err := sm.store.MarkIssueSynthCycleCapHit(repo, issueNum); err != nil {
+			log.Printf("[statemachine] mark synth cycle cap hit for %s#%d: %v", repo, issueNum, err)
+		}
+		sm.eventlog.Log(eventlog.TypeDevReviewCycleCapReached, repo, issueNum, payload)
+		if sm.capReporter != nil {
+			info := CycleCapInfo{
+				WorkflowName:    wf.Name,
+				CycleCount:      cycleCount,
+				MaxReviewCycles: maxCycles,
+				HitAt:           time.Now().UTC(),
+			}
+			if err := sm.capReporter.ReportDevReviewCycleCap(ctx, repo, issueNum, info); err != nil {
+				log.Printf("[statemachine] report synth cycle cap for %s#%d: %v", repo, issueNum, err)
+			}
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
 // recordStateEntry advances the persisted workflow_instance current_state
 // when a state-entry causes a real transition. Idempotent for self-entries.
 func (sm *StateMachine) recordStateEntry(workflowName, repo string, issueNum int, currentStateName string, currentState *config.State) {
@@ -681,6 +742,27 @@ func (sm *StateMachine) queryPriorWorkflowState(workflowName, repo string, issue
 	for _, inst := range instances {
 		if inst.WorkflowName == workflowName {
 			return inst.CurrentState
+		}
+	}
+	return ""
+}
+
+func (sm *StateMachine) latestTransitionIntoState(workflowName, repo string, issueNum int, toState string) string {
+	if sm.workflowManager == nil {
+		return ""
+	}
+	instances, err := sm.workflowManager.QueryByRepoIssue(repo, issueNum)
+	if err != nil {
+		return ""
+	}
+	for _, inst := range instances {
+		if inst.WorkflowName != workflowName {
+			continue
+		}
+		for i := len(inst.History) - 1; i >= 0; i-- {
+			if inst.History[i].To == toState {
+				return inst.History[i].From
+			}
 		}
 	}
 	return ""
@@ -968,7 +1050,7 @@ func (sm *StateMachine) dispatchSingleAgent(ctx context.Context, req DispatchReq
 		}
 		existing.dispatchedSlots[slotKey] = struct{}{}
 	} else {
-		sm.inflight[issueKey] = newDispatchGroup(workflow, state, defaultJoinConfig, map[string]string{slotKey: agentName})
+		sm.inflight[issueKey] = newDispatchGroup(workflow, state, config.StateModeReview, defaultJoinConfig, map[string]string{slotKey: agentName})
 		sm.inflight[issueKey].dispatchedSlots[slotKey] = struct{}{}
 	}
 	sm.inflightMu.Unlock()
@@ -1063,6 +1145,7 @@ func (sm *StateMachine) dispatchStateAgents(ctx context.Context, repo string, is
 				AgentName:      agents[0],
 				Workflow:       wfName,
 				State:          state,
+				SourceState:    sourceState,
 				RolloutIndex:   idx,
 				RolloutsTotal:  rollouts,
 				RolloutGroupID: groupID,
@@ -1070,28 +1153,46 @@ func (sm *StateMachine) dispatchStateAgents(ctx context.Context, repo string, is
 			slots[dispatchSlotKey(req)] = req.AgentName
 			requests = append(requests, req)
 		}
-	} else if inherited, err := sm.inheritedRolloutRequests(repo, issueNum, wf, sourceState, state, agents[0]); err != nil {
-		return err
-	} else if len(inherited) > 0 {
-		for _, req := range inherited {
-			slots[dispatchSlotKey(req)] = req.AgentName
-			requests = append(requests, req)
+	} else if stateMode(stateDef) != config.StateModeSynth {
+		inherited, err := sm.inheritedRolloutRequests(repo, issueNum, wf, sourceState, state, agents[0])
+		if err != nil {
+			return err
+		}
+		if len(inherited) > 0 {
+			for _, req := range inherited {
+				slots[dispatchSlotKey(req)] = req.AgentName
+				requests = append(requests, req)
+			}
+		} else {
+			for _, agent := range agents {
+				req := DispatchRequest{
+					Repo:        repo,
+					IssueNum:    issueNum,
+					AgentName:   agent,
+					Workflow:    wfName,
+					State:       state,
+					SourceState: sourceState,
+				}
+				slots[dispatchSlotKey(req)] = req.AgentName
+				requests = append(requests, req)
+			}
 		}
 	} else {
 		for _, agent := range agents {
 			req := DispatchRequest{
-				Repo:      repo,
-				IssueNum:  issueNum,
-				AgentName: agent,
-				Workflow:  wfName,
-				State:     state,
+				Repo:        repo,
+				IssueNum:    issueNum,
+				AgentName:   agent,
+				Workflow:    wfName,
+				State:       state,
+				SourceState: sourceState,
 			}
 			slots[dispatchSlotKey(req)] = req.AgentName
 			requests = append(requests, req)
 		}
 	}
 
-	group := newDispatchGroup(wfName, state, join, slots)
+	group := newDispatchGroup(wfName, state, stateMode(stateDef), join, slots)
 
 	sm.inflightMu.Lock()
 	if existing, ok := sm.inflight[issueKey]; ok {
@@ -1146,6 +1247,7 @@ func (sm *StateMachine) inheritedRolloutRequests(repo string, issueNum int, wf *
 			AgentName:      agentName,
 			Workflow:       wf.Name,
 			State:          targetState,
+			SourceState:    sourceState,
 			RolloutIndex:   task.RolloutIndex,
 			RolloutsTotal:  task.RolloutsTotal,
 			RolloutGroupID: task.RolloutGroupID,
@@ -1195,6 +1297,10 @@ func (sm *StateMachine) isBackEdge(repo string, issueNum int, targetState string
 // It clears inflight group state and records completion time for stuck detection
 // when the group can no longer progress.
 func (sm *StateMachine) MarkAgentCompleted(repo string, issueNum int, taskID, agentName string, exitCode int, currentLabels []string) {
+	sm.MarkAgentCompletedWithDecision(repo, issueNum, taskID, agentName, exitCode, currentLabels, nil)
+}
+
+func (sm *StateMachine) MarkAgentCompletedWithDecision(repo string, issueNum int, taskID, agentName string, exitCode int, currentLabels []string, decision *runtimepkg.SynthesisDecision) {
 	issueKey := sm.issueKey(repo, issueNum)
 	agentName = sm.canonicalAgentName(taskID, agentName)
 	slotKey := agentName
@@ -1338,11 +1444,30 @@ func (sm *StateMachine) MarkAgentCompleted(repo string, issueNum int, taskID, ag
 	}
 
 	sm.logCompletionEvent(repo, issueNum, taskID, agentName, exitCode)
+	sm.logSynthesisDecision(repo, issueNum, group, exitCode, decision)
 
 	if shouldAdvance {
+		if stateModeFromGroup(group) == config.StateModeSynth && shouldEscalateSynthDecision(exitCode, decision) {
+			if decision == nil && sm.synthNeedsHumanReporter != nil {
+				if err := sm.synthNeedsHumanReporter.ReportSynthesisNeedsHuman(context.Background(), repo, issueNum, "malformed_or_missing_synthesis_output"); err != nil {
+					log.Printf("[statemachine] synth needs-human comment failed for %s#%d: %v", repo, issueNum, err)
+				}
+			}
+			if err := sm.advanceRolloutFailureToBlocked(repo, issueNum, group.workflow, group.state); err != nil {
+				log.Printf("[statemachine] synth escalation transition failed for %s#%d: %v", repo, issueNum, err)
+			}
+			sm.recordStuckCandidate(issueKey, currentLabels)
+			return
+		}
 		if passed {
 			// Evaluate the next transition only when this group is complete.
 			if transitioned := sm.evaluateCompletionTransitions(context.Background(), repo, issueNum, group.workflow, group.state, currentLabels); !transitioned {
+				if stateModeFromGroup(group) == config.StateModeSynth {
+					if err := sm.advanceRolloutFailureToBlocked(repo, issueNum, group.workflow, group.state); err != nil {
+						log.Printf("[statemachine] synth malformed transition failed for %s#%d: %v", repo, issueNum, err)
+					}
+					return
+				}
 				sm.recordStuckCandidate(issueKey, currentLabels)
 			}
 		} else {
@@ -1362,6 +1487,46 @@ func (sm *StateMachine) MarkAgentCompleted(repo string, issueNum int, taskID, ag
 			sm.recordStuckCandidate(issueKey, currentLabels)
 		}
 	}
+}
+
+func (sm *StateMachine) logSynthesisDecision(repo string, issueNum int, group *dispatchGroup, exitCode int, decision *runtimepkg.SynthesisDecision) {
+	if group == nil || stateModeFromGroup(group) != config.StateModeSynth || sm.eventlog == nil {
+		return
+	}
+	if decision == nil {
+		sm.eventlog.Log(eventlog.TypeSynthesisDecision, repo, issueNum, map[string]any{
+			"outcome":      "escalate",
+			"rejected_prs": []int{},
+			"reason":       "malformed_or_missing_synthesis_output",
+		})
+		return
+	}
+	payload := map[string]any{
+		"outcome":      decision.Outcome,
+		"rejected_prs": decision.RejectedPRs,
+		"reason":       decision.Reason,
+	}
+	switch decision.Outcome {
+	case "pick":
+		payload["chosen_pr"] = decision.ChosenPR
+	case "cherry-pick":
+		payload["synth_pr"] = decision.SynthPR
+	}
+	sm.eventlog.Log(eventlog.TypeSynthesisDecision, repo, issueNum, payload)
+}
+
+func shouldEscalateSynthDecision(exitCode int, decision *runtimepkg.SynthesisDecision) bool {
+	if decision == nil {
+		return true
+	}
+	return decision.Outcome == "escalate"
+}
+
+func stateModeFromGroup(group *dispatchGroup) string {
+	if group == nil || strings.TrimSpace(group.mode) == "" {
+		return config.StateModeReview
+	}
+	return group.mode
 }
 
 func (sm *StateMachine) advanceRolloutFailureToBlocked(repo string, issueNum int, workflowName, sourceState string) error {
@@ -1716,6 +1881,40 @@ func (sm *StateMachine) stateAgents(state *config.State) []string {
 
 func (sm *StateMachine) stateHasAgents(state *config.State) bool {
 	return len(sm.stateAgents(state)) > 0
+}
+
+func stateMode(state *config.State) string {
+	if state == nil || strings.TrimSpace(state.Mode) == "" {
+		return config.StateModeReview
+	}
+	return state.Mode
+}
+
+func transitionAllowedForState(currentStateName string, currentState *config.State, label, targetState string, labels []string) bool {
+	if currentStateName != stateNameDeveloping || currentState == nil {
+		return true
+	}
+	hasSynthTarget := false
+	for _, candidate := range currentState.Transitions {
+		if candidate == "synthesizing" {
+			hasSynthTarget = true
+			break
+		}
+	}
+	if !hasSynthTarget {
+		return true
+	}
+	rollouts, err := resolveStateRollouts(currentState, labels)
+	if err != nil {
+		return false
+	}
+	if targetState == "synthesizing" {
+		return rollouts > 1
+	}
+	if targetState == stateNameReviewing && label == "status:reviewing" {
+		return rollouts <= 1
+	}
+	return true
 }
 
 func resolveStateRollouts(state *config.State, labels []string) (int, error) {

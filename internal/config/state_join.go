@@ -49,6 +49,7 @@ func (s *State) UnmarshalYAML(value *yaml.Node) error {
 		"enter_label": {},
 		"agent":       {},
 		"agents":      {},
+		"mode":        {},
 		"join":        {},
 		"rollouts":    {},
 		"transitions": {},
@@ -60,6 +61,7 @@ func (s *State) UnmarshalYAML(value *yaml.Node) error {
 		EnterLabel  string            `yaml:"enter_label"`
 		Agent       string            `yaml:"agent,omitempty"`
 		Agents      []string          `yaml:"agents,omitempty"`
+		Mode        string            `yaml:"mode,omitempty"`
 		Rollouts    int               `yaml:"rollouts,omitempty"`
 		Transitions map[string]string `yaml:"transitions"`
 	}
@@ -73,8 +75,14 @@ func (s *State) UnmarshalYAML(value *yaml.Node) error {
 	s.EnterLabel = raw.EnterLabel
 	s.Agent = raw.Agent
 	s.Agents = raw.Agents
+	s.Mode = raw.Mode
 	s.Rollouts = raw.Rollouts
 	s.Transitions = raw.Transitions
+	switch s.Mode {
+	case "", StateModeReview, StateModeSynth:
+	default:
+		return fmt.Errorf("config: invalid mode %q (valid: %q, %q)", s.Mode, StateModeReview, StateModeSynth)
+	}
 	if raw.Join.Kind == 0 {
 		s.Join = JoinConfig{}
 		return nil

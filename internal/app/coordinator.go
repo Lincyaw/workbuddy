@@ -14,10 +14,13 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/ghadapter"
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/router"
+	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/tasknotify"
+	"github.com/Lincyaw/workbuddy/internal/taskprep"
 )
 
 // FullCoordinatorServer is the distributed coordinator's HTTP control plane:
@@ -62,16 +65,17 @@ type WorkerRegisterRequest struct {
 // TaskPollResponse is returned from GET /api/v1/tasks/poll when a task is
 // claimable.
 type TaskPollResponse struct {
-	TaskID         string   `json:"task_id"`
-	Repo           string   `json:"repo"`
-	IssueNum       int      `json:"issue_num"`
-	AgentName      string   `json:"agent_name"`
-	Workflow       string   `json:"workflow,omitempty"`
-	State          string   `json:"state,omitempty"`
-	RolloutIndex   int      `json:"rollout_index,omitempty"`
-	RolloutsTotal  int      `json:"rollouts_total,omitempty"`
-	RolloutGroupID string   `json:"rollout_group_id,omitempty"`
-	Roles          []string `json:"roles,omitempty"`
+	TaskID         string                       `json:"task_id"`
+	Repo           string                       `json:"repo"`
+	IssueNum       int                          `json:"issue_num"`
+	AgentName      string                       `json:"agent_name"`
+	Workflow       string                       `json:"workflow,omitempty"`
+	State          string                       `json:"state,omitempty"`
+	RolloutIndex   int                          `json:"rollout_index,omitempty"`
+	RolloutsTotal  int                          `json:"rollouts_total,omitempty"`
+	RolloutGroupID string                       `json:"rollout_group_id,omitempty"`
+	Roles          []string                     `json:"roles,omitempty"`
+	Synthesis      *runtimepkg.SynthesisContext `json:"synthesis,omitempty"`
 }
 
 // RepoRegisterRequest is the body of POST /api/v1/repos/register.
@@ -99,8 +103,9 @@ type TaskResultRequest struct {
 	CurrentLabels []string `json:"current_labels"`
 	// InfraFailure flags launcher-layer failures that must NOT be translated
 	// into a state-machine failure signal. See issue #131 / AC-3.
-	InfraFailure bool   `json:"infra_failure,omitempty"`
-	InfraReason  string `json:"infra_reason,omitempty"`
+	InfraFailure      bool                          `json:"infra_failure,omitempty"`
+	InfraReason       string                        `json:"infra_reason,omitempty"`
+	SynthesisDecision *runtimepkg.SynthesisDecision `json:"synthesis_decision,omitempty"`
 }
 
 // TaskHeartbeatRequest is the body of POST /api/v1/tasks/{id}/heartbeat.
@@ -589,7 +594,7 @@ func (s *FullCoordinatorServer) HandleTaskResult(w http.ResponseWriter, r *http.
 			"source":     "worker_submit",
 		})
 	} else {
-		s.Pollers.MarkAgentCompleted(task.Repo, task.IssueNum, task.ID, task.AgentName, exitCode, req.CurrentLabels)
+		s.Pollers.MarkAgentCompletedWithDecision(task.Repo, task.IssueNum, task.ID, task.AgentName, exitCode, req.CurrentLabels, req.SynthesisDecision)
 	}
 	s.Eventlog.Log(eventlog.TypeCompleted, task.Repo, task.IssueNum, map[string]any{
 		"task_id":    task.ID,
@@ -697,7 +702,53 @@ func (s *FullCoordinatorServer) claimNextTask(worker *store.WorkerRecord) (*Task
 		RolloutsTotal:  task.RolloutsTotal,
 		RolloutGroupID: task.RolloutGroupID,
 		Roles:          append([]string(nil), roles...),
+		Synthesis:      s.buildSynthesisPayload(task),
 	}, nil
+}
+
+func (s *FullCoordinatorServer) buildSynthesisPayload(task *store.TaskRecord) *runtimepkg.SynthesisContext {
+	if task == nil || s.Config == nil {
+		return nil
+	}
+	cfg := s.Config.Current()
+	if cfg == nil {
+		return nil
+	}
+	wf, ok := cfg.Workflows[task.Workflow]
+	if !ok || wf == nil {
+		return nil
+	}
+	state, ok := wf.States[task.State]
+	if !ok || state == nil || state.Mode != config.StateModeSynth {
+		return nil
+	}
+	sourceState := ""
+	var sourceStateDef *config.State
+	for name, candidate := range wf.States {
+		if candidate == nil {
+			continue
+		}
+		for _, target := range candidate.Transitions {
+			if target == task.State {
+				sourceState = name
+				sourceStateDef = candidate
+				break
+			}
+		}
+		if sourceState != "" {
+			break
+		}
+	}
+	gh := ghadapter.NewCLI()
+	relatedPRs, err := gh.ListRelatedPRs(task.Repo, task.IssueNum)
+	if err != nil {
+		return nil
+	}
+	synth, err := taskprep.BuildSynthesisContext(task.Repo, task.IssueNum, task.Workflow, sourceState, state, sourceStateDef, s.Store, gh, relatedPRs)
+	if err != nil {
+		return nil
+	}
+	return synth
 }
 
 // ParseLongPollTimeout parses a human-readable timeout, falling back to the

@@ -172,7 +172,7 @@ func (s *ProcessSession) Run(ctx context.Context, events chan<- launcherevents.E
 	if exitCode != 0 && strings.TrimSpace(stdoutBuf.String()) == "" && StderrLooksLikeRuntimePanic(string(stderrBytes)) {
 		MarkInfraFailure(result, "runtime panic/abort before agent output")
 	}
-	if err := ValidateOutputContract(s.Agent, result); err != nil {
+	if err := ValidateResolvedOutputContract(s.Agent, s.Task, result); err != nil {
 		EmitOutputContractFailure(events, &seq, s.Task.Session.ID, s.Task.Session.ID, err, EmitEvent)
 		return result, err
 	}
@@ -228,8 +228,8 @@ func (s *ProcessSession) startRequestFor(spec *CommandSpec) supervisor.StartAgen
 // it returns the binary, argv, and optional stdin to hand to the supervisor.
 func (s *ProcessSession) BuildSpec() (*CommandSpec, error) {
 	rolloutArgs := rolloutInvocationArgs(s.Task)
-	if IsClaudeRuntime(s.RuntimeName) && strings.TrimSpace(s.Agent.Prompt) != "" {
-		prompt, err := RenderAgentPrompt(s.Agent.Prompt, s.Task)
+	if promptBody := ResolvePromptBody(s.Agent, s.Task); IsClaudeRuntime(s.RuntimeName) && strings.TrimSpace(promptBody) != "" {
+		prompt, err := RenderAgentPrompt(promptBody, s.Task)
 		if err != nil {
 			return nil, err
 		}

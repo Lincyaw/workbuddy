@@ -226,6 +226,18 @@ func (r *Reporter) ReportNeedsHuman(ctx context.Context, repo string, issueNum i
 	})
 }
 
+// ReportSynthesisNeedsHuman posts a needs-human recommendation when a
+// synthesize-mode run failed to produce a valid structured decision.
+func (r *Reporter) ReportSynthesisNeedsHuman(ctx context.Context, repo string, issueNum int, reason string) error {
+	body := FormatSynthesisNeedsHumanReport(SynthesisNeedsHumanData{
+		Reason:    reason,
+		Timestamp: time.Now(),
+	})
+	return r.writeWithRateLimitRetry(ctx, repo, issueNum, "synthesis_needs_human", func() error {
+		return r.gh.WriteComment(repo, issueNum, body)
+	})
+}
+
 // CycleCapTrailLoader fetches the rejection-trail digest entries that are
 // rendered into the dev↔review cycle-cap needs-human comment. The Reporter
 // calls this when posting a cap-hit comment so digest assembly stays in

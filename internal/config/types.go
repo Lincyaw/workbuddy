@@ -6,6 +6,8 @@ import "time"
 const (
 	StateNameFailed = "failed"
 	LabelFailed     = "status:failed"
+	StateModeReview = "review"
+	StateModeSynth  = "synthesize"
 )
 
 // GlobalConfig is the top-level configuration loaded from config.yaml.
@@ -180,6 +182,7 @@ type State struct {
 	EnterLabel  string            `yaml:"enter_label"`
 	Agent       string            `yaml:"agent,omitempty"`
 	Agents      []string          `yaml:"agents,omitempty"`
+	Mode        string            `yaml:"mode,omitempty"`
 	Join        JoinConfig        `yaml:"join,omitempty"`
 	Rollouts    int               `yaml:"rollouts,omitempty"`
 	Transitions map[string]string `yaml:"transitions"`

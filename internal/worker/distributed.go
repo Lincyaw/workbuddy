@@ -119,6 +119,7 @@ func (w *DistributedWorker) ExecuteTask(ctx context.Context, task *workerclient.
 		if wf, ok := w.deps.Config.Workflows[task.Workflow]; ok && wf != nil {
 			if state, ok := wf.States[task.State]; ok && state != nil {
 				launchCtx.SetWorkflowState(task.State, state.EnterLabel, state.Transitions)
+				launchCtx.SetWorkflowStateMode(state.Mode)
 			} else {
 				launchCtx.SetWorkflowState(task.State, "", nil)
 			}
@@ -298,6 +299,9 @@ func (w *DistributedWorker) ExecuteTask(ctx context.Context, task *workerclient.
 		InfraFailure:  execution.InfraFailure(),
 		InfraReason:   execution.InfraReason(),
 	}
+	if result != nil {
+		resultReq.SynthesisDecision = result.SynthesisDecision
+	}
 	submitErr := w.submitResultWithRetry(ctx, task.TaskID, resultReq)
 	if submitErr != nil {
 		// Result delivery failed even after bounded retry. Treat as a
@@ -385,10 +389,11 @@ func BuildRemoteTaskContext(task *workerclient.Task, reader DistributedIssueRead
 		}
 	}
 	return &runtimepkg.TaskContext{
-		Issue:    issue,
-		Repo:     task.Repo,
-		RepoRoot: workDir,
-		WorkDir:  workDir,
+		Issue:     issue,
+		Repo:      task.Repo,
+		RepoRoot:  workDir,
+		WorkDir:   workDir,
+		Synthesis: task.Synthesis,
 		Rollout: runtimepkg.RolloutContext{
 			Index:   task.RolloutIndex,
 			Total:   task.RolloutsTotal,

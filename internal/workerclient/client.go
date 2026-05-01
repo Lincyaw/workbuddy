@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 )
 
 var ErrUnauthorized = errors.New("workerclient: unauthorized")
@@ -36,16 +38,17 @@ type RegisterRequest struct {
 }
 
 type Task struct {
-	TaskID         string   `json:"task_id"`
-	Repo           string   `json:"repo"`
-	IssueNum       int      `json:"issue_num"`
-	AgentName      string   `json:"agent_name"`
-	Workflow       string   `json:"workflow,omitempty"`
-	State          string   `json:"state,omitempty"`
-	RolloutIndex   int      `json:"rollout_index,omitempty"`
-	RolloutsTotal  int      `json:"rollouts_total,omitempty"`
-	RolloutGroupID string   `json:"rollout_group_id,omitempty"`
-	Roles          []string `json:"roles,omitempty"`
+	TaskID         string                       `json:"task_id"`
+	Repo           string                       `json:"repo"`
+	IssueNum       int                          `json:"issue_num"`
+	AgentName      string                       `json:"agent_name"`
+	Workflow       string                       `json:"workflow,omitempty"`
+	State          string                       `json:"state,omitempty"`
+	RolloutIndex   int                          `json:"rollout_index,omitempty"`
+	RolloutsTotal  int                          `json:"rollouts_total,omitempty"`
+	RolloutGroupID string                       `json:"rollout_group_id,omitempty"`
+	Roles          []string                     `json:"roles,omitempty"`
+	Synthesis      *runtimepkg.SynthesisContext `json:"synthesis,omitempty"`
 }
 
 type ResultRequest struct {
@@ -61,7 +64,8 @@ type ResultRequest struct {
 	// InfraReason carries a short operator-facing reason for the infra
 	// failure (e.g. "exec start error", "scanner buffer overflow"). Only
 	// meaningful when InfraFailure is true.
-	InfraReason string `json:"infra_reason,omitempty"`
+	InfraReason       string                        `json:"infra_reason,omitempty"`
+	SynthesisDecision *runtimepkg.SynthesisDecision `json:"synthesis_decision,omitempty"`
 }
 
 type HeartbeatRequest struct {

@@ -127,8 +127,10 @@ type IssueCycleState struct {
 	Repo                string
 	IssueNum            int
 	DevReviewCycleCount int
+	SynthCycleCount     int
 	FirstDispatchAt     time.Time
 	CapHitAt            time.Time
+	SynthCapHitAt       time.Time
 	UpdatedAt           time.Time
 }
 

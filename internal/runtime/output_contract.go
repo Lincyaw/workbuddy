@@ -45,6 +45,21 @@ func ValidateOutputContract(agent *config.AgentConfig, result *Result) error {
 	return fmt.Errorf("runtime: output_contract: %s", strings.Join(problems, "; "))
 }
 
+func ValidateResolvedOutputContract(agent *config.AgentConfig, task *TaskContext, result *Result) error {
+	if agent == nil || result == nil || result.ExitCode != 0 {
+		return nil
+	}
+	if task != nil && task.WorkflowStateMode() == config.StateModeSynth {
+		decision, err := ParseSynthesisDecision(structuredOutputCandidate(result))
+		if err != nil {
+			return fmt.Errorf("runtime: output_contract: %w", err)
+		}
+		result.SynthesisDecision = decision
+		return nil
+	}
+	return ValidateOutputContract(agent, result)
+}
+
 func structuredOutputCandidate(result *Result) string {
 	if result == nil {
 		return ""
