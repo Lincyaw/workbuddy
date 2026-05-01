@@ -108,3 +108,19 @@ The v0.4 worker speaks the original "spawn agent in-process" path; it does not l
 - The on-disk binary path (`/usr/local/bin/workbuddy` or `~/.local/bin/workbuddy`) is unchanged.
 - `deploy upgrade` for a single named unit (`--name workbuddy-coordinator`) still runs the binary swap + restart on that one unit. `--bundle` is purely additive: it backfills the supervisor unit if a v0.4 install is detected.
 - The supervisor unit deliberately uses `KillMode=process`. Restarting it (e.g. for a binary swap) leaves the agent subprocesses running, reparented to systemd, so the next supervisor invocation reattaches via the on-disk events log. A "drain" mode that waits for in-flight agents to finish before swapping the supervisor binary is intentionally deferred to v0.5.x.
+
+## Upgrading to session-data-ownership refactor (v0.5.x → v0.6 candidate)
+
+**Architecture change.** The `sessions` and `agent_sessions` tables now live on the **worker**, not the coordinator. The coordinator opens its DB via `NewCoordinatorStore`, which idempotently drops both tables on startup. Session reads on the coordinator (`/api/v1/sessions`, `/api/v1/sessions/{id}[/events|/stream]`, and the issue-detail session list) are served by `internal/sessionproxy` — a fan-out / reverse-proxy that resolves `session_id → worker_id → workers.audit_url` and forwards the request to the worker's audit HTTP server (started via `--audit-listen`, default `127.0.0.1:0`). See `internal/sessionproxy/resolver.go` for the routing rules.
+
+**Deploy order: workers first, then coordinator.** The new coordinator's `dropLegacySessionTables` removes the rows it used to read from. If you upgrade the coordinator first while workers are still on the old binary:
+
+- Old workers don't advertise `audit_url` → the coordinator records empty strings.
+- The single-session resolver treats empty `audit_url` as "fall back to the coordinator-local handler" (the same code path used by `workbuddy serve`'s in-process worker). The fan-out listing path also includes the coordinator-local store as a single dedupe-friendly source when any worker has no `audit_url`.
+- Result: sessions are still served via the coordinator-local fallback for `serve` installs and gracefully degraded for old workers — but live sessions written by the still-old workers go to the coordinator DB, are dropped at next coordinator restart, and appear as `worker offline` until you upgrade the worker. Upgrade workers first to skip the gap entirely.
+
+`workbuddy serve` is unaffected. The in-process worker shares the coordinator's DB (one SQLite file, `NewStore` not `NewCoordinatorStore`), so the legacy session tables stay in place and the local fan-out fallback covers the empty-`audit_url` path.
+
+**Rollback caveat.** Once `dropLegacySessionTables` has run on a coordinator DB, the rows are gone. Rolling the coordinator binary back to a pre-Phase-3 build does **not** require manual SQL: `createTables` uses `CREATE TABLE IF NOT EXISTS`, so the old binary recreates empty `sessions` and `agent_sessions` on next startup and resumes writing into them as before. The dropped rows from before the rollback are unrecoverable, but the DB is functional. If you want to preserve the historical rows across a Phase-3 rollout, snapshot `.workbuddy/workbuddy.db` (or the coordinator-side DB path) before the upgrade.
+
+**`audit_url` scheme validation.** Worker registration now rejects `audit_url` values whose scheme is anything other than `http` or `https`, or whose host portion is empty. Empty `audit_url` continues to be accepted (it means "no audit listener configured" — sessionproxy falls back to the coordinator-local handler). Operators with custom registration tooling that previously sent placeholders like `none://disabled` must switch to either an empty string or a real `http://...` URL.
