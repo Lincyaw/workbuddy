@@ -52,6 +52,13 @@ type WorkerRecord struct {
 	Runtime       string
 	Hostname      string
 	MgmtBaseURL   string
+	// AuditURL is the worker-advertised base URL of its audit HTTP server
+	// (Phase 1 of the session-data ownership refactor). Empty when the
+	// worker did not start an audit listener (i.e. --audit-listen=disabled
+	// or older worker builds). Phase 2 will use this to proxy session
+	// reads from the coordinator to the worker that owns the data; Phase 1
+	// only persists it.
+	AuditURL      string
 	Status        string // online, offline
 	LastHeartbeat time.Time
 	RegisteredAt  time.Time

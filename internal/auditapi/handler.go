@@ -63,6 +63,15 @@ type Handler struct {
 	prDiffTTL       time.Duration
 	prDiffMu        sync.Mutex
 	prDiffCache     map[string]cachedPRDiff
+	// disableDiskOnlySynthesis suppresses the listDiskOnlySessions /
+	// buildDegradedFromDisk fallbacks. Worker-side audit servers (which own
+	// their session DB and disk artefacts atomically) set this to true so a
+	// missing DB row is reported as 404 rather than synthesized as
+	// "aborted_before_start". Coordinator-side handlers leave it false to
+	// preserve the operator-visible degraded fallback for split deployments
+	// where rows can lag the disk artefacts. See
+	// docs/decisions/2026-05-01-session-data-ownership.md.
+	disableDiskOnlySynthesis bool
 }
 
 type rolloutPRReader interface {
@@ -139,6 +148,15 @@ func (h *Handler) SetRolloutPRReader(reader rolloutPRReader) {
 	h.gh = reader
 }
 
+// SetDisableDiskOnlySynthesis controls whether the handler synthesizes
+// "aborted_before_start" responses from on-disk metadata.json files for
+// sessions that have no agent_sessions DB row. The coordinator path leaves
+// this false (the legacy behavior); worker-side audit servers set it true so
+// that the worker's own DB is treated as authoritative for session existence.
+func (h *Handler) SetDisableDiskOnlySynthesis(disabled bool) {
+	h.disableDiskOnlySynthesis = disabled
+}
+
 func (h *Handler) SetPRDiffTTL(ttl time.Duration) {
 	if ttl <= 0 {
 		h.prDiffTTL = 30 * time.Second
@@ -179,6 +197,15 @@ func (h *Handler) RegisterDashboard(mux *http.ServeMux) {
 // another handler such as audit.HTTPHandler).
 func (h *Handler) RegisterSessionsOnly(mux *http.ServeMux) {
 	mux.HandleFunc("/sessions/", h.handleSession)
+}
+
+// RegisterAPISessions mounts only the /api/v1/sessions and
+// /api/v1/sessions/{id...} JSON endpoints. Used by worker-side audit
+// servers that expose just the session subset of the dashboard API
+// (Phase 1 of the session-data ownership refactor).
+func (h *Handler) RegisterAPISessions(mux *http.ServeMux) {
+	mux.HandleFunc("/api/v1/sessions", h.handleAPISessions)
+	mux.HandleFunc("/api/v1/sessions/", h.handleAPISession)
 }
 
 type eventsResponse struct {
@@ -545,9 +572,14 @@ func (h *Handler) serveSessionDetail(w http.ResponseWriter, sessionID string) {
 		// so the operator can still see what happened. The response is
 		// flagged degraded=true so the SPA renders a "never produced any
 		// events" warning instead of an empty-looking normal session.
-		if resp, ok := h.buildDegradedFromDisk(sessionID); ok {
-			writeJSON(w, http.StatusOK, resp)
-			return
+		// Worker-side audit servers disable this synthesis (they own
+		// the DB+disk artefacts together; absence is real). Phase 1 of
+		// the session-data ownership refactor.
+		if !h.disableDiskOnlySynthesis {
+			if resp, ok := h.buildDegradedFromDisk(sessionID); ok {
+				writeJSON(w, http.StatusOK, resp)
+				return
+			}
 		}
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -1583,7 +1615,7 @@ func (h *Handler) listSessions(p sessionListParams) ([]sessionListResponse, erro
 	// degraded=no_db_row. Skipped when sessionsDir is unset (tests / split
 	// deployments without a sessions directory) or when filters were used —
 	// disk-walk filtering would be lossy and surprising.
-	if h.sessionsDir != "" && p.Repo == "" && p.AgentName == "" && p.IssueNum == 0 {
+	if !h.disableDiskOnlySynthesis && h.sessionsDir != "" && p.Repo == "" && p.AgentName == "" && p.IssueNum == 0 {
 		out = append(out, h.listDiskOnlySessions(seen)...)
 	}
 	return out, nil

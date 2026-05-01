@@ -60,6 +60,12 @@ type WorkerRegisterRequest struct {
 	Repos       []string `json:"repos,omitempty"`
 	Hostname    string   `json:"hostname"`
 	MgmtBaseURL string   `json:"mgmt_base_url,omitempty"`
+	// AuditURL is the worker-advertised base URL of its audit HTTP
+	// server. Phase 1 of the session-data ownership refactor: the
+	// coordinator persists this verbatim so Phase 2 can proxy session
+	// reads to the owning worker. Today's read paths still serve from
+	// the coordinator's own DB.
+	AuditURL string `json:"audit_url,omitempty"`
 }
 
 // TaskPollResponse is returned from GET /api/v1/tasks/poll when a task is
@@ -409,6 +415,7 @@ func (s *FullCoordinatorServer) HandleRegisterWorker(w http.ResponseWriter, r *h
 	req.Repo = strings.TrimSpace(req.Repo)
 	req.Runtime = strings.TrimSpace(req.Runtime)
 	req.MgmtBaseURL = strings.TrimRight(strings.TrimSpace(req.MgmtBaseURL), "/")
+	req.AuditURL = strings.TrimRight(strings.TrimSpace(req.AuditURL), "/")
 	if len(req.Repos) == 0 && req.Repo != "" {
 		req.Repos = []string{req.Repo}
 	}
@@ -433,7 +440,7 @@ func (s *FullCoordinatorServer) HandleRegisterWorker(w http.ResponseWriter, r *h
 			return
 		}
 	}
-	if err := s.Registry.RegisterWithRepos(req.WorkerID, req.Repo, req.Repos, req.Roles, req.Runtime, req.Hostname, req.MgmtBaseURL); err != nil {
+	if err := s.Registry.RegisterWithRepos(req.WorkerID, req.Repo, req.Repos, req.Roles, req.Runtime, req.Hostname, req.MgmtBaseURL, req.AuditURL); err != nil {
 		CoordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -444,6 +451,7 @@ func (s *FullCoordinatorServer) HandleRegisterWorker(w http.ResponseWriter, r *h
 		"repos":     req.Repos,
 		"hostname":  req.Hostname,
 		"mgmt_url":  req.MgmtBaseURL,
+		"audit_url": req.AuditURL,
 	})
 	CoordWriteJSON(w, http.StatusCreated, map[string]string{"status": "registered"})
 }
