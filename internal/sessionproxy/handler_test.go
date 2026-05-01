@@ -399,6 +399,78 @@ func TestFanoutCacheHit(t *testing.T) {
 	}
 }
 
+// TestFanoutCacheInvalidationOnWorkerRegister verifies the Phase 3
+// invalidation hook: after the first fan-out call caches the listing,
+// adding a new worker and calling InvalidateCache makes the next
+// listing visit BOTH workers, not just the cached set.
+func TestFanoutCacheInvalidationOnWorkerRegister(t *testing.T) {
+	now := time.Now().UTC()
+	a := startFanoutWorker(t, "worker-a", []map[string]any{
+		{"session_id": "s-1", "created_at": now.Format(time.RFC3339)},
+	})
+	st, err := store.NewStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.InsertWorker(store.WorkerRecord{ID: "worker-a", Repo: "org/repo", AuditURL: a.w.URL(), Status: "online"}); err != nil {
+		t.Fatal(err)
+	}
+
+	dispatched := make(map[string]int)
+	var dispatchMu sync.Mutex
+	h := NewHandler(HandlerConfig{Resolver: NewResolver(st), AuthToken: "tok"})
+	h.dispatchHook = func(workerID string) {
+		dispatchMu.Lock()
+		defer dispatchMu.Unlock()
+		dispatched[workerID]++
+	}
+
+	// First call: only worker-a is registered.
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil))
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("call 1 status = %d", rec1.Code)
+	}
+
+	// Second call: still cached → no new dispatch.
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("call 2 status = %d", rec2.Code)
+	}
+	if rec2.Header().Get("X-Workbuddy-Cache") != "hit" {
+		t.Fatalf("call 2 should be a cache hit, got header %q", rec2.Header().Get("X-Workbuddy-Cache"))
+	}
+
+	// Add worker-b and invalidate.
+	b := startFanoutWorker(t, "worker-b", []map[string]any{
+		{"session_id": "s-2", "created_at": now.Format(time.RFC3339)},
+	})
+	if err := st.InsertWorker(store.WorkerRecord{ID: "worker-b", Repo: "org/repo", AuditURL: b.w.URL(), Status: "online"}); err != nil {
+		t.Fatal(err)
+	}
+	h.InvalidateCache()
+
+	// Third call: cache cleared, should hit BOTH workers and surface s-2.
+	rec3 := httptest.NewRecorder()
+	h.ServeHTTP(rec3, httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil))
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("call 3 status = %d", rec3.Code)
+	}
+	if rec3.Header().Get("X-Workbuddy-Cache") == "hit" {
+		t.Fatalf("call 3 should NOT be a cache hit after InvalidateCache")
+	}
+	dispatchMu.Lock()
+	defer dispatchMu.Unlock()
+	if got := dispatched["worker-b"]; got != 1 {
+		t.Fatalf("worker-b dispatched %d times, want 1 (was the new worker visible after invalidation?)", got)
+	}
+	if !strings.Contains(rec3.Body.String(), `"s-2"`) {
+		t.Fatalf("call 3 body missing new worker's session: %s", rec3.Body.String())
+	}
+}
+
 func TestProxyLocalLoopbackShortCircuits(t *testing.T) {
 	// audit_url points at the coordinator's loopback. Resolver should
 	// flag Local=true and the proxy should hand the request to the

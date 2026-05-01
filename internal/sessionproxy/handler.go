@@ -361,24 +361,72 @@ func (h *Handler) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	repo := strings.TrimSpace(q.Get("repo"))
-	agent := strings.TrimSpace(q.Get("agent"))
-	issue := strings.TrimSpace(q.Get("issue"))
-	limitRaw := strings.TrimSpace(q.Get("limit"))
-	offsetRaw := strings.TrimSpace(q.Get("offset"))
 
-	cacheKey := fanoutCacheKey(repo, agent, issue, limitRaw, offsetRaw)
-	if entry, ok := h.cacheGet(cacheKey); ok {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Workbuddy-Cache", "hit")
-		_, _ = w.Write(entry.body)
-		return
-	}
-
-	workers, err := h.resolver.CandidateWorkers(repo)
+	merged, offline, fromCache, err := h.fanOutListing(r.Context(), q)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "candidate workers lookup failed", "")
 		return
+	}
+	if fromCache {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Workbuddy-Cache", "hit")
+		bareBody, mErr := json.Marshal(merged)
+		if mErr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "encode response failed", "")
+			return
+		}
+		if len(offline) > 0 {
+			w.Header().Set("X-Workbuddy-Worker-Offline", strings.Join(offline, ","))
+		}
+		_, _ = w.Write(bareBody)
+		return
+	}
+
+	bareBody, err := json.Marshal(merged)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "encode response failed", "")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if len(offline) > 0 {
+		w.Header().Set("X-Workbuddy-Worker-Offline", strings.Join(offline, ","))
+	}
+	// Backwards-compat with the SPA: the existing reader expects a bare
+	// JSON array, not an envelope. We serve the array directly and fold
+	// worker_offline into a custom response header. The frontend reads
+	// the header in fetchSessions to render an "N workers offline" banner.
+	_, _ = w.Write(bareBody)
+}
+
+// fanOutListing performs the cross-worker session fan-out used by
+// /api/v1/sessions and by coordinator-internal callers (issue-detail).
+// Returns the merged rows, the list of offline worker IDs, a flag
+// indicating the result was served from cache (caller may want to mark
+// the response with X-Workbuddy-Cache), and any setup error.
+//
+// On a partial response (some workers offline), the result is NOT
+// cached — the next call should retry the offline ones in case they
+// recovered. On a fully successful response, the merged rows are cached
+// for cacheTTL.
+func (h *Handler) fanOutListing(parent context.Context, q map[string][]string) (rows []map[string]any, offline []string, fromCache bool, err error) {
+	repo := firstQueryValue(q, "repo")
+	agent := firstQueryValue(q, "agent")
+	issue := firstQueryValue(q, "issue")
+	limitRaw := firstQueryValue(q, "limit")
+	offsetRaw := firstQueryValue(q, "offset")
+
+	cacheKey := fanoutCacheKey(repo, agent, issue, limitRaw, offsetRaw)
+	if entry, ok := h.cacheGet(cacheKey); ok {
+		var cached []map[string]any
+		if jErr := json.Unmarshal(entry.body, &cached); jErr == nil {
+			return cached, entry.workerOffline, true, nil
+		}
+	}
+
+	workers, lookupErr := h.resolver.CandidateWorkers(repo)
+	if lookupErr != nil {
+		return nil, nil, false, lookupErr
 	}
 
 	type workerResult struct {
@@ -387,7 +435,7 @@ func (h *Handler) handleList(w http.ResponseWriter, r *http.Request) {
 		err      error
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), h.overallTimeout)
+	ctx, cancel := context.WithTimeout(parent, h.overallTimeout)
 	defer cancel()
 
 	results := make(chan workerResult, len(workers))
@@ -415,7 +463,7 @@ func (h *Handler) handleList(w http.ResponseWriter, r *http.Request) {
 
 	merged := make([]map[string]any, 0, 32)
 	seen := make(map[string]struct{})
-	offline := make([]string, 0)
+	offline = make([]string, 0)
 	hadAnyError := false
 	for res := range results {
 		if res.err != nil {
@@ -460,30 +508,45 @@ func (h *Handler) handleList(w http.ResponseWriter, r *http.Request) {
 		sort.Strings(offline)
 	}
 
-	// Backwards-compat with the SPA: the existing reader expects a bare
-	// JSON array, not an envelope. We serve the array directly and
-	// fold worker_offline into a custom response header. Phase 3 may
-	// upgrade to an envelope shape with per-row degraded fields once
-	// the SPA is updated to read it (Accept-versioned).
-	bareBody, err := json.Marshal(merged)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "encode response failed", "")
-		return
-	}
-
 	if !hadAnyError {
-		h.cacheSet(cacheKey, listingCacheEntry{
-			body:          bareBody,
-			expiresAt:     h.now().Add(h.cacheTTL),
-			workerOffline: offline,
-		})
+		bareBody, mErr := json.Marshal(merged)
+		if mErr == nil {
+			h.cacheSet(cacheKey, listingCacheEntry{
+				body:          bareBody,
+				expiresAt:     h.now().Add(h.cacheTTL),
+				workerOffline: offline,
+			})
+		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if len(offline) > 0 {
-		w.Header().Set("X-Workbuddy-Worker-Offline", strings.Join(offline, ","))
+	return merged, offline, false, nil
+}
+
+// ListSessionsForRepoIssue is a programmatic entry point onto the same
+// fan-out used by /api/v1/sessions. Used by coordinator-internal callers
+// (the issue-detail endpoint) that need the merged rows directly without
+// going through the HTTP wrapper. Errors during candidate lookup are
+// returned; per-worker errors are folded into the offline list, same as
+// the HTTP path.
+//
+// Phase 3 (REQ-122): added so the coordinator's issue-detail handler
+// can stop reading from the now-dropped local sessions table.
+func (h *Handler) ListSessionsForRepoIssue(ctx context.Context, repo string, issueNum int) ([]map[string]any, []string, error) {
+	q := map[string][]string{"repo": {repo}}
+	if issueNum > 0 {
+		q["issue"] = []string{strconv.Itoa(issueNum)}
 	}
-	_, _ = w.Write(bareBody)
+	rows, offline, _, err := h.fanOutListing(ctx, q)
+	return rows, offline, err
+}
+
+// firstQueryValue returns q[key][0] or "" — pulls the first non-empty
+// value out of a parsed query map.
+func firstQueryValue(q map[string][]string, key string) string {
+	if vs, ok := q[key]; ok && len(vs) > 0 {
+		return strings.TrimSpace(vs[0])
+	}
+	return ""
 }
 
 // fetchWorkerListing pushes the same filters down to one worker.

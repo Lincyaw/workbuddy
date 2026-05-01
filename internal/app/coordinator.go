@@ -41,6 +41,12 @@ type FullCoordinatorServer struct {
 	// false (Secure required); set true only for HTTP reverse-proxy fronts
 	// where TLS terminates upstream.
 	CookieInsecure bool
+	// OnWorkerMembershipChange is fired after a successful worker
+	// registration or unregistration. Phase 3 (REQ-122) uses this to
+	// invalidate sessionproxy.Handler's listing cache so a freshly-
+	// registered worker becomes visible immediately rather than after the
+	// 5s TTL. nil = no-op.
+	OnWorkerMembershipChange func()
 }
 
 // SessionCookieName is the HTTP cookie that carries the bearer token after
@@ -394,6 +400,12 @@ func (s *FullCoordinatorServer) HandleWorkerByPath(w http.ResponseWriter, r *htt
 			}
 			return
 		}
+		// Phase 3 (REQ-122): drop the sessionproxy listing cache so the
+		// removed worker stops showing up in the next /api/v1/sessions
+		// call without waiting for the 5s TTL.
+		if hook := s.OnWorkerMembershipChange; hook != nil {
+			hook()
+		}
 		CoordWriteJSON(w, http.StatusOK, map[string]string{"status": "unregistered"})
 	default:
 		CoordWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -453,6 +465,12 @@ func (s *FullCoordinatorServer) HandleRegisterWorker(w http.ResponseWriter, r *h
 		"mgmt_url":  req.MgmtBaseURL,
 		"audit_url": req.AuditURL,
 	})
+	// Phase 3 (REQ-122): drop the sessionproxy listing cache so the new
+	// worker shows up in the next /api/v1/sessions call without waiting
+	// for the 5s TTL.
+	if hook := s.OnWorkerMembershipChange; hook != nil {
+		hook()
+	}
 	CoordWriteJSON(w, http.StatusCreated, map[string]string{"status": "registered"})
 }
 
