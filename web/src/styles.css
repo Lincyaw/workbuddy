@@ -1323,6 +1323,63 @@ a:hover {
   font-size: 20px;
 }
 
+/* Phase 3 (REQ-122): worker_offline gets a polite info-style card.
+   Suppresses the danger-tinted background from the .wb-degraded-card
+   shorthand above. */
+.wb-degraded-card.wb-degraded-card-info {
+  background: color-mix(in srgb, var(--bg-canvas) 80%, var(--bg-panel));
+  border-color: var(--border-hairline);
+  color: var(--text-secondary);
+}
+
+.wb-degraded-card.wb-degraded-card-info h2 {
+  color: var(--text-primary);
+}
+
+/* Banner shown above the sessions table when one or more workers are
+   currently unreachable (X-Workbuddy-Worker-Offline). */
+.wb-offline-banner {
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-canvas) 80%, var(--bg-panel));
+  border: 1px solid var(--border-hairline);
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+/* Standalone panel rendered in SessionDetail when the proxy returns
+   503 worker_offline before any meta arrives. */
+.wb-offline-panel {
+  padding: 18px 20px;
+  border-color: var(--border-hairline);
+}
+
+.wb-offline-panel h2 {
+  margin: 0 0 8px;
+  font-size: 18px;
+  color: var(--text-primary);
+}
+
+.wb-offline-panel p {
+  margin: 0 0 6px;
+  color: var(--text-secondary);
+}
+
+.wb-offline-panel .muted {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* Per-row pill for worker_offline rows in the sessions list. Gray,
+   not danger — the worker being unreachable isn't the session's
+   fault. */
+.wb-badge.wb-badge-offline {
+  background: color-mix(in srgb, var(--bg-canvas) 80%, var(--border-hairline));
+  color: var(--text-muted);
+  border: 1px solid var(--border-hairline);
+}
+
 .wb-reload-dialog {
   position: fixed;
   inset: 0;

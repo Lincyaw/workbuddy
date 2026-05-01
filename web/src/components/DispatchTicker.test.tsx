@@ -38,9 +38,15 @@ describe('DispatchTicker', () => {
     vi.clearAllMocks();
   });
 
+  // Phase 3 (REQ-122): fetchSessions now returns
+  // {rows, offlineWorkers}. Tests build the result via this helper.
+  function ok(rows: ReturnType<typeof makeSession>[], offlineWorkers: string[] = []) {
+    return { rows, offlineWorkers };
+  }
+
   it('debounces polling while a previous request is still in flight', async () => {
     vi.useFakeTimers();
-    const pending = deferred<ReturnType<typeof makeSession>[]>();
+    const pending = deferred<ReturnType<typeof ok>>();
     vi.mocked(fetchSessions).mockReturnValue(pending.promise as never);
 
     const { container } = render(<DispatchTicker />);
@@ -49,12 +55,12 @@ describe('DispatchTicker', () => {
     await vi.advanceTimersByTimeAsync(TICKER_POLL_MS * 2);
     expect(fetchSessions).toHaveBeenCalledTimes(1);
 
-    pending.resolve([makeSession()]);
+    pending.resolve(ok([makeSession()]));
     await waitFor(() => expect(container.textContent).toContain('DISPATCHED'));
   });
 
   it('pauses the marquee while hovered', async () => {
-    vi.mocked(fetchSessions).mockResolvedValue([makeSession()] as never);
+    vi.mocked(fetchSessions).mockResolvedValue(ok([makeSession()]) as never);
     const { container } = render(<DispatchTicker />);
     await waitFor(() => expect(container.textContent).toContain('DISPATCHED'));
     const ticker = container.querySelector('.dispatch-ticker') as HTMLElement;
@@ -67,7 +73,7 @@ describe('DispatchTicker', () => {
   it('dims after an error and keeps the last successful batch visible', async () => {
     vi.useFakeTimers();
     vi.mocked(fetchSessions)
-      .mockResolvedValueOnce([makeSession()] as never)
+      .mockResolvedValueOnce(ok([makeSession()]) as never)
       .mockRejectedValueOnce(new Error('boom') as never);
 
     const { container } = render(<DispatchTicker />);

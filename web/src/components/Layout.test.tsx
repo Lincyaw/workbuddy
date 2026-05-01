@@ -4,7 +4,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Layout } from './Layout';
 
 vi.mock('../api/sessions', () => ({
-  fetchSessions: vi.fn().mockResolvedValue([]),
+  // Phase 3 (REQ-122): fetchSessions returns {rows, offlineWorkers}.
+  fetchSessions: vi.fn().mockResolvedValue({ rows: [], offlineWorkers: [] }),
 }));
 
 function renderLayout() {

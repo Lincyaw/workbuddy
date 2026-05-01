@@ -81,6 +81,7 @@ export function Sessions() {
   const location = useLocation();
   const filter = useMemo(() => parseQuery(location.query), [location.query]);
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
+  const [offlineWorkers, setOfflineWorkers] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [liveConnected, setLiveConnected] = useState(false);
@@ -99,8 +100,8 @@ export function Sessions() {
     let cancelled = false;
     async function loadOptions() {
       try {
-        const items = await fetchSessions({ limit: OPTIONS_LIMIT });
-        if (!cancelled) setOptionsSource(items || []);
+        const result = await fetchSessions({ limit: OPTIONS_LIMIT });
+        if (!cancelled) setOptionsSource(result.rows || []);
       } catch {
         // dropdown options are best-effort; do not block the page on failure
       }
@@ -142,8 +143,9 @@ export function Sessions() {
       offset: filter.offset,
     };
     try {
-      const items = await fetchSessions(query);
-      const nextRows = items || [];
+      const result = await fetchSessions(query);
+      const nextRows = result.rows || [];
+      setOfflineWorkers(result.offlineWorkers || []);
       if (reason === 'sse') {
         const flashing = nextRows
           .filter((row) => previousRows.current[row.session_id]?.status !== row.status)
@@ -190,6 +192,7 @@ export function Sessions() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'request failed');
       setSessions([]);
+      setOfflineWorkers([]);
       setRolloutPanels([]);
     } finally {
       setLoading(false);
@@ -330,6 +333,15 @@ export function Sessions() {
       </div>
 
       {error ? <div class="error-banner">Failed to load sessions: {error}</div> : null}
+
+      {offlineWorkers.length > 0 ? (
+        <div class="info-banner wb-offline-banner" role="status">
+          {offlineWorkers.length === 1
+            ? `1 worker offline: ${offlineWorkers[0]}`
+            : `${offlineWorkers.length} workers offline: ${offlineWorkers.join(', ')}`}
+          {' — sessions on these workers may be temporarily missing from the list.'}
+        </div>
+      ) : null}
 
       {rolloutPanels.map((panel) => (
         <RolloutGroupPanel

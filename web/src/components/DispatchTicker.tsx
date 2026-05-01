@@ -155,10 +155,11 @@ export function DispatchTicker() {
       if (inFlightRef.current) return;
       inFlightRef.current = true;
       try {
-        const sessions = await fetchSessions({ limit: 40 });
+        const result = await fetchSessions({ limit: 40 });
         if (cancelled) return;
+        const sessions = result.rows || [];
         setEntries((current) => {
-          const next = buildTickerEntries(sessions || [], previousRef.current, current);
+          const next = buildTickerEntries(sessions, previousRef.current, current);
           const topId = next[0]?.id ?? null;
           if (topId && lastTopIdRef.current !== null && topId !== lastTopIdRef.current) {
             setFlashing(true);
@@ -174,7 +175,7 @@ export function DispatchTicker() {
           return next;
         });
         previousRef.current = Object.fromEntries(
-          (sessions || []).map((session) => [session.session_id, session]),
+          sessions.map((session) => [session.session_id, session]),
         );
         setDegraded(false);
       } catch {

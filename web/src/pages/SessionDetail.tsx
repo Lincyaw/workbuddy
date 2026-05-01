@@ -73,6 +73,15 @@ export function SessionDetail() {
 
   const [meta, setMeta] = useState<SessionDetailMeta | null>(null);
   const [metaError, setMetaError] = useState<string | null>(null);
+  // workerOfflineMeta is set when the detail API returns 503 with a
+  // worker_offline payload — Phase 3 (REQ-122). We surface a polite
+  // info panel instead of falling into the red "session never produced
+  // any events" warning, and skip opening the SSE stream that would
+  // immediately fail. nil = no offline shape, render normally.
+  const [workerOfflineMeta, setWorkerOfflineMeta] = useState<{
+    workerID: string;
+    degradedReason: string;
+  } | null>(null);
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [eventsTotal, setEventsTotal] = useState<number | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -101,6 +110,7 @@ export function SessionDetail() {
     let aborted = false;
     setMeta(null);
     setMetaError(null);
+    setWorkerOfflineMeta(null);
     setEvents([]);
     setEventsTotal(null);
     setLoadError(null);
@@ -113,7 +123,23 @@ export function SessionDetail() {
         if (!aborted) setMeta(response);
       })
       .catch((err) => {
-        if (!aborted) setMetaError(err instanceof Error ? err.message : 'failed to load session');
+        if (aborted) return;
+        // Phase 3 (REQ-122): the proxy emits HTTP 503 with a
+        // {degraded_reason: 'worker_offline', worker_id: ...} payload
+        // when it cannot reach the owning worker. Render a polite
+        // info panel rather than the red degraded card, and avoid
+        // opening the SSE stream (which would 503 too).
+        const apiErr = err as { status?: number; body?: unknown };
+        const body = (apiErr?.body || {}) as Record<string, unknown>;
+        const reason = typeof body.degraded_reason === 'string' ? body.degraded_reason : '';
+        if (apiErr?.status === 503 && reason === 'worker_offline') {
+          setWorkerOfflineMeta({
+            workerID: typeof body.worker_id === 'string' ? body.worker_id : '',
+            degradedReason: reason,
+          });
+          return;
+        }
+        setMetaError(err instanceof Error ? err.message : 'failed to load session');
       });
 
     fetchSessionEvents(sessionID, { tail: true, limit: INITIAL_LIMIT })
@@ -126,7 +152,12 @@ export function SessionDetail() {
         setEventsTotal(typeof response.total === 'number' ? response.total : 0);
       })
       .catch((err) => {
-        if (!aborted) setLoadError(err instanceof Error ? err.message : 'failed to load events');
+        if (aborted) return;
+        const apiErr = err as { status?: number };
+        // Don't surface the events-side 503 as a separate error — the
+        // worker_offline info panel already covers the situation.
+        if (apiErr?.status === 503) return;
+        setLoadError(err instanceof Error ? err.message : 'failed to load events');
       });
 
     return () => {
@@ -136,7 +167,11 @@ export function SessionDetail() {
   }, [sessionID]);
 
   useEffect(() => {
-    if (!sessionID || !follow) {
+    if (!sessionID || !follow || workerOfflineMeta) {
+      // Phase 3 (REQ-122): skip the SSE stream entirely when the
+      // proxy already told us the worker is unreachable. Otherwise
+      // EventSource opens a connection that 503s on the first byte
+      // and the SPA flips into a confusing onerror loop.
       eventSourceRef.current?.close();
       setStreamLive(false);
       return;
@@ -202,6 +237,36 @@ export function SessionDetail() {
     return (
       <Layout>
         <div class="error-banner">Missing session id in URL.</div>
+      </Layout>
+    );
+  }
+
+  if (workerOfflineMeta) {
+    // Phase 3 (REQ-122): render a polite info panel when the proxy
+    // already told us the worker is unreachable. We don't have a
+    // useful timeline to show, and the red "never produced any
+    // events" warning misrepresents the situation.
+    return (
+      <Layout>
+        <section class="page-header page-header-tight">
+          <div>
+            <p class="page-eyebrow">session trace</p>
+            <h1>{shortID(sessionID, 18)}</h1>
+          </div>
+        </section>
+        <div class="surface-card wb-offline-panel" role="status">
+          <h2>This worker is currently unreachable</h2>
+          <p>
+            The session data lives on{' '}
+            <code>{workerOfflineMeta.workerID || 'an unknown worker'}</code>,
+            which the coordinator could not contact. Come back when the
+            worker reconnects — the session timeline will reload
+            automatically.
+          </p>
+          <p class="muted">
+            HTTP 503 · degraded_reason: <code>{workerOfflineMeta.degradedReason}</code>
+          </p>
+        </div>
       </Layout>
     );
   }
