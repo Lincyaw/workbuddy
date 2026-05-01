@@ -2247,7 +2247,6 @@ requirements:
       - cmd/admin_restart_issue.go
       - cmd/worker.go
       - cmd/deploy.go
-      - cmd/deprecation.go
       - README.md
       - docs/implemented/distributed-topology-and-cli.md
       - docs/implemented/pipeline-observability-and-diagnosis.md
