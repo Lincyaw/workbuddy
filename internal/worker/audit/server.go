@@ -21,10 +21,10 @@
 // header where the token matches WORKBUDDY_AUTH_TOKEN. Missing/mismatched
 // tokens get HTTP 401.
 //
-// The handler reuses internal/auditapi.Handler with the disk-only-fallback
-// disabled: the worker's DB is authoritative for session existence, so a
-// missing row is a real 404 rather than a synthesized
-// `aborted_before_start` response. Events/stream paths reuse
+// The handler reuses internal/auditapi.Handler. Phase 3 of the
+// session-data ownership refactor (REQ-122) deleted the disk-only
+// synthesis fallback in auditapi.Handler entirely, so a missing row is a
+// real 404 — no toggle needed. Events/stream paths reuse
 // internal/webui.Handler unchanged.
 package audit
 
@@ -105,7 +105,6 @@ func Start(cfg Config) (*Server, error) {
 func buildMux(cfg Config) http.Handler {
 	dashboard := auditapi.NewHandler(cfg.Store)
 	dashboard.SetSessionsDir(cfg.SessionsDir)
-	dashboard.SetDisableDiskOnlySynthesis(true)
 
 	events := webui.NewHandler(cfg.Store)
 	events.SetSessionsDir(cfg.SessionsDir)
