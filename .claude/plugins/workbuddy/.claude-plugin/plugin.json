@@ -1,6 +1,6 @@
 {
   "name": "workbuddy",
-  "version": "0.1.0",
+  "version": "0.4.39",
   "description": "Operate workbuddy — GitHub Issue-driven agent orchestration platform. Covers repo setup, deployment, issue creation, pipeline monitoring, and troubleshooting.",
   "author": {
     "name": "Lincyaw",
