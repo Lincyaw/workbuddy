@@ -1,12 +1,15 @@
 package sessionproxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -438,15 +441,18 @@ func (h *Handler) fanOutListing(parent context.Context, q map[string][]string) (
 	ctx, cancel := context.WithTimeout(parent, h.overallTimeout)
 	defer cancel()
 
-	results := make(chan workerResult, len(workers))
+	results := make(chan workerResult, len(workers)+1)
 	var wg sync.WaitGroup
+	// emptyAuditWorkers collects workers that registered without an
+	// audit_url. When a local handler is configured we serve them all via
+	// a single in-process call (the coordinator-local store is shared
+	// across workers in `serve` mode, so one fetch covers them); without a
+	// local handler they degrade to "offline" with reason no_audit_url.
+	emptyAuditWorkers := make([]string, 0)
 	for _, worker := range workers {
 		auditURL := strings.TrimRight(strings.TrimSpace(worker.AuditURL), "/")
 		if auditURL == "" {
-			// Worker registered but did not advertise an audit_url.
-			// Treat as offline: a Phase 1 worker with --audit-listen
-			// disabled has no session API to fan-out to.
-			results <- workerResult{workerID: worker.ID, err: ErrAuditURLMissing}
+			emptyAuditWorkers = append(emptyAuditWorkers, worker.ID)
 			continue
 		}
 		wg.Add(1)
@@ -458,6 +464,28 @@ func (h *Handler) fanOutListing(parent context.Context, q map[string][]string) (
 			}
 			results <- workerResult{workerID: workerID, rows: rows, err: ferr}
 		}(worker.ID, auditURL)
+	}
+	if len(emptyAuditWorkers) > 0 {
+		if h.local != nil {
+			// Single shared call — the local store backs every worker
+			// with an empty audit_url, so dedupe-by-session-id later
+			// hides the overlap. Use the first worker's ID as the
+			// dispatch label for parity with the per-worker path.
+			label := emptyAuditWorkers[0]
+			wg.Add(1)
+			go func(workerID string) {
+				defer wg.Done()
+				rows, ferr := h.fetchLocalListing(ctx, q)
+				if h.dispatchHook != nil {
+					h.dispatchHook(workerID)
+				}
+				results <- workerResult{workerID: workerID, rows: rows, err: ferr}
+			}(label)
+		} else {
+			for _, id := range emptyAuditWorkers {
+				results <- workerResult{workerID: id, err: ErrAuditURLMissing}
+			}
+		}
 	}
 	go func() { wg.Wait(); close(results) }()
 
@@ -583,6 +611,45 @@ func (h *Handler) fetchWorkerListing(ctx context.Context, workerID, auditURL str
 	var rows []map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
 		return nil, fmt.Errorf("worker %s: decode body: %w", workerID, err)
+	}
+	return rows, nil
+}
+
+// fetchLocalListing serves the same /api/v1/sessions listing through
+// the in-process local handler so fan-out can include sessions whose
+// owning worker has no audit_url (e.g. `workbuddy serve` doesn't pass
+// --audit-listen, or a pre-Phase-1 worker rolled before its coordinator
+// was upgraded). The caller is responsible for the empty-handler guard.
+func (h *Handler) fetchLocalListing(ctx context.Context, query map[string][]string) ([]map[string]any, error) {
+	if h.local == nil {
+		return nil, nil
+	}
+	target := "/api/v1/sessions"
+	values := url.Values{}
+	for _, key := range []string{"repo", "agent", "issue", "limit", "offset"} {
+		if vs, ok := query[key]; ok && len(vs) > 0 && vs[0] != "" {
+			values.Set(key, vs[0])
+		}
+	}
+	if encoded := values.Encode(); encoded != "" {
+		target += "?" + encoded
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, fmt.Errorf("local listing: build request: %w", err)
+	}
+	rec := httptest.NewRecorder()
+	h.local.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		return nil, fmt.Errorf("local listing: status %d: %w", rec.Code, ErrWorkerOffline)
+	}
+	body := rec.Body.Bytes()
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, nil
+	}
+	var rows []map[string]any
+	if jerr := json.Unmarshal(body, &rows); jerr != nil {
+		return nil, fmt.Errorf("local listing: decode body: %w", jerr)
 	}
 	return rows, nil
 }

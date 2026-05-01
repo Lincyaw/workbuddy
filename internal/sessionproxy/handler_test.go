@@ -495,3 +495,121 @@ func TestProxyLocalLoopbackShortCircuits(t *testing.T) {
 	}
 }
 
+// TestProxyEmptyAuditURLFallsBackToLocal exercises the must-fix #1
+// behaviour: a worker that registered with an empty audit_url (typical
+// in `serve` mode where the in-process worker doesn't pass
+// --audit-listen, or rolling a new coordinator out before its workers)
+// should fall through to the coordinator's local handler instead of
+// 503-ing with "worker has no audit_url".
+func TestProxyEmptyAuditURLFallsBackToLocal(t *testing.T) {
+	called := false
+	local := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"session_id":"sess-empty","status":"running"}`))
+	})
+	st := newTestStore(t, "sess-empty", "worker-empty", "")
+	h := NewHandler(HandlerConfig{
+		Resolver:  NewResolver(st),
+		Local:     local,
+		AuthToken: "tok",
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/sess-empty", nil)
+	h.ServeHTTP(rec, req)
+	if !called {
+		t.Fatalf("local handler not called for empty audit_url; status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"sess-empty"`) {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+}
+
+// TestFanoutEmptyAuditURLIncludesLocalListing exercises the must-fix #1
+// fan-out behaviour: when ANY candidate worker has an empty audit_url
+// AND a local handler is configured, the fan-out makes one call into
+// the local handler so the coordinator-local store contributes rows
+// instead of those workers being silently dropped as "offline".
+func TestFanoutEmptyAuditURLIncludesLocalListing(t *testing.T) {
+	now := time.Now().UTC()
+	a := startFanoutWorker(t, "worker-a", []map[string]any{
+		{"session_id": "remote-1", "created_at": now.Format(time.RFC3339)},
+	})
+	st, err := store.NewStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.InsertWorker(store.WorkerRecord{ID: "worker-a", Repo: "org/repo", AuditURL: a.w.URL(), Status: "online"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertWorker(store.WorkerRecord{ID: "worker-empty", Repo: "org/repo", AuditURL: "", Status: "online"}); err != nil {
+		t.Fatal(err)
+	}
+
+	localHits := 0
+	local := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		localHits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"session_id":"local-1","created_at":"` + now.Add(-15*time.Second).Format(time.RFC3339) + `"}]`))
+	})
+
+	h := NewHandler(HandlerConfig{
+		Resolver:  NewResolver(st),
+		Local:     local,
+		AuthToken: "tok",
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode: %v body=%s", err, rec.Body.String())
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d body=%s", len(rows), rec.Body.String())
+	}
+	got := []string{rows[0]["session_id"].(string), rows[1]["session_id"].(string)}
+	if got[0] != "remote-1" || got[1] != "local-1" {
+		t.Fatalf("rows order = %v, want [remote-1 local-1]", got)
+	}
+	if localHits != 1 {
+		t.Fatalf("local handler hit %d times, want 1 (one shared call covers all empty-audit_url workers)", localHits)
+	}
+	if hdr := rec.Header().Get("X-Workbuddy-Worker-Offline"); hdr != "" {
+		t.Fatalf("X-Workbuddy-Worker-Offline = %q, want empty (empty-audit_url workers should not be marked offline when local fallback succeeds)", hdr)
+	}
+}
+
+// TestFanoutEmptyAuditURLNoLocalHandlerMarksOffline verifies the
+// degraded path: when no local handler is configured, an empty-audit_url
+// worker is reported as offline (so the SPA can render the banner).
+func TestFanoutEmptyAuditURLNoLocalHandlerMarksOffline(t *testing.T) {
+	st, err := store.NewStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.InsertWorker(store.WorkerRecord{ID: "worker-empty", Repo: "org/repo", AuditURL: "", Status: "online"}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewHandler(HandlerConfig{Resolver: NewResolver(st), AuthToken: "tok"})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Workbuddy-Worker-Offline"); got != "worker-empty" {
+		t.Fatalf("worker_offline = %q, want worker-empty", got)
+	}
+}
+

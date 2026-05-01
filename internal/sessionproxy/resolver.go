@@ -37,9 +37,12 @@ var (
 	// pre-bundle deployment whose data lives only on the coordinator's own
 	// disk, or the session_id is bogus.
 	ErrSessionNotRouted = errors.New("sessionproxy: session not routed")
-	// ErrAuditURLMissing means we found the owning worker but it never
-	// advertised an audit_url (Phase 1 worker not running --audit-listen,
-	// or a legacy worker that pre-dates Phase 1).
+	// ErrAuditURLMissing is retained for the fan-out listing path when a
+	// candidate worker has no audit_url AND no local handler is available
+	// to fall back to. The single-session resolver no longer returns this:
+	// an empty audit_url instead degrades to Resolution{Local: true} so the
+	// in-process serve topology and old-worker-without-audit-listen
+	// rollouts both succeed via the coordinator-local fallback.
 	ErrAuditURLMissing = errors.New("sessionproxy: worker has no audit_url")
 	// ErrWorkerOffline is reserved for the proxy/fan-out layers — the
 	// resolver itself does not call workers, so it does not return this
@@ -165,7 +168,20 @@ func (r *Resolver) Resolve(sessionID string) (*Resolution, error) {
 	}
 	auditURL := strings.TrimRight(strings.TrimSpace(worker.AuditURL), "/")
 	if auditURL == "" {
-		return nil, fmt.Errorf("worker %s: %w", workerID, ErrAuditURLMissing)
+		// Worker registered but never advertised an audit URL. Two real-
+		// world causes both want the same outcome:
+		//   1. `workbuddy serve` runs an in-process worker that doesn't
+		//      pass --audit-listen, so audit_url is empty even though
+		//      the data IS reachable via the shared coordinator DB.
+		//   2. An operator rolls a new coordinator out before upgrading
+		//      its workers; the old workers haven't learned to advertise
+		//      audit_url yet but their session data still exists on the
+		//      coordinator host's pre-Phase-2 disk store.
+		// Falling through to the local handler covers both. The caller
+		// (handler.serveLocal) returns 404 cleanly when the local store
+		// has nothing either, so the user-visible failure mode is "no
+		// session" instead of "503 worker has no audit_url".
+		return &Resolution{WorkerID: workerID, Local: true}, nil
 	}
 	if r.isLocalURL(auditURL) {
 		// audit_url points back at us. Avoid the dial-self loop.
