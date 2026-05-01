@@ -4341,3 +4341,47 @@ requirements:
       - web/src/components/RolloutGroupPanel.test.tsx
     deps:
       - REQ-117
+
+  - id: REQ-120
+    title: Worker-side session audit HTTP server (Phase 1 of session-data ownership refactor)
+    description: >
+      In the v0.5 3-unit bundle the worker writes session rows into its own
+      .workbuddy/worker.db while the coordinator's audit API reads
+      .workbuddy/workbuddy.db. There is no replication channel, so every
+      session created since the cutover is invisible to the audit API and
+      falls into the synthesized aborted_before_start path. Phase 1 of the
+      session-data ownership refactor stands up a worker-side audit HTTP
+      server that reads from the worker's own DB, and extends the
+      worker→coordinator register protocol to advertise that audit URL.
+      Phase 2 will rewire the coordinator to proxy session reads to the
+      owning worker; Phase 3 will delete the legacy synthesis paths. See
+      docs/decisions/2026-05-01-session-data-ownership.md.
+    priority: P0
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-120-1: `internal/worker/audit` exposes /api/v1/sessions, /api/v1/sessions/{id}, /events, and /stream backed by the worker's local store and sessionsDir, with disk-only aborted_before_start synthesis disabled (worker DB is authoritative)."
+      - "AC-120-2: the audit listener requires Authorization: Bearer <WORKBUDDY_AUTH_TOKEN> on every /api/v1/* request, and refuses to start when the token is empty (fail-closed)."
+      - "AC-120-3: `workbuddy worker` accepts --audit-listen (default 127.0.0.1:0; '' or 'disabled' opts out) and --audit-public-url for split-host advertised URLs."
+      - "AC-120-4: `workerclient.RegisterRequest` carries audit_url, the coordinator's /api/v1/workers/register handler reads it, and the workers table persists it via a new audit_url column added by ALTER TABLE migration."
+      - "AC-120-5: tests cover bearer-auth gating, list/detail/events happy paths, the no-disk-only-synthesis behavior, the migration adding audit_url to existing rows without data loss, and an integration round-trip exercising register + audit GET."
+    code:
+      - internal/worker/audit/server.go
+      - internal/worker/audit/auth.go
+      - internal/auditapi/handler.go
+      - internal/store/store.go
+      - internal/store/types.go
+      - internal/registry/registry.go
+      - internal/app/coordinator.go
+      - internal/workerclient/client.go
+      - cmd/worker.go
+      - cmd/worker_audit.go
+      - cmd/worker_repos.go
+      - docs/decisions/2026-05-01-session-data-ownership.md
+    tests:
+      - internal/worker/audit/server_test.go
+      - internal/store/store_audit_url_test.go
+      - cmd/worker_audit_test.go
+    deps:
+      - REQ-019
+      - REQ-028

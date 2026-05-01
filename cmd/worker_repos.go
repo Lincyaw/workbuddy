@@ -486,7 +486,7 @@ func resolveWorkerRepoBindings(opts *workerOpts, configRepo, defaultPath string)
 	return nil, fmt.Errorf("worker: repo is required")
 }
 
-func registerWorkerRepos(ctx context.Context, client *workerclient.Client, workerID string, roles []string, runtime, mgmtBaseURL string, bindings []workerRepoBinding) error {
+func registerWorkerRepos(ctx context.Context, client *workerclient.Client, workerID string, roles []string, runtime, mgmtBaseURL, auditURL string, bindings []workerRepoBinding) error {
 	if len(bindings) == 0 {
 		return fmt.Errorf("worker: at least one repo binding is required")
 	}
@@ -502,6 +502,7 @@ func registerWorkerRepos(ctx context.Context, client *workerclient.Client, worke
 		Repos:       repos,
 		Hostname:    hostnameOrUnknown(),
 		MgmtBaseURL: strings.TrimRight(strings.TrimSpace(mgmtBaseURL), "/"),
+		AuditURL:    strings.TrimRight(strings.TrimSpace(auditURL), "/"),
 	})
 }
 
