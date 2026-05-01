@@ -35,6 +35,7 @@ const (
 )
 
 var yamlFenceRe = regexp.MustCompile("(?s)```yaml\\s*\n(.*?)```")
+var localIssueRefRe = regexp.MustCompile(`^#([1-9][0-9]*)$`)
 var fqIssueRefRe = regexp.MustCompile(`^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)#([1-9][0-9]*)$`)
 
 type IssueReader interface {
@@ -352,7 +353,7 @@ func normalizeDependency(repo, raw string) ParsedDependency {
 	parsed := ParsedDependency{Raw: raw}
 	canonical := normalizeDependencyRef(raw)
 	switch {
-	case strings.HasPrefix(canonical, "#"):
+	case localIssueRefRe.MatchString(canonical):
 		var num int
 		if _, err := fmt.Sscanf(canonical, "#%d", &num); err != nil || num <= 0 {
 			parsed.Status = store.DependencyStatusInvalid

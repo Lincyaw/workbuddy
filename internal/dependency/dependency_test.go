@@ -79,6 +79,12 @@ func TestNormalizeDependencyHandlesEscapedQuotes(t *testing.T) {
 			wantState: store.DependencyStatusActive,
 		},
 		{
+			name:      "local ref must match entire shape",
+			raw:       `#292garbage`,
+			wantState: store.DependencyStatusInvalid,
+			wantErr:   "invalid_format",
+		},
+		{
 			name:      "fully qualified same repo ref",
 			raw:       `Lincyaw/workbuddy#292`,
 			wantRepo:  repo,
