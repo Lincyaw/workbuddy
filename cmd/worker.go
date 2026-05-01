@@ -362,9 +362,16 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	// pump races a non-existent session stream reader and can wedge on a full
 	// events channel, holding the per-issue execution lock until stale-inference
 	// tears the agent down at 30m.
-	lnch.SetSessionManager(runtimepkg.NewSessionManager(opts.sessionsDir, localStore))
+	sessionManager := runtimepkg.NewSessionManager(opts.sessionsDir, localStore)
+	lnch.SetSessionManager(sessionManager)
 
 	client := workerclient.New(opts.coordinatorURL, opts.token, nil)
+	// Hook the announce RPC so each freshly-created session immediately
+	// installs a session_id → worker_id route on the coordinator. Without
+	// this, the coordinator's sessionproxy can't find the owning worker
+	// for /api/v1/sessions/{id} reads after REQ-122 dropped the legacy
+	// sessions table on the coord side.
+	sessionManager.SetAnnouncer(&workerSessionAnnouncer{client: client, workerID: workerID})
 	rep := reporter.NewReporter(&reporter.GHCLIWriter{})
 	recorder := workersession.NewRecorder(localStore, opts.sessionsDir)
 	rep.SetEventRecorder(recorder)
@@ -435,7 +442,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 		if len(currentRoles) == 0 {
 			return nil, fmt.Errorf("worker: at least one role is required")
 		}
-		if err := registerWorkerRepos(changeCtx, client, workerID, currentRoles, publicRuntime, advertisedWorkerMgmtBaseURL(opts, mgmtServer.baseURL), auditURL, bindings.list()); err != nil {
+		if err := registerWorkerRepos(changeCtx, client, workerID, currentRoles, publicRuntime, advertisedWorkerMgmtBaseURL(opts, mgmtServer.baseURL), auditURL, bindings.list(), workerOpenSessions(localStore, workerID)); err != nil {
 			return nil, err
 		}
 		return summary, nil
@@ -468,7 +475,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 		}
 	}()
 
-	if err := registerWorkerRepos(ctx, client, workerID, roles, publicRuntime, advertisedWorkerMgmtBaseURL(opts, mgmtServer.baseURL), auditURL, bindings.list()); err != nil {
+	if err := registerWorkerRepos(ctx, client, workerID, roles, publicRuntime, advertisedWorkerMgmtBaseURL(opts, mgmtServer.baseURL), auditURL, bindings.list(), workerOpenSessions(localStore, workerID)); err != nil {
 		if errors.Is(err, workerclient.ErrUnauthorized) {
 			return &cliExitError{
 				msg:  "worker: coordinator rejected the provided token",
@@ -665,4 +672,61 @@ func workflowMaxRetries(cfg *config.FullConfig, workflow string) int {
 		return wf.MaxRetries
 	}
 	return 3
+}
+
+// workerSessionAnnouncer is the runtimepkg.SessionAnnouncer adapter
+// backed by the worker's HTTP client to the coordinator. Threading
+// workerID separately keeps the SessionManager API independent of the
+// outer worker boot sequence (the manager doesn't need to know who it
+// belongs to; the announcer does).
+type workerSessionAnnouncer struct {
+	client   *workerclient.Client
+	workerID string
+}
+
+func (a *workerSessionAnnouncer) AnnounceSession(ctx context.Context, sessionID, repo string, issueNum int) error {
+	if a == nil || a.client == nil || strings.TrimSpace(a.workerID) == "" {
+		return nil
+	}
+	return a.client.AnnounceSession(ctx, a.workerID, workerclient.SessionAnnounce{
+		SessionID: sessionID,
+		Repo:      repo,
+		IssueNum:  issueNum,
+	})
+}
+
+// workerOpenSessions reads any locally-recorded sessions still in the
+// running state and returns them as RegisterRequest.OpenSessions. The
+// coordinator does an idempotent bulk upsert on receipt, so the worker
+// re-seeds the route index after a coord restart without duplicating
+// already-known rows. Read errors are downgraded to "no sessions" — a
+// missed re-seed self-heals when the next session is created (its
+// AnnounceSession call repopulates the row).
+func workerOpenSessions(st *store.Store, workerID string) []workerclient.SessionAnnounce {
+	if st == nil || strings.TrimSpace(workerID) == "" {
+		return nil
+	}
+	sessions, err := st.ListSessions(store.SessionFilter{
+		WorkerID: workerID,
+		Status:   store.TaskStatusRunning,
+	})
+	if err != nil {
+		log.Printf("[worker] list open sessions for re-announce: %v", err)
+		return nil
+	}
+	if len(sessions) == 0 {
+		return nil
+	}
+	out := make([]workerclient.SessionAnnounce, 0, len(sessions))
+	for _, sess := range sessions {
+		if strings.TrimSpace(sess.SessionID) == "" {
+			continue
+		}
+		out = append(out, workerclient.SessionAnnounce{
+			SessionID: sess.SessionID,
+			Repo:      sess.Repo,
+			IssueNum:  sess.IssueNum,
+		})
+	}
+	return out
 }

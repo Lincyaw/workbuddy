@@ -126,9 +126,15 @@ func (r *Resolver) WithLocalHost(host string) *Resolver {
 
 // Resolve returns the worker that owns sessionID. The chain is:
 //
-//	session_id    → worker_id  via the local sessions table
+//	session_id    → worker_id  via the session_routes index
 //	worker_id     → audit_url  via the workers table
 //	audit_url     → loopback?  → fall back to local handler
+//
+// session_routes is populated by the worker via AnnounceSession (and
+// re-seeded on Register from RegisterRequest.OpenSessions). When no row
+// exists the resolver returns ErrSessionNotRouted; the handler falls
+// through to the coordinator-local handler so legacy `serve`-mode rows
+// in the shared sessions table still resolve.
 //
 // A non-nil error is one of the package sentinels; callers translate to
 // HTTP status. The result's Local flag is set when the caller should
@@ -142,15 +148,27 @@ func (r *Resolver) Resolve(sessionID string) (*Resolution, error) {
 	if sessionID == "" {
 		return nil, ErrSessionNotRouted
 	}
-	// session_id → SessionRecord (carries worker_id directly).
-	rec, err := r.store.GetSession(sessionID)
+	// session_id → worker_id via session_routes (the coord-side index
+	// populated by worker AnnounceSession). Falls back to the legacy
+	// sessions table read for `serve` mode (shared DB), where the
+	// in-process worker has historically written rows directly.
+	workerID := ""
+	route, err := r.store.GetSessionRoute(sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("sessionproxy: get session: %w", err)
+		return nil, fmt.Errorf("sessionproxy: get session route: %w", err)
 	}
-	if rec == nil {
-		return nil, ErrSessionNotRouted
+	if route != nil {
+		workerID = strings.TrimSpace(route.WorkerID)
+	} else {
+		rec, lerr := r.store.GetSession(sessionID)
+		if lerr != nil {
+			return nil, fmt.Errorf("sessionproxy: get session: %w", lerr)
+		}
+		if rec == nil {
+			return nil, ErrSessionNotRouted
+		}
+		workerID = strings.TrimSpace(rec.WorkerID)
 	}
-	workerID := strings.TrimSpace(rec.WorkerID)
 	if workerID == "" {
 		// Pre-bundle / orphan rows have no worker. Let the local handler
 		// serve them — the data is on this host's sessions dir.

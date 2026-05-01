@@ -41,6 +41,24 @@ type RegisterRequest struct {
 	// --audit-listen=disabled). Phase 2 will use this to proxy session
 	// reads from the coordinator to the owning worker.
 	AuditURL string `json:"audit_url,omitempty"`
+	// OpenSessions re-seeds the coordinator's session_routes index after a
+	// coord restart. The worker reports any sessions it still considers
+	// running (or that completed since the last register but whose UI
+	// links should still resolve). Coordinator does an idempotent bulk
+	// upsert; pre-existing rows survive untouched. Empty on first
+	// register before any session has been created.
+	OpenSessions []SessionAnnounce `json:"open_sessions,omitempty"`
+}
+
+// SessionAnnounce is the route record carried by both the standalone
+// /api/v1/workers/{id}/sessions/announce call and the OpenSessions field
+// on RegisterRequest. The coordinator validates session_id and infers the
+// worker_id from the URL/RegisterRequest; repo + issue_num are kept for
+// debuggability and future filtering.
+type SessionAnnounce struct {
+	SessionID string `json:"session_id"`
+	Repo      string `json:"repo"`
+	IssueNum  int    `json:"issue_num"`
 }
 
 type Task struct {
@@ -123,6 +141,18 @@ func (c *Client) PollTask(ctx context.Context, workerID string, timeout time.Dur
 
 func (c *Client) SubmitResult(ctx context.Context, taskID string, req ResultRequest) error {
 	_, err := c.doJSON(ctx, http.MethodPost, "/api/v1/tasks/"+url.PathEscape(taskID)+"/result", req, nil, http.StatusOK)
+	return err
+}
+
+// AnnounceSession registers a session_id → worker_id route on the
+// coordinator. Called by the worker right after CreateSession so the
+// proxy can find the owner without waiting for the next Register.
+// Returns nil on success; transient HTTP errors are retried with the
+// same backoff policy as other RPCs (the runtime guarantees at-least-
+// once semantics — the upsert on the server side is idempotent).
+func (c *Client) AnnounceSession(ctx context.Context, workerID string, ann SessionAnnounce) error {
+	path := "/api/v1/workers/" + url.PathEscape(workerID) + "/sessions/announce"
+	_, err := c.doJSON(ctx, http.MethodPost, path, ann, nil, http.StatusCreated, http.StatusOK)
 	return err
 }
 

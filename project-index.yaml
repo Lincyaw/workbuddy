@@ -4482,3 +4482,56 @@ requirements:
     deps:
       - REQ-120
       - REQ-121
+
+  - id: REQ-123
+    title: Session routing index for split-topology session detail (REQ-122 follow-up)
+    description: >
+      REQ-122 deleted the coordinator's `sessions` table and the disk-only
+      synthesis fallback in auditapi.Handler, but left the resolver still
+      relying on `Store.GetSession(session_id)` for session_id → worker_id
+      lookup. On a standalone `workbuddy coordinator`, that read returns
+      nil for everything (coordinatorMode short-circuit), so the
+      sessionproxy fell back to the local handler — which had its
+      disk-only synthesis paths removed in REQ-122 — and 404'd every
+      single-session detail request. Live `events` calls still worked
+      because webui.Handler reads jsonl directly off
+      sessions_dir, an asymmetric fallback that only happens to work
+      when coord and worker share a host.
+
+      This adds a thin coord-side `session_routes(session_id PK,
+      worker_id, repo, issue_num, created_at)` index, populated by the
+      worker. Workers call POST
+      /api/v1/workers/{id}/sessions/announce as soon as a session row
+      lands in their local store, and re-seed the routes via
+      RegisterRequest.OpenSessions on every register so a coordinator
+      restart self-heals from the next worker reconnect. Resolver
+      consults session_routes first, falling back to the legacy
+      Store.GetSession path so `serve`-mode (shared DB) keeps working.
+      The webui events/stream local handlers stay wired for serve mode
+      — split deployments now route detail/events/stream uniformly
+      through the proxy.
+    priority: P0
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-123-1: a coordinator opened via NewCoordinatorStore exposes a working session_routes table; UpsertSessionRoute and GetSessionRoute round-trip; idempotent on re-announce (the owning worker_id is stable, ON CONFLICT DO NOTHING)."
+      - "AC-123-2: workerclient.AnnounceSession POSTs SessionAnnounce to /api/v1/workers/{id}/sessions/announce with bearer auth; coordinator handler refuses unknown worker_id (404) and empty session_id (400) and upserts otherwise."
+      - "AC-123-3: workerclient.RegisterRequest.OpenSessions is bulk-upserted on /api/v1/workers/register; pre-existing routes survive untouched (ON CONFLICT DO NOTHING)."
+      - "AC-123-4: sessionproxy.Resolver.Resolve consults session_routes first; falls back to Store.GetSession when the route is missing so serve-mode shared-DB rows keep working; returns ErrSessionNotRouted only when both miss."
+      - "AC-123-5: cmd/worker.go wires runtimepkg.SessionManager with a SessionAnnouncer adapter that calls AnnounceSession after CreateSession; failures degrade to a log warning and rely on the next register's bulk upsert to self-heal."
+    code:
+      - internal/store/store.go
+      - internal/store/types.go
+      - internal/sessionproxy/resolver.go
+      - internal/workerclient/client.go
+      - internal/runtime/session_manager.go
+      - internal/app/coordinator.go
+      - cmd/worker.go
+      - cmd/worker_repos.go
+    tests:
+      - internal/store/store_session_routes_test.go
+      - internal/sessionproxy/resolver_routes_test.go
+      - internal/workerclient/client_announce_test.go
+      - internal/app/coordinator_session_route_test.go
+    deps:
+      - REQ-122

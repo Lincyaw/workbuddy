@@ -93,6 +93,20 @@ type IssueCache struct {
 	UpdatedAt time.Time
 }
 
+// SessionRoute is the coordinator-side index that maps a session_id to the
+// worker that owns the underlying SessionRecord and on-disk artefacts. It is
+// the only session-shaped data the coordinator stores after the worker-owned
+// refactor (REQ-122 follow-up): the rest lives on the worker that produced
+// it. Resolver uses (worker_id, repo, issue_num) to dispatch session reads to
+// the owning worker via workers.audit_url.
+type SessionRoute struct {
+	SessionID string
+	WorkerID  string
+	Repo      string
+	IssueNum  int
+	CreatedAt time.Time
+}
+
 // SessionRecord stores the durable execution session index row.
 type SessionRecord struct {
 	ID            int64
