@@ -25,6 +25,7 @@ flowchart TB
         Serve["serve"]
         Coord["coordinator"]
         Worker["worker"]
+        Supervisor["supervisor"]
         Status["status / diagnose / logs / recover"]
     end
 
@@ -37,6 +38,8 @@ flowchart TB
         Audit["audit + auditapi + webui\nsessions / metrics / diagnostics"]
         Store["store\nissues / tasks / workers / events / sessions"]
         Reg["registry\nworker capability registry"]
+        Dep["dependency\nissue dependency graph + gate"]
+        Hooks["hooks\noperator event hooks"]
         Alerts["alertbus / notifier / operator"]
     end
 
@@ -46,6 +49,7 @@ flowchart TB
 
     subgraph DistMode["Distributed topology"]
         CoordRuntime["coordinator runtime\nHTTP API + per-repo pollers"]
+        SupervisorRuntime["supervisor runtime\nunix-socket agent supervisor"]
         RemoteWorker["worker runtime\nlong-poll + local launcher"]
     end
 
@@ -58,6 +62,7 @@ flowchart TB
     Serve --> ServeRuntime
     Coord --> CoordRuntime
     Worker --> RemoteWorker
+    Supervisor --> SupervisorRuntime
 
     ServeRuntime --> Poller
     ServeRuntime --> SM
@@ -67,6 +72,7 @@ flowchart TB
     ServeRuntime --> Audit
     ServeRuntime --> Store
     ServeRuntime --> Reg
+    ServeRuntime --> Dep
     ServeRuntime --> Alerts
 
     CoordRuntime --> Poller
@@ -76,10 +82,13 @@ flowchart TB
     CoordRuntime --> Audit
     CoordRuntime --> Store
     CoordRuntime --> Reg
+    CoordRuntime --> Dep
     CoordRuntime --> Alerts
     RemoteWorker --> Launch
     RemoteWorker --> Report
     RemoteWorker --> Store
+
+    SupervisorRuntime -.-> Launch
 
     Poller --> GH
     Router --> GH
@@ -91,6 +100,7 @@ flowchart TB
     Report --> DB
     Audit --> DB
     Reg --> DB
+    Dep --> DB
     Alerts --> DB
 
     CoordRuntime <-. task poll / result .-> RemoteWorker
@@ -223,6 +233,8 @@ After installing the plugin, the following skills are available in Claude Code:
 | `/setup-repo` | "configure repo", "配置仓库" | Onboards a new repo: creates labels, agent configs, and workflows |
 | `/pipeline-monitor` | "monitor pipeline", "监工" | Watches agent execution, diagnoses stuck issues |
 | `/merge-flow` | "merge approved PRs", "批量合并" | Merges a batch of workbuddy PRs with conflict resolution |
+| `/deploy` | "deploy workbuddy", "安装部署" | Bundle vs serve topology, systemd install, rolling restart |
+| `/web-debug` | "verify frontend", "验下 webui" | End-to-end SPA validation with headless browser |
 
 ## License
 

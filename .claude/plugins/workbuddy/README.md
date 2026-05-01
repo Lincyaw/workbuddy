@@ -24,6 +24,15 @@ python3 scripts/sync_codex_plugin.py
 | `/workbuddy-guide` | "how to use workbuddy", "使用指南" | Concepts, deployment modes, operations, troubleshooting |
 | `/setup-repo` | "configure repo", "配置仓库" | Onboard a new repo: labels, config, agents, workflow |
 | `/pipeline-monitor` | "monitor pipeline", "监工" | Watch agent execution, diagnose stuck issues |
+| `/merge-flow` | "merge approved PRs", "批量合并" | Merge a batch of workbuddy PRs with conflict resolution |
+| `/deploy` | "deploy workbuddy", "安装部署" | Bundle vs serve topology, systemd install, rolling restart |
+| `/web-debug` | "verify frontend", "验下 webui" | End-to-end SPA validation with headless browser |
+
+## Commands
+
+| Command | Purpose |
+|---------|---------|
+| `handle-incident` | Diagnose, fix or escalate a single workbuddy alert (invoked by `operator-watch`) |
 
 ## Quick start
 
