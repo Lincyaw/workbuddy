@@ -101,8 +101,14 @@ main() {
 
   tar -xzf "${dl_dir}/${archive}" -C "$dl_dir"
 
+  # Find the binary inside the extracted tree (handles both flat and
+  # nested tar layouts produced by different release pipelines).
+  local binary_path
+  binary_path=$(find "$dl_dir" -name "workbuddy" -type f | head -n1)
+  [ -n "$binary_path" ] || die "Archive did not contain a 'workbuddy' binary"
+
   mkdir -p "$INSTALL_DIR"
-  mv "${dl_dir}/workbuddy" "${INSTALL_DIR}/workbuddy"
+  mv "$binary_path" "${INSTALL_DIR}/workbuddy"
   chmod +x "${INSTALL_DIR}/workbuddy"
 
   log "Installed workbuddy to ${INSTALL_DIR}/workbuddy"

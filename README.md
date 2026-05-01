@@ -7,9 +7,6 @@ Today the repository implements two runtime shapes over one shared core:
 - `workbuddy coordinator` + `workbuddy worker` (+ `workbuddy supervisor`) for the
   recommended distributed deployment, installed via `workbuddy deploy install`
   as the supervisor + coordinator + worker bundle.
-- `workbuddy serve` for legacy single-process / local-dev convenience only —
-  it does **not** preserve in-flight agent runs across restart and is kept
-  for one migration window. New deployments should use the bundle layout.
 
 ## Architecture
 
@@ -22,7 +19,6 @@ flowchart TB
 
     subgraph CLI["CLI entrypoints (`cmd/*`)"]
         Root["root / main"]
-        Serve["serve"]
         Coord["coordinator"]
         Worker["worker"]
         Supervisor["supervisor"]
@@ -43,10 +39,6 @@ flowchart TB
         Alerts["alertbus / notifier / operator"]
     end
 
-    subgraph ServeMode["Single-process topology"]
-        ServeRuntime["serve runtime\nembedded worker + HTTP surface"]
-    end
-
     subgraph DistMode["Distributed topology"]
         CoordRuntime["coordinator runtime\nHTTP API + per-repo pollers"]
         SupervisorRuntime["supervisor runtime\nunix-socket agent supervisor"]
@@ -54,26 +46,13 @@ flowchart TB
     end
 
     User --> Root
-    Root --> Serve
     Root --> Coord
     Root --> Worker
     Root --> Status
 
-    Serve --> ServeRuntime
     Coord --> CoordRuntime
     Worker --> RemoteWorker
     Supervisor --> SupervisorRuntime
-
-    ServeRuntime --> Poller
-    ServeRuntime --> SM
-    ServeRuntime --> Router
-    ServeRuntime --> Launch
-    ServeRuntime --> Report
-    ServeRuntime --> Audit
-    ServeRuntime --> Store
-    ServeRuntime --> Reg
-    ServeRuntime --> Dep
-    ServeRuntime --> Alerts
 
     CoordRuntime --> Poller
     CoordRuntime --> SM
@@ -84,6 +63,7 @@ flowchart TB
     CoordRuntime --> Reg
     CoordRuntime --> Dep
     CoordRuntime --> Alerts
+
     RemoteWorker --> Launch
     RemoteWorker --> Report
     RemoteWorker --> Store
@@ -131,7 +111,7 @@ Or build from source:
 go build -o workbuddy .
 ```
 
-### Deploy as a service (recommended: bundle layout)
+### Deploy as a service (bundle layout)
 
 `workbuddy deploy install` installs three systemd user units in one step:
 
@@ -155,11 +135,9 @@ workbuddy deploy install --scope user \
   --worker-args=--repos=owner/repo=$PWD
 ```
 
-The `--bundle` flag is no longer required (the bundle layout became the
-default). It is accepted as a no-op alias so existing automation keeps
-working. Trailing `-- args` are not allowed in bundle mode — use the
-per-unit `--supervisor-args` / `--coordinator-args` / `--worker-args`
-flags (each repeatable).
+Trailing `-- args` are not allowed — use the per-unit
+`--supervisor-args` / `--coordinator-args` / `--worker-args` flags (each
+repeatable).
 
 Upgrade and lifecycle commands operate on the recorded manifests:
 
@@ -169,35 +147,8 @@ workbuddy deploy upgrade --name workbuddy-worker        # rolling upgrade of jus
 workbuddy deploy uninstall --scope user --force         # remove the bundle (keeps the binary on disk)
 ```
 
-`workbuddy deploy upgrade` (with no flags) refuses to silently upgrade a
-legacy single-process `serve` install — it errors with a migration hint.
-Pass `--legacy-serve` if you genuinely want to keep the legacy layout
-during the migration window.
-
-Prefer `--token-file` (or `WORKBUDDY_AUTH_TOKEN` in the service env) over the
-plain `--token` flag — the plain form leaks into `ps` and shell history and
-now prints a deprecation warning.
-
-#### Legacy single-process `serve` install (deprecated)
-
-The single-process layout is preserved for one migration window only and
-**does not preserve in-flight agent runs across restart**. Prefer the bundle
-layout for any new deployment.
-
-```bash
-# Single-process serve unit (legacy):
-workbuddy deploy install --legacy-serve \
-  --name workbuddy --scope user --systemd --working-directory "$PWD"
-
-# Dedicated coordinator / worker units (legacy):
-sudo workbuddy deploy install --legacy-serve \
-  --name workbuddy-coordinator --scope system --systemd \
-  --working-directory /srv/workbuddy \
-  -- coordinator --listen 0.0.0.0:8081 --db /srv/workbuddy/.workbuddy/workbuddy.db
-```
-
-See `docs/upgrade-v0.4-to-v0.5.md` for the migration walkthrough and the
-`deploy` skill (Claude Code plugin) for a concise topology briefing.
+Use `--token-file` or `WORKBUDDY_AUTH_TOKEN` in the service env for
+authentication. Never pass secrets via plain flags.
 
 ### Claude Code Plugin
 
@@ -233,7 +184,7 @@ After installing the plugin, the following skills are available in Claude Code:
 | `/setup-repo` | "configure repo", "配置仓库" | Onboards a new repo: creates labels, agent configs, and workflows |
 | `/pipeline-monitor` | "monitor pipeline", "监工" | Watches agent execution, diagnoses stuck issues |
 | `/merge-flow` | "merge approved PRs", "批量合并" | Merges a batch of workbuddy PRs with conflict resolution |
-| `/deploy` | "deploy workbuddy", "安装部署" | Bundle vs serve topology, systemd install, rolling restart |
+| `/deploy` | "deploy workbuddy", "安装部署" | Bundle topology, systemd install, rolling restart |
 | `/web-debug` | "verify frontend", "验下 webui" | End-to-end SPA validation with headless browser |
 
 ## License

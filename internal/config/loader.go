@@ -198,14 +198,6 @@ func parseFrontmatter(data []byte) (frontmatter []byte, body string, err error) 
 
 var yamlCodeBlockRe = regexp.MustCompile("(?s)```yaml\\s*\n(.*?)```")
 
-// legacyPromptKeyRe matches a top-level `prompt:` key in YAML frontmatter
-// (anchored at column 0, key followed by ':' and either space or end-of-line).
-var legacyPromptKeyRe = regexp.MustCompile(`(?m)^prompt\s*:`)
-
-func hasLegacyPromptField(fm []byte) bool {
-	return legacyPromptKeyRe.Match(fm)
-}
-
 func parseAgentFile(path string) (*AgentConfig, []Warning, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -214,14 +206,6 @@ func parseAgentFile(path string) (*AgentConfig, []Warning, error) {
 	fm, body, err := parseFrontmatter(data)
 	if err != nil {
 		return nil, nil, fmt.Errorf("config: %s: %w", path, err)
-	}
-
-	// Reject the legacy `prompt:` frontmatter field eagerly. Issue #204 batch 2
-	// is a hard cut: the prompt now lives in the markdown body. Detecting this
-	// here gives a clear actionable error instead of a confusing yaml field
-	// rejection from the strict-tagged struct below.
-	if hasLegacyPromptField(fm) {
-		return nil, nil, fmt.Errorf("config: %s: legacy \"prompt:\" frontmatter field is no longer supported; move the prompt into the markdown body", filepath.Base(path))
 	}
 
 	var agent AgentConfig
@@ -244,8 +228,8 @@ func parseAgentFile(path string) (*AgentConfig, []Warning, error) {
 	if len(agent.Context) == 0 {
 		return nil, nil, fmt.Errorf("config: %s: missing required field \"context\" (list of TaskContext field paths used by the prompt)", fname)
 	}
-	if agent.Command == "" && agent.Prompt == "" {
-		return nil, nil, fmt.Errorf("config: %s: agent has empty prompt body and no command", fname)
+	if agent.Prompt == "" {
+		return nil, nil, fmt.Errorf("config: %s: agent has empty prompt body", fname)
 	}
 
 	if agent.Runtime == "" {

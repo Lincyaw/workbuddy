@@ -98,11 +98,6 @@ type agentDoc struct {
 	ContextLines    []int
 	ContextDeclLine int
 
-	// HasLegacyPromptField is set when the frontmatter still includes the
-	// removed `prompt:` field — used by the WB-F001 check.
-	HasLegacyPromptField bool
-	LegacyPromptLine     int
-
 	// Policy timeout (Go duration). 0 if unset/unparseable.
 	PolicyTimeout     time.Duration
 	PolicyTimeoutLine int
@@ -398,14 +393,6 @@ func parseAgentFile(path string) (*agentDoc, []Diagnostic) {
 	agent.Name, agent.NameLine = scalarValue(root, "name", fmStartLine)
 	agent.Runtime, agent.RuntimeLine = scalarValue(root, "runtime", fmStartLine)
 	agent.Role, agent.RoleLine = scalarValue(root, "role", fmStartLine)
-
-	// Detect the legacy `prompt:` frontmatter field for WB-F001. The
-	// validator accepts the file structurally so the diagnostic can fire
-	// instead of a fatal load error; the loader is the strict gate.
-	if promptNode, promptKeyLine := mappingValue(root, "prompt"); promptNode != nil {
-		agent.HasLegacyPromptField = true
-		agent.LegacyPromptLine = absoluteLine(fmStartLine, promptKeyLine)
-	}
 
 	// New format: prompt is the markdown body, captured as-is for WB-T001/T101
 	// parse + field checks. PromptLine is the first non-blank body line.

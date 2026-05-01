@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,16 +13,8 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
-// TestCoordinatorRoutesSessionsThroughSPAFallback verifies that:
-//
-//   - /sessions and /sessions/{id} (without a known suffix) fall through
-//     to the SPA catch-all instead of being captured by the webui handler.
-//   - /sessions/{id}/events.json and /sessions/{id}/stream still hit the
-//     deprecation alias on the webui handler.
-//
-// This is the routing contract for issue #220 — once templates.go was deleted,
-// the legacy `/sessions` HTML handler had to be replaced by the SPA without
-// breaking the events/stream aliases that older callers may still use.
+// TestCoordinatorRoutesSessionsThroughSPAFallback verifies that /sessions and
+// /sessions/{id} fall through to the SPA catch-all.
 func TestCoordinatorRoutesSessionsThroughSPAFallback(t *testing.T) {
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "coordinator.db")
@@ -33,7 +24,7 @@ func TestCoordinatorRoutesSessionsThroughSPAFallback(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	// Seed an events-v1.jsonl so the deprecation alias has something to read.
+	// Seed an events-v1.jsonl so the API paths have something to read.
 	sessionsDir := filepath.Join(filepath.Dir(dbPath), "sessions")
 	sessionDir := filepath.Join(sessionsDir, "abc-123")
 	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
@@ -84,25 +75,15 @@ func TestCoordinatorRoutesSessionsThroughSPAFallback(t *testing.T) {
 	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/html") {
 		t.Fatalf("/sessions/abc-123 Content-Type = %q, want text/html (SPA)", got)
 	}
-	if got := resp.Header.Get("Deprecation"); got != "" {
-		t.Fatalf("/sessions/abc-123 Deprecation = %q, want unset (SPA, not alias)", got)
-	}
 	_ = resp.Body.Close()
 
-	// /sessions/abc-123/events.json hits the deprecation alias.
-	resp = authedGet("/sessions/abc-123/events.json")
+	// /api/v1/sessions/abc-123/events hits the modern API.
+	resp = authedGet("/api/v1/sessions/abc-123/events")
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("alias status = %d, want 200", resp.StatusCode)
-	}
-	if got := resp.Header.Get("Deprecation"); got != "true" {
-		t.Fatalf("alias Deprecation = %q, want \"true\"", got)
+		t.Fatalf("events status = %d, want 200", resp.StatusCode)
 	}
 	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
-		t.Fatalf("alias Content-Type = %q, want application/json", got)
+		t.Fatalf("events Content-Type = %q, want application/json", got)
 	}
-	body, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	if !strings.Contains(string(body), `"kind":"a"`) {
-		t.Fatalf("alias body missing event content: %s", string(body))
-	}
 }

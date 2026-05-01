@@ -31,8 +31,7 @@ const (
 	CodeDuplicateEnterLabel = "WB-X005"
 
 	// CodeUnknownTriggerState — agent's `triggers[].state:` references a
-	// state name that is not present in any loaded workflow. Replaces the
-	// removed WB-X006 (which keyed off the legacy label-based trigger).
+	// state name that is not present in any loaded workflow.
 	CodeUnknownTriggerState = "WB-X007"
 )
 

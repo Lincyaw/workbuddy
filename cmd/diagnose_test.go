@@ -195,9 +195,6 @@ func TestDiagnoseHelpTextUsesFormatJSONCanonically(t *testing.T) {
 	if !strings.Contains(diagnoseCmd.Long, "Use --format json when piping into another tool.") {
 		t.Fatalf("diagnose help missing canonical --format json guidance: %q", diagnoseCmd.Long)
 	}
-	if !strings.Contains(diagnoseCmd.Long, "--json remains a deprecated") {
-		t.Fatalf("diagnose help missing deprecated alias note: %q", diagnoseCmd.Long)
-	}
 }
 
 func seedHeartbeatZombieTask(st *store.Store, sessionDir, taskID string, issueNum int, labels string, now time.Time, sessionAge time.Duration) error {

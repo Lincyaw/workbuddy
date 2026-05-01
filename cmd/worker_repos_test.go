@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spf13/cobra"
+	
 )
 
 func TestResolveWorkerRepoBindings(t *testing.T) {
@@ -28,13 +28,6 @@ func TestResolveWorkerRepoBindings(t *testing.T) {
 		t.Fatalf("unexpected bindings: %+v", bindings)
 	}
 
-	bindings, err = resolveWorkerRepoBindings(&workerOpts{repo: "owner/c"}, "", defaultPath)
-	if err != nil {
-		t.Fatalf("resolve --repo: %v", err)
-	}
-	if len(bindings) != 1 || bindings[0].Path != defaultPath {
-		t.Fatalf("unexpected legacy binding: %+v", bindings)
-	}
 
 	bindings, err = resolveWorkerRepoBindings(&workerOpts{}, "owner/d", defaultPath)
 	if err != nil {
@@ -45,30 +38,6 @@ func TestResolveWorkerRepoBindings(t *testing.T) {
 	}
 }
 
-func TestParseWorkerFlagsWarnsForDeprecatedRepoFlag(t *testing.T) {
-	cmd := &cobra.Command{Use: "worker"}
-	bindWorkerFlags(cmd)
-	cmd.Flags().String("id", "", "")
-	cmd.Flags().String("mgmt-addr", defaultWorkerMgmtAddr, "")
-	cmd.Flags().Int("concurrency", 1, "")
-
-	var stderr bytes.Buffer
-	cmd.SetErr(&stderr)
-	_ = cmd.Flags().Set("coordinator", "http://127.0.0.1:8081")
-	_ = cmd.Flags().Set("token", "token")
-	_ = cmd.Flags().Set("repo", "owner/repo")
-
-	opts, err := parseWorkerFlags(cmd)
-	if err != nil {
-		t.Fatalf("parseWorkerFlags: %v", err)
-	}
-	if opts.repo != "owner/repo" {
-		t.Fatalf("opts.repo = %q", opts.repo)
-	}
-	if !strings.Contains(stderr.String(), "`worker --repo` is deprecated") {
-		t.Fatalf("expected deprecation warning, got %q", stderr.String())
-	}
-}
 
 func TestWorkerRepoBindingStoreOperations(t *testing.T) {
 	store := newWorkerRepoBindingStore([]workerRepoBinding{{Repo: "owner/b", Path: "/b"}, {Repo: "owner/a", Path: "/a"}})

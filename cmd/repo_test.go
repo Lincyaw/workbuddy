@@ -119,7 +119,6 @@ func TestParseRepoListFlags_TokenFile(t *testing.T) {
 	cmd.Flags().String("coordinator", "", "")
 	addCoordinatorAuthFlags(cmd.Flags(), "t", "Bearer token for coordinator auth")
 	addOutputFormatFlag(cmd)
-	addDeprecatedJSONAliasFlag(cmd)
 	cmd.Flags().Duration("timeout", 15*time.Second, "")
 	if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
 		t.Fatalf("set coordinator: %v", err)
@@ -193,22 +192,3 @@ func TestRunRepoRegisterCmd_JSON(t *testing.T) {
 	}
 }
 
-func TestParseRepoListFlags_JSONAlias(t *testing.T) {
-	cmd := &cobra.Command{}
-	cmd.Flags().String("coordinator", "", "")
-	addCoordinatorAuthFlags(cmd.Flags(), "t", "Bearer token for coordinator auth")
-	cmd.Flags().Duration("timeout", 15*time.Second, "")
-	addOutputFormatFlag(cmd)
-	addDeprecatedJSONAliasFlag(cmd)
-	if err := cmd.Flags().Parse([]string{"--coordinator", "http://coord:8081", "--json"}); err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-
-	opts, err := parseRepoListFlags(cmd)
-	if err != nil {
-		t.Fatalf("parseRepoListFlags: %v", err)
-	}
-	if opts.format != outputFormatJSON {
-		t.Fatalf("format = %q, want %q", opts.format, outputFormatJSON)
-	}
-}

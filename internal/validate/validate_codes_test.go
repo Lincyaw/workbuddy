@@ -96,18 +96,6 @@ func TestValidateDir_CodeFixtures(t *testing.T) {
 			wantHas: CodeUnknownTriggerState,
 		},
 		{
-			name: "WB-F001 legacy prompt field",
-			files: map[string]string{
-				"config.yaml":         "repo: octo/x\n",
-				"agents/dev-agent.md": fixtureAgentLegacyPrompt("dev-agent", "developing", "dev", "claude-code"),
-				"workflows/default.md": fixtureWorkflow(map[string]workflowState{
-					"developing": {EnterLabel: "status:developing", Agent: "dev-agent"},
-				}),
-			},
-			opts:    Options{SkipRuntimeBinaryCheck: true},
-			wantHas: CodeLegacyPromptField,
-		},
-		{
 			name: "WB-F002 empty prompt body",
 			files: map[string]string{
 				"config.yaml":         "repo: octo/x\n",
@@ -405,26 +393,6 @@ func fixtureAgentNoContext(name, triggerState, role, runtime, prompt string) str
 	return buildAgentFixture(name, triggerState, role, runtime, prompt, "", nil, true)
 }
 
-// fixtureAgentLegacyPrompt emits an agent that still carries the removed
-// `prompt:` frontmatter field (alongside a body). Drives the WB-F001 check.
-func fixtureAgentLegacyPrompt(name, triggerState, role, runtime string) string {
-	var b strings.Builder
-	b.WriteString("---\n")
-	b.WriteString("name: " + name + "\n")
-	b.WriteString("description: test agent\n")
-	b.WriteString("triggers:\n")
-	b.WriteString("  - state: " + triggerState + "\n")
-	if role != "" {
-		b.WriteString("role: " + role + "\n")
-	}
-	if runtime != "" {
-		b.WriteString("runtime: " + runtime + "\n")
-	}
-	b.WriteString("context:\n  - Repo\n")
-	b.WriteString("prompt: |\n  Repo: {{.Repo}}\n")
-	b.WriteString("---\nRepo: {{.Repo}}\n")
-	return b.String()
-}
 
 func buildAgentFixture(name, triggerState, role, runtime, prompt, timeout string, context []string, omitContext bool) string {
 	var b strings.Builder

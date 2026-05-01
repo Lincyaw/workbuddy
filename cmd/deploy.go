@@ -155,48 +155,20 @@ var deployCmd = &cobra.Command{
 }
 
 var deployInstallCmd = &cobra.Command{
-	Use:   "install [-- workbuddy args...]",
-	Short: "Install the supervisor + coordinator + worker bundle (default) or, with --legacy-serve, a single-process serve unit",
+	Use:   "install",
+	Short: "Install the supervisor + coordinator + worker bundle",
 	Long: strings.TrimSpace(`
-Install the v0.5 supervisor + coordinator + worker user units. This is the
-default and recommended layout: the supervisor owns the agent subprocesses
-(Type=notify, KillMode=process, Restart=always), so restarting the worker —
-e.g. for a binary upgrade — does not kill in-flight agent runs.
-
-Pass --legacy-serve to install the older single-process ` + "`workbuddy serve`" + `
-unit instead. That layout is preserved for one migration window only and
-does not preserve in-flight agent runs across restart; new deployments
-should not use it.
+Install the v0.5 supervisor + coordinator + worker user units. The supervisor
+owns the agent subprocesses (Type=notify, KillMode=process, Restart=always),
+so restarting the worker — e.g. for a binary upgrade — does not kill in-flight
+agent runs.
 `),
 	Example: strings.TrimSpace(`
-  # Default: v0.5 bundled install (supervisor + coordinator + worker user units).
-  # The --bundle flag is no longer required; it is accepted as a no-op alias
-  # for backwards compatibility with existing automation.
+  # Bundled install (supervisor + coordinator + worker user units).
   workbuddy deploy install --scope user \
     --env-file /home/ddq/.config/workbuddy/worker.env \
     --coordinator-args=--listen=127.0.0.1:8081 --coordinator-args=--auth \
     --worker-args=--coordinator=http://127.0.0.1:8081 --worker-args=--token=$WORKBUDDY_TOKEN
-
-  # Same install, with the explicit --bundle alias (kept for compatibility):
-  workbuddy deploy install --bundle --scope user --env-file /etc/workbuddy/bundle.env
-
-  # Legacy single-process install (default command is "serve").
-  # Does NOT preserve in-flight agent runs across restart — prefer the bundle layout.
-  workbuddy deploy install --legacy-serve --name workbuddy --scope user --systemd
-
-  # Dedicated coordinator service (legacy layout). Non-loopback bind requires
-  # --report-base-url. Pair with --env-file pointing at a file that defines
-  # WORKBUDDY_REPORT_BASE_URL so session links posted to GitHub comments are
-  # clickable in a browser.
-  workbuddy deploy install --legacy-serve --name workbuddy-coordinator --scope system --systemd \
-    --env-file /etc/workbuddy/coordinator.env -- \
-    coordinator --listen 0.0.0.0:8081 \
-      --report-base-url=https://workbuddy.example.com:8081 \
-      --auth --db /srv/workbuddy/.workbuddy/workbuddy.db
-
-  # Dedicated worker service bound to a coordinator (legacy layout).
-  workbuddy deploy install --legacy-serve --name workbuddy-worker-dev --scope system --systemd -- \
-    worker --coordinator http://127.0.0.1:8081 --token <token> --role dev --repos owner/repo=/srv/workbuddy-worker
 `),
 	Args: cobra.ArbitraryArgs,
 	RunE: runDeployInstallCmd,
@@ -254,11 +226,9 @@ func init() {
 	deployInstallCmd.Flags().String("updater-interval", "5m", "Poll interval used by the updater unit (only consulted with --enable-updater)")
 	deployInstallCmd.Flags().StringSlice("updater-restart-units", []string{"workbuddy-coordinator.service", "workbuddy-worker.service"}, "systemd unit name(s) the updater should restart after a successful upgrade (only consulted with --enable-updater)")
 	deployInstallCmd.Flags().String("updater-name", "workbuddy-updater", "Service name used for the updater unit (only consulted with --enable-updater)")
-	deployInstallCmd.Flags().Bool("legacy-serve", false, "Install the legacy single-process `workbuddy serve` unit instead of the default supervisor+coordinator+worker bundle. Provided for one-version migration; does not preserve in-flight agent runs across restart.")
 
 	deployListCmd.Flags().String("scope", defaultDeployListScope, "Deployment scope: all, user, or system")
 	addOutputFormatFlag(deployListCmd)
-	addDeprecatedJSONAliasFlag(deployListCmd)
 
 	deployRedeployCmd.Flags().String("name", defaultDeployName, "Deployment name")
 	deployRedeployCmd.Flags().String("scope", defaultDeployScope, "Deployment scope: user or system")
@@ -287,8 +257,6 @@ func init() {
 	deployUpgradeCmd.Flags().Bool("all", false, "Operate on every deployment in the requested scope")
 	deployUpgradeCmd.Flags().Bool("force", false, "Skip confirmation prompts for destructive actions")
 	deployUpgradeCmd.Flags().Bool("dry-run", false, "Print the actions that would be taken without executing them")
-	deployUpgradeCmd.Flags().Bool("bundle", false, "Ensure the v0.5 supervisor unit is installed after upgrading. Default behavior since the bundle layout became the default; accepted as a no-op alias for compatibility with existing automation.")
-	deployUpgradeCmd.Flags().Bool("legacy-serve", false, "Treat the deployment as a legacy single-process `workbuddy serve` install. Skips the supervisor backfill and bypasses the default safety check that refuses to silently upgrade a legacy install.")
 
 	deployCmd.AddCommand(deployInstallCmd, deployListCmd, deployRedeployCmd, deployStopCmd, deployStartCmd, deployDeleteCmd, deployUpgradeCmd)
 	rootCmd.AddCommand(deployCmd)
@@ -298,31 +266,15 @@ func runDeployInstallCmd(cmd *cobra.Command, args []string) error {
 	if err := requireWritable(cmd, "deploy install"); err != nil {
 		return err
 	}
-	legacy, _ := cmd.Flags().GetBool("legacy-serve")
-	if legacy {
-		if cmd.Flags().Changed("bundle") {
-			return fmt.Errorf("deploy install: --legacy-serve and --bundle are mutually exclusive")
-		}
-		for _, name := range []string{"supervisor-args", "coordinator-args", "worker-args", "bundle-skip-coordinator", "bundle-skip-worker"} {
-			if cmd.Flags().Changed(name) {
-				return fmt.Errorf("deploy install: --legacy-serve cannot be combined with --%s (that flag belongs to the bundle layout)", name)
-			}
-		}
-		opts, err := parseDeployInstallFlags(cmd, args)
-		if err != nil {
-			return err
-		}
-		return runDeployInstallWithOpts(cmd.Context(), opts, cmdStdout(cmd))
-	}
 	bundleOpts, err := parseBundleInstallFlags(cmd)
 	if err != nil {
 		return err
 	}
 	if len(args) > 0 {
-		return fmt.Errorf("deploy install: trailing -- args are not supported with the bundle layout (the default). Use --supervisor-args/--coordinator-args/--worker-args, or pass --legacy-serve to install a single-process serve unit")
+		return fmt.Errorf("deploy install: trailing -- args are not supported. Use --supervisor-args/--coordinator-args/--worker-args")
 	}
 	if cmd.Flags().Changed("name") {
-		return fmt.Errorf("deploy install: the bundle layout (default) ignores --name (units are workbuddy-supervisor / -coordinator / -worker). Remove --name, or pass --legacy-serve to install a single named unit")
+		return fmt.Errorf("deploy install: --name is not supported (bundle units are named workbuddy-supervisor / -coordinator / -worker)")
 	}
 	return runDeployBundleInstallWithOpts(cmd.Context(), bundleOpts, cmdStdout(cmd))
 }
@@ -389,17 +341,6 @@ func runDeployUpgradeCmd(cmd *cobra.Command, _ []string) error {
 	}
 	version, _ := cmd.Flags().GetString("version")
 	repository, _ := cmd.Flags().GetString("repository")
-	legacy, _ := cmd.Flags().GetBool("legacy-serve")
-
-	// Default behavior: refuse to silently upgrade a legacy single-process
-	// `serve` install. The bundle layout is the supported default; users on
-	// the legacy layout must opt in via --legacy-serve so layout drift is
-	// always explicit.
-	if !legacy && !lookup.all {
-		if record, lookupErr := loadDeploymentRecordForScope(lookup.name, lookup.scope); lookupErr == nil && record != nil && isLegacyServeManifest(record.manifest) {
-			return fmt.Errorf("deploy upgrade: %q is a legacy single-process `serve` install. Pass --legacy-serve to upgrade it as-is, or migrate to the bundle layout via `workbuddy deploy uninstall` + `workbuddy deploy install`", lookup.name)
-		}
-	}
 
 	if err := runDeployUpgradeWithOpts(cmd.Context(), &deployUpgradeOpts{
 		deployLookupOpts: *lookup,
@@ -408,27 +349,7 @@ func runDeployUpgradeCmd(cmd *cobra.Command, _ []string) error {
 	}, cmdStdout(cmd)); err != nil {
 		return err
 	}
-	if legacy {
-		return nil
-	}
-	// --bundle is no longer required: ensuring the supervisor unit is the
-	// default since the bundle layout became the default. The flag is
-	// accepted as a no-op alias for backwards compatibility.
 	return ensureSupervisorUnitForUpgrade(cmd.Context(), lookup.scope, cmdStdout(cmd))
-}
-
-// isLegacyServeManifest reports whether a deployment manifest looks like a
-// legacy single-process `workbuddy serve` install (Command starts with
-// "serve" or is empty, in which case `deploy install` defaulted to "serve").
-func isLegacyServeManifest(m *deploymentManifest) bool {
-	if m == nil {
-		return false
-	}
-	if len(m.Command) == 0 {
-		return true
-	}
-	first := strings.ToLower(strings.TrimSpace(m.Command[0]))
-	return first == "serve"
 }
 
 func parseDeployListFlags(cmd *cobra.Command) (*deployListOpts, error) {

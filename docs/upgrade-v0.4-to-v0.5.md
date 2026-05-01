@@ -63,14 +63,6 @@ allowed in bundle mode; use the per-unit
 `--{supervisor,coordinator,worker}-args` flags instead (each repeatable).
 The `--bundle` flag is accepted as a no-op alias for backwards compatibility.
 
-To install the legacy single-process `serve` unit instead (preserved for one
-migration window only — does not preserve in-flight agent runs across
-restart), pass `--legacy-serve`:
-
-```bash
-workbuddy deploy install --legacy-serve --name workbuddy --scope user --systemd
-```
-
 To remove a bundled install:
 
 ```bash

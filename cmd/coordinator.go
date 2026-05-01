@@ -633,12 +633,6 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 
 	spa := webui.SPAHandler()
 
-	// Deprecation aliases for the legacy session events/stream paths. Pinned
-	// to specific suffixes so /sessions and /sessions/{id} (without suffix)
-	// fall through to the SPA catch-all instead of being captured here.
-	mux.Handle("/sessions/{id}/events.json", api.WrapAuth(http.HandlerFunc(sessionUI.HandleLegacyEventsAlias)))
-	mux.Handle("/sessions/{id}/stream", api.WrapAuth(http.HandlerFunc(sessionUI.HandleLegacyStreamAlias)))
-
 	if taskHub != nil {
 		taskWatchMux := http.NewServeMux()
 		taskWatchMux.HandleFunc("/tasks/watch", app.NewTaskWatchHandler(taskHub))

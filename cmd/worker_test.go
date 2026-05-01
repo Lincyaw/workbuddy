@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -161,14 +160,12 @@ func TestWorkerUnregisterCmd(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	t.Setenv(coordinatorAuthTokenEnvVar, "secret")
 	cmd := &cobra.Command{Use: "unregister"}
 	cmd.Flags().String("coordinator", "", "")
-	cmd.Flags().String("token", "", "")
+	cmd.Flags().String("token-file", "", "")
 	cmd.Flags().String("id", "", "")
 	if err := cmd.Flags().Set("coordinator", srv.URL); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("token", "secret"); err != nil {
 		t.Fatal(err)
 	}
 	if err := cmd.Flags().Set("id", "worker-1"); err != nil {
@@ -196,14 +193,12 @@ func TestWorkerUnregisterCmdNotFound(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	t.Setenv(coordinatorAuthTokenEnvVar, "secret")
 	cmd := &cobra.Command{Use: "unregister"}
 	cmd.Flags().String("coordinator", "", "")
-	cmd.Flags().String("token", "", "")
+	cmd.Flags().String("token-file", "", "")
 	cmd.Flags().String("id", "", "")
 	if err := cmd.Flags().Set("coordinator", srv.URL); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("token", "secret"); err != nil {
 		t.Fatal(err)
 	}
 	if err := cmd.Flags().Set("id", "missing-worker"); err != nil {
@@ -246,7 +241,6 @@ func TestWorkerRejectsInvalidToken(t *testing.T) {
 		coordinatorURL:    "http://localhost:18944",
 		token:             "bad-token",
 		runtime:           config.RuntimeClaudeCode,
-		repo:              repo,
 		configDir:         configDir,
 		workDir:           initGitRepo(t),
 		dbPath:            filepath.Join(t.TempDir(), "worker.db"),
@@ -296,28 +290,6 @@ func TestParseWorkerFlags_TokenFile(t *testing.T) {
 	}
 }
 
-func TestParseWorkerFlags_DeprecatedTokenWarns(t *testing.T) {
-	cmd := newWorkerFlagCommand()
-	var stderr bytes.Buffer
-	cmd.SetErr(&stderr)
-	if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
-		t.Fatalf("set coordinator: %v", err)
-	}
-	if err := cmd.Flags().Set("token", "legacy-token"); err != nil {
-		t.Fatalf("set token: %v", err)
-	}
-
-	opts, err := parseWorkerFlags(cmd)
-	if err != nil {
-		t.Fatalf("parseWorkerFlags: %v", err)
-	}
-	if got, want := opts.token, "legacy-token"; got != want {
-		t.Fatalf("token = %q, want %q", got, want)
-	}
-	if got := stderr.String(); !strings.Contains(got, "--token is deprecated") {
-		t.Fatalf("stderr = %q, want deprecation warning", got)
-	}
-}
 
 func TestParseWorkerFlags_DefaultReportBaseURLAndMgmtAuthToken(t *testing.T) {
 	t.Setenv("WORKBUDDY_AUTH_TOKEN", "shared-token")
@@ -341,12 +313,16 @@ func TestParseWorkerFlags_DefaultReportBaseURLAndMgmtAuthToken(t *testing.T) {
 
 func TestParseWorkerFlags_MgmtPublicURLRequiresSharedAuth(t *testing.T) {
 	t.Setenv("WORKBUDDY_AUTH_TOKEN", "")
+	tokenPath := filepath.Join(t.TempDir(), "token.txt")
+	if err := os.WriteFile(tokenPath, []byte("coord-token"), 0o644); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
 	cmd := newWorkerFlagCommand()
 	if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
 		t.Fatalf("set coordinator: %v", err)
 	}
-	if err := cmd.Flags().Set("token", "coord-token"); err != nil {
-		t.Fatalf("set token: %v", err)
+	if err := cmd.Flags().Set("token-file", tokenPath); err != nil {
+		t.Fatalf("set token-file: %v", err)
 	}
 	if err := cmd.Flags().Set("mgmt-public-url", "https://worker.example.com"); err != nil {
 		t.Fatalf("set mgmt-public-url: %v", err)
@@ -359,12 +335,10 @@ func TestParseWorkerFlags_MgmtPublicURLRequiresSharedAuth(t *testing.T) {
 }
 
 func TestParseWorkerFlags_MgmtPublicURLRequiresMatchingCoordinatorToken(t *testing.T) {
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", "coord-token")
 	cmd := newWorkerFlagCommand()
 	if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
 		t.Fatalf("set coordinator: %v", err)
-	}
-	if err := cmd.Flags().Set("token", "coord-token"); err != nil {
-		t.Fatalf("set token: %v", err)
 	}
 	if err := cmd.Flags().Set("mgmt-public-url", " https://worker.example.com/proxy/ "); err != nil {
 		t.Fatalf("set mgmt-public-url: %v", err)
@@ -380,12 +354,10 @@ func TestParseWorkerFlags_MgmtPublicURLRequiresMatchingCoordinatorToken(t *testi
 }
 
 func TestParseWorkerFlags_MgmtPublicURLTrimsAndStores(t *testing.T) {
+	t.Setenv("WORKBUDDY_AUTH_TOKEN", "coord-token")
 	cmd := newWorkerFlagCommand()
 	if err := cmd.Flags().Set("coordinator", "http://coord:8081"); err != nil {
 		t.Fatalf("set coordinator: %v", err)
-	}
-	if err := cmd.Flags().Set("token", "coord-token"); err != nil {
-		t.Fatalf("set token: %v", err)
 	}
 	if err := cmd.Flags().Set("mgmt-public-url", " https://worker.example.com/proxy/ "); err != nil {
 		t.Fatalf("set mgmt-public-url: %v", err)
@@ -547,7 +519,6 @@ func TestWorkerPairsWithCoordinatorAndCompletesTask(t *testing.T) {
 			token:             "secret-token",
 			roleCSV:           "dev",
 			runtime:           config.RuntimeClaudeCode,
-			repo:              repo,
 			configDir:         configDir,
 			workDir:           initGitRepo(t),
 			dbPath:            filepath.Join(t.TempDir(), "worker.db"),
@@ -761,7 +732,6 @@ func TestWorkerShutdownRequeuesInFlightTask(t *testing.T) {
 			token:             "secret-token",
 			roleCSV:           "dev",
 			runtime:           config.RuntimeClaudeCode,
-			repo:              repo,
 			configDir:         configDir,
 			workDir:           initGitRepo(t),
 			dbPath:            filepath.Join(t.TempDir(), "worker.db"),
@@ -1044,7 +1014,6 @@ func TestWorkerReleasesUnmappedTask(t *testing.T) {
 			token:             "",
 			roleCSV:           "dev",
 			runtime:           config.RuntimeClaudeCode,
-			repo:              repo,
 			configDir:         configDir,
 			workDir:           initGitRepo(t),
 			dbPath:            filepath.Join(t.TempDir(), "worker.db"),
@@ -1498,7 +1467,6 @@ func TestWorkerRecoversAfterKilledTaskWhenResultSubmitFails(t *testing.T) {
 			token:             "",
 			roleCSV:           "dev",
 			runtime:           config.RuntimeClaudeCode,
-			repo:              repo,
 			configDir:         configDir,
 			workDir:           initGitRepo(t),
 			dbPath:            filepath.Join(t.TempDir(), "worker.db"),

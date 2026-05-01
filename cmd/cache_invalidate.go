@@ -45,26 +45,9 @@ or after manually editing labels to kick off a retry.`,
 	RunE: runCacheInvalidateCmd,
 }
 
-var cacheInvalidateAliasCmd = &cobra.Command{
-	Use:   "cache-invalidate",
-	Short: "Force the poller to re-process issues on the next cycle",
-	Long: `Clear the poller's cached issue snapshot so the next poll treats each
-listed issue as new. Use this when an issue's labels changed on GitHub but
-workbuddy didn't react (poller de-dup kept it out of the state machine),
-or after manually editing labels to kick off a retry.`,
-	Example: `  # Force re-poll of one issue
-  workbuddy cache-invalidate --repo owner/name --issue 42
-
-  # Invalidate several issues at once
-  workbuddy cache-invalidate --repo owner/name --issue 42,43,44`,
-	RunE: runCacheInvalidateAliasCmd,
-}
-
 func init() {
 	bindCacheInvalidateFlags(cacheInvalidateCmd)
-	bindCacheInvalidateFlags(cacheInvalidateAliasCmd)
 	cacheCmd.AddCommand(cacheInvalidateCmd)
-	rootCmd.AddCommand(cacheInvalidateAliasCmd)
 }
 
 func runCacheInvalidateCmd(cmd *cobra.Command, _ []string) error {
@@ -78,17 +61,11 @@ func runCacheInvalidateCmd(cmd *cobra.Command, _ []string) error {
 	return runCacheInvalidateWithOpts(cmd.Context(), opts, cmdStdout(cmd))
 }
 
-func runCacheInvalidateAliasCmd(cmd *cobra.Command, args []string) error {
-	writeDeprecationWarning(cmd.ErrOrStderr(), "`workbuddy cache-invalidate`", "`workbuddy cache invalidate`")
-	return runCacheInvalidateCmd(cmd, args)
-}
-
 func bindCacheInvalidateFlags(cmd *cobra.Command) {
 	cmd.Flags().String("repo", "", "GitHub repository in OWNER/NAME form")
 	cmd.Flags().String("issue", "", "Comma-separated issue numbers")
 	cmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "SQLite database path")
 	addOutputFormatFlag(cmd)
-	addDeprecatedJSONAliasFlag(cmd)
 	cmd.Flags().Bool("dry-run", false, "Print the actions that would be taken without executing them")
 }
 

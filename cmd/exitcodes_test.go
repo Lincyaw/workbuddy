@@ -108,7 +108,6 @@ func TestRunWorkerWithOptsUnauthorizedReturnsAuthExitCode(t *testing.T) {
 		coordinatorURL:    srv.URL,
 		token:             "bad-token",
 		runtime:           "claude-code",
-		repo:              repo,
 		configDir:         configDir,
 		workDir:           workDir,
 		dbPath:            filepath.Join(t.TempDir(), "worker.db"),

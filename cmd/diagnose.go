@@ -39,8 +39,7 @@ Each finding includes a severity, a plain-English diagnosis, and a suggested
 fix. Pass --fix to apply safe automated remediations (for example cache
 invalidation for stuck issues); destructive actions are never auto-applied.
 
-Use --format json when piping into another tool. --json remains a deprecated
-alias for backwards compatibility. Exit code is non-zero if any
+Use --format json when piping into another tool. Exit code is non-zero if any
 error-severity findings remain after --fix.`,
 	Example: `  # Scan all repos
   workbuddy diagnose
@@ -58,7 +57,6 @@ func init() {
 	diagnoseCmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "SQLite database path")
 	diagnoseCmd.Flags().Bool("fix", false, "Apply safe fixes such as cache invalidation")
 	addOutputFormatFlag(diagnoseCmd)
-	addDeprecatedJSONAliasFlag(diagnoseCmd)
 	rootCmd.AddCommand(diagnoseCmd)
 }
 

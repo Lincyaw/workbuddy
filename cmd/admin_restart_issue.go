@@ -57,21 +57,9 @@ because the poller cache already matches GitHub.`,
 	RunE: runRestartIssueCmd,
 }
 
-var adminRestartIssueCmd = &cobra.Command{
-	Use:   "restart-issue",
-	Short: "Force an issue back through the next poll cycle",
-	Long: `Deprecated alias for "workbuddy issue restart". Clear the local recovery
-state for one issue so the next poll cycle treats it as fresh.`,
-	Example: `  workbuddy admin restart-issue --repo owner/name --issue 173
-  workbuddy admin restart-issue --repo owner/name --issue 173 --format json`,
-	RunE: runAdminRestartIssueCmd,
-}
-
 func init() {
 	bindRestartIssueFlags(issueRestartCmd)
-	bindRestartIssueFlags(adminRestartIssueCmd)
 	issueCmd.AddCommand(issueRestartCmd)
-	adminCmd.AddCommand(adminRestartIssueCmd)
 }
 
 func runRestartIssueCmd(cmd *cobra.Command, _ []string) error {
@@ -79,15 +67,10 @@ func runRestartIssueCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	if err := requireWritable(cmd, "admin restart-issue"); err != nil {
+	if err := requireWritable(cmd, "issue restart"); err != nil {
 		return err
 	}
 	return runRestartIssueWithOpts(cmd.Context(), opts, cmdStdout(cmd))
-}
-
-func runAdminRestartIssueCmd(cmd *cobra.Command, args []string) error {
-	writeDeprecationWarning(cmd.ErrOrStderr(), "`workbuddy admin restart-issue`", "`workbuddy issue restart`")
-	return runRestartIssueCmd(cmd, args)
 }
 
 func bindRestartIssueFlags(cmd *cobra.Command) {
@@ -97,7 +80,6 @@ func bindRestartIssueFlags(cmd *cobra.Command) {
 	cmd.Flags().String("coordinator", "", "Coordinator base URL for clearing the live inflight tracker")
 	addCoordinatorAuthFlags(cmd.Flags(), "t", "Bearer token for coordinator auth")
 	addOutputFormatFlag(cmd)
-	addDeprecatedJSONAliasFlag(cmd)
 	cmd.Flags().Bool("force", false, "Skip confirmation prompts for destructive actions")
 	cmd.Flags().Bool("dry-run", false, "Print the actions that would be taken without executing them")
 }

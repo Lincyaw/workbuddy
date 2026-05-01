@@ -463,18 +463,8 @@ func resolveWorkerRepoBindings(opts *workerOpts, configRepo, defaultPath string)
 	if opts == nil {
 		return nil, fmt.Errorf("worker: options are required")
 	}
-	if strings.TrimSpace(opts.reposCSV) != "" && strings.TrimSpace(opts.repo) != "" {
-		return nil, fmt.Errorf("worker: --repo and --repos cannot be used together")
-	}
 	if strings.TrimSpace(opts.reposCSV) != "" {
 		return parseWorkerRepoBindings(opts.reposCSV, defaultPath)
-	}
-	if strings.TrimSpace(opts.repo) != "" {
-		binding, err := parseWorkerRepoBinding(opts.repo, defaultPath, false)
-		if err != nil {
-			return nil, fmt.Errorf("worker: --repo: %w", err)
-		}
-		return []workerRepoBinding{binding}, nil
 	}
 	if strings.TrimSpace(configRepo) != "" {
 		binding, err := parseWorkerRepoBinding(configRepo, defaultPath, false)

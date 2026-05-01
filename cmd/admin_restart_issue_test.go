@@ -49,34 +49,6 @@ func TestRestartIssueCommands(t *testing.T) {
 		}
 	})
 
-	t.Run("deprecated admin restart-issue warns on stderr", func(t *testing.T) {
-		dbPath := filepath.Join(t.TempDir(), "restart.db")
-		st, err := store.NewStore(dbPath)
-		if err != nil {
-			t.Fatalf("NewStore: %v", err)
-		}
-		if err := st.UpsertIssueCache(store.IssueCache{Repo: "owner/repo", IssueNum: 174, Labels: `["status:developing"]`, State: "open"}); err != nil {
-			t.Fatalf("UpsertIssueCache: %v", err)
-		}
-		_ = st.Close()
-
-		cmd := &cobra.Command{Use: "restart-issue", RunE: runAdminRestartIssueCmd}
-		bindRestartIssueFlags(cmd)
-		var stderr bytes.Buffer
-		cmd.SetErr(&stderr)
-		cmd.SetOut(io.Discard)
-		_ = cmd.Flags().Set("repo", "owner/repo")
-		_ = cmd.Flags().Set("issue", "174")
-		_ = cmd.Flags().Set("db-path", dbPath)
-		_ = cmd.Flags().Set("force", "true")
-
-		if err := cmd.RunE(cmd, nil); err != nil {
-			t.Fatalf("runAdminRestartIssueCmd: %v", err)
-		}
-		if !strings.Contains(stderr.String(), "`workbuddy admin restart-issue` is deprecated") {
-			t.Fatalf("expected deprecation warning, got %q", stderr.String())
-		}
-	})
 }
 
 func TestRunRestartIssueStoreClearsCacheClaimAndLogsEvent(t *testing.T) {

@@ -5,10 +5,8 @@
 // /-handler. This package now only exposes:
 //
 //   - events.json + SSE stream endpoints under /api/v1/sessions/{id}/...
-//   - the same endpoints under /sessions/{id}/{events.json|stream} as
-//     deprecation aliases (Deprecation/Sunset headers + log line)
 //
-// The legacy /sessions list/detail HTML pages are owned by the SPA via the
+// The /sessions list/detail HTML pages are owned by the SPA via the
 // embedded dist bundle (see SPAHandler).
 package webui
 
@@ -18,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -70,33 +67,6 @@ func (h *Handler) HandleAPISessionStream(w http.ResponseWriter, r *http.Request)
 	h.handleStream(w, r, sessionID)
 }
 
-// HandleLegacyEventsAlias serves the deprecation alias
-// /sessions/{id}/events.json. Adds Deprecation/Sunset headers + log line.
-func (h *Handler) HandleLegacyEventsAlias(w http.ResponseWriter, r *http.Request) {
-	sessionID, ok := legacySessionID(r.URL.Path, "/events.json")
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-	markDeprecated(w, r,
-		"/sessions/{id}/events.json",
-		"/api/v1/sessions/{id}/events")
-	h.handleEventsJSON(w, r, sessionID)
-}
-
-// HandleLegacyStreamAlias serves the deprecation alias /sessions/{id}/stream.
-func (h *Handler) HandleLegacyStreamAlias(w http.ResponseWriter, r *http.Request) {
-	sessionID, ok := legacySessionID(r.URL.Path, "/stream")
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-	markDeprecated(w, r,
-		"/sessions/{id}/stream",
-		"/api/v1/sessions/{id}/stream")
-	h.handleStream(w, r, sessionID)
-}
-
 func apiSessionID(path string) (string, bool) {
 	rest := strings.TrimPrefix(path, "/api/v1/sessions/")
 	id, _, _ := strings.Cut(rest, "/")
@@ -104,32 +74,6 @@ func apiSessionID(path string) (string, bool) {
 		return "", false
 	}
 	return id, true
-}
-
-// legacySessionID extracts {id} from /sessions/{id}<suffix>. The suffix must
-// match exactly so /sessions/{id} (no suffix) is not handled here.
-func legacySessionID(path, suffix string) (string, bool) {
-	rest := strings.TrimPrefix(path, "/sessions/")
-	if !strings.HasSuffix(rest, suffix) {
-		return "", false
-	}
-	id := strings.TrimSuffix(rest, suffix)
-	if !isValidSessionID(id) {
-		return "", false
-	}
-	return id, true
-}
-
-// markDeprecated tags responses to legacy /sessions/{id}/events.json and
-// /sessions/{id}/stream paths. Operators get a `Deprecation: true` header
-// (per RFC 8594 the value would be a date, but the issue spec asks for a
-// boolean shape) and a stdout log line so log-scrapers can spot lingering
-// callers before the alias is removed.
-func markDeprecated(w http.ResponseWriter, r *http.Request, oldPath, newPath string) {
-	w.Header().Set("Deprecation", "true")
-	w.Header().Set("Sunset", "30 days")
-	w.Header().Set("Link", `<`+newPath+`>; rel="successor-version"`)
-	log.Printf("[deprecated] old path %s accessed (request %s), prefer %s", oldPath, r.URL.Path, newPath)
 }
 
 // handleEventsJSON returns a paginated slice of events from events-v1.jsonl.

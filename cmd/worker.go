@@ -51,7 +51,6 @@ type workerOpts struct {
 	mgmtPublicURL     string
 	roleCSV           string
 	runtime           string
-	repo              string
 	reposCSV          string
 	workerID          string
 	mgmtAddr          string
@@ -127,7 +126,7 @@ func runWorkerUnregister(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if token == "" {
-		return fmt.Errorf("worker unregister: --token-file, deprecated --token, or WORKBUDDY_AUTH_TOKEN is required")
+		return fmt.Errorf("worker unregister: --token-file or WORKBUDDY_AUTH_TOKEN is required")
 	}
 	if err := requireWritable(cmd, "worker unregister"); err != nil {
 		return err
@@ -147,8 +146,7 @@ func bindWorkerFlags(cmd *cobra.Command) {
 	cmd.Flags().String("role", "", "Comma-separated worker roles (default: roles from local agent config)")
 	cmd.Flags().String("runtime", config.RuntimeClaudeCode, "Worker runtime capability: claude-code or codex")
 	cmd.Flags().String("config-dir", ".github/workbuddy", "Configuration directory (relative to each bound repo unless absolute)")
-	cmd.Flags().String("repo", "", "Deprecated single binding alias; use --repos OWNER/NAME=/path (path defaults to cwd only for --repo)")
-	cmd.Flags().String("repos", "", "Canonical repo bindings: comma-separated OWNER/NAME=/path entries")
+	cmd.Flags().String("repos", "", "Repo bindings: comma-separated OWNER/NAME=/path entries (path defaults to cwd)")
 }
 
 func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
@@ -156,7 +154,6 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	roleCSV, _ := cmd.Flags().GetString("role")
 	runtimeName, _ := cmd.Flags().GetString("runtime")
 	configDir, _ := cmd.Flags().GetString("config-dir")
-	repo, _ := cmd.Flags().GetString("repo")
 	reposCSV, _ := cmd.Flags().GetString("repos")
 	workerID, _ := cmd.Flags().GetString("id")
 	mgmtAddr, _ := cmd.Flags().GetString("mgmt-addr")
@@ -172,7 +169,7 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 		return nil, err
 	}
 	if token == "" {
-		return nil, fmt.Errorf("worker: --token-file, deprecated --token, or WORKBUDDY_AUTH_TOKEN is required")
+		return nil, fmt.Errorf("worker: --token-file or WORKBUDDY_AUTH_TOKEN is required")
 	}
 	if err := validateWorkerMgmtPublicURL(mgmtPublicURL); err != nil {
 		return nil, err
@@ -184,9 +181,6 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	if err := validateWorkerMgmtPublicURLAuth(strings.TrimSpace(mgmtPublicURL), strings.TrimSpace(token), resolvedMgmtAuthToken); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(repo) != "" && strings.TrimSpace(reposCSV) == "" {
-		writeDeprecationWarning(cmd.ErrOrStderr(), "`worker --repo`", "`worker --repos OWNER/NAME=/path`")
-	}
 	return &workerOpts{
 		coordinatorURL:    strings.TrimSpace(coordinatorURL),
 		token:             strings.TrimSpace(token),
@@ -194,7 +188,6 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 		mgmtPublicURL:     strings.TrimRight(strings.TrimSpace(mgmtPublicURL), "/"),
 		roleCSV:           roleCSV,
 		runtime:           runtimeName,
-		repo:              strings.TrimSpace(repo),
 		reposCSV:          strings.TrimSpace(reposCSV),
 		workerID:          strings.TrimSpace(workerID),
 		mgmtAddr:          strings.TrimSpace(mgmtAddr),
@@ -269,7 +262,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	}
 
 	configRepo := ""
-	if strings.TrimSpace(opts.reposCSV) == "" && strings.TrimSpace(opts.repo) == "" {
+	if strings.TrimSpace(opts.reposCSV) == "" {
 		bootstrapDir := resolveWorkerConfigDir(workDir, opts.configDir)
 		bootstrapCfg, _, err := config.LoadConfig(bootstrapDir)
 		if err != nil {

@@ -4,28 +4,6 @@ import (
 	"testing"
 )
 
-// TestValidateAgentFormat_LegacyPromptField fires WB-F001 when the agent file
-// still carries a top-level `prompt:` frontmatter key.
-func TestValidateAgentFormat_LegacyPromptField(t *testing.T) {
-	agent := &agentDoc{
-		Path:                 "/tmp/agents/dev-agent.md",
-		Name:                 "dev-agent",
-		Prompt:               "Body",
-		PromptLine:           10,
-		Context:              []string{"Repo"},
-		HasLegacyPromptField: true,
-		LegacyPromptLine:     7,
-	}
-	got := validateAgentFormat(agent)
-	requireOneCode(t, got, CodeLegacyPromptField)
-	if got[0].Line != 7 {
-		t.Errorf("expected diagnostic on line 7, got %d", got[0].Line)
-	}
-	if got[0].EffectiveSeverity() != SeverityError {
-		t.Errorf("severity = %q, want error", got[0].EffectiveSeverity())
-	}
-}
-
 // TestValidateAgentFormat_EmptyBody fires WB-F002 when the body is whitespace-
 // only or absent. The body IS the prompt template now.
 func TestValidateAgentFormat_EmptyBody(t *testing.T) {

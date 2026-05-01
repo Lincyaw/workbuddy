@@ -83,7 +83,6 @@ func init() {
 	addCoordinatorAuthFlags(repoListCmd.Flags(), "t", "Bearer token for coordinator auth")
 	repoListCmd.Flags().Duration("timeout", 15*time.Second, "HTTP timeout")
 	addOutputFormatFlag(repoListCmd)
-	addDeprecatedJSONAliasFlag(repoListCmd)
 	repoCmd.AddCommand(repoListCmd)
 
 	rootCmd.AddCommand(repoCmd)

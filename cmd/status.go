@@ -113,8 +113,7 @@ The flag combinations select the view:
   --watch         — block until the next matching task completes
   --repos         — list repos registered on a coordinator (needs --coordinator)
 
-Combine with --repo to scope by repository and --format json for machine output
-(--json remains a deprecated alias).`,
+Combine with --repo to scope by repository and --format json for machine output.`,
 	Example: `  # Current issue state
   workbuddy status --repo owner/name
 
@@ -142,7 +141,6 @@ func init() {
 	statusCmd.Flags().Bool("events", false, "Show recent structured events")
 	statusCmd.Flags().Bool("watch", false, "Block until the next matching task completes")
 	addOutputFormatFlag(statusCmd)
-	addDeprecatedJSONAliasFlag(statusCmd)
 	statusCmd.Flags().String("status", "", "Task status filter for --tasks")
 	statusCmd.Flags().String("type", "", "Event type filter for --events")
 	statusCmd.Flags().String("since", "", "Relative time filter for --events, for example 10m or 1h")
