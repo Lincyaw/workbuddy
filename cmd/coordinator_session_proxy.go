@@ -1,28 +1,36 @@
 package cmd
 
-// This file pre-dates Phase 1 of the session-data ownership refactor
-// (REQ-120 / REQ-121). It serves the legacy `/workers/{id}/sessions[/{sid}]`
-// HTML viewer used by GitHub-comment links: the reporter posts a URL of
-// that shape into issue comments (see internal/sessionref) and a human
-// clicking the link gets the worker's HTML session UI proxied through
-// the coordinator. It proxies to the worker's `mgmt_base_url` — a
-// different surface than the JSON `/api/v1/sessions/...` proxy that
-// internal/sessionproxy now serves (audit_url-based, machine-readable).
+// Phase 3 of the session-data ownership refactor (REQ-122) replaced the
+// legacy worker-side mgmt_base_url HTML proxy with a 302 redirect.
 //
-// Phase 3 (next agent) should pick one of:
+// Background: the reporter posts session links of the shape
+// `<reportBaseURL>/workers/<workerID>/sessions/<sessionID>` into GitHub
+// issue comments (see internal/sessionref). Pre-refactor the coordinator
+// proxied that path to the worker's mgmt HTTP server (mgmt_base_url) and
+// rewrote in-flight HTML to keep the worker prefix on relative session
+// links. Phase 1 added an `audit_url` column on `workers` and Phase 2
+// stood up internal/sessionproxy as a JSON proxy keyed off audit_url.
+// The HTML viewer the old proxy wrapped is now served by the SPA at
+// `/sessions/{id}` directly, reading the same JSON the SPA reads
+// elsewhere — the worker mgmt HTML route is no longer the source of
+// truth.
 //
-//   (a) Make the SPA the canonical session viewer and 30x redirect
-//       /workers/{id}/sessions/{sid} → /sessions/{sid}, then delete
-//       this file and the worker-side mgmt HTML route entirely.
-//   (b) Refactor this proxy onto `audit_url` once the worker audit
-//       server grows an HTML view (currently it's JSON-only).
+// We picked option (a) from the Phase 2 ADR: redirect the legacy URL
+// shape onto the SPA route. The reporter still emits the
+// `/workers/<id>/sessions/<sid>` URL (sessionref.BuildURL), so existing
+// GitHub comments keep working — the user lands on the SPA via the
+// redirect rather than on a worker-served HTML page. Nothing reads
+// mgmt_base_url for sessions any longer; the column is left in place
+// for the workers-table response shape (operators inspect it via the
+// admin API).
 //
-// Either way, `mgmt_base_url` becomes deprecated. Until that decision
-// is made, leaving this overlay alone is the lowest-risk option:
-// existing GitHub-comment URLs keep working.
+// Net effect:
+//   * 80 lines of HTML body-rewriting + reverse-proxy machinery deleted.
+//   * No coordinator-side dependency on the worker mgmt HTML surface.
+//   * GitHub-comment URLs continue to resolve through the SPA, which
+//     calls /api/v1/sessions/{id} (sessionproxy → audit_url → worker).
 
 import (
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -30,87 +38,34 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
-type coordinatorSessionProxy struct {
-	store      *store.Store
-	sharedAuth string
-	client     *http.Client
-}
-
-func newCoordinatorSessionProxy(st *store.Store, sharedAuth string) http.Handler {
-	return &coordinatorSessionProxy{
-		store:      st,
-		sharedAuth: strings.TrimSpace(sharedAuth),
-		client:     &http.Client{},
-	}
-}
-
-func (p *coordinatorSessionProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if p == nil || p.store == nil {
-		http.NotFound(w, r)
-		return
-	}
-	workerID, sessionPath, ok := parseWorkerSessionProxyPath(r.URL.Path)
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-	worker, err := p.store.GetWorker(workerID)
-	if err != nil {
-		http.Error(w, "failed to query worker", http.StatusInternalServerError)
-		return
-	}
-	if worker == nil || strings.TrimSpace(worker.MgmtBaseURL) == "" {
-		http.NotFound(w, r)
-		return
-	}
-
-	targetURL := strings.TrimRight(worker.MgmtBaseURL, "/") + sessionPath
-	if raw := r.URL.RawQuery; raw != "" {
-		targetURL += "?" + raw
-	}
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
-	if err != nil {
-		http.Error(w, "failed to build worker session request", http.StatusBadGateway)
-		return
-	}
-	req.Header = r.Header.Clone()
-	if p.sharedAuth != "" {
-		req.Header.Set("Authorization", "Bearer "+p.sharedAuth)
-	}
-
-	resp, err := p.client.Do(req)
-	if err != nil {
-		http.Error(w, "worker session viewer unavailable", http.StatusBadGateway)
-		return
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	rewritePrefix := "/workers/" + url.PathEscape(workerID) + "/sessions"
-	for key, values := range resp.Header {
-		for _, value := range values {
-			if strings.EqualFold(key, "Location") && strings.HasPrefix(value, "/sessions") {
-				value = rewriteWorkerSessionHTML(workerID, value)
-			}
-			w.Header().Add(key, value)
-		}
-	}
-
-	if strings.Contains(resp.Header.Get("Content-Type"), "text/html") {
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			http.Error(w, "failed to read worker session response", http.StatusBadGateway)
+// newCoordinatorSessionProxy returns an http.Handler that 302-redirects
+// `/workers/<id>/sessions/<sid>[suffix]` onto the SPA's canonical
+// `/sessions/<sid>[suffix]` route. The redirect preserves any query
+// string. Paths outside that shape return 404.
+//
+// The store and sharedAuth arguments are no longer used (the redirect
+// touches neither the DB nor any worker), but the signature is kept so
+// the existing wiring in cmd/coordinator.go and the legacy test surface
+// compile unchanged.
+func newCoordinatorSessionProxy(_ *store.Store, _ string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, sessionPath, ok := parseWorkerSessionProxyPath(r.URL.Path)
+		if !ok {
+			http.NotFound(w, r)
 			return
 		}
-		w.Header().Del("Content-Length")
-		w.WriteHeader(resp.StatusCode)
-		_, _ = w.Write([]byte(strings.ReplaceAll(string(body), "\"/sessions", "\""+rewritePrefix)))
-		return
-	}
-
-	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+		// sessionPath is "/sessions/<sid>[/suffix]"; serve as-is.
+		target := sessionPath
+		if raw := r.URL.RawQuery; raw != "" {
+			target += "?" + raw
+		}
+		http.Redirect(w, r, target, http.StatusFound)
+	})
 }
 
+// parseWorkerSessionProxyPath parses `/workers/<id>/sessions[/<rest>]`
+// into (workerID, "/sessions[/<rest>]", true). Used by the redirect
+// handler and exercised by the legacy proxy tests.
 func parseWorkerSessionProxyPath(path string) (workerID, sessionPath string, ok bool) {
 	if !strings.HasPrefix(path, "/workers/") {
 		return "", "", false
@@ -128,8 +83,4 @@ func parseWorkerSessionProxyPath(path string) (workerID, sessionPath string, ok 
 		return "", "", false
 	}
 	return workerID, "/sessions" + suffix, true
-}
-
-func rewriteWorkerSessionHTML(workerID, value string) string {
-	return strings.ReplaceAll(value, "/sessions", "/workers/"+url.PathEscape(workerID)+"/sessions")
 }
