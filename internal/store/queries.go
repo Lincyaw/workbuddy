@@ -221,6 +221,14 @@ func (s *Store) LatestSessionForIssue(repo string, issueNum int) (*SessionRecord
 // given terminal status since the cutoff time. Used for done_24h / failed_24h
 // summary fields on /api/v1/status.
 func (s *Store) CountTerminalSessionsSince(status string, since time.Time) (int, error) {
+	if s.coordinatorMode {
+		// Phase 3 (REQ-122): coordinator's `sessions` table is dropped.
+		// Status counters now report 0 from the coordinator side; the
+		// per-worker audit endpoints carry the truth and a future
+		// metrics rollup may aggregate them. Returning 0 keeps the
+		// /api/v1/status response shape valid.
+		return 0, nil
+	}
 	var n int
 	err := s.db.QueryRow(
 		`SELECT COUNT(*) FROM sessions s
@@ -526,6 +534,13 @@ func (s *Store) ListOpenIssueActivity(pendingStatus, runningStatus string) ([]Is
 // CountActiveSessions returns the number of sessions whose joined task status
 // (falling back to session status) is pending or running.
 func (s *Store) CountActiveSessions() (int, error) {
+	if s.coordinatorMode {
+		// Phase 3 (REQ-122): coordinator's `sessions` table is dropped.
+		// See CountTerminalSessionsSince for the same tradeoff. Returns
+		// 0 so /api/v1/status keeps its shape; per-worker counts must
+		// come from an aggregator that doesn't exist yet.
+		return 0, nil
+	}
 	var n int
 	err := s.db.QueryRow(
 		`SELECT COUNT(*)
@@ -584,6 +599,14 @@ type SessionListFilter struct {
 // newest first, for the audit API. This preserves the exact JOIN semantics
 // previously inlined in auditapi.
 func (s *Store) ListSessionsForAPI(filter SessionListFilter) ([]SessionRecord, error) {
+	if s.coordinatorMode {
+		// Phase 3 (REQ-122): coordinator's `sessions` table is dropped.
+		// The /api/v1/sessions endpoint is served by sessionproxy fan-
+		// out, not by this method, on a coordinator. Returning an empty
+		// slice keeps test fixtures and any orphan caller (the legacy
+		// sessionproxy local fallback) cleanly empty.
+		return nil, nil
+	}
 	query := `SELECT s.id, s.session_id, s.task_id, s.repo, s.issue_num, s.agent_name, s.runtime, s.worker_id, s.attempt,
 	                 COALESCE(t.status, s.status),
 	                 s.dir, s.stdout_path, s.stderr_path, s.tool_calls_path, s.metadata_path, s.summary, s.raw_path, s.created_at, s.closed_at
@@ -654,6 +677,14 @@ type SessionAggregateMetrics struct {
 // AggregateSessionMetrics returns the counts/averages used by the audit API's
 // /api/v1/metrics endpoint.
 func (s *Store) AggregateSessionMetrics() (SessionAggregateMetrics, error) {
+	if s.coordinatorMode {
+		// Phase 3 (REQ-122): coordinator's `sessions` table is dropped.
+		// /api/v1/metrics on the coordinator now reflects only its own
+		// surface (issue cache, transitions, tasks); session-derived
+		// success/retry rates would require fanning out to every
+		// worker, which the metrics handler does not yet model.
+		return SessionAggregateMetrics{}, nil
+	}
 	var m SessionAggregateMetrics
 	var successful, retried sql.NullInt64
 	err := s.db.QueryRow(
@@ -691,6 +722,11 @@ type SessionCountByAgent struct {
 
 // CountSessionsByAgent returns per-agent session counts ordered by agent name.
 func (s *Store) CountSessionsByAgent() ([]SessionCountByAgent, error) {
+	if s.coordinatorMode {
+		// Phase 3 (REQ-122): coordinator's `sessions` table is dropped.
+		// See AggregateSessionMetrics comment for the same tradeoff.
+		return nil, nil
+	}
 	rows, err := s.db.Query(`SELECT agent_name, COUNT(*) FROM sessions GROUP BY agent_name ORDER BY agent_name`)
 	if err != nil {
 		return nil, fmt.Errorf("store: sessions by agent: %w", err)

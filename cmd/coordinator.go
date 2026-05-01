@@ -69,6 +69,13 @@ type coordinatorOpts struct {
 	// optional (defaults to http://<listen>) when --listen is loopback.
 	reportBaseURL string
 	hooksConfig   string
+	// sharedStoreWithWorker is true when the coordinator is being run
+	// in-process alongside a worker that uses the same SQLite file
+	// (the `workbuddy serve` topology). Phase 3 (REQ-122): the
+	// coordinator otherwise drops the legacy `sessions` and
+	// `agent_sessions` tables on startup; in shared mode it must NOT
+	// drop them because the worker still writes session rows there.
+	sharedStoreWithWorker bool
 }
 
 type tokenCreateOpts struct {
@@ -346,7 +353,18 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 		log.Printf("[coordinator] warning: WORKBUDDY_AUTH_TOKEN is not set; worker API is running without authentication")
 	}
 
-	st, err := store.NewStore(opts.dbPath)
+	var st *store.Store
+	if opts.sharedStoreWithWorker {
+		// `workbuddy serve` topology: one DB, shared with the in-process
+		// worker. Phase 3 keeps the legacy session tables here because
+		// the worker side still writes to them.
+		st, err = store.NewStore(opts.dbPath)
+	} else {
+		// Standalone coordinator: drop the legacy sessions /
+		// agent_sessions tables and short-circuit their reads.
+		// REQ-122 / Phase 3 of the session-data ownership refactor.
+		st, err = store.NewCoordinatorStore(opts.dbPath)
+	}
 	if err != nil {
 		return fmt.Errorf("coordinator: init store: %w", err)
 	}
@@ -614,14 +632,11 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 	dashboardAPI := auditapi.NewHandler(st)
 	sessionsDir := filepath.Join(filepath.Dir(dbPath), "sessions")
 	dashboardAPI.SetSessionsDir(sessionsDir)
-	// Phase 2 of the session-data ownership refactor (REQ-121): the worker
-	// audit listener now reports sessions truthfully, so the legacy
-	// listDiskOnlySessions / buildDegradedFromDisk fallbacks are turned off
-	// on the coordinator-side handler. They remain available behind the
-	// disableDiskOnlySynthesis=false code path for tests and the local
-	// fall-back used by sessionproxy when an audit_url points at this host.
-	// Phase 3 will delete the disk-walk synthesis entirely.
-	dashboardAPI.SetDisableDiskOnlySynthesis(true)
+	// Phase 3 (REQ-122) deleted the disk-only synthesis paths from
+	// auditapi.Handler entirely, so no per-handler opt-out remains. The
+	// coordinator's local handler now serves only sessions whose rows
+	// physically exist in the coordinator DB (legacy pre-bundle data). The
+	// sessionproxy fan-out reaches live sessions on each owning worker.
 
 	sessionUI := webui.NewHandler(st)
 	sessionUI.SetSessionsDir(sessionsDir)
@@ -632,19 +647,14 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 	dashboardAPI.RegisterDashboard(dashboardMux)
 	mux.Handle("/api/v1/status", api.WrapAuth(dashboardMux))
 
-	// /api/v1/sessions and /api/v1/sessions/{id}[/events|/stream] now go
+	// /api/v1/sessions and /api/v1/sessions/{id}[/events|/stream] go
 	// through the sessionproxy: it resolves session_id → owning worker via
-	// workers.audit_url and reverse-proxies. When the audit_url points at
-	// this coordinator's own host (loopback / explicit local-fallback),
-	// the request is dispatched back to dashboardMux so the existing
-	// in-process handler serves legacy pre-bundle data.
-	// Local fallback is opt-out: when an audit_url resolution fails (no
-	// row, no worker, no advertised URL) the proxy falls back to the
-	// in-process handler so legacy pre-bundle sessions on the
-	// coordinator host stay reachable. Loopback short-circuit is
-	// opt-IN via --local-audit-fallback (Phase 2 spec section 1); the
-	// flag is plumbed by the surrounding coordinator command if set.
-	// Phase 3 deletes both branches once legacy data has aged out.
+	// workers.audit_url and reverse-proxies. When Resolve says the
+	// session has no worker (legacy pre-bundle row), the proxy falls back
+	// to the in-process dashboard handler. Loopback short-circuit (an
+	// audit_url that points back at this coordinator's hostname) is
+	// opt-IN via WithLocalAuditFallback; the flag is plumbed by the
+	// surrounding coordinator command if set.
 	resolver := sessionproxy.NewResolver(st)
 	if hostname, err := os.Hostname(); err == nil && strings.TrimSpace(hostname) != "" {
 		resolver.WithLocalHost(hostname)
@@ -654,6 +664,15 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 		Local:     dashboardMux,
 		AuthToken: api.AuthToken,
 	})
+	// Phase 3 (REQ-122): the coordinator's issue-detail endpoint used to
+	// read sessions from the local store. Now that the coordinator drops
+	// its sessions table on startup, route the issue-detail's session
+	// list through the same fan-out used by /api/v1/sessions.
+	dashboardAPI.SetIssueSessionsLister(sessionProxy)
+	// Phase 3 (REQ-122): drop the sessionproxy listing cache whenever a
+	// worker (re-)registers or unregisters. Without this hook, a freshly
+	// registered worker remains invisible for up to the cache TTL (5s).
+	api.OnWorkerMembershipChange = sessionProxy.InvalidateCache
 	mux.Handle("/api/v1/sessions", api.WrapAuth(http.HandlerFunc(sessionProxy.ServeHTTP)))
 	mux.Handle("/api/v1/sessions/", api.WrapAuth(http.HandlerFunc(sessionProxy.ServeHTTP)))
 
