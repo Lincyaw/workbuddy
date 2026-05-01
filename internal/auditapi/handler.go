@@ -1805,6 +1805,14 @@ func (h *Handler) sessionTaskStats(record store.SessionRecord) (int, string, *ti
 	}
 	task, err := h.store.GetTask(record.TaskID)
 	if err != nil {
+		// Worker DBs don't keep terminal task_queue rows around (the row
+		// is acked + deleted on completion), so a missing task is the
+		// normal case for finished sessions on the worker-side audit
+		// listener. Treat ErrTaskNotFound like the task==nil branch
+		// rather than bubbling it up as a 500.
+		if errors.Is(err, store.ErrTaskNotFound) {
+			return exitCode, status, finishedAt, nil
+		}
 		return 0, "", nil, fmt.Errorf("get task %s: %w", record.TaskID, err)
 	}
 	if task == nil {
