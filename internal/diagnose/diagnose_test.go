@@ -111,6 +111,56 @@ func TestAnalyzeHeartbeatOnlyZombieSignals(t *testing.T) {
 	})
 }
 
+func TestAnalyzePipelineHazard_MalformedDependencyRefIncludesLineHint(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	restore := stubTaskProcesses(func() ([]taskProcess, error) { return nil, nil })
+	defer restore()
+
+	st, _ := newDiagnoseStore(t)
+	defer func() { _ = st.Close() }()
+
+	const (
+		repo     = "Lincyaw/workbuddy"
+		issueNum = 293
+	)
+
+	body := "Prelude\n\n```yaml\nworkbuddy:\n  depends_on:\n    - \\\"#292\\\"\n    - garbage\n```\n"
+	if err := st.UpsertIssueCache(store.IssueCache{
+		Repo:     repo,
+		IssueNum: issueNum,
+		Labels:   `["workbuddy","status:developing"]`,
+		Body:     body,
+		State:    "open",
+	}); err != nil {
+		t.Fatalf("UpsertIssueCache: %v", err)
+	}
+	if _, err := st.UpsertIssuePipelineHazard(store.PipelineHazard{
+		Repo:        repo,
+		IssueNum:    issueNum,
+		Kind:        store.HazardKindMalformedDependencyRef,
+		Fingerprint: "fp",
+	}); err != nil {
+		t.Fatalf("UpsertIssuePipelineHazard: %v", err)
+	}
+
+	findings, err := analyzeWithConfig(st, repo, now, diagnoseConfig{})
+	if err != nil {
+		t.Fatalf("analyzeWithConfig: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("findings=%d, want 1: %+v", len(findings), findings)
+	}
+	if findings[0].Kind != KindPipelineHazard {
+		t.Fatalf("kind=%q, want %q", findings[0].Kind, KindPipelineHazard)
+	}
+	if !strings.Contains(findings[0].Diagnosis, `line 7`) || !strings.Contains(findings[0].Diagnosis, `"garbage"`) {
+		t.Fatalf("diagnosis=%q, want line-specific malformed ref context", findings[0].Diagnosis)
+	}
+	if !strings.Contains(findings[0].SuggestedFix, "line 7") || !strings.Contains(findings[0].SuggestedFix, "`garbage`") {
+		t.Fatalf("suggested_fix=%q, want line-specific edit hint", findings[0].SuggestedFix)
+	}
+}
+
 type runningTaskFixture struct {
 	repo         string
 	issueNum     int

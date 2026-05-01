@@ -35,6 +35,7 @@ const (
 )
 
 var yamlFenceRe = regexp.MustCompile("(?s)```yaml\\s*\n(.*?)```")
+var localIssueRefRe = regexp.MustCompile(`^#([1-9][0-9]*)$`)
 var fqIssueRefRe = regexp.MustCompile(`^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)#([1-9][0-9]*)$`)
 
 type IssueReader interface {
@@ -53,6 +54,7 @@ type ParsedDependency struct {
 	Status           string
 	Normalized       string
 	ParseErrorReason string
+	Line             int
 }
 
 type ParsedDeclaration struct {
@@ -78,23 +80,30 @@ func NewResolver(st *store.Store, reader IssueReader, eventlog EventRecorder, al
 }
 
 func ParseDeclaration(repo, body string) ParsedDeclaration {
-	matches := yamlFenceRe.FindAllStringSubmatch(body, -1)
+	matches := yamlFenceRe.FindAllStringSubmatchIndex(body, -1)
 	for _, match := range matches {
+		block := body[match[2]:match[3]]
 		var raw struct {
 			Workbuddy struct {
 				DependsOn []string `yaml:"depends_on"`
 			} `yaml:"workbuddy"`
 		}
-		if err := yaml.Unmarshal([]byte(match[1]), &raw); err != nil {
+		if err := yaml.Unmarshal([]byte(block), &raw); err != nil {
 			continue
 		}
 		if raw.Workbuddy.DependsOn == nil {
 			continue
 		}
+		blockStartLine := 1 + strings.Count(body[:match[2]], "\n")
+		linesByRaw := dependencyEntryLines(block, blockStartLine)
 		decl := ParsedDeclaration{HasBlock: true}
 		seen := make(map[string]struct{})
 		for _, dep := range raw.Workbuddy.DependsOn {
 			parsed := normalizeDependency(repo, dep)
+			if lines := linesByRaw[parsed.Raw]; len(lines) > 0 {
+				parsed.Line = lines[0]
+				linesByRaw[parsed.Raw] = lines[1:]
+			}
 			if parsed.Normalized != "" {
 				if _, ok := seen[parsed.Normalized]; ok {
 					continue
@@ -104,9 +113,15 @@ func ParseDeclaration(repo, body string) ParsedDeclaration {
 			decl.Dependencies = append(decl.Dependencies, parsed)
 		}
 		sort.Slice(decl.Dependencies, func(i, j int) bool {
-			return decl.Dependencies[i].Normalized < decl.Dependencies[j].Normalized
+			if decl.Dependencies[i].Normalized != decl.Dependencies[j].Normalized {
+				return decl.Dependencies[i].Normalized < decl.Dependencies[j].Normalized
+			}
+			if decl.Dependencies[i].Raw != decl.Dependencies[j].Raw {
+				return decl.Dependencies[i].Raw < decl.Dependencies[j].Raw
+			}
+			return decl.Dependencies[i].Line < decl.Dependencies[j].Line
 		})
-		decl.SourceHash = hashStrings(match[1], dependenciesSignature(decl.Dependencies))
+		decl.SourceHash = hashStrings(block, dependenciesSignature(decl.Dependencies))
 		return decl
 	}
 	return ParsedDeclaration{}
@@ -141,6 +156,9 @@ func (r *Resolver) EvaluateOpenIssues(ctx context.Context, repo string, graphVer
 	for num, issue := range openIssues {
 		decl := ParseDeclaration(repo, issue.Body)
 		parsedDecls[num] = decl
+		if err := r.syncMalformedDependencyHazard(repo, num, decl); err != nil {
+			return nil, err
+		}
 		deps := make([]store.IssueDependency, 0, len(decl.Dependencies))
 		for _, dep := range decl.Dependencies {
 			if dep.Repo == "" || dep.IssueNum <= 0 {
@@ -227,7 +245,7 @@ func (r *Resolver) publishAlert(eventKind string, severity alertbus.Severity, re
 		Kind:      eventKind,
 		Severity:  severity,
 		Repo:      repo,
-		IssueNum:   issueNum,
+		IssueNum:  issueNum,
 		AgentName: agentName,
 		Timestamp: time.Now().Unix(),
 		Payload:   payload,
@@ -333,10 +351,11 @@ func buildResolveResult(
 func normalizeDependency(repo, raw string) ParsedDependency {
 	raw = strings.TrimSpace(raw)
 	parsed := ParsedDependency{Raw: raw}
+	canonical := normalizeDependencyRef(raw)
 	switch {
-	case strings.HasPrefix(raw, "#"):
+	case localIssueRefRe.MatchString(canonical):
 		var num int
-		if _, err := fmt.Sscanf(raw, "#%d", &num); err != nil || num <= 0 {
+		if _, err := fmt.Sscanf(canonical, "#%d", &num); err != nil || num <= 0 {
 			parsed.Status = store.DependencyStatusInvalid
 			parsed.ParseErrorReason = "invalid_issue_number"
 			return parsed
@@ -344,8 +363,8 @@ func normalizeDependency(repo, raw string) ParsedDependency {
 		parsed.Repo = repo
 		parsed.IssueNum = num
 		parsed.Status = store.DependencyStatusActive
-	case fqIssueRefRe.MatchString(raw):
-		match := fqIssueRefRe.FindStringSubmatch(raw)
+	case fqIssueRefRe.MatchString(canonical):
+		match := fqIssueRefRe.FindStringSubmatch(canonical)
 		var num int
 		if _, err := fmt.Sscanf(match[3], "%d", &num); err != nil || num <= 0 {
 			parsed.Status = store.DependencyStatusInvalid
@@ -367,6 +386,150 @@ func normalizeDependency(repo, raw string) ParsedDependency {
 		parsed.Normalized = fmt.Sprintf("%s#%d", parsed.Repo, parsed.IssueNum)
 	}
 	return parsed
+}
+
+func normalizeDependencyRef(raw string) string {
+	raw = strings.TrimSpace(raw)
+	raw = strings.ReplaceAll(raw, `\"`, `"`)
+	raw = strings.ReplaceAll(raw, `\'`, `'`)
+	raw = stripMatchingQuotes(raw)
+	return strings.TrimSpace(raw)
+}
+
+func stripMatchingQuotes(raw string) string {
+	if len(raw) < 2 {
+		return raw
+	}
+	if raw[0] == '"' && raw[len(raw)-1] == '"' {
+		return raw[1 : len(raw)-1]
+	}
+	if raw[0] == '\'' && raw[len(raw)-1] == '\'' {
+		return raw[1 : len(raw)-1]
+	}
+	return raw
+}
+
+func dependencyEntryLines(block string, blockStartLine int) map[string][]int {
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(block), &root); err != nil {
+		return nil
+	}
+	if len(root.Content) == 0 {
+		return nil
+	}
+	workbuddy := lookupMappingValue(root.Content[0], "workbuddy")
+	if workbuddy == nil {
+		return nil
+	}
+	dependsOn := lookupMappingValue(workbuddy, "depends_on")
+	if dependsOn == nil || dependsOn.Kind != yaml.SequenceNode {
+		return nil
+	}
+	lines := make(map[string][]int, len(dependsOn.Content))
+	for _, item := range dependsOn.Content {
+		if item.Kind != yaml.ScalarNode {
+			continue
+		}
+		lines[item.Value] = append(lines[item.Value], blockStartLine+item.Line-1)
+	}
+	return lines
+}
+
+func lookupMappingValue(node *yaml.Node, key string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
+		}
+	}
+	return nil
+}
+
+func invalidDependencies(deps []ParsedDependency) []ParsedDependency {
+	out := make([]ParsedDependency, 0)
+	for _, dep := range deps {
+		if dep.Status == store.DependencyStatusInvalid {
+			out = append(out, dep)
+		}
+	}
+	return out
+}
+
+func (r *Resolver) syncMalformedDependencyHazard(repo string, issueNum int, decl ParsedDeclaration) error {
+	invalid := invalidDependencies(decl.Dependencies)
+	if len(invalid) == 0 {
+		return r.clearPipelineHazardIfKind(repo, issueNum, store.HazardKindMalformedDependencyRef)
+	}
+	fingerprint := hashStrings("malformed_dependency_ref", decl.SourceHash, dependenciesSignature(invalid))
+	changed, err := r.store.UpsertIssuePipelineHazard(store.PipelineHazard{
+		Repo:        repo,
+		IssueNum:    issueNum,
+		Kind:        store.HazardKindMalformedDependencyRef,
+		Fingerprint: fingerprint,
+	})
+	if err != nil {
+		return fmt.Errorf("dependency: upsert malformed dependency hazard for %s#%d: %w", repo, issueNum, err)
+	}
+	if !changed || r.eventlog == nil {
+		return nil
+	}
+	r.eventlog.Log(eventlog.TypeIssueDependencyUnentered, repo, issueNum, map[string]any{
+		"reason":               "unparseable_ref",
+		"depends_on":           invalidDependencyRefs(invalid),
+		"invalid_dependencies": invalidDependencyPayload(invalid),
+		"hint":                 invalidDependencyHint(invalid),
+	})
+	return nil
+}
+
+func (r *Resolver) clearPipelineHazardIfKind(repo string, issueNum int, kind string) error {
+	prev, err := r.store.QueryIssuePipelineHazard(repo, issueNum)
+	if err != nil {
+		return fmt.Errorf("dependency: query pipeline hazard for %s#%d: %w", repo, issueNum, err)
+	}
+	if prev == nil || prev.Kind != kind {
+		return nil
+	}
+	if err := r.store.ClearIssuePipelineHazard(repo, issueNum); err != nil {
+		return fmt.Errorf("dependency: clear pipeline hazard for %s#%d: %w", repo, issueNum, err)
+	}
+	return nil
+}
+
+func invalidDependencyRefs(invalid []ParsedDependency) []string {
+	refs := make([]string, 0, len(invalid))
+	for _, dep := range invalid {
+		refs = append(refs, dep.Raw)
+	}
+	return refs
+}
+
+func invalidDependencyPayload(invalid []ParsedDependency) []map[string]any {
+	payload := make([]map[string]any, 0, len(invalid))
+	for _, dep := range invalid {
+		entry := map[string]any{
+			"raw":                dep.Raw,
+			"parse_error_reason": dep.ParseErrorReason,
+		}
+		if dep.Line > 0 {
+			entry["line"] = dep.Line
+		}
+		payload = append(payload, entry)
+	}
+	return payload
+}
+
+func invalidDependencyHint(invalid []ParsedDependency) string {
+	if len(invalid) == 0 {
+		return "edit the malformed depends_on entry so it uses `#<int>` or `owner/repo#<int>`"
+	}
+	dep := invalid[0]
+	if dep.Line > 0 {
+		return fmt.Sprintf("edit issue body line %d under `workbuddy.depends_on`: replace %q with `#<int>` or `owner/repo#<int>`", dep.Line, dep.Raw)
+	}
+	return fmt.Sprintf("edit the malformed `workbuddy.depends_on` entry %q so it uses `#<int>` or `owner/repo#<int>`", dep.Raw)
 }
 
 func detectCycles(graph map[int][]int) map[int][]string {

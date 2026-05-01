@@ -18,6 +18,11 @@ const (
 	// machine never enters the issue and the dependency gate cannot release
 	// downstream work.
 	HazardKindAwaitingStatusLabel = "awaiting-status-label"
+	// HazardKindMalformedDependencyRef — issue declares workbuddy.depends_on
+	// but at least one dependency ref could not be normalized into #<int> or
+	// owner/repo#<int>, so the resolver dropped it and the issue may remain
+	// blocked until the body is fixed.
+	HazardKindMalformedDependencyRef = "malformed-dependency-ref"
 )
 
 // PipelineHazard records a per-issue configuration-incompleteness condition.
@@ -75,8 +80,8 @@ func (s *Store) QueryIssuePipelineHazard(repo string, issueNum int) (*PipelineHa
 		repo, issueNum,
 	)
 	var (
-		out    PipelineHazard
-		rawTS  string
+		out   PipelineHazard
+		rawTS string
 	)
 	err := row.Scan(&out.Repo, &out.IssueNum, &out.Kind, &out.Fingerprint, &rawTS)
 	if err == sql.ErrNoRows {

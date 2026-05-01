@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
+	"github.com/Lincyaw/workbuddy/internal/dependency"
 	recoverpkg "github.com/Lincyaw/workbuddy/internal/recover"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
@@ -278,8 +279,8 @@ func analyzeWithConfig(st *store.Store, repo string, now time.Time, cfg diagnose
 			Repo:         h.Repo,
 			IssueNum:     h.IssueNum,
 			Severity:     SeverityWarn,
-			Diagnosis:    pipelineHazardDiagnosis(h.Kind),
-			SuggestedFix: pipelineHazardSuggestedFix(h.Kind),
+			Diagnosis:    pipelineHazardDiagnosis(st, h),
+			SuggestedFix: pipelineHazardSuggestedFix(st, h),
 		})
 	}
 
@@ -594,26 +595,59 @@ func parseFailureKey(raw string) (string, int, string) {
 	return parts[0], issueNum, parts[2]
 }
 
-func pipelineHazardDiagnosis(kind string) string {
-	switch kind {
+func pipelineHazardDiagnosis(st *store.Store, hazard store.PipelineHazard) string {
+	switch hazard.Kind {
 	case store.HazardKindNoWorkflowMatch:
 		return "issue carries a status:* label but no workflow trigger label matched, so the state machine cannot enter it"
 	case store.HazardKindAwaitingStatusLabel:
 		return "issue declares depends_on but has no status:* label, so the state machine cannot enter it and the dependency gate cannot release downstream work"
+	case store.HazardKindMalformedDependencyRef:
+		if dep, ok := firstInvalidDependency(st, hazard); ok {
+			if dep.Line > 0 {
+				return fmt.Sprintf("issue declares an unparseable depends_on ref at line %d (%q), so the resolver dropped it and dependency gating may stay stuck", dep.Line, dep.Raw)
+			}
+			return fmt.Sprintf("issue declares an unparseable depends_on ref (%q), so the resolver dropped it and dependency gating may stay stuck", dep.Raw)
+		}
+		return "issue declares an unparseable depends_on ref, so the resolver dropped it and dependency gating may stay stuck"
 	default:
-		return fmt.Sprintf("pipeline hazard: %s", kind)
+		return fmt.Sprintf("pipeline hazard: %s", hazard.Kind)
 	}
 }
 
-func pipelineHazardSuggestedFix(kind string) string {
-	switch kind {
+func pipelineHazardSuggestedFix(st *store.Store, hazard store.PipelineHazard) string {
+	switch hazard.Kind {
 	case store.HazardKindNoWorkflowMatch:
 		return "add the workflow trigger label, e.g. `workbuddy`"
 	case store.HazardKindAwaitingStatusLabel:
 		return "add `status:blocked` so the gate can evaluate, or `status:developing` if the deps are already satisfied"
+	case store.HazardKindMalformedDependencyRef:
+		if dep, ok := firstInvalidDependency(st, hazard); ok {
+			if dep.Line > 0 {
+				return fmt.Sprintf("edit issue body line %d under `workbuddy.depends_on`: replace `%s` with `#<int>` or `owner/repo#<int>`, then run `workbuddy cache invalidate --repo %s --issue %d`", dep.Line, dep.Raw, hazard.Repo, hazard.IssueNum)
+			}
+			return fmt.Sprintf("edit the malformed `workbuddy.depends_on` entry `%s` so it uses `#<int>` or `owner/repo#<int>`, then run `workbuddy cache invalidate --repo %s --issue %d`", dep.Raw, hazard.Repo, hazard.IssueNum)
+		}
+		return fmt.Sprintf("fix the malformed `workbuddy.depends_on` entry so it uses `#<int>` or `owner/repo#<int>`, then run `workbuddy cache invalidate --repo %s --issue %d`", hazard.Repo, hazard.IssueNum)
 	default:
 		return "inspect issue labels and body; clear the hazard once the configuration is complete"
 	}
+}
+
+func firstInvalidDependency(st *store.Store, hazard store.PipelineHazard) (dependency.ParsedDependency, bool) {
+	if st == nil {
+		return dependency.ParsedDependency{}, false
+	}
+	cache, err := st.QueryIssueCache(hazard.Repo, hazard.IssueNum)
+	if err != nil || cache == nil {
+		return dependency.ParsedDependency{}, false
+	}
+	decl := dependency.ParseDeclaration(hazard.Repo, cache.Body)
+	for _, dep := range decl.Dependencies {
+		if dep.Status == store.DependencyStatusInvalid {
+			return dep, true
+		}
+	}
+	return dependency.ParsedDependency{}, false
 }
 
 func issueKey(repo string, issueNum int) string {

@@ -2031,6 +2031,7 @@ func (sm *StateMachine) detectDependencyUnenteredHazard(wf *config.WorkflowConfi
 	}
 	sm.eventlog.Log(eventlog.TypeIssueDependencyUnentered, event.Repo, event.IssueNum, map[string]any{
 		"workflow":   wf.Name,
+		"reason":     "missing_status_label",
 		"labels":     append([]string(nil), event.Labels...),
 		"depends_on": deps,
 		"hint":       "add status:blocked so the dependency gate can evaluate, or status:developing if the deps are already satisfied",
