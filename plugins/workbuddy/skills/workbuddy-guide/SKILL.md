@@ -42,13 +42,14 @@ Dev writes code + PR → flips to `reviewing`. Review evaluates each AC →
 
 | Mode | Command | When to use |
 |------|---------|-------------|
-| **Serve** (single process) | `workbuddy serve` | Local dev, single-host setups, testing |
-| **Distributed** (coordinator + workers) | `workbuddy coordinator` + `workbuddy worker` | Workers on different hosts, horizontal scale, multi-repo |
-| **Managed install** (systemd) | `workbuddy deploy install` | Long-lived production; survives reboots; `deploy redeploy`/`deploy upgrade` for updates |
+| **Bundle** (default since v0.5: supervisor + coordinator + worker) | `workbuddy supervisor` + `workbuddy coordinator` + `workbuddy worker` | Production, multi-host, anywhere agent runs must survive worker restarts |
+| **Serve** (single process, legacy) | `workbuddy serve` | Local dev, single-host quick-start; does **not** preserve agents across restart |
+| **Managed install** (systemd) | `workbuddy deploy install` | Long-lived production; defaults to the bundle layout; `deploy redeploy`/`deploy upgrade`/`deploy rollback`/`deploy watch` for updates |
 
 All three share the same state machine, SQLite store, and agent configs.
 Run `workbuddy <mode> --help` for flags, `workbuddy deploy install --help`
-for the systemd wrapper examples, etc.
+for the systemd wrapper examples. See the `/deploy` skill for the bundle
+topology rationale and the cutover from `serve`.
 
 ## Command map — what to reach for
 
@@ -60,19 +61,21 @@ Run `workbuddy --help` for the full list. Grouped by intent:
 - `workbuddy repo register` — attach a repo to a running coordinator (no restart)
 
 **Run workbuddy**
-- `workbuddy serve` — single-process dev mode
-- `workbuddy coordinator` + `workbuddy worker` — distributed mode
-- `workbuddy deploy install|redeploy|upgrade` — managed systemd install
+- `workbuddy supervisor` + `workbuddy coordinator` + `workbuddy worker` — bundle mode (default)
+- `workbuddy serve` — single-process legacy mode (local dev only)
+- `workbuddy deploy install|redeploy|upgrade|rollback|watch` — managed systemd install
 
 **Observe**
-- `workbuddy status` — issues, tasks, events, stuck issues, or watch until done
+- `workbuddy status` — issues, tasks, events, stuck issues, or `--watch` until done
 - `workbuddy logs <issue>` — per-attempt session logs (stdout/stderr/tool calls)
 - `workbuddy diagnose` — surfaces stuck issues, 3-retry caps, stale claims; `--fix` for safe auto-remediation
+- `workbuddy hooks list|status|test|reload` — operator-owned event hooks (Slack/Feishu/etc.)
 
 **Recover**
-- `workbuddy cache-invalidate` — force re-poll after manual label edits
-- `workbuddy recover` — clean stale processes/worktrees/claims after a crash
-- `workbuddy operator-watch` — auto-dispatch Claude on coordinator incident files
+- `workbuddy cache invalidate` — force re-poll after manual label edits (`cache-invalidate` remains as a deprecated alias)
+- `workbuddy issue restart` — clear poller cache + claim lease for one issue (was `admin restart-issue`, now deprecated)
+- `workbuddy recover` — clean stale processes/worktrees/claims after a crash (`--kill-zombies --prune-worktrees --prune-remote-branches --reset-db`)
+- `workbuddy operator-watch` — tail the operator incident inbox and auto-dispatch Claude per incident
 
 **Worker runtime ops**
 - `workbuddy worker repos add|list|remove` — change a running worker's repo bindings without restart
@@ -98,7 +101,7 @@ read the relevant decision docs for depth; the short version:
 Impact for operators: if `diagnose` says "failed 3 times in a row", check
 the issue's comments — if they're "Infra Error", the bug is infrastructure
 (usually runtime/launcher), not the acceptance criteria. Fix infra and
-`cache-invalidate` to restart; don't rewrite the issue.
+`workbuddy cache invalidate` to restart; don't rewrite the issue.
 
 ## Common workflows
 
@@ -123,7 +126,12 @@ workbuddy diagnose --repo owner/name
 
 # Manually nudge state and force re-poll
 gh issue edit N -R owner/name --remove-label status:blocked --add-label status:developing
-workbuddy cache-invalidate --repo owner/name --issue N
+workbuddy cache invalidate --repo owner/name --issue N
+
+# Or, if the poller cache + claim lease both need clearing (stuck after a crash)
+workbuddy issue restart --repo owner/name --issue N \
+  --coordinator http://127.0.0.1:8081 \
+  --token-file /home/$USER/.config/workbuddy/auth-token
 ```
 
 **Add a repo to a running deployment** (no restart)
