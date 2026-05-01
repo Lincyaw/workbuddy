@@ -428,6 +428,19 @@ func (s *FullCoordinatorServer) HandleRegisterWorker(w http.ResponseWriter, r *h
 	req.Runtime = strings.TrimSpace(req.Runtime)
 	req.MgmtBaseURL = strings.TrimRight(strings.TrimSpace(req.MgmtBaseURL), "/")
 	req.AuditURL = strings.TrimRight(strings.TrimSpace(req.AuditURL), "/")
+	// audit_url is optional (empty means "no audit listener configured" —
+	// the sessionproxy resolver falls back to the coordinator-local
+	// handler in that case). When provided, only http/https are
+	// accepted: the coordinator opens this URL with net/http.Client, so
+	// `javascript:`, `file:`, `data:` etc. are nonsense at best and
+	// confused-deputy bait at worst.
+	if req.AuditURL != "" {
+		parsed, perr := url.Parse(req.AuditURL)
+		if perr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			CoordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "audit_url must be an http or https URL with a host"})
+			return
+		}
+	}
 	if len(req.Repos) == 0 && req.Repo != "" {
 		req.Repos = []string{req.Repo}
 	}
