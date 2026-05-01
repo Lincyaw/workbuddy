@@ -106,6 +106,12 @@ type CycleCapReporter interface {
 	ReportDevReviewCycleCap(ctx context.Context, repo string, issueNum int, info CycleCapInfo) error
 }
 
+// SynthesisNeedsHumanReporter posts a coordinator-side needs-human comment
+// when synthesize mode produced malformed or missing structured output.
+type SynthesisNeedsHumanReporter interface {
+	ReportSynthesisNeedsHuman(ctx context.Context, repo string, issueNum int, reason string) error
+}
+
 // CycleCapInfo carries the data the Reporter needs to assemble the
 // needs-human comment posted on cap-hit. The rejection-trail digest is
 // expected to be assembled by Coordinator Go code (no agent re-invocation).
@@ -215,6 +221,9 @@ type StateMachine struct {
 	// dev↔review cycle cap. Optional; when nil, cap-hit still records an
 	// event + alert but no GitHub comment is written.
 	capReporter CycleCapReporter
+	// synthNeedsHumanReporter posts the coordinator-side needs-human comment
+	// when synthesize mode returns malformed or missing structured output.
+	synthNeedsHumanReporter SynthesisNeedsHumanReporter
 
 	// issueClaim configuration (REQ-057). When claimerID is empty, per-issue
 	// claim acquisition is skipped — useful for tests that don't care and for
@@ -266,6 +275,13 @@ func NewStateMachine(
 // the comment side-effect (event + alert still fire).
 func (sm *StateMachine) SetCycleCapReporter(r CycleCapReporter) {
 	sm.capReporter = r
+}
+
+// SetSynthesisNeedsHumanReporter installs the callback used to post a
+// needs-human comment when synthesize mode returns malformed output. Pass nil
+// to disable the comment side-effect (event + blocked transition still fire).
+func (sm *StateMachine) SetSynthesisNeedsHumanReporter(r SynthesisNeedsHumanReporter) {
+	sm.synthNeedsHumanReporter = r
 }
 
 // SetIssueClaim enables per-issue dispatch-claim acquisition (REQ-057). When
@@ -1432,6 +1448,11 @@ func (sm *StateMachine) MarkAgentCompletedWithDecision(repo string, issueNum int
 
 	if shouldAdvance {
 		if stateModeFromGroup(group) == config.StateModeSynth && shouldEscalateSynthDecision(exitCode, decision) {
+			if decision == nil && sm.synthNeedsHumanReporter != nil {
+				if err := sm.synthNeedsHumanReporter.ReportSynthesisNeedsHuman(context.Background(), repo, issueNum, "malformed_or_missing_synthesis_output"); err != nil {
+					log.Printf("[statemachine] synth needs-human comment failed for %s#%d: %v", repo, issueNum, err)
+				}
+			}
 			if err := sm.advanceRolloutFailureToBlocked(repo, issueNum, group.workflow, group.state); err != nil {
 				log.Printf("[statemachine] synth escalation transition failed for %s#%d: %v", repo, issueNum, err)
 			}

@@ -26,6 +26,14 @@ func TestFormatNeedsHumanReport_Golden(t *testing.T) {
 	assertGolden(t, "needs-human.md", got)
 }
 
+func TestFormatSynthesisNeedsHumanReport_Golden(t *testing.T) {
+	got := FormatSynthesisNeedsHumanReport(SynthesisNeedsHumanData{
+		Reason:    "malformed_or_missing_synthesis_output",
+		Timestamp: time.Date(2026, 4, 29, 12, 1, 30, 0, time.UTC),
+	})
+	assertGolden(t, "synthesis-needs-human.md", got)
+}
+
 func TestFormatReportAt_Golden(t *testing.T) {
 	got := FormatReportAt(ReportData{
 		AgentName:   "dev-agent",

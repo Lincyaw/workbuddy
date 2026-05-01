@@ -60,6 +60,15 @@ func newSynthSM(t *testing.T) (*StateMachine, *fakeRecorder, chan DispatchReques
 	return sm, rec, dispatch
 }
 
+type fakeSynthesisNeedsHumanReporter struct {
+	calls []string
+}
+
+func (f *fakeSynthesisNeedsHumanReporter) ReportSynthesisNeedsHuman(_ context.Context, _ string, _ int, reason string) error {
+	f.calls = append(f.calls, reason)
+	return nil
+}
+
 func TestSynthesisFlow_PickTransitionsToReviewing(t *testing.T) {
 	sm, rec, dispatch := newSynthSM(t)
 	if err := sm.HandleEvent(context.Background(), ChangeEvent{
@@ -269,6 +278,8 @@ func TestSynthesisFlow_EscalateBlocksFurtherDispatch(t *testing.T) {
 
 func TestSynthesisFlow_MalformedOutputFallsBackToEscalate(t *testing.T) {
 	sm, rec, dispatch := newSynthSM(t)
+	rep := &fakeSynthesisNeedsHumanReporter{}
+	sm.SetSynthesisNeedsHumanReporter(rep)
 	wm := workflow.NewManager(sm.store)
 	if err := wm.CreateIfMissing("test/repo", 10, "dev-flow", "developing"); err != nil {
 		t.Fatalf("CreateIfMissing: %v", err)
@@ -303,6 +314,9 @@ func TestSynthesisFlow_MalformedOutputFallsBackToEscalate(t *testing.T) {
 	}
 	if _, exists := payload["synth_pr"]; exists {
 		t.Fatalf("malformed payload unexpectedly includes synth_pr")
+	}
+	if len(rep.calls) != 1 || rep.calls[0] != "malformed_or_missing_synthesis_output" {
+		t.Fatalf("needs-human reporter calls = %+v, want malformed fallback", rep.calls)
 	}
 	assertTransitionTrail(t, rec, [][2]string{
 		{"synthesizing", "blocked"},

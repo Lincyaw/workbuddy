@@ -57,6 +57,15 @@ type NeedsHumanData struct {
 	Timestamp time.Time
 }
 
+// SynthesisNeedsHumanData holds the canonical facts for a coordinator-side
+// synthesis fallback comment. This is used when the synth reviewer did not
+// return a valid structured decision, so the coordinator must surface the
+// needs-human recommendation itself.
+type SynthesisNeedsHumanData struct {
+	Reason    string
+	Timestamp time.Time
+}
+
 // statusBadge returns a Markdown status badge string.
 func statusBadge(status string) string {
 	switch status {
@@ -212,6 +221,24 @@ func FormatNeedsHumanReport(d NeedsHumanData) string {
 		b.WriteString("\n\n")
 	}
 	b.WriteString("Recommended next step: add `needs-human` and review the issue manually.\n\n")
+
+	b.WriteString("---\n")
+	fmt.Fprintf(&b, "*workbuddy coordinator | %s*\n", d.Timestamp.UTC().Format(time.RFC3339))
+
+	return b.String()
+}
+
+// FormatSynthesisNeedsHumanReport generates the coordinator-side comment used
+// when synthesize mode produced malformed or missing structured output.
+func FormatSynthesisNeedsHumanReport(d SynthesisNeedsHumanData) string {
+	var b strings.Builder
+
+	b.WriteString("## Managed Follow-up\n\n")
+	b.WriteString("The synthesize run did not return a valid structured decision, so the coordinator stopped the rollout reduce step instead of auto-picking a PR.\n\n")
+	if reason := strings.TrimSpace(d.Reason); reason != "" {
+		fmt.Fprintf(&b, "**Why it was blocked**: `%s`\n\n", reason)
+	}
+	b.WriteString("Recommended next step: add `needs-human`, inspect the candidate PRs manually, and decide whether to pick one, build a synth PR, or rewrite the issue.\n\n")
 
 	b.WriteString("---\n")
 	fmt.Fprintf(&b, "*workbuddy coordinator | %s*\n", d.Timestamp.UTC().Format(time.RFC3339))
