@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { extractRolloutOutcomes } from './Hooks';
 
 describe('extractRolloutOutcomes', () => {
-  it('reads rollout outcomes from the events envelope returned by /api/v1/events', () => {
+  it('reads rollout outcomes from the legacy events envelope shape', () => {
     const outcomes = extractRolloutOutcomes({
       events: [
         { payload: { decision: 'join_satisfied' } },
@@ -10,6 +10,16 @@ describe('extractRolloutOutcomes', () => {
         { payload: { decision: 'join_satisfied' } },
       ],
     });
+
+    expect(outcomes).toEqual([true, false, true]);
+  });
+
+  it('reads rollout outcomes from the current bare-array /api/v1/events shape', () => {
+    const outcomes = extractRolloutOutcomes([
+      { payload: { decision: 'join_satisfied' } },
+      { payload: { decision: 'min_successes_unmet' } },
+      { payload: { decision: 'join_satisfied' } },
+    ]);
 
     expect(outcomes).toEqual([true, false, true]);
   });

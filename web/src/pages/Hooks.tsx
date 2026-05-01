@@ -23,6 +23,12 @@ interface RolloutResolvedEventsResponse {
   events?: RolloutResolvedEvent[];
 }
 
+type RolloutResolvedEventsPayload =
+  | RolloutResolvedEvent[]
+  | RolloutResolvedEventsResponse
+  | null
+  | undefined;
+
 interface FetchState {
   data: HooksListResponse | null;
   latencySamples: Record<string, number[]>;
@@ -33,8 +39,12 @@ interface FetchState {
 
 const INITIAL: FetchState = { data: null, latencySamples: {}, rolloutOutcomes: [], error: null, loading: true };
 
-export function extractRolloutOutcomes(response: RolloutResolvedEventsResponse | null | undefined): boolean[] {
-  const events = Array.isArray(response?.events) ? response.events : [];
+export function extractRolloutOutcomes(response: RolloutResolvedEventsPayload): boolean[] {
+  const events = Array.isArray(response)
+    ? response
+    : Array.isArray(response?.events)
+      ? response.events
+      : [];
   return events
     .map((event) => event.payload)
     .map((payload) => {
@@ -67,7 +77,7 @@ export function Hooks() {
       );
       let rolloutOutcomes: boolean[] = [];
       try {
-        const rolloutEvents = await apiJSON<RolloutResolvedEventsResponse>('/api/v1/events?type=rollout_group_resolved');
+        const rolloutEvents = await apiJSON<RolloutResolvedEvent[] | RolloutResolvedEventsResponse>('/api/v1/events?type=rollout_group_resolved');
         rolloutOutcomes = extractRolloutOutcomes(rolloutEvents);
       } catch {
         rolloutOutcomes = [];
