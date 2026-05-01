@@ -121,6 +121,19 @@ func TestSynthesisFlow_PickTransitionsToReviewing(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("synthesis_decision events = %d, want 1", len(events))
 	}
+	payload, ok := events[0].Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T", events[0].Payload)
+	}
+	if got := payload["outcome"]; got != "pick" {
+		t.Fatalf("outcome = %v, want pick", got)
+	}
+	if got := payload["chosen_pr"]; got != 101 {
+		t.Fatalf("chosen_pr = %v, want 101", got)
+	}
+	if _, exists := payload["synth_pr"]; exists {
+		t.Fatalf("pick payload unexpectedly includes synth_pr")
+	}
 	if err := sm.store.InsertTask(store.TaskRecord{
 		ID:        "review-1",
 		Repo:      "test/repo",
@@ -200,6 +213,9 @@ func TestSynthesisFlow_CherryPickTransitionsToReviewing(t *testing.T) {
 	if got := payload["synth_pr"]; got != 201 {
 		t.Fatalf("synth_pr = %v, want 201", got)
 	}
+	if _, exists := payload["chosen_pr"]; exists {
+		t.Fatalf("cherry-pick payload unexpectedly includes chosen_pr")
+	}
 	assertTransitionTrail(t, rec, [][2]string{
 		{"synthesizing", "reviewing"},
 	})
@@ -229,8 +245,22 @@ func TestSynthesisFlow_EscalateBlocksFurtherDispatch(t *testing.T) {
 		t.Fatalf("unexpected follow-up dispatch after escalate: %+v", req)
 	default:
 	}
-	if len(rec.find(eventlog.TypeSynthesisDecision)) != 1 {
+	events := rec.find(eventlog.TypeSynthesisDecision)
+	if len(events) != 1 {
 		t.Fatalf("expected synthesis_decision event")
+	}
+	payload, ok := events[0].Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T", events[0].Payload)
+	}
+	if got := payload["outcome"]; got != "escalate" {
+		t.Fatalf("outcome = %v, want escalate", got)
+	}
+	if _, exists := payload["chosen_pr"]; exists {
+		t.Fatalf("escalate payload unexpectedly includes chosen_pr")
+	}
+	if _, exists := payload["synth_pr"]; exists {
+		t.Fatalf("escalate payload unexpectedly includes synth_pr")
 	}
 	assertTransitionTrail(t, rec, [][2]string{
 		{"synthesizing", "blocked"},
@@ -260,6 +290,19 @@ func TestSynthesisFlow_MalformedOutputFallsBackToEscalate(t *testing.T) {
 	events := rec.find(eventlog.TypeSynthesisDecision)
 	if len(events) != 1 {
 		t.Fatalf("synthesis_decision events = %d, want 1", len(events))
+	}
+	payload, ok := events[0].Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T", events[0].Payload)
+	}
+	if got := payload["reason"]; got != "malformed_or_missing_synthesis_output" {
+		t.Fatalf("reason = %v, want malformed_or_missing_synthesis_output", got)
+	}
+	if _, exists := payload["chosen_pr"]; exists {
+		t.Fatalf("malformed payload unexpectedly includes chosen_pr")
+	}
+	if _, exists := payload["synth_pr"]; exists {
+		t.Fatalf("malformed payload unexpectedly includes synth_pr")
 	}
 	assertTransitionTrail(t, rec, [][2]string{
 		{"synthesizing", "blocked"},

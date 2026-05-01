@@ -1480,14 +1480,18 @@ func (sm *StateMachine) logSynthesisDecision(repo string, issueNum int, group *d
 		})
 		return
 	}
-	sm.eventlog.Log(eventlog.TypeSynthesisDecision, repo, issueNum, map[string]any{
+	payload := map[string]any{
 		"outcome":      decision.Outcome,
-		"chosen_pr":    decision.ChosenPR,
-		"synth_pr":     decision.SynthPR,
 		"rejected_prs": decision.RejectedPRs,
 		"reason":       decision.Reason,
-		"exit_code":    exitCode,
-	})
+	}
+	switch decision.Outcome {
+	case "pick":
+		payload["chosen_pr"] = decision.ChosenPR
+	case "cherry-pick":
+		payload["synth_pr"] = decision.SynthPR
+	}
+	sm.eventlog.Log(eventlog.TypeSynthesisDecision, repo, issueNum, payload)
 }
 
 func shouldEscalateSynthDecision(exitCode int, decision *runtimepkg.SynthesisDecision) bool {
