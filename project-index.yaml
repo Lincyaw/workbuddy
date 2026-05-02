@@ -4535,3 +4535,181 @@ requirements:
       - internal/app/coordinator_session_route_test.go
     deps:
       - REQ-122
+
+  - id: REQ-124
+    title: Comment context pruning for agent prompts
+    description: >
+      Agent prompts used to embed every issue comment verbatim via
+      FormatComments, so dev↔review cycle accumulation linearly inflated the
+      prompt and risked drowning the actionable signal in stale verdicts and
+      reporter bookkeeping. taskprep now keeps only the most recent review
+      verdict (located by a `<!-- workbuddy:review-verdict -->` marker the
+      review-agent prepends) and replaces the rest with a counted summary
+      line plus a `gh issue view ... --json comments` invocation the agent
+      can run on demand. Reporter-generated noise (Agent Started, Agent
+      Report, Infra Error, Managed Follow-up, Cycle Cap, anything carrying
+      the `*workbuddy coordinator |` footer) is filtered out entirely and
+      reported as a separate count.
+    priority: P1
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-124-1: FormatComments(nil, ...) returns \"(no comments)\"; reporter-generated comments (header prefix or `*workbuddy coordinator |` footer) are dropped and counted separately."
+      - "AC-124-2: When multiple comments carry the verdict marker, FormatComments retains only the most recent; older verdicts are folded into the omitted-count summary."
+      - "AC-124-3: The summary line names the omitted comment count and the reporter-noise count, and includes the literal `gh issue view <num> --repo <repo> --json comments` command so the agent can fetch full history on demand."
+      - "AC-124-4: review-agent.md instructs the agent to prepend `<!-- workbuddy:review-verdict -->` to its verdict comment so future cycles can locate it."
+    code:
+      - internal/taskprep/taskprep.go
+      - .github/workbuddy/agents/review-agent.md
+    tests:
+      - internal/taskprep/taskprep_test.go
+    deps:
+      - REQ-001
+
+  - id: REQ-125
+    title: deploy redeploy/upgrade preserves supervisor for hot-reload
+    description: >
+      Before this change, `workbuddy deploy redeploy --all` and `workbuddy
+      deploy upgrade --all` cold-restarted every unit in the bundle,
+      including the supervisor. The supervisor's whole design intent is to
+      outlive worker/coordinator restarts so in-flight agent processes it
+      owns survive — restarting it on every binary swap defeats that. The
+      new default is: replace the binary on disk for all three units, but
+      skip the supervisor's systemd restart. Operators who really need the
+      supervisor's process to pick up the new binary can pass
+      `--include-supervisor` to opt back into the old behaviour. This is
+      the realistic hot-reload contract the bundle topology can deliver:
+      worker/coordinator restarts that the supervisor stitches across.
+    priority: P1
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-125-1: deploymentRoleFromManifest returns supervisor/coordinator/worker/serve from the first non-flag positional argument of the manifest command, lowercased; nil and flag-only manifests return empty string."
+      - "AC-125-2: shouldRestartUnit returns (false, non-empty reason) for role==supervisor when includeSupervisor=false, and (true, \"\") in every other case; --include-supervisor=true returns (true, \"\") even for supervisor."
+      - "AC-125-3: deployRedeployCmd and deployUpgradeCmd register a `--include-supervisor` boolean flag (default false) and parseDeployLookupFlags reads it into deployLookupOpts.includeSupervisor."
+      - "AC-125-4: runDeployRedeployRecord and runDeployUpgradeRecord always copy the binary and rewrite the manifest, then dispatch to syncSystemdDeploymentStateRestart with the restart decision computed from the manifest role and the flag — when restart is skipped, the output reads `left <unit> running (<reason>)` instead of `restarted <unit>`."
+      - "AC-125-5: TestDeploymentRoleFromManifest and TestShouldRestartUnit_PreservesSupervisor cover the helper contract; the existing deploy test suite still passes."
+    code:
+      - cmd/deploy.go
+    tests:
+      - cmd/deploy_test.go
+    deps:
+      - REQ-027
+
+  - id: REQ-126
+    title: Worker repo bindings persist across restart
+    description: >
+      Bindings added at runtime via `workbuddy worker repos add` lived in
+      worker process memory only. On worker restart (deploy redeploy /
+      upgrade / SIGTERM) the dynamic bindings vanished and the
+      coordinator's poller would silently dispatch tasks for those repos
+      to a worker that no longer matched, leaving issues stranded in
+      `status:developing` with no claim and no error. The fix introduces
+      a persistent YAML file (default
+      `$XDG_CONFIG_HOME/workbuddy/worker-repos.yaml`, override with
+      `--repos-file` or `WORKBUDDY_WORKER_REPOS_FILE`) that the worker
+      loads at startup and atomically rewrites after every successful
+      `repos add/remove`. Static `--repos` flag and the file are merged at
+      startup; on conflict the file wins because it records the latest
+      operator-issued mutation.
+    priority: P0
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-126-1: defaultWorkerReposFilePath honors $WORKBUDDY_WORKER_REPOS_FILE first, then $XDG_CONFIG_HOME/workbuddy/worker-repos.yaml, then ~/.config/workbuddy/worker-repos.yaml."
+      - "AC-126-2: loadWorkerRepoBindingsFile returns (nil, nil) for a missing file or empty path; rejects entries with empty repo/path; rejects duplicates; rejects schema_version greater than the supported version."
+      - "AC-126-3: writeWorkerRepoBindingsFile writes atomically (temp file in the same directory + rename), creates the parent directory with 0700, sets file mode 0600, and leaves no orphan .tmp files on the happy path."
+      - "AC-126-4: mergeRepoBindings combines CLI-supplied and file-supplied bindings, the file value wins on conflict, and entries with empty repo are dropped."
+      - "AC-126-5: runWorkerWithOpts loads the persisted file after resolveWorkerRepoBindings and merges into the in-memory binding store before mgmt server starts; the mgmt onChange callback writes the file after the coordinator update succeeds, and a write failure logs but does not roll back the in-memory or coordinator-side state."
+      - "AC-126-6: Unit tests in cmd/worker_repos_persist_test.go cover the load/write/merge contract; the existing worker test suite still passes."
+    code:
+      - cmd/worker.go
+      - cmd/worker_repos_persist.go
+    tests:
+      - cmd/worker_repos_persist_test.go
+    deps:
+      - REQ-049
+
+  - id: REQ-127
+    title: Codex runtime lifecycle decoupled from worker (supervisor-owned WS sidecar)
+    description: >
+      Pre-REQ-127 the codex `app-server` child process was a direct fork of
+      the worker via stdio JSON-RPC pipes. Every `deploy redeploy` of the
+      worker therefore tore down codex, reset model warmup, and forced
+      every concurrent turn to restart from zero. This REQ moves the
+      codex runtime out of the worker's process tree: `workbuddy
+      supervisor` now hosts a long-lived `codex app-server --listen
+      ws://HOST:PORT` child it owns and restarts on crash, and the worker
+      reaches it over a persistent WebSocket. Worker redeploy now leaves
+      the codex process intact; the worker simply re-dials on startup.
+      Codex 0.125.0's `--listen unix://PATH` is advertised in --help but
+      rejected at runtime, so the only viable non-stdio transport is
+      WebSocket, bound to loopback (no auth on codex's WS server).
+
+      In-flight turn results are NOT preserved across worker restart:
+      probe (task #1) showed codex auto-interrupts the turn within ~1s of
+      WS disconnect and `thread/resume` returns a snapshot with the
+      partial assistant output discarded. v1 ships the lifecycle
+      decoupling only; cross-restart turn resume is a separate follow-up
+      (v1.5, REQ-128 if pursued).
+    priority: P0
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-127-1: cmd/supervisor.go registers --codex-binary, --codex-listen, and --codex-bypass-approvals-and-sandbox flags. preflightCodexSidecar validates binary on PATH (or absolute), parses listen as host:port, rejects non-loopback hosts, fills defaults (listen=127.0.0.1:7177, min/max backoff 1s/30s)."
+      - "AC-127-2: runCodexSidecar spawns codex with `app-server --listen ws://<listen>`, places it in its own process group, restarts with exponential backoff on crash, kills the whole pgid (SIGTERM then SIGKILL after 2s) on context cancel, and returns nil on clean shutdown."
+      - "AC-127-3: internal/agent/codex/appserver.go dials `ws://...` via github.com/coder/websocket instead of fork+exec; Config gains URL field, drops Binary and DangerouslyBypass; Backend.NewBackend no longer LookPath-checks codex (the sidecar owns the binary). resolveCodexURL honours Config.URL, then $WORKBUDDY_CODEX_URL, then defaultCodexURL."
+      - "AC-127-4: ensureConnected dial failure returns an error mentioning `supervisor must be started with --codex-binary` so operators see the missing-sidecar root cause without grepping. Multiplex semantics (one connection, many threads, distinct thread_ids) preserved; concurrent NewSession serializes write frames safely (coder/websocket.Conn.Write is goroutine-safe)."
+      - "AC-127-5: cmd/deploy_bundle.go --bundle-codex-binary, --bundle-codex-listen, --bundle-codex-no-bypass auto-inject the matching supervisor-args flags so `deploy install --bundle --bundle-codex-binary=/usr/local/bin/codex` is sufficient operator config."
+      - "AC-127-6: New test surface: internal/agent/codex/codextest provides an in-process WebSocket fake that replaces the pre-REQ-127 python stdio fake. internal/agent/codex/backend_test.go exercises lifecycle, multiplex, interrupt, process-scoped log fan-out, dial-failure guidance, and slow-consumer backpressure over WS. internal/launcher/codex_appserver_test.go's installFakeCodex helper now spins up the codextest server and points $WORKBUDDY_CODEX_URL at it."
+      - "AC-127-7: cmd/serve_test.go's setupFakeGHCLI sets $XDG_CONFIG_HOME to t.TempDir() so worker tests do not load the developer's ~/.config/workbuddy/worker-repos.yaml. go vet, go build, go test ./... all pass."
+    code:
+      - cmd/supervisor.go
+      - cmd/supervisor_codex_sidecar.go
+      - cmd/deploy_bundle.go
+      - cmd/serve_test.go
+      - internal/agent/codex/appserver.go
+      - internal/agent/codex/backend.go
+      - internal/agent/codex/codextest/wsfake.go
+      - internal/launcher/codex_appserver_test.go
+      - internal/launcher/permissions_test.go
+    tests:
+      - cmd/supervisor_codex_sidecar_test.go
+      - internal/agent/codex/backend_test.go
+    deps:
+      - REQ-027
+
+  - id: REQ-128
+    title: Dedup repeated infra-error comments via edit-with-count
+    description: >
+      Reporter posted a fresh GitHub comment for every infra-error
+      (e.g. "worktree has uncommitted changes — refusing to reuse")
+      regardless of whether the same agent had reported the same reason
+      seconds earlier on the same issue. A retry storm could file 3+
+      duplicate "Infra Error: dev-agent" comments before the dispatch
+      failure cap kicked in (issue Lincyaw/AgentM#58 hit this). The fix
+      introduces an in-memory dedup keyed by (repo, issue_num,
+      agent_name): on subsequent infra error with the same reason
+      within a 30 minute TTL, reporter edits the prior comment and
+      prepends a `:repeat: Repeat #N` badge instead of posting a new
+      one. Any non-infra report or TTL expiry resets the state so the
+      next failure surfaces cleanly. Capability is opt-in via the
+      GHCommentEditor interface, so test fakes that only implement
+      GHCommentWriter still work.
+    priority: P1
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-128-1: ghadapter.CLI exposes WriteIssueCommentReturningID and EditIssueComment; the gh issue comment success URL is parsed via the regex `#issuecomment-(\\d+)` to recover the comment id."
+      - "AC-128-2: GHCommentEditor is an optional interface (writer + editor on the same object). GHCLIWriter satisfies both; legacy fakes that only implement GHCommentWriter take the no-dedup fallback path."
+      - "AC-128-3: Reporter.report dedup state is keyed by (repo, issueNum, agentName); the prior reason and TTL gate together control whether the next infra error edits or posts fresh."
+      - "AC-128-4: A non-infra report (any status != \"infra-error\") clears the dedup state so the next infra event surfaces as a new comment."
+      - "AC-128-5: Repeat #N badge format (`:repeat: **Repeat #N** (first seen ..., last seen ...)`) is rendered above the existing report body, not in place of it, so operators retain the full diagnostic."
+      - "AC-128-6: Tests in internal/reporter/infra_dedup_test.go cover same-reason editing, different-reason fresh posting, TTL expiry, non-infra clearing, per-agent isolation, and the writer-without-editor fallback."
+    code:
+      - internal/ghadapter/ghcli.go
+      - internal/reporter/reporter.go
+    tests:
+      - internal/reporter/infra_dedup_test.go
+    deps:
+      - REQ-001

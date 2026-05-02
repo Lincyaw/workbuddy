@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/agent/codex/codextest"
 	"github.com/Lincyaw/workbuddy/internal/config"
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 )
@@ -200,12 +201,19 @@ func TestCodexSessionRun_EmitsPermissionEvent(t *testing.T) {
 	}
 }
 
-func TestCodexSessionRun_DangerBypassesSandboxThroughLauncher(t *testing.T) {
-	restore := installFakeCodex(t)
-	defer restore()
-
-	logPath := filepath.Join(t.TempDir(), "fake-codex.log")
-	t.Setenv("FAKE_CODEX_LOG", logPath)
+func TestCodexSessionRun_DangerSandboxFlowsToThreadStart(t *testing.T) {
+	// Pre-REQ-127 this test asserted the worker forked codex with the
+	// top-level --dangerously-bypass-approvals-and-sandbox CLI flag. With
+	// the WS-transport refactor the worker no longer forks codex —
+	// `workbuddy supervisor` does, with the bypass flag set once at
+	// supervisor startup (covered by cmd/supervisor_codex_sidecar_test.go).
+	// The remaining worker-side assertion is the per-session sandbox
+	// param threading: an agent with Sandbox=danger-full-access must
+	// produce thread/start params with sandbox="danger-full-access".
+	logPath := filepath.Join(t.TempDir(), "fake.log")
+	srv := codextest.NewServer(t, codextest.Config{Mode: codextest.ModeComplete, LogPath: logPath})
+	defer srv.Close()
+	t.Setenv("WORKBUDDY_CODEX_URL", srv.URL)
 
 	task := newTestTask(t)
 	agent := &config.AgentConfig{
@@ -234,30 +242,15 @@ func TestCodexSessionRun_DangerBypassesSandboxThroughLauncher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fake codex log: %v", err)
 	}
-	var (
-		argv        []any
-		threadStart map[string]any
-	)
+	var threadStart map[string]any
 	for _, line := range splitNonEmptyLines(string(logData)) {
 		var obj map[string]any
 		if err := json.Unmarshal([]byte(line), &obj); err != nil {
 			t.Fatalf("unmarshal fake codex log line %q: %v", line, err)
 		}
-		if rawArgv, ok := obj["argv"].([]any); ok {
-			argv = rawArgv
-		}
 		if obj["method"] == "thread/start" {
 			threadStart, _ = obj["params"].(map[string]any)
 		}
-	}
-	if len(argv) < 2 {
-		t.Fatalf("argv = %#v, want top-level bypass flag plus app-server", argv)
-	}
-	if got, _ := argv[0].(string); got != "--dangerously-bypass-approvals-and-sandbox" {
-		t.Fatalf("argv[0] = %q, want top-level bypass flag; argv=%#v", got, argv)
-	}
-	if got, _ := argv[1].(string); got != "app-server" {
-		t.Fatalf("argv[1] = %q, want app-server; argv=%#v", got, argv)
 	}
 	if threadStart == nil {
 		t.Fatal("missing thread/start request in fake codex log")

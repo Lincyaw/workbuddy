@@ -143,6 +143,11 @@ func setupFakeGHCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// Isolate the worker repo-bindings persistence file (REQ-126) from
+	// the developer's real ~/.config/workbuddy/worker-repos.yaml so
+	// runWorkerWithOpts doesn't inherit production bindings during
+	// unit tests.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 }
 
 func newServeFlagCommand(t *testing.T, configDir string) *cobra.Command {
