@@ -1890,3 +1890,47 @@ func TestRunDeployInstallEnableUpdaterRejectsBadInterval(t *testing.T) {
 		t.Fatalf("expected invalid --updater-interval error, got %v", err)
 	}
 }
+
+func TestDeploymentRoleFromManifest(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  []string
+		want string
+	}{
+		{"supervisor plain", []string{"supervisor"}, "supervisor"},
+		{"coordinator with flags", []string{"coordinator", "--listen=:8090", "--auth"}, "coordinator"},
+		{"worker with leading flag stripped (defensive)", []string{"--quiet", "worker", "--repos=x=y"}, "worker"},
+		{"serve", []string{"serve"}, "serve"},
+		{"empty", nil, ""},
+		{"flags only", []string{"--no-color"}, ""},
+		{"casing", []string{"Worker"}, "worker"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := deploymentRoleFromManifest(&deploymentManifest{Command: tc.cmd})
+			if got != tc.want {
+				t.Fatalf("got %q want %q", got, tc.want)
+			}
+		})
+	}
+	if got := deploymentRoleFromManifest(nil); got != "" {
+		t.Fatalf("nil manifest: got %q want empty", got)
+	}
+}
+
+func TestRestartPlanFor_PreservesSupervisor(t *testing.T) {
+	if plan := restartPlanFor("supervisor", false); !plan.skip {
+		t.Fatal("supervisor should be preserved by default")
+	}
+	if plan := restartPlanFor("supervisor", false); plan.reason == "" {
+		t.Fatalf("expected reason; got skip=%v reason=%q", plan.skip, plan.reason)
+	}
+	if plan := restartPlanFor("supervisor", true); plan.skip {
+		t.Fatal("supervisor must restart with --include-supervisor")
+	}
+	for _, role := range []string{"coordinator", "worker", "serve", ""} {
+		if plan := restartPlanFor(role, false); plan.skip {
+			t.Fatalf("non-supervisor role %q should always restart", role)
+		}
+	}
+}

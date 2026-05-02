@@ -1,16 +1,19 @@
 // Package codex implements the agent.Backend interface via the
-// `codex app-server` JSON-RPC protocol.
+// `codex app-server` JSON-RPC protocol over WebSocket.
 //
-// A single `codex app-server --listen stdio://` child process is shared by
-// every concurrent agent session on a worker. Each session is a JSON-RPC
-// "thread" on that shared process. Per-agent cwd/model/sandbox/approval
-// policy is passed via thread/start parameters. Tools that codex spawns
-// inherit the shared app-server process environment; this worker-wide
-// singleton model does not provide per-agent env isolation, and the
-// current deployment does not require it.
+// The codex app-server child is supervised externally by `workbuddy
+// supervisor` (see cmd/supervisor_codex_sidecar.go) so it survives worker
+// redeploy / upgrade — REQ-127's process-lifecycle abstraction. The
+// worker dials a long-lived WebSocket and multiplexes JSON-RPC threads
+// onto it; per-agent cwd/model/sandbox/approval policy still flows
+// through thread/start params. Per-agent env isolation is still not
+// available (the supervisor's environment applies to the whole codex
+// process), matching the 2026-04-22 design decision.
 //
-// See decisions.md 2026-04-22 for rationale; that entry supersedes the
-// 2026-04-20 [L4][flagged] per-session-process decision.
+// Codex's own `--dangerously-bypass-approvals-and-sandbox` flag is set
+// once on the supervisor side via `workbuddy supervisor --codex-bypass-
+// approvals-and-sandbox`; the worker no longer toggles it per-session
+// because it does not own the codex process.
 package codex
 
 import (
@@ -19,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os/exec"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,83 +32,64 @@ import (
 const (
 	defaultClientName    = "workbuddy"
 	defaultClientVersion = "dev"
-	// Give the shared stderr scanner a brief chance to flush process-scoped
-	// lines that were emitted just before turn completion, so session
-	// consumers do not miss trailing stderr log events due to close timing.
+	// Give the read loop a brief chance to flush process-scoped log
+	// notifications that were emitted just before turn completion, so
+	// session consumers do not miss trailing log events due to close timing.
 	sessionCloseGracePeriod = 25 * time.Millisecond
 )
 
 // Config holds optional configuration for the Codex app-server backend.
 type Config struct {
-	// Binary overrides the codex binary path (default: "codex").
-	Binary string
+	// URL is the codex app-server WebSocket endpoint (default
+	// ws://127.0.0.1:7177; matches the supervisor sidecar default).
+	// Honours $WORKBUDDY_CODEX_URL when empty.
+	URL string
 	// ClientName populates the JSON-RPC initialize handshake.
 	ClientName string
 	// ClientVersion populates the JSON-RPC initialize handshake.
 	ClientVersion string
-	// DangerouslyBypass enables the top-level
-	// `--dangerously-bypass-approvals-and-sandbox` CLI flag on the shared
-	// app-server process. It is a property of the whole worker, not of any
-	// single session, and is derived from the first session that requests
-	// sandbox=danger-full-access (see NewSession).
-	DangerouslyBypass bool
 }
 
 // Backend is the worker-level codex agent.Backend. It owns a single shared
-// `codex app-server` child process and starts one thread per session.
+// WebSocket connection to the supervised codex app-server and starts one
+// thread per session.
 type Backend struct {
 	cfg Config
 
 	mu       sync.Mutex
 	server   *appServer
-	serverMu sync.Mutex // serialize ensureStarted racing against Shutdown
+	serverMu sync.Mutex // serialize ensureConnected racing against Shutdown
 }
 
-// NewBackend verifies the codex binary is present.
+// NewBackend prepares a Backend; the WebSocket is dialed lazily on the
+// first NewSession.
 func NewBackend(cfg Config) (*Backend, error) {
-	bin := cfg.Binary
-	if bin == "" {
-		bin = "codex"
-	}
-	if _, err := exec.LookPath(bin); err != nil {
-		return nil, fmt.Errorf("codex: binary %q not found: %w", bin, err)
-	}
 	if cfg.ClientName == "" {
 		cfg.ClientName = defaultClientName
 	}
 	if cfg.ClientVersion == "" {
 		cfg.ClientVersion = defaultClientVersion
 	}
-	cfg.Binary = bin
 	return &Backend{cfg: cfg}, nil
 }
 
-// sharedServer returns the shared app-server manager, creating it lazily.
-// The needBypass flag forces the shared process to be started with the
-// top-level dangerous-bypass CLI flag. Because bypass is a CLI flag set at
-// process start, we cannot flip it mid-flight: if a session requests bypass
-// and the shared process is already running without it, we return an error
-// that surfaces as an infra failure to the caller.
-func (b *Backend) sharedServer(needBypass bool) (*appServer, error) {
+// sharedServer returns the shared app-server connection manager,
+// creating it lazily on first call. With WebSocket transport the
+// supervisor controls all CLI flags (including --dangerously-bypass-
+// approvals-and-sandbox), so the worker no longer has to negotiate them
+// per session.
+func (b *Backend) sharedServer() *appServer {
 	b.serverMu.Lock()
 	defer b.serverMu.Unlock()
 	if b.server == nil {
-		b.server = newAppServer(b.cfg, needBypass || b.cfg.DangerouslyBypass)
-		return b.server, nil
+		b.server = newAppServer(b.cfg)
 	}
-	if needBypass && !b.server.dangerousBypass {
-		return nil, errors.New("codex: shared app-server started without --dangerously-bypass-approvals-and-sandbox; cannot upgrade a running process to bypass mode")
-	}
-	return b.server, nil
+	return b.server
 }
 
 func (b *Backend) NewSession(ctx context.Context, spec agent.Spec) (agent.Session, error) {
-	needBypass := spec.Sandbox == "danger-full-access"
-	srv, err := b.sharedServer(needBypass)
-	if err != nil {
-		return nil, err
-	}
-	if err := srv.ensureStarted(ctx); err != nil {
+	srv := b.sharedServer()
+	if err := srv.ensureConnected(ctx); err != nil {
 		return nil, err
 	}
 

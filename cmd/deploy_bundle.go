@@ -71,6 +71,9 @@ func init() {
 	deployInstallCmd.Flags().StringArray("worker-args", nil, "Extra argument to append to the worker ExecStart (repeatable, --bundle only)")
 	deployInstallCmd.Flags().Bool("bundle-skip-coordinator", false, "When --bundle is set, do not (re)install the coordinator unit (e.g. host runs worker only)")
 	deployInstallCmd.Flags().Bool("bundle-skip-worker", false, "When --bundle is set, do not (re)install the worker unit")
+	deployInstallCmd.Flags().String("bundle-codex-binary", "", "When --bundle is set, also instruct the supervisor to host a long-lived `codex app-server` sidecar (REQ-127): worker dials the supervised WebSocket so worker redeploy doesn't kill the codex runtime. Pass the absolute codex CLI path (e.g. /usr/local/bin/codex). Empty disables the sidecar.")
+	deployInstallCmd.Flags().String("bundle-codex-listen", "", "Override the host:port the supervised codex sidecar binds to (default: 127.0.0.1:7177). Must be loopback. Worker reads the same default.")
+	deployInstallCmd.Flags().Bool("bundle-codex-no-bypass", false, "When --bundle is set with --bundle-codex-binary, omit the codex --dangerously-bypass-approvals-and-sandbox flag. Default behaviour passes it because workbuddy is non-interactive.")
 
 	deployUninstallCmd.Flags().String("scope", defaultDeployScope, "Deployment scope: user or system")
 	deployUninstallCmd.Flags().Bool("force", false, "Skip confirmation prompts for destructive actions")
@@ -94,6 +97,24 @@ func parseBundleInstallFlags(cmd *cobra.Command) (*bundleInstallOpts, error) {
 	workerArgs, _ := cmd.Flags().GetStringArray("worker-args")
 	skipCoordinator, _ := cmd.Flags().GetBool("bundle-skip-coordinator")
 	skipWorker, _ := cmd.Flags().GetBool("bundle-skip-worker")
+	codexBinary, _ := cmd.Flags().GetString("bundle-codex-binary")
+	codexListen, _ := cmd.Flags().GetString("bundle-codex-listen")
+	codexNoBypass, _ := cmd.Flags().GetBool("bundle-codex-no-bypass")
+
+	if strings.TrimSpace(codexBinary) != "" {
+		// Inject the codex sidecar flags into the supervisor unit so the
+		// operator only has to remember --bundle-codex-binary. Existing
+		// --supervisor-args still apply (they come after, so explicit
+		// overrides win on the cobra side).
+		injected := []string{"--codex-binary=" + strings.TrimSpace(codexBinary)}
+		if s := strings.TrimSpace(codexListen); s != "" {
+			injected = append(injected, "--codex-listen="+s)
+		}
+		if !codexNoBypass {
+			injected = append(injected, "--codex-bypass-approvals-and-sandbox=true")
+		}
+		supervisorArgs = append(injected, supervisorArgs...)
+	}
 
 	envVars, _ := cmd.Flags().GetStringArray("env")
 	if len(envVars) > 0 {

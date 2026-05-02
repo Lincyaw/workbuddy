@@ -31,6 +31,9 @@ func init() {
 	supervisorCmd.Flags().String("socket", "", "Unix socket path (default $XDG_RUNTIME_DIR/workbuddy-supervisor.sock)")
 	supervisorCmd.Flags().String("state-dir", "", "State directory holding agents/ and supervisor.db (default $XDG_STATE_HOME/workbuddy)")
 	supervisorCmd.Flags().Duration("cancel-grace", supervisor.DefaultCancelGrace, "Time to wait between SIGTERM and SIGKILL when cancelling an agent")
+	supervisorCmd.Flags().String("codex-binary", "", "If set, supervise a long-lived `codex app-server --listen ws://` child so worker redeploy doesn't kill the codex runtime (REQ-127). Empty disables the sidecar.")
+	supervisorCmd.Flags().String("codex-listen", "", "host:port the supervised codex sidecar binds to (default 127.0.0.1:7177). Must be loopback — codex's WebSocket transport has no auth.")
+	supervisorCmd.Flags().Bool("codex-bypass-approvals-and-sandbox", false, "Pass --dangerously-bypass-approvals-and-sandbox to the codex sidecar. Required for non-interactive workbuddy operation.")
 	rootCmd.AddCommand(supervisorCmd)
 }
 
@@ -38,6 +41,9 @@ func runSupervisor(cmd *cobra.Command, _ []string) error {
 	socket, _ := cmd.Flags().GetString("socket")
 	stateDir, _ := cmd.Flags().GetString("state-dir")
 	grace, _ := cmd.Flags().GetDuration("cancel-grace")
+	codexBinary, _ := cmd.Flags().GetString("codex-binary")
+	codexListen, _ := cmd.Flags().GetString("codex-listen")
+	codexBypass, _ := cmd.Flags().GetBool("codex-bypass-approvals-and-sandbox")
 
 	sup, err := supervisor.New(supervisor.Config{
 		SocketPath:  socket,
@@ -52,11 +58,33 @@ func runSupervisor(cmd *cobra.Command, _ []string) error {
 	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Validate the codex sidecar configuration synchronously so a bad
+	// --codex-binary path aborts supervisor startup instead of leaving
+	// us up with a quietly dead sidecar. Workers depend on the codex
+	// socket existing; they fail fast if it doesn't, so we'd rather
+	// fail fast here than let the worker discover the misconfig.
+	codexOpts, err := preflightCodexSidecar(codexSidecarOpts{
+		binary:                 codexBinary,
+		listen:                 codexListen,
+		bypassApprovalsSandbox: codexBypass,
+	})
+	if err != nil {
+		return err
+	}
+	codexErr := make(chan error, 1)
+	go func() {
+		codexErr <- runCodexSidecar(ctx, codexOpts)
+	}()
+
 	log.Printf("supervisor: listening on %s (state %s, grace %s)",
 		sup.SocketPath(), sup.AgentsDir(), grace.Round(time.Millisecond))
 	notifySystemdReady()
 	if err := sup.Serve(ctx); err != nil {
 		return fmt.Errorf("serve: %w", err)
+	}
+	// Drain the sidecar goroutine so we don't leak it on shutdown.
+	if err := <-codexErr; err != nil {
+		return fmt.Errorf("codex-sidecar: %w", err)
 	}
 	return nil
 }
