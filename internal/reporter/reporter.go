@@ -39,7 +39,17 @@ type GHCommentWriter interface {
 	WriteComment(repo string, issueNum int, body string) error
 }
 
-// GHCLIWriter implements GHCommentWriter using the shared gh CLI adapter.
+// GHCommentEditor is an optional capability the writer may implement.
+// When available, the reporter uses it to dedup repeated infra-error
+// comments by editing the existing comment instead of posting a new
+// one (avoids issue thread spam during retry storms).
+type GHCommentEditor interface {
+	WriteCommentReturningID(repo string, issueNum int, body string) (int64, error)
+	EditComment(repo string, commentID int64, body string) error
+}
+
+// GHCLIWriter implements GHCommentWriter (and GHCommentEditor) using
+// the shared gh CLI adapter.
 type GHCLIWriter struct {
 	Client *ghadapter.CLI
 }
@@ -54,6 +64,18 @@ func (g *GHCLIWriter) client() *ghadapter.CLI {
 // WriteComment posts a comment to the given issue via gh issue comment.
 func (g *GHCLIWriter) WriteComment(repo string, issueNum int, body string) error {
 	return g.client().WriteIssueComment(context.Background(), repo, issueNum, body)
+}
+
+// WriteCommentReturningID posts a comment and returns the GitHub comment
+// id parsed out of the gh CLI's success output. Returns 0 if the id
+// could not be determined (older gh versions, parsing failure).
+func (g *GHCLIWriter) WriteCommentReturningID(repo string, issueNum int, body string) (int64, error) {
+	return g.client().WriteIssueCommentReturningID(context.Background(), repo, issueNum, body)
+}
+
+// EditComment replaces the body of an existing issue comment.
+func (g *GHCLIWriter) EditComment(repo string, commentID int64, body string) error {
+	return g.client().EditIssueComment(context.Background(), repo, commentID, body)
 }
 
 // ReactionManager abstracts adding/removing emoji reactions on issues so the
@@ -134,7 +156,34 @@ type Reporter struct {
 	verifier       ClaimVerifier
 	now            func() time.Time
 	cycleCapLoader CycleCapTrailLoader
+
+	// infraDedup coalesces repeated infra-error comments (REQ-128). Key
+	// is (repo, issueNum, agentName); value tracks the live comment id +
+	// the reason that produced it so subsequent failures with the same
+	// reason update the existing comment instead of spamming the issue.
+	infraDedupMu sync.Mutex
+	infraDedup   map[infraDedupKey]*infraDedupState
 }
+
+type infraDedupKey struct {
+	repo     string
+	issueNum int
+	agent    string
+}
+
+type infraDedupState struct {
+	commentID int64
+	reason    string
+	count     int
+	firstSeen time.Time
+	lastSeen  time.Time
+}
+
+// infraDedupTTL is the window after which a fresh infra error gets a
+// new comment instead of editing the prior one. Beyond this window the
+// retry storm has plausibly become a different incident worth surfacing
+// distinctly.
+const infraDedupTTL = 30 * time.Minute
 
 var (
 	// rateLimitRetryDelays is overridden in tests to keep assertions fast.
@@ -151,7 +200,12 @@ var (
 // reaction manager defaults to a GHCLIReactionManager; callers may override
 // it via SetReactionManager (e.g., tests).
 func NewReporter(gh GHCommentWriter) *Reporter {
-	return &Reporter{gh: gh, reactions: &GHCLIReactionManager{}, now: time.Now}
+	return &Reporter{
+		gh:         gh,
+		reactions:  &GHCLIReactionManager{},
+		now:        time.Now,
+		infraDedup: make(map[infraDedupKey]*infraDedupState),
+	}
 }
 
 // SetReactionManager replaces the default ReactionManager (used by tests).
@@ -458,11 +512,102 @@ func (r *Reporter) report(
 
 	body := FormatReportAt(data, time.Now())
 	if bodySizeBytes(body) > maxCommentBodyBytes {
+		// Overflow path posts a truncated body separately. Treat the
+		// dedup state for this (repo, issue, agent) as invalidated.
+		r.clearInfraDedup(repo, issueNum, agentName)
 		return verification, r.reportWithOverflow(ctx, repo, issueNum, agentName, body, workDir)
 	}
+
+	if status == "infra-error" {
+		if posted, err := r.tryDedupInfraComment(ctx, repo, issueNum, agentName, infraReason, body); posted {
+			return verification, err
+		}
+	} else {
+		// Any non-infra report ends the retry storm; next infra error
+		// for this (repo, issue, agent) gets a fresh comment.
+		r.clearInfraDedup(repo, issueNum, agentName)
+	}
+
 	return verification, r.writeWithRateLimitRetry(ctx, repo, issueNum, "report", func() error {
+		if status == "infra-error" {
+			return r.writeAndRecordInfraComment(repo, issueNum, agentName, infraReason, body)
+		}
 		return r.gh.WriteComment(repo, issueNum, body)
 	})
+}
+
+// tryDedupInfraComment edits the live infra-error comment for this
+// (repo, issue, agent) when the new error has the same reason as the
+// last one and we are still inside the dedup window. Returns
+// (posted, err) where posted=true means the dedup path handled the
+// report; the caller should not fall through to a fresh WriteComment.
+//
+// Returns posted=false when:
+//   - no editor capability is available on the writer
+//   - no live state for this key
+//   - the reason changed (different incident)
+//   - TTL expired
+//   - the prior comment id was 0 (write returned no parseable id)
+func (r *Reporter) tryDedupInfraComment(ctx context.Context, repo string, issueNum int, agent, reason, body string) (bool, error) {
+	editor, ok := r.gh.(GHCommentEditor)
+	if !ok {
+		return false, nil
+	}
+	r.infraDedupMu.Lock()
+	defer r.infraDedupMu.Unlock()
+	key := infraDedupKey{repo: repo, issueNum: issueNum, agent: agent}
+	state, ok := r.infraDedup[key]
+	now := r.now()
+	if !ok || state.commentID == 0 || state.reason != reason || now.Sub(state.lastSeen) > infraDedupTTL {
+		return false, nil
+	}
+	state.count++
+	state.lastSeen = now
+	editedBody := infraRepeatBadge(state.count, state.firstSeen, state.lastSeen) + body
+	err := r.writeWithRateLimitRetry(ctx, repo, issueNum, "report_dedup", func() error {
+		return editor.EditComment(repo, state.commentID, editedBody)
+	})
+	return true, err
+}
+
+// writeAndRecordInfraComment is the WriteComment path used for the
+// first occurrence of a (repo, issue, agent, reason) combo. It captures
+// the new comment's id (when the writer supports it) so subsequent
+// repeats can be coalesced via tryDedupInfraComment.
+func (r *Reporter) writeAndRecordInfraComment(repo string, issueNum int, agent, reason, body string) error {
+	editor, ok := r.gh.(GHCommentEditor)
+	if !ok {
+		return r.gh.WriteComment(repo, issueNum, body)
+	}
+	id, err := editor.WriteCommentReturningID(repo, issueNum, body)
+	if err != nil {
+		return err
+	}
+	r.infraDedupMu.Lock()
+	defer r.infraDedupMu.Unlock()
+	now := r.now()
+	r.infraDedup[infraDedupKey{repo: repo, issueNum: issueNum, agent: agent}] = &infraDedupState{
+		commentID: id,
+		reason:    reason,
+		count:     1,
+		firstSeen: now,
+		lastSeen:  now,
+	}
+	return nil
+}
+
+func (r *Reporter) clearInfraDedup(repo string, issueNum int, agent string) {
+	r.infraDedupMu.Lock()
+	defer r.infraDedupMu.Unlock()
+	delete(r.infraDedup, infraDedupKey{repo: repo, issueNum: issueNum, agent: agent})
+}
+
+func infraRepeatBadge(count int, firstSeen, lastSeen time.Time) string {
+	return fmt.Sprintf(":repeat: **Repeat #%d** (first seen %s, last seen %s)\n\n",
+		count,
+		firstSeen.UTC().Format(time.RFC3339),
+		lastSeen.UTC().Format(time.RFC3339),
+	)
 }
 
 func reportOutput(result *runtimepkg.Result) string {

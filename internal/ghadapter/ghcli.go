@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -389,6 +390,16 @@ func (c *CLI) ReadPullRequestDetail(repo string, prNum int) (runtimepkg.PRSummar
 }
 
 func (c *CLI) WriteIssueComment(ctx context.Context, repo string, issueNum int, body string) error {
+	_, err := c.WriteIssueCommentReturningID(ctx, repo, issueNum, body)
+	return err
+}
+
+// WriteIssueCommentReturningID posts a comment and parses the GitHub
+// comment ID out of the gh CLI's success output (a URL of the form
+// https://github.com/.../issues/N#issuecomment-COMMENT_ID). Returns
+// 0 with no error if the URL could not be parsed — callers that
+// require an ID should treat 0 as "edit-not-supported".
+func (c *CLI) WriteIssueCommentReturningID(ctx context.Context, repo string, issueNum int, body string) (int64, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -400,9 +411,45 @@ func (c *CLI) WriteIssueComment(ctx context.Context, repo string, issueNum int, 
 	cmd.Stdin = strings.NewReader(body)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("ghadapter: gh issue comment: %s: %w", string(output), err)
+		return 0, fmt.Errorf("ghadapter: gh issue comment: %s: %w", string(output), err)
+	}
+	return parseIssueCommentID(string(output)), nil
+}
+
+// EditIssueComment replaces the body of an existing issue comment via
+// the GitHub PATCH /repos/.../issues/comments/:id API.
+func (c *CLI) EditIssueComment(ctx context.Context, repo string, commentID int64, body string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if commentID <= 0 {
+		return fmt.Errorf("ghadapter: edit issue comment: invalid comment id %d", commentID)
+	}
+	cmd := exec.CommandContext(ctx, "gh", "api",
+		"-X", "PATCH",
+		fmt.Sprintf("/repos/%s/issues/comments/%d", repo, commentID),
+		"-f", "body=@-",
+	)
+	cmd.Stdin = strings.NewReader(body)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ghadapter: gh api PATCH issue comment %d: %s: %w", commentID, string(output), err)
 	}
 	return nil
+}
+
+var issueCommentIDPattern = regexp.MustCompile(`#issuecomment-(\d+)`)
+
+func parseIssueCommentID(out string) int64 {
+	m := issueCommentIDPattern.FindStringSubmatch(out)
+	if len(m) != 2 {
+		return 0
+	}
+	id, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return id
 }
 
 func (c *CLI) AuthenticatedLogin(ctx context.Context) (string, error) {

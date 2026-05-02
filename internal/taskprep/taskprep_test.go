@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
@@ -280,5 +281,102 @@ func TestPreparer_NilAgentReturnsError(t *testing.T) {
 	p := NewPreparer(st, t.TempDir(), nil, false)
 	if err := p.Prepare(context.Background(), Decision{Repo: "test/repo", IssueNum: 1, AgentName: "missing"}); err == nil {
 		t.Fatal("expected error for nil agent")
+	}
+}
+
+func TestFormatComments_Empty(t *testing.T) {
+	got := FormatComments(nil, "owner/repo", 1)
+	if got != "(no comments)" {
+		t.Fatalf("empty -> %q", got)
+	}
+}
+
+func TestFormatComments_DropsReporterNoise(t *testing.T) {
+	cs := []runtimepkg.IssueComment{
+		{Author: "wb-bot", CreatedAt: "2026-05-01T00:00:00Z",
+			Body: "## :robot: Agent Started: dev-agent\n\nblah\n\n---\n*workbuddy coordinator | 2026-05-01T00:00:00Z*"},
+		{Author: "wb-bot", CreatedAt: "2026-05-01T00:10:00Z",
+			Body: "## Agent Report: dev-agent\n\nstuff\n*workbuddy coordinator | 2026-05-01T00:10:00Z*"},
+	}
+	got := FormatComments(cs, "owner/repo", 7)
+	if strings.Contains(got, "Agent Started") || strings.Contains(got, "Agent Report") {
+		t.Fatalf("reporter noise leaked: %q", got)
+	}
+	if !strings.Contains(got, "2 reporter/bot comment(s) filtered") {
+		t.Fatalf("missing filter count: %q", got)
+	}
+}
+
+func TestFormatComments_LatestVerdictKeptOthersOmitted(t *testing.T) {
+	cs := []runtimepkg.IssueComment{
+		{Author: "alice", CreatedAt: "t1", Body: "first user comment"},
+		{Author: "wb-bot", CreatedAt: "t2",
+			Body: "## Agent Report: dev-agent\n*workbuddy coordinator | t2*"},
+		{Author: "review-bot", CreatedAt: "t3",
+			Body: "<!-- workbuddy:review-verdict -->\nAC-1: PASS\nAC-2: FAIL"},
+		{Author: "alice", CreatedAt: "t4", Body: "follow-up question"},
+		{Author: "review-bot", CreatedAt: "t5",
+			Body: "<!-- workbuddy:review-verdict -->\nAC-1: PASS\nAC-2: PASS"},
+	}
+	got := FormatComments(cs, "owner/repo", 42)
+	if !strings.Contains(got, "Latest review verdict") {
+		t.Fatalf("verdict block missing: %q", got)
+	}
+	if !strings.Contains(got, "AC-2: PASS") {
+		t.Fatalf("expected newest verdict (AC-2: PASS), got %q", got)
+	}
+	if strings.Contains(got, "AC-2: FAIL") {
+		t.Fatalf("older verdict leaked: %q", got)
+	}
+	if !strings.Contains(got, "3 earlier comment(s) omitted") {
+		t.Fatalf("expected 3 omitted (2 user + 1 older verdict): %q", got)
+	}
+	if !strings.Contains(got, "1 reporter/bot comment(s) filtered") {
+		t.Fatalf("expected 1 reporter filtered: %q", got)
+	}
+	if !strings.Contains(got, "gh issue view 42 --repo owner/repo --json comments") {
+		t.Fatalf("missing gh hint: %q", got)
+	}
+}
+
+func TestFormatComments_NoVerdictFallback(t *testing.T) {
+	cs := []runtimepkg.IssueComment{
+		{Author: "alice", CreatedAt: "t1", Body: "discussion 1"},
+		{Author: "bob", CreatedAt: "t2", Body: "discussion 2"},
+	}
+	got := FormatComments(cs, "owner/repo", 9)
+	if strings.Contains(got, "Latest review verdict") {
+		t.Fatalf("should not fabricate verdict: %q", got)
+	}
+	if !strings.Contains(got, "2 earlier comment(s) omitted") {
+		t.Fatalf("expected 2 omitted: %q", got)
+	}
+}
+
+func TestFormatComments_OnlyVerdict(t *testing.T) {
+	cs := []runtimepkg.IssueComment{
+		{Author: "review-bot", CreatedAt: "t1",
+			Body: "<!-- workbuddy:review-verdict -->\nall pass"},
+	}
+	got := FormatComments(cs, "owner/repo", 1)
+	if !strings.Contains(got, "Latest review verdict") {
+		t.Fatalf("verdict missing: %q", got)
+	}
+	if strings.Contains(got, "earlier comment") || strings.Contains(got, "filtered") {
+		t.Fatalf("should not have summary line: %q", got)
+	}
+}
+
+func TestFormatComments_TruncatesLongVerdict(t *testing.T) {
+	bigBody := "<!-- workbuddy:review-verdict -->\n" + strings.Repeat("X", maxVerdictBytes*2)
+	cs := []runtimepkg.IssueComment{
+		{Author: "review-bot", CreatedAt: "t1", Body: bigBody},
+	}
+	got := FormatComments(cs, "owner/repo", 1)
+	if !strings.Contains(got, "verdict body truncated at") {
+		t.Fatalf("truncation marker missing: %q", got[:200])
+	}
+	if len(got) > maxVerdictBytes*3/2 {
+		t.Fatalf("truncated body still too large: got %d bytes", len(got))
 	}
 }

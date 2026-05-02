@@ -5,30 +5,45 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/agent"
+	"github.com/Lincyaw/workbuddy/internal/agent/codex/codextest"
 )
 
-func TestCodexNewBackendMissingBinary(t *testing.T) {
-	cfg := Config{Binary: "/nonexistent/codex-binary-that-does-not-exist"}
-	_, err := NewBackend(cfg)
+func TestCodexBackend_DialFailure_FailsFastWithGuidance(t *testing.T) {
+	// Pre-REQ-127 the missing-binary test exercised the spawn path. With
+	// the WS transport the equivalent failure mode is "no codex sidecar
+	// listening on the URL". The error must point operators at the
+	// supervisor flag they likely forgot.
+	t.Setenv("WORKBUDDY_CODEX_URL", "ws://127.0.0.1:1") // RFC 1700: TCP port 1, intentionally unreachable
+	backend, err := NewBackend(Config{ClientName: "test"})
+	if err != nil {
+		t.Fatalf("NewBackend: %v", err)
+	}
+	defer func() { _ = backend.Shutdown(context.Background()) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = backend.NewSession(ctx, agent.Spec{Workdir: t.TempDir(), Prompt: "x"})
 	if err == nil {
-		t.Fatal("NewBackend with missing binary should return error")
+		t.Fatal("expected dial failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "supervisor must be started with --codex-binary") {
+		t.Fatalf("error must guide operator to the supervisor flag; got: %v", err)
 	}
 }
 
 func TestCodexSessionLifecycleViaAppServer(t *testing.T) {
-	bin, logPath := writeFakeCodexBinary(t, "complete")
-	// The fake codex reads FAKE_CODEX_LOG / WB_TEST_ENV from its own process
-	// environment. In the shared-app-server model the child is spawned once
-	// at worker boot and inherits the parent's env, so set these on the
-	// test process.
-	t.Setenv("FAKE_CODEX_LOG", logPath)
-	t.Setenv("WB_TEST_ENV", "scoped-token")
-	backend, err := NewBackend(Config{Binary: bin, ClientName: "workbuddy-test", ClientVersion: "1.2.3"})
+	logPath := filepath.Join(t.TempDir(), "fake.log")
+	srv := codextest.NewServer(t, codextest.Config{Mode: codextest.ModeComplete, LogPath: logPath})
+	defer srv.Close()
+
+	t.Setenv("WORKBUDDY_CODEX_URL", srv.URL)
+	backend, err := NewBackend(Config{ClientName: "workbuddy-test", ClientVersion: "1.2.3"})
 	if err != nil {
 		t.Fatalf("NewBackend: %v", err)
 	}
@@ -40,10 +55,6 @@ func TestCodexSessionLifecycleViaAppServer(t *testing.T) {
 		Model:    "gpt-5.4-mini",
 		Sandbox:  "workspace-write",
 		Approval: "never",
-		Env: map[string]string{
-			"FAKE_CODEX_LOG": logPath,
-			"WB_TEST_ENV":    "scoped-token",
-		},
 	}
 
 	sess, err := backend.NewSession(t.Context(), spec)
@@ -95,112 +106,31 @@ func TestCodexSessionLifecycleViaAppServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fake log: %v", err)
 	}
-	var lines []map[string]any
-	for _, line := range splitNonEmptyLines(string(logData)) {
+	lines := splitNonEmptyLines(string(logData))
+	// initialize, initialized, thread/start, turn/start = 4 messages
+	// (exit varies; assert >= 4).
+	if len(lines) < 4 {
+		t.Fatalf("fake app-server log lines = %d, want >= 4", len(lines))
+	}
+	expectMethods := []string{"initialize", "initialized", "thread/start", "turn/start"}
+	for i, want := range expectMethods {
 		var obj map[string]any
-		if err := json.Unmarshal([]byte(line), &obj); err != nil {
-			t.Fatalf("unmarshal log line %q: %v", line, err)
+		if err := json.Unmarshal([]byte(lines[i]), &obj); err != nil {
+			t.Fatalf("unmarshal log line %d %q: %v", i, lines[i], err)
 		}
-		lines = append(lines, obj)
-	}
-	if len(lines) < 5 {
-		t.Fatalf("fake app-server log lines = %d, want >= 5", len(lines))
-	}
-	if env, _ := lines[0]["env"].(string); env != "scoped-token" {
-		t.Fatalf("fake app-server env = %q, want %q", env, "scoped-token")
-	}
-	if method, _ := lines[2]["method"].(string); method != "initialize" {
-		t.Fatalf("first request method = %q, want initialize", method)
-	}
-	if method, _ := lines[3]["method"].(string); method != "initialized" {
-		t.Fatalf("second client message = %q, want initialized", method)
-	}
-	if method, _ := lines[4]["method"].(string); method != "thread/start" {
-		t.Fatalf("third request method = %q, want thread/start", method)
-	}
-	if method, _ := lines[5]["method"].(string); method != "turn/start" {
-		t.Fatalf("fourth request method = %q, want turn/start", method)
-	}
-}
-
-func TestCodexDangerouslyBypassSandboxUsesCLIFlag(t *testing.T) {
-	bin, logPath := writeFakeCodexBinary(t, "complete")
-	t.Setenv("FAKE_CODEX_LOG", logPath)
-	backend, err := NewBackend(Config{Binary: bin})
-	if err != nil {
-		t.Fatalf("NewBackend: %v", err)
-	}
-	defer func() { _ = backend.Shutdown(context.Background()) }()
-
-	sess, err := backend.NewSession(t.Context(), agent.Spec{
-		Workdir:  t.TempDir(),
-		Prompt:   "fix the bug",
-		Sandbox:  "danger-full-access",
-		Approval: "never",
-		Env: map[string]string{
-			"FAKE_CODEX_LOG": logPath,
-		},
-	})
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	defer func() { _ = sess.Close() }()
-
-	if _, err := sess.Wait(t.Context()); err != nil {
-		t.Fatalf("Wait: %v", err)
-	}
-
-	logData, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read fake log: %v", err)
-	}
-	var (
-		argv        []any
-		threadStart map[string]any
-	)
-	for _, line := range splitNonEmptyLines(string(logData)) {
-		var obj map[string]any
-		if err := json.Unmarshal([]byte(line), &obj); err != nil {
-			t.Fatalf("unmarshal log line %q: %v", line, err)
+		got, _ := obj["method"].(string)
+		if got != want {
+			t.Fatalf("log[%d].method = %q, want %q", i, got, want)
 		}
-		if rawArgv, ok := obj["argv"].([]any); ok {
-			argv = rawArgv
-		}
-		if obj["method"] == "thread/start" {
-			threadStart, _ = obj["params"].(map[string]any)
-		}
-	}
-	if len(argv) == 0 {
-		t.Fatal("missing argv log entry")
-	}
-	foundBypass := false
-	for _, arg := range argv {
-		if s, _ := arg.(string); s == "--dangerously-bypass-approvals-and-sandbox" {
-			foundBypass = true
-			break
-		}
-	}
-	if !foundBypass {
-		t.Fatalf("argv missing bypass flag: %#v", argv)
-	}
-	if got, _ := argv[0].(string); got != "--dangerously-bypass-approvals-and-sandbox" {
-		t.Fatalf("argv[0] = %q, want top-level bypass flag; argv=%#v", got, argv)
-	}
-	if got, _ := argv[1].(string); got != "app-server" {
-		t.Fatalf("argv[1] = %q, want app-server; argv=%#v", got, argv)
-	}
-	if threadStart == nil {
-		t.Fatal("missing thread/start request")
-	}
-	if got, _ := threadStart["sandbox"].(string); got != "danger-full-access" {
-		t.Fatalf("thread/start sandbox = %q, want danger-full-access; params=%#v", got, threadStart)
 	}
 }
 
 func TestCodexSessionInterruptUsesTurnID(t *testing.T) {
-	bin, logPath := writeFakeCodexBinary(t, "interrupt")
-	t.Setenv("FAKE_CODEX_LOG", logPath)
-	backend, err := NewBackend(Config{Binary: bin})
+	logPath := filepath.Join(t.TempDir(), "fake.log")
+	srv := codextest.NewServer(t, codextest.Config{Mode: codextest.ModeInterrupt, LogPath: logPath})
+	defer srv.Close()
+	t.Setenv("WORKBUDDY_CODEX_URL", srv.URL)
+	backend, err := NewBackend(Config{})
 	if err != nil {
 		t.Fatalf("NewBackend: %v", err)
 	}
@@ -210,9 +140,6 @@ func TestCodexSessionInterruptUsesTurnID(t *testing.T) {
 		Workdir:  t.TempDir(),
 		Prompt:   "wait for interrupt",
 		Approval: "never",
-		Env: map[string]string{
-			"FAKE_CODEX_LOG": logPath,
-		},
 	})
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -250,10 +177,17 @@ func TestCodexSessionInterruptUsesTurnID(t *testing.T) {
 	}
 }
 
-func TestCodexSessionCapturesStderrAsLogEvent(t *testing.T) {
-	bin, logPath := writeFakeCodexBinary(t, "stderr")
-	t.Setenv("FAKE_CODEX_LOG", logPath)
-	backend, err := NewBackend(Config{Binary: bin})
+func TestCodexProcessScopedNotificationFansOut(t *testing.T) {
+	// Replaces the pre-REQ-127 stderr-capture test. With WS transport the
+	// worker no longer sees codex stderr (the supervised sidecar's
+	// journalctl owns it). The replacement signal is process-scoped
+	// JSON-RPC notifications (configWarning, mcpServer/startupStatus)
+	// which the new readLoop fans out to active sessions as log events
+	// so operators still see them in the per-session artifacts.
+	srv := codextest.NewServer(t, codextest.Config{Mode: codextest.ModeStderrAsLog})
+	defer srv.Close()
+	t.Setenv("WORKBUDDY_CODEX_URL", srv.URL)
+	backend, err := NewBackend(Config{})
 	if err != nil {
 		t.Fatalf("NewBackend: %v", err)
 	}
@@ -261,18 +195,15 @@ func TestCodexSessionCapturesStderrAsLogEvent(t *testing.T) {
 
 	sess, err := backend.NewSession(t.Context(), agent.Spec{
 		Workdir:  t.TempDir(),
-		Prompt:   "show stderr",
+		Prompt:   "show warnings",
 		Approval: "never",
-		Env: map[string]string{
-			"FAKE_CODEX_LOG": logPath,
-		},
 	})
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
 	defer func() { _ = sess.Close() }()
 
-	var sawStderr bool
+	var sawCodexLog bool
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
@@ -284,8 +215,8 @@ func TestCodexSessionCapturesStderrAsLogEvent(t *testing.T) {
 			if err := json.Unmarshal(evt.Body, &payload); err != nil {
 				continue
 			}
-			if payload["stream"] == "stderr" && payload["line"] == "rpc warning on stderr" {
-				sawStderr = true
+			if payload["stream"] == "codex" {
+				sawCodexLog = true
 			}
 		}
 	}()
@@ -295,15 +226,17 @@ func TestCodexSessionCapturesStderrAsLogEvent(t *testing.T) {
 	}
 	<-drained
 
-	if !sawStderr {
-		t.Fatal("expected stderr log event")
+	if !sawCodexLog {
+		t.Fatal("expected process-scoped log event from configWarning notification")
 	}
 }
 
-func TestCodexConcurrentSessionsShareOneProcess(t *testing.T) {
-	bin, logPath := writeFakeCodexBinary(t, "complete")
-	t.Setenv("FAKE_CODEX_LOG", logPath)
-	backend, err := NewBackend(Config{Binary: bin})
+func TestCodexConcurrentSessionsShareOneConnection(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "fake.log")
+	srv := codextest.NewServer(t, codextest.Config{Mode: codextest.ModeComplete, LogPath: logPath})
+	defer srv.Close()
+	t.Setenv("WORKBUDDY_CODEX_URL", srv.URL)
+	backend, err := NewBackend(Config{})
 	if err != nil {
 		t.Fatalf("NewBackend: %v", err)
 	}
@@ -319,7 +252,6 @@ func TestCodexConcurrentSessionsShareOneProcess(t *testing.T) {
 		t.Fatalf("NewSession 2: %v", err)
 	}
 
-	// Drain events concurrently so the sessions don't block on full channels.
 	for _, s := range []agent.Session{sess1, sess2} {
 		s := s
 		go func() {
@@ -335,7 +267,6 @@ func TestCodexConcurrentSessionsShareOneProcess(t *testing.T) {
 		t.Fatalf("Wait 2: %v", err)
 	}
 
-	// Distinct thread ids prove the shared process multiplexed two sessions.
 	if sess1.ID() == sess2.ID() {
 		t.Fatalf("expected distinct thread ids, got %q and %q", sess1.ID(), sess2.ID())
 	}
@@ -343,22 +274,18 @@ func TestCodexConcurrentSessionsShareOneProcess(t *testing.T) {
 		t.Fatalf("empty thread ids: %q %q", sess1.ID(), sess2.ID())
 	}
 
-	// Exactly one argv line should appear in the fake log: the shared
-	// process started once and was reused for both sessions.
+	// Exactly one initialize and two thread/start: shared connection,
+	// multiplexed threads (the property the singleton model preserves).
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read fake log: %v", err)
 	}
-	argvCount := 0
 	initializeCount := 0
 	threadStartCount := 0
 	for _, line := range splitNonEmptyLines(string(data)) {
 		var obj map[string]any
 		if err := json.Unmarshal([]byte(line), &obj); err != nil {
 			continue
-		}
-		if _, ok := obj["argv"]; ok {
-			argvCount++
 		}
 		if m, _ := obj["method"].(string); m == "initialize" {
 			initializeCount++
@@ -367,11 +294,8 @@ func TestCodexConcurrentSessionsShareOneProcess(t *testing.T) {
 			threadStartCount++
 		}
 	}
-	if argvCount != 1 {
-		t.Fatalf("argv lines = %d, want 1 (one shared process)", argvCount)
-	}
 	if initializeCount != 1 {
-		t.Fatalf("initialize calls = %d, want 1 (one handshake for shared process)", initializeCount)
+		t.Fatalf("initialize calls = %d, want 1 (one handshake for shared connection)", initializeCount)
 	}
 	if threadStartCount != 2 {
 		t.Fatalf("thread/start calls = %d, want 2 (one per session)", threadStartCount)
@@ -393,9 +317,10 @@ func TestCodexSessionInterfaceCompliance(t *testing.T) {
 // without a consumer must still let Wait return, and must actually record
 // drops — otherwise the test would silently stop exercising the regression.
 func TestCodexSessionDoesNotDeadlockOnSlowConsumer(t *testing.T) {
-	bin, logPath := writeFakeCodexBinary(t, "flood")
-	t.Setenv("FAKE_CODEX_LOG", logPath)
-	backend, err := NewBackend(Config{Binary: bin})
+	srv := codextest.NewServer(t, codextest.Config{Mode: codextest.ModeFlood})
+	defer srv.Close()
+	t.Setenv("WORKBUDDY_CODEX_URL", srv.URL)
+	backend, err := NewBackend(Config{})
 	if err != nil {
 		t.Fatalf("NewBackend: %v", err)
 	}
@@ -428,88 +353,6 @@ func TestCodexSessionDoesNotDeadlockOnSlowConsumer(t *testing.T) {
 	if dropped == 0 {
 		t.Fatalf("expected events to be dropped under flood; got 0 — flood may no longer overflow the buffer")
 	}
-}
-
-func writeFakeCodexBinary(t *testing.T, mode string) (string, string) {
-	t.Helper()
-	dir := t.TempDir()
-	logPath := filepath.Join(dir, "fake-codex.log")
-	scriptPath := filepath.Join(dir, "codex")
-	script := `#!/usr/bin/env python3
-import json
-import os
-import sys
-
-mode = os.environ.get("FAKE_CODEX_MODE", "` + mode + `")
-log_path = os.environ.get("FAKE_CODEX_LOG", "")
-
-def log(obj):
-    if not log_path:
-        return
-    with open(log_path, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(obj) + "\n")
-
-log({"env": os.environ.get("WB_TEST_ENV", "")})
-log({"argv": sys.argv[1:]})
-
-thread_counter = 0
-# Shared app-server model: the process stays alive across multiple threads
-# until stdin closes or we're told to interrupt. Thread ids are per-request.
-
-for line in sys.stdin:
-    msg = json.loads(line)
-    log(msg)
-    method = msg.get("method")
-    if method == "initialize":
-        print(json.dumps({"id": msg["id"], "result": {"userAgent": "fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "linux"}}), flush=True)
-    elif method == "initialized":
-        continue
-    elif method == "thread/start":
-        thread_counter += 1
-        # First thread keeps the legacy id "thread-test" to satisfy existing
-        # assertions; extra threads get distinct ids.
-        tid = "thread-test" if thread_counter == 1 else "thread-test-" + str(thread_counter)
-        print(json.dumps({"id": msg["id"], "result": {"thread": {"id": tid}, "model": "gpt-5.4-mini", "modelProvider": "openai", "cwd": msg.get("params", {}).get("cwd", ""), "approvalPolicy": msg.get("params", {}).get("approvalPolicy", "never"), "approvalsReviewer": "user", "sandbox": {"type": "workspaceWrite"}}}), flush=True)
-    elif method == "turn/start":
-        tid = msg.get("params", {}).get("threadId", "thread-test")
-        print(json.dumps({"id": msg["id"], "result": {"turn": {"id": "turn-test", "items": [], "status": "inProgress"}}}), flush=True)
-        print(json.dumps({"method": "turn/started", "params": {"threadId": tid, "turn": {"id": "turn-test", "items": [], "status": "inProgress"}}}), flush=True)
-        if mode == "stderr":
-            print("rpc warning on stderr", file=sys.stderr, flush=True)
-        if mode == "flood":
-            # 500 pairs = 1000 notifications, comfortably above the 256
-            # events-channel buffer so drops are guaranteed.
-            for i in range(500):
-                print(json.dumps({"method": "item/started", "params": {"threadId": tid, "turnId": "turn-test", "item": {"type": "agentMessage", "id": "msg-" + str(i), "text": "", "phase": "final_answer"}}}), flush=True)
-                print(json.dumps({"method": "item/completed", "params": {"threadId": tid, "turnId": "turn-test", "item": {"type": "agentMessage", "id": "msg-" + str(i), "text": "chunk", "phase": "final_answer"}}}), flush=True)
-            print(json.dumps({"method": "turn/completed", "params": {"threadId": tid, "turn": {"id": "turn-test", "items": [], "status": "completed", "durationMs": 5}}}), flush=True)
-        if mode == "complete" or mode == "stderr":
-            print(json.dumps({"method": "item/started", "params": {"threadId": tid, "turnId": "turn-test", "item": {"type": "agentMessage", "id": "msg-1", "text": "", "phase": "final_answer"}}}), flush=True)
-            print(json.dumps({"method": "item/agentMessage/delta", "params": {"threadId": tid, "turnId": "turn-test", "itemId": "msg-1", "delta": "OK"}}), flush=True)
-            print(json.dumps({"method": "item/completed", "params": {"threadId": tid, "turnId": "turn-test", "item": {"type": "agentMessage", "id": "msg-1", "text": "OK", "phase": "final_answer"}}}), flush=True)
-            print(json.dumps({"method": "thread/tokenUsage/updated", "params": {"threadId": tid, "turnId": "turn-test", "tokenUsage": {"total": {"inputTokens": 10, "outputTokens": 2, "cachedInputTokens": 1, "totalTokens": 12, "reasoningOutputTokens": 0}, "last": {"inputTokens": 10, "outputTokens": 2, "cachedInputTokens": 1, "totalTokens": 12, "reasoningOutputTokens": 0}}}}), flush=True)
-            print(json.dumps({"method": "turn/completed", "params": {"threadId": tid, "turn": {"id": "turn-test", "items": [], "status": "completed", "durationMs": 15}}}), flush=True)
-        # In "interrupt" mode we deliberately stall so the client has time
-        # to send turn/interrupt; we emit no further output until that
-        # arrives.
-    elif method == "turn/interrupt":
-        tid = msg.get("params", {}).get("threadId", "thread-test")
-        print(json.dumps({"id": msg["id"], "result": {}}), flush=True)
-        print(json.dumps({"method": "turn/completed", "params": {"threadId": tid, "turn": {"id": "turn-test", "items": [], "status": "interrupted", "durationMs": 7}}}), flush=True)
-    elif method == "thread/archive":
-        print(json.dumps({"id": msg["id"], "result": {}}), flush=True)
-    else:
-        # Unknown method: respond if it has an id.
-        if "id" in msg:
-            print(json.dumps({"id": msg["id"], "result": {}}), flush=True)
-
-# stdin closed: exit cleanly.
-sys.exit(0)
-`
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake codex binary: %v", err)
-	}
-	return scriptPath, logPath
 }
 
 func splitNonEmptyLines(data string) []string {

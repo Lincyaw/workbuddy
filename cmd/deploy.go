@@ -72,6 +72,11 @@ type deployLookupOpts struct {
 	dryRun      bool
 	interactive bool
 	stdin       io.Reader
+	// includeSupervisor opts in to restarting the supervisor unit during
+	// redeploy / upgrade. By default supervisor restart is skipped so its
+	// in-flight agent process ownership survives across binary swaps —
+	// this is the realistic hot-reload guarantee the bundle provides.
+	includeSupervisor bool
 }
 
 type deployUpgradeOpts struct {
@@ -233,6 +238,7 @@ func init() {
 	deployRedeployCmd.Flags().String("name", defaultDeployName, "Deployment name")
 	deployRedeployCmd.Flags().String("scope", defaultDeployScope, "Deployment scope: user or system")
 	deployRedeployCmd.Flags().Bool("all", false, "Operate on every deployment in the requested scope")
+	deployRedeployCmd.Flags().Bool("include-supervisor", false, "Also restart the supervisor unit. By default the supervisor binary is replaced but the running process is left alive so in-flight agent runs it owns survive the redeploy.")
 
 	deployStopCmd.Flags().String("name", defaultDeployName, "Deployment name")
 	deployStopCmd.Flags().String("scope", defaultDeployScope, "Deployment scope: user or system")
@@ -257,6 +263,7 @@ func init() {
 	deployUpgradeCmd.Flags().Bool("all", false, "Operate on every deployment in the requested scope")
 	deployUpgradeCmd.Flags().Bool("force", false, "Skip confirmation prompts for destructive actions")
 	deployUpgradeCmd.Flags().Bool("dry-run", false, "Print the actions that would be taken without executing them")
+	deployUpgradeCmd.Flags().Bool("include-supervisor", false, "Also restart the supervisor unit. By default the supervisor binary is replaced but the running process is left alive so in-flight agent runs it owns survive the upgrade.")
 
 	deployCmd.AddCommand(deployInstallCmd, deployListCmd, deployRedeployCmd, deployStopCmd, deployStartCmd, deployDeleteCmd, deployUpgradeCmd)
 	rootCmd.AddCommand(deployCmd)
@@ -414,13 +421,14 @@ func parseDeployLookupFlags(cmd *cobra.Command) (*deployLookupOpts, error) {
 	force := getBoolFlagIfDefined(cmd, "force")
 	dryRun := getBoolFlagIfDefined(cmd, "dry-run")
 	return &deployLookupOpts{
-		name:        strings.TrimSpace(name),
-		scope:       strings.TrimSpace(scope),
-		all:         all,
-		force:       force,
-		dryRun:      dryRun,
-		interactive: commandIsInteractiveTerminal(),
-		stdin:       cmd.InOrStdin(),
+		name:              strings.TrimSpace(name),
+		scope:             strings.TrimSpace(scope),
+		all:               all,
+		force:             force,
+		dryRun:            dryRun,
+		interactive:       commandIsInteractiveTerminal(),
+		stdin:             cmd.InOrStdin(),
+		includeSupervisor: getBoolFlagIfDefined(cmd, "include-supervisor"),
 	}, nil
 }
 
@@ -704,17 +712,20 @@ func runDeployRedeployWithOpts(ctx context.Context, opts *deployLookupOpts, stdo
 	if opts == nil {
 		return fmt.Errorf("deploy redeploy: options are required")
 	}
+	runOne := func(ctx context.Context, record *deploymentRecord, stdout io.Writer) error {
+		return runDeployRedeployRecord(ctx, record, stdout, opts.includeSupervisor)
+	}
 	if opts.all {
-		return runDeployAcrossScope(ctx, opts.scope, stdout, "deploy redeploy", runDeployRedeployRecord)
+		return runDeployAcrossScope(ctx, opts.scope, stdout, "deploy redeploy", runOne)
 	}
 	record, err := loadDeploymentRecordForScope(opts.name, opts.scope)
 	if err != nil {
 		return fmt.Errorf("deploy redeploy: %w", err)
 	}
-	return runDeployRedeployRecord(ctx, record, stdout)
+	return runOne(ctx, record, stdout)
 }
 
-func runDeployRedeployRecord(ctx context.Context, record *deploymentRecord, stdout io.Writer) error {
+func runDeployRedeployRecord(ctx context.Context, record *deploymentRecord, stdout io.Writer, includeSupervisor bool) error {
 	if record == nil || record.manifest == nil {
 		return fmt.Errorf("deploy redeploy: deployment record is required")
 	}
@@ -751,7 +762,8 @@ func runDeployRedeployRecord(ctx context.Context, record *deploymentRecord, stdo
 	if manifest.Systemd == nil {
 		return nil
 	}
-	if err := syncSystemdDeploymentState(ctx, "deploy redeploy", manifest, stdout); err != nil {
+	plan := restartPlanFor(deploymentRoleFromManifest(manifest), includeSupervisor)
+	if err := syncSystemdDeploymentStateWithPlan(ctx, "deploy redeploy", manifest, stdout, plan); err != nil {
 		return err
 	}
 	return nil
@@ -987,14 +999,14 @@ func runDeployUpgradeWithOpts(ctx context.Context, opts *deployUpgradeOpts, stdo
 	}
 	if opts.all {
 		return runDeployAcrossScope(ctx, opts.scope, stdout, "deploy upgrade", func(ctx context.Context, record *deploymentRecord, stdout io.Writer) error {
-			return runDeployUpgradeRecord(ctx, record, version, repository, stdout)
+			return runDeployUpgradeRecord(ctx, record, version, repository, stdout, opts.includeSupervisor)
 		})
 	}
 	record, err := loadDeploymentRecordForScope(opts.name, opts.scope)
 	if err != nil {
 		return fmt.Errorf("deploy upgrade: %w", err)
 	}
-	return runDeployUpgradeRecord(ctx, record, version, repository, stdout)
+	return runDeployUpgradeRecord(ctx, record, version, repository, stdout, opts.includeSupervisor)
 }
 
 func runDeployUpgradeRecord(
@@ -1003,6 +1015,7 @@ func runDeployUpgradeRecord(
 	version string,
 	repository string,
 	stdout io.Writer,
+	includeSupervisor bool,
 ) error {
 	if record == nil || record.manifest == nil {
 		return fmt.Errorf("deploy upgrade: deployment record is required")
@@ -1037,13 +1050,27 @@ func runDeployUpgradeRecord(
 	if manifest.Systemd == nil {
 		return nil
 	}
-	if err := syncSystemdDeploymentState(ctx, "deploy upgrade", manifest, stdout); err != nil {
+	plan := restartPlanFor(deploymentRoleFromManifest(manifest), includeSupervisor)
+	if err := syncSystemdDeploymentStateWithPlan(ctx, "deploy upgrade", manifest, stdout, plan); err != nil {
 		return err
 	}
 	return nil
 }
 
+// restartPlan describes whether redeploy/upgrade should restart a unit
+// after swapping its binary. Zero value (skip=false) means "restart
+// unconditionally"; skip=true preserves the running process and logs
+// reason so operators see why the restart was held.
+type restartPlan struct {
+	skip   bool
+	reason string
+}
+
 func syncSystemdDeploymentState(ctx context.Context, op string, manifest *deploymentManifest, stdout io.Writer) error {
+	return syncSystemdDeploymentStateWithPlan(ctx, op, manifest, stdout, restartPlan{})
+}
+
+func syncSystemdDeploymentStateWithPlan(ctx context.Context, op string, manifest *deploymentManifest, stdout io.Writer, plan restartPlan) error {
 	if manifest == nil || manifest.Systemd == nil {
 		return nil
 	}
@@ -1066,6 +1093,16 @@ func syncSystemdDeploymentState(ctx context.Context, op string, manifest *deploy
 		}
 		return nil
 	}
+	if plan.skip {
+		reason := plan.reason
+		if reason == "" {
+			reason = "restart skipped"
+		}
+		if _, err := fmt.Fprintf(stdout, "left %s running (%s)\n", serviceName, reason); err != nil {
+			return fmt.Errorf("%s: write output: %w", op, err)
+		}
+		return nil
+	}
 	if err := deployRunSystemctl(ctx, manifest.Scope, "restart", serviceName); err != nil {
 		return fmt.Errorf("%s: %w", op, err)
 	}
@@ -1073,6 +1110,36 @@ func syncSystemdDeploymentState(ctx context.Context, op string, manifest *deploy
 		return fmt.Errorf("%s: write output: %w", op, err)
 	}
 	return nil
+}
+
+// deploymentRoleFromManifest returns the workbuddy runtime role recorded in
+// the manifest's command line — one of "supervisor", "coordinator", "worker",
+// "serve", or "" if the command is empty / unrecognized. The first
+// non-flag positional argument is treated as the role.
+func deploymentRoleFromManifest(m *deploymentManifest) string {
+	if m == nil {
+		return ""
+	}
+	for _, arg := range m.Command {
+		arg = strings.TrimSpace(arg)
+		if arg == "" || strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return strings.ToLower(arg)
+	}
+	return ""
+}
+
+// restartPlanFor decides whether a unit being redeployed/upgraded should
+// have its systemd service restarted. Supervisor is preserved by default
+// (its design intent is to outlive worker/coordinator restarts so
+// in-flight agent processes it owns survive); pass includeSupervisor=true
+// to force it.
+func restartPlanFor(role string, includeSupervisor bool) restartPlan {
+	if role == "supervisor" && !includeSupervisor {
+		return restartPlan{skip: true, reason: "supervisor preserved for hot reload; pass --include-supervisor to force restart"}
+	}
+	return restartPlan{}
 }
 
 func validateDeployIdentity(name, scope string) (string, string, *deployScopePaths, error) {

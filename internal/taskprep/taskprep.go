@@ -15,6 +15,7 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/ghadapter"
+	"github.com/Lincyaw/workbuddy/internal/reporter"
 	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/google/uuid"
@@ -167,7 +168,7 @@ func (p *Preparer) Prepare(ctx context.Context, d Decision) error {
 			log.Printf("[taskprep] warning: could not fetch issue comments for %s#%d: %v", d.Repo, d.IssueNum, err)
 		} else {
 			issueCtx.Comments = comments
-			issueCtx.CommentsText = FormatComments(comments)
+			issueCtx.CommentsText = FormatComments(comments, d.Repo, d.IssueNum)
 		}
 		prs, err := p.gh.ListRelatedPRs(d.Repo, d.IssueNum)
 		if err != nil {
@@ -231,19 +232,97 @@ func (p *Preparer) Prepare(ctx context.Context, d Decision) error {
 	return nil
 }
 
-// FormatComments renders issue comments into a human-readable blob for
-// agent prompt templates. Exported so callers that build their own
-// TaskContext can reuse the same format.
-func FormatComments(comments []runtimepkg.IssueComment) string {
+// reviewVerdictMarker is the HTML comment review-agent prepends to its
+// criterion-by-criterion verdict so taskprep can locate the most recent
+// verdict across an arbitrarily long dev↔review cycle history.
+const reviewVerdictMarker = "<!-- workbuddy:review-verdict -->"
+
+// maxVerdictBytes caps the quoted verdict body in the prompt. Verdicts
+// past this length are truncated with a tail pointer to `gh issue view`
+// so a runaway FAIL transcript doesn't bloat every subsequent dispatch.
+// Sized for ~250 lines of typical AC output.
+const maxVerdictBytes = 16 * 1024
+
+// FormatComments renders issue comments into a compact, signal-dense blob
+// for agent prompt templates. The strategy (issue #51 / REQ-061) is:
+//
+//  1. Drop reporter/bot noise (Agent Report, Cycle Cap, etc.).
+//  2. Keep the most recent review verdict (identified by reviewVerdictMarker)
+//     in full — that is the only comment guaranteed to be load-bearing for
+//     the next dev iteration.
+//  3. Replace every other surviving comment with a single counted summary
+//     line, plus a `gh` invocation the agent can run on demand to read the
+//     full history.
+//
+// Older issues without verdict markers fall back to the summary-only form;
+// no verdict block is fabricated.
+func FormatComments(comments []runtimepkg.IssueComment, repo string, issueNum int) string {
 	if len(comments) == 0 {
 		return "(no comments)"
 	}
-	var b strings.Builder
-	for i, c := range comments {
-		if i > 0 {
-			b.WriteString("\n---\n")
+
+	noiseDropped := 0
+	kept := make([]runtimepkg.IssueComment, 0, len(comments))
+	for _, c := range comments {
+		if reporter.IsAutomatedComment(c.Body) {
+			noiseDropped++
+			continue
 		}
-		fmt.Fprintf(&b, "[%s by %s]\n%s", c.CreatedAt, c.Author, c.Body)
+		kept = append(kept, c)
+	}
+
+	verdictIdx := -1
+	for i := len(kept) - 1; i >= 0; i-- {
+		if strings.Contains(kept[i].Body, reviewVerdictMarker) {
+			verdictIdx = i
+			break
+		}
+	}
+
+	otherCount := len(kept)
+	if verdictIdx >= 0 {
+		otherCount--
+	}
+
+	var b strings.Builder
+	if verdictIdx >= 0 {
+		v := kept[verdictIdx]
+		body := v.Body
+		var tail string
+		if len(body) > maxVerdictBytes {
+			body = body[:maxVerdictBytes]
+			tail = fmt.Sprintf("\n\n[... verdict body truncated at %d bytes; %d more bytes available via `gh issue view`]", maxVerdictBytes, len(v.Body)-maxVerdictBytes)
+		}
+		fmt.Fprintf(&b, "[Latest review verdict — %s by %s]\n%s%s", v.CreatedAt, v.Author, body, tail)
+	}
+
+	if otherCount > 0 || noiseDropped > 0 {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		ghCmd := "gh issue view"
+		if issueNum > 0 {
+			ghCmd += fmt.Sprintf(" %d", issueNum)
+		}
+		if repo != "" {
+			ghCmd += fmt.Sprintf(" --repo %s", repo)
+		}
+		ghCmd += " --json comments"
+
+		switch {
+		case otherCount > 0 && noiseDropped > 0:
+			fmt.Fprintf(&b, "[%d earlier comment(s) omitted; %d reporter/bot comment(s) filtered. Run `%s` to read the full history.]",
+				otherCount, noiseDropped, ghCmd)
+		case otherCount > 0:
+			fmt.Fprintf(&b, "[%d earlier comment(s) omitted. Run `%s` to read the full history.]",
+				otherCount, ghCmd)
+		default: // noiseDropped > 0 only
+			fmt.Fprintf(&b, "[%d reporter/bot comment(s) filtered as noise.]", noiseDropped)
+		}
+	}
+
+	if b.Len() == 0 {
+		return "(no comments)"
 	}
 	return b.String()
 }

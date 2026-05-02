@@ -1,68 +1,105 @@
-// Package codex — shared app-server process manager.
+// Package codex — shared app-server WebSocket client.
 //
-// A single `codex app-server --listen stdio://` child process is multiplexed
-// across all concurrent agent sessions on a worker. Each agent session is a
-// JSON-RPC "thread" on that shared process. This replaces the earlier
-// one-process-per-session model (see decisions.md 2026-04-20 and superseding
-// entry 2026-04-22).
+// A single `codex app-server --listen ws://HOST:PORT` child process is
+// supervised by `workbuddy supervisor` (see cmd/supervisor_codex_sidecar.go)
+// and dialed by the worker over a WebSocket connection. Each agent
+// session multiplexes onto one JSON-RPC "thread" on that shared
+// connection. This replaces the earlier stdio-pipe model in which the
+// worker fork+exec'd codex itself; lifting codex out of the worker's
+// process tree is what makes worker redeploy non-destructive to the
+// codex runtime (REQ-127).
+//
+// Codex 0.125.0's `--listen unix://PATH` is advertised in --help but
+// rejected at runtime, so WebSocket is the only non-stdio transport
+// supported. Bind must be loopback because codex's WS server has no
+// authentication.
 package codex
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
+
+	"github.com/coder/websocket"
 
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 )
 
-// appServer owns the single shared `codex app-server` child process. It
-// multiplexes JSON-RPC traffic for many concurrent sessions (threads). It is
-// safe for concurrent use from multiple goroutines.
+// envCodexURL overrides Config.URL. Set via the worker systemd unit so
+// operators can swap endpoints without rebuilding.
+const envCodexURL = "WORKBUDDY_CODEX_URL"
+
+// defaultCodexURL matches defaultCodexSidecarListen() in cmd/supervisor_codex_sidecar.go.
+// The two constants are intentionally duplicated rather than imported across
+// packages to keep cmd/ and internal/agent/codex/ decoupled.
+const defaultCodexURL = "ws://127.0.0.1:7177"
+
+// resolveCodexURL returns the WebSocket URL the appServer dials, in
+// precedence order: explicit cfg.URL, $WORKBUDDY_CODEX_URL, the default.
+func resolveCodexURL(cfg Config) string {
+	if u := strings.TrimSpace(cfg.URL); u != "" {
+		return u
+	}
+	if u := strings.TrimSpace(os.Getenv(envCodexURL)); u != "" {
+		return u
+	}
+	return defaultCodexURL
+}
+
+// appServer owns the single shared WebSocket connection to the supervised
+// `codex app-server` sidecar. It multiplexes JSON-RPC traffic for many
+// concurrent sessions (threads). Safe for concurrent use from multiple
+// goroutines.
+//
+// Lifecycle is one-shot: ensureConnected dials lazily on first use; if the
+// connection drops (codex restarted, network glitch, supervisor cycled),
+// the appServer transitions to a permanent failed state and all subsequent
+// calls fail with deadErr. The next worker restart re-creates the Backend
+// from scratch and re-dials. v1 deliberately keeps reconnect out of scope;
+// the fail-fast model matches the prior stdio-pipe behaviour.
 type appServer struct {
-	cfg             Config
-	dangerousBypass bool
+	cfg Config
+	url string
 
 	mu       sync.Mutex
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	stdout   io.ReadCloser
-	stderr   io.ReadCloser
-	writeMu  sync.Mutex
+	conn     *websocket.Conn
 	pending  map[string]chan Response
 	threads  map[string]*session
 	nextID   atomic.Int64
 	started  bool
 	closed   bool
 	initErr  error
-	procDone chan error
-	doneOnce sync.Once
 	deadErr  error
+	doneOnce sync.Once
+
+	// connCtx scopes the read loop. shutdown cancels it to make any
+	// in-flight Conn.Read return immediately.
+	connCtx    context.Context
+	connCancel context.CancelFunc
+	readDone   chan struct{}
 }
 
-// newAppServer creates an idle manager. The child process is started on the
-// first call to ensureStarted.
-func newAppServer(cfg Config, dangerousBypass bool) *appServer {
+// newAppServer creates an idle manager. The connection is dialed on the
+// first call to ensureConnected.
+func newAppServer(cfg Config) *appServer {
 	return &appServer{
-		cfg:             cfg,
-		dangerousBypass: dangerousBypass,
-		pending:         make(map[string]chan Response),
-		threads:         make(map[string]*session),
-		procDone:        make(chan error, 1),
+		cfg:      cfg,
+		url:      resolveCodexURL(cfg),
+		pending:  make(map[string]chan Response),
+		threads:  make(map[string]*session),
+		readDone: make(chan struct{}),
 	}
 }
 
-// ensureStarted spawns and initializes the shared process if it is not
-// already running. Subsequent calls return nil until the process dies.
-func (a *appServer) ensureStarted(ctx context.Context) error {
+// ensureConnected dials the supervised codex sidecar if not already
+// connected. Subsequent calls return nil until the connection drops.
+func (a *appServer) ensureConnected(ctx context.Context) error {
 	a.mu.Lock()
 	if a.started && a.deadErr == nil {
 		a.mu.Unlock()
@@ -80,46 +117,33 @@ func (a *appServer) ensureStarted(ctx context.Context) error {
 	}
 	a.mu.Unlock()
 
-	args := []string{}
-	if a.dangerousBypass {
-		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
-	}
-	args = append(args, "app-server", "--listen", "stdio://")
-	// Use Background, not the session ctx: this process outlives any single
-	// session. Lifecycle is driven by Shutdown.
-	cmd := exec.Command(a.cfg.Binary, args...)
-	cmd.Env = os.Environ()
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	stdin, err := cmd.StdinPipe()
+	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(dialCtx, a.url, &websocket.DialOptions{
+		// codex frames its messages well below the default limit but
+		// raise the read limit defensively — long agent messages can
+		// exceed the 32KB default.
+	})
 	if err != nil {
-		return fmt.Errorf("codex: stdin pipe: %w", err)
+		return fmt.Errorf("codex: dial %s: %w (is the supervised codex sidecar running? supervisor must be started with --codex-binary)", a.url, err)
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("codex: stdout pipe: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("codex: stderr pipe: %w", err)
-	}
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("codex: start app-server: %w", err)
-	}
+	// 8 MB per frame: codex agentMessage frames stay well below this in
+	// practice, but we keep a buffer for tool-result frames carrying long
+	// command outputs. Loopback-only bind limits the blast radius if a
+	// malformed frame slipped through, but capping protects the worker
+	// from a single huge frame OOMing it.
+	conn.SetReadLimit(8 * 1024 * 1024)
 
 	a.mu.Lock()
-	a.cmd = cmd
-	a.stdin = stdin
-	a.stdout = stdout
-	a.stderr = stderr
+	a.conn = conn
+	a.connCtx, a.connCancel = context.WithCancel(context.Background())
 	a.started = true
 	a.mu.Unlock()
 
 	go a.readLoop()
-	go a.captureStderr()
 
-	initCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
+	initCtx, cancelInit := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelInit()
 	if err := a.initialize(initCtx); err != nil {
 		a.mu.Lock()
 		a.initErr = err
@@ -185,8 +209,22 @@ func (a *appServer) activeSessions() []*session {
 	return out
 }
 
+// writeFrame serializes one JSON-RPC message as a WebSocket text frame.
+// coder/websocket.Conn.Write is safe for concurrent use.
+func (a *appServer) writeFrame(ctx context.Context, payload []byte) error {
+	a.mu.Lock()
+	conn := a.conn
+	closed := a.closed
+	a.mu.Unlock()
+	if closed || conn == nil {
+		return errors.New("codex: shared app-server connection closed")
+	}
+	return conn.Write(ctx, websocket.MessageText, payload)
+}
+
 // call issues a JSON-RPC request and waits for its response. Multiple
-// goroutines may call concurrently; writes to stdin are serialized.
+// goroutines may call concurrently; coder/websocket serializes frame
+// writes internally.
 func (a *appServer) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	id := a.nextID.Add(1)
 	req := Request{JSONRPC: "2.0", ID: id, Method: method, Params: params}
@@ -194,7 +232,6 @@ func (a *appServer) call(ctx context.Context, method string, params any) (json.R
 	if err != nil {
 		return nil, fmt.Errorf("codex: marshal %s request: %w", method, err)
 	}
-	data = append(data, '\n')
 
 	key := requestIDForInt(id)
 	ch := make(chan Response, 1)
@@ -211,14 +248,11 @@ func (a *appServer) call(ctx context.Context, method string, params any) (json.R
 	a.pending[key] = ch
 	a.mu.Unlock()
 
-	a.writeMu.Lock()
-	_, werr := a.stdin.Write(data)
-	a.writeMu.Unlock()
-	if werr != nil {
+	if err := a.writeFrame(ctx, data); err != nil {
 		a.mu.Lock()
 		delete(a.pending, key)
 		a.mu.Unlock()
-		return nil, fmt.Errorf("codex: write %s request: %w", method, werr)
+		return nil, fmt.Errorf("codex: write %s request: %w", method, err)
 	}
 
 	select {
@@ -235,6 +269,19 @@ func (a *appServer) call(ctx context.Context, method string, params any) (json.R
 	}
 }
 
+// writeFireAndForget marshals envelope as JSON and ships one WS frame
+// with a fixed 5s write deadline. Used by notify/reply/replyError where
+// no response is expected.
+func (a *appServer) writeFireAndForget(envelope any) error {
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return a.writeFrame(ctx, data)
+}
+
 func (a *appServer) notify(method string, params any) error {
 	req := Notification{JSONRPC: "2.0", Method: method}
 	if params != nil {
@@ -244,79 +291,60 @@ func (a *appServer) notify(method string, params any) error {
 		}
 		req.Params = raw
 	}
-	data, err := json.Marshal(req)
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	a.writeMu.Lock()
-	defer a.writeMu.Unlock()
-	if a.stdin == nil {
-		return errors.New("codex: shared app-server stdin closed")
-	}
-	_, err = a.stdin.Write(data)
-	return err
+	return a.writeFireAndForget(req)
 }
 
 func (a *appServer) reply(id json.RawMessage, payload any) error {
-	data, err := json.Marshal(map[string]any{
+	return a.writeFireAndForget(map[string]any{
 		"jsonrpc": "2.0",
-		"id":      json.RawMessage(append([]byte(nil), id...)),
+		"id":      id,
 		"result":  payload,
 	})
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	a.writeMu.Lock()
-	defer a.writeMu.Unlock()
-	if a.stdin == nil {
-		return errors.New("codex: shared app-server stdin closed")
-	}
-	_, err = a.stdin.Write(data)
-	return err
 }
 
 func (a *appServer) replyError(id json.RawMessage, code int, message string) error {
-	data, err := json.Marshal(map[string]any{
+	return a.writeFireAndForget(map[string]any{
 		"jsonrpc": "2.0",
-		"id":      json.RawMessage(append([]byte(nil), id...)),
+		"id":      id,
 		"error": map[string]any{
 			"code":    code,
 			"message": message,
 		},
 	})
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	a.writeMu.Lock()
-	defer a.writeMu.Unlock()
-	if a.stdin == nil {
-		return errors.New("codex: shared app-server stdin closed")
-	}
-	_, err = a.stdin.Write(data)
-	return err
 }
 
-// readLoop consumes stdout and routes responses / notifications / server
-// requests to the correct destination (pending response channel or session).
+// readLoop consumes WebSocket text frames and routes responses /
+// notifications / server requests to the correct destination (pending
+// response channel or session).
 func (a *appServer) readLoop() {
-	scanner := bufio.NewScanner(a.stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		line := append([]byte(nil), scanner.Bytes()...)
+	defer close(a.readDone)
+	for {
+		a.mu.Lock()
+		conn := a.conn
+		a.mu.Unlock()
+		if conn == nil {
+			return
+		}
+		_, frame, err := conn.Read(a.connCtx)
+		if err != nil {
+			// Either ctx cancel (shutdown) or the codex side closed
+			// the WS — both routed through onConnectionClosed which
+			// fails pending calls and tears down active sessions.
+			a.onConnectionClosed(err)
+			return
+		}
+
 		var envelope struct {
 			ID     json.RawMessage `json:"id"`
 			Method string          `json:"method"`
 		}
-		if err := json.Unmarshal(line, &envelope); err != nil {
+		if jerr := json.Unmarshal(frame, &envelope); jerr != nil {
 			continue
 		}
 		switch {
 		case len(envelope.ID) > 0 && envelope.Method == "":
 			var resp Response
-			if err := json.Unmarshal(line, &resp); err != nil {
+			if jerr := json.Unmarshal(frame, &resp); jerr != nil {
 				continue
 			}
 			key := requestIDKey(resp.ID)
@@ -330,43 +358,18 @@ func (a *appServer) readLoop() {
 			}
 		case len(envelope.ID) > 0 && envelope.Method != "":
 			var req ServerRequest
-			if err := json.Unmarshal(line, &req); err != nil {
+			if jerr := json.Unmarshal(frame, &req); jerr != nil {
 				continue
 			}
 			a.dispatchServerRequest(req)
 		case envelope.Method != "":
 			var notif Notification
-			if err := json.Unmarshal(line, &notif); err != nil {
+			if jerr := json.Unmarshal(frame, &notif); jerr != nil {
 				continue
 			}
-			a.dispatchNotification(notif, json.RawMessage(line))
+			a.dispatchNotification(notif, append(json.RawMessage(nil), frame...))
 		}
 	}
-
-	waitErr := a.cmd.Wait()
-	a.onProcessExit(waitErr)
-}
-
-func (a *appServer) captureStderr() {
-	if a.stderr == nil {
-		return
-	}
-	scanner := bufio.NewScanner(a.stderr)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-		// Stderr is process-scoped, not session-scoped. Fan out to every
-		// active session as a log event so operators can still see it
-		// alongside per-session artifacts.
-		payload := launcherevents.LogPayload{Stream: "stderr", Line: line}
-		for _, s := range a.activeSessions() {
-			s.emit(newEvent("log", s.currentTurnID(), payload, nil))
-		}
-	}
-	_, _ = io.Copy(io.Discard, a.stderr)
 }
 
 // dispatchServerRequest routes a server-initiated request to the owning
@@ -389,44 +392,55 @@ func (a *appServer) dispatchNotification(notif Notification, raw json.RawMessage
 		return
 	}
 	// Some notifications (e.g. pre-thread errors) may arrive without a
-	// threadId; drop silently.
+	// threadId. Fan process-scoped log notifications out to every active
+	// session so operators still see them, mirroring the prior stderr-
+	// capture path. Other notifications drop silently.
+	if isProcessScopedLogNotif(notif.Method) {
+		payload := launcherevents.LogPayload{Stream: "codex", Line: notif.Method}
+		for _, s := range a.activeSessions() {
+			s.emit(newEvent("log", s.currentTurnID(), payload, nil))
+		}
+	}
 }
 
-// onProcessExit marks the shared process dead, fails all pending calls, and
-// forces every active session to finish.
-func (a *appServer) onProcessExit(waitErr error) {
+func isProcessScopedLogNotif(method string) bool {
+	switch method {
+	case "configWarning", "mcpServer/startupStatus":
+		return true
+	}
+	return false
+}
+
+// onConnectionClosed marks the connection dead, fails all pending calls,
+// and forces every active session to finish.
+func (a *appServer) onConnectionClosed(closeErr error) {
 	a.doneOnce.Do(func() {
 		a.mu.Lock()
-		if waitErr == nil {
-			waitErr = errors.New("codex: shared app-server exited")
+		if closeErr == nil {
+			closeErr = errors.New("codex: shared app-server connection closed")
 		}
-		a.deadErr = waitErr
+		a.deadErr = closeErr
 		pending := a.pending
 		a.pending = make(map[string]chan Response)
 		threads := a.threads
 		a.threads = make(map[string]*session)
 		a.mu.Unlock()
-		// Fail every in-flight request.
 		for _, ch := range pending {
 			select {
-			case ch <- Response{Error: &RPCError{Code: -32000, Message: waitErr.Error()}}:
+			case ch <- Response{Error: &RPCError{Code: -32000, Message: closeErr.Error()}}:
 			default:
 			}
 			close(ch)
 		}
-		// Finish every active session.
 		for _, s := range threads {
-			s.finishWithDuration("failed", 1, fmt.Errorf("codex: shared app-server exited: %w", waitErr), 0)
+			s.finishWithDuration("failed", 1, fmt.Errorf("codex: shared app-server connection closed: %w", closeErr), 0)
 			s.closeEvents()
-		}
-		select {
-		case a.procDone <- waitErr:
-		default:
 		}
 	})
 }
 
-// shutdown stops the shared process and waits for it to exit.
+// shutdown closes the WebSocket connection and waits for the read loop
+// to exit. Safe to call multiple times.
 func (a *appServer) shutdown(ctx context.Context) error {
 	a.mu.Lock()
 	if !a.started || a.closed {
@@ -440,26 +454,21 @@ func (a *appServer) shutdown(ctx context.Context) error {
 }
 
 func (a *appServer) shutdownLocked() error {
-	a.writeMu.Lock()
-	if a.stdin != nil {
-		_ = a.stdin.Close()
+	a.mu.Lock()
+	conn := a.conn
+	cancel := a.connCancel
+	a.mu.Unlock()
+
+	if cancel != nil {
+		cancel() // make any in-flight Conn.Read return
 	}
-	a.writeMu.Unlock()
-	if a.cmd != nil && a.cmd.Process != nil {
-		_ = syscall.Kill(-a.cmd.Process.Pid, syscall.SIGTERM)
-	}
-	select {
-	case <-a.procDone:
-		return nil
-	case <-time.After(2 * time.Second):
-		if a.cmd != nil && a.cmd.Process != nil {
-			_ = syscall.Kill(-a.cmd.Process.Pid, syscall.SIGKILL)
-		}
+	if conn != nil {
+		_ = conn.Close(websocket.StatusNormalClosure, "worker shutting down")
 	}
 	select {
-	case <-a.procDone:
+	case <-a.readDone:
 		return nil
 	case <-time.After(2 * time.Second):
-		return errors.New("codex: shared app-server did not exit after SIGKILL")
+		return errors.New("codex: read loop did not exit within shutdown deadline")
 	}
 }

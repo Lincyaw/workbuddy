@@ -44,6 +44,11 @@ Evaluate EACH criterion as pass / fail / cannot-judge, with concrete
 evidence (file:line, test name, or quoted text). Post a comment on the issue
 with the criterion-by-criterion verdict regardless of outcome.
 
+The verdict comment MUST start with the literal marker line
+`<!-- workbuddy:review-verdict -->` on its own first line. Workbuddy uses this
+marker to locate the most recent verdict when assembling the next dev cycle's
+prompt, so older verdicts can be elided without losing the actionable one.
+
 After posting the verdict comment, follow the Transition footer below:
 - If every criterion passes, choose the "all criteria pass" outcome.
 - If any criterion fails, choose the "fixes needed" outcome — your verdict

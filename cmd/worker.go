@@ -75,6 +75,12 @@ type workerOpts struct {
 	// reverse proxy). Falls back to "http://<bind>:<port>" derived from
 	// the resolved listener address.
 	auditPublicURL string
+	// reposFile is the persistent YAML file that records runtime-mutated
+	// repo bindings (added/removed via `worker repos add/remove`). Loaded
+	// at startup so dynamic bindings survive worker restart; written
+	// after every successful mgmt mutation. Empty disables persistence,
+	// in which case --repos and config-bootstrap remain the only source.
+	reposFile string
 }
 
 type workerIssueReader interface {
@@ -160,6 +166,7 @@ func bindWorkerFlags(cmd *cobra.Command) {
 	cmd.Flags().String("runtime", config.RuntimeClaudeCode, "Worker runtime capability: claude-code or codex")
 	cmd.Flags().String("config-dir", ".github/workbuddy", "Configuration directory (relative to each bound repo unless absolute)")
 	cmd.Flags().String("repos", "", "Repo bindings: comma-separated OWNER/NAME=/path entries (path defaults to cwd)")
+	cmd.Flags().String("repos-file", "", "Persistent YAML file recording runtime repo bindings; survives worker restart. Default: $XDG_CONFIG_HOME/workbuddy/worker-repos.yaml (or ~/.config/workbuddy/worker-repos.yaml). Empty value disables persistence.")
 }
 
 func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
@@ -168,6 +175,7 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	runtimeName, _ := cmd.Flags().GetString("runtime")
 	configDir, _ := cmd.Flags().GetString("config-dir")
 	reposCSV, _ := cmd.Flags().GetString("repos")
+	reposFile, _ := cmd.Flags().GetString("repos-file")
 	workerID, _ := cmd.Flags().GetString("id")
 	mgmtAddr, _ := cmd.Flags().GetString("mgmt-addr")
 	mgmtPublicURL, _ := cmd.Flags().GetString("mgmt-public-url")
@@ -204,6 +212,7 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 		roleCSV:           roleCSV,
 		runtime:           runtimeName,
 		reposCSV:          strings.TrimSpace(reposCSV),
+		reposFile:         strings.TrimSpace(reposFile),
 		workerID:          strings.TrimSpace(workerID),
 		mgmtAddr:          strings.TrimSpace(mgmtAddr),
 		mgmtAuthToken:     resolvedMgmtAuthToken,
@@ -291,6 +300,30 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	repoBindings, err := resolveWorkerRepoBindings(opts, configRepo, workDir)
 	if err != nil {
 		return err
+	}
+
+	reposFilePath := opts.reposFile
+	// Empty CLI value uses the canonical default path. The flag has no
+	// "disable" syntax — operators who do not want persistence can set
+	// WORKBUDDY_WORKER_REPOS_FILE=/dev/null or pass --repos-file=/dev/null.
+	// The default-path resolver isolates env-var precedence in one place.
+	if reposFilePath == "" {
+		defaultPath, defaultErr := defaultWorkerReposFilePath()
+		if defaultErr != nil {
+			log.Printf("[worker] repos-file default unavailable: %v (persistence disabled)", defaultErr)
+		} else {
+			reposFilePath = defaultPath
+		}
+	}
+	if reposFilePath != "" && reposFilePath != os.DevNull {
+		filed, loadErr := loadWorkerRepoBindingsFile(reposFilePath)
+		if loadErr != nil {
+			return fmt.Errorf("worker: load persisted repo bindings: %w", loadErr)
+		}
+		if len(filed) > 0 {
+			repoBindings = mergeRepoBindings(repoBindings, filed)
+			log.Printf("[worker] merged %d persisted repo binding(s) from %s", len(filed), reposFilePath)
+		}
 	}
 
 	if opts.dbPath == "" {
@@ -448,6 +481,18 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 		return summary, nil
 	}
 
+	persistRepos := func() {
+		if reposFilePath == "" || reposFilePath == os.DevNull {
+			return
+		}
+		if perr := writeWorkerRepoBindingsFile(reposFilePath, bindings.list()); perr != nil {
+			// Persist failure does not roll back the in-memory or
+			// coordinator-side update — those are authoritative for
+			// the running process. The next successful mgmt call will
+			// retry the write. Operators see this in journalctl.
+			log.Printf("[worker] persist repo bindings to %s failed: %v", reposFilePath, perr)
+		}
+	}
 	mgmtServer, err = startWorkerMgmtServer(
 		opts.mgmtAddr,
 		addrFile,
@@ -456,8 +501,11 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 		localStore,
 		opts.sessionsDir,
 		func(changeCtx context.Context, _ []string) error {
-			_, err := reloadAndRegister(changeCtx)
-			return err
+			if _, err := reloadAndRegister(changeCtx); err != nil {
+				return err
+			}
+			persistRepos()
+			return nil
 		},
 		func(reloadCtx context.Context) (any, error) {
 			return reloadAndRegister(reloadCtx)
