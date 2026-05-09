@@ -144,14 +144,45 @@ func runDiagnoseWithOpts(_ context.Context, opts *diagnoseOpts, stdout io.Writer
 		}
 	} else if len(results) == 0 {
 		_, _ = fmt.Fprintln(stdout, "Pipeline healthy: no issues detected")
+		renderDiagnoseTunnelStatus(stdout, st)
 	} else {
 		renderDiagnoseTable(stdout, results)
+		renderDiagnoseTunnelStatus(stdout, st)
 	}
 
 	if len(results) > 0 {
 		return &cliExitError{code: exitCodeFailure}
 	}
 	return nil
+}
+
+func renderDiagnoseTunnelStatus(w io.Writer, st *store.Store) {
+	workers, err := st.QueryWorkers("")
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "tunnel: disconnected (last_handshake=unknown; status_error=%v)\n", err)
+		return
+	}
+	var latest store.WorkerRecord
+	for _, worker := range workers {
+		if !worker.Tunnel {
+			continue
+		}
+		if latest.ID == "" || worker.LastHeartbeat.After(latest.LastHeartbeat) {
+			latest = worker
+		}
+		if worker.Status == "online" {
+			_, _ = fmt.Fprintf(w, "tunnel: connected (worker=%s last_handshake=%s)\n", worker.ID, formatTunnelHandshake(worker.LastHeartbeat))
+			return
+		}
+	}
+	_, _ = fmt.Fprintf(w, "tunnel: disconnected (last_handshake=%s)\n", formatTunnelHandshake(latest.LastHeartbeat))
+}
+
+func formatTunnelHandshake(t time.Time) string {
+	if t.IsZero() {
+		return "unknown"
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 func applyDiagnoseFindingFix(st *store.Store, finding diag.Finding) error {
@@ -174,7 +205,7 @@ func renderDiagnoseTable(w io.Writer, rows []diagnoseResult) {
 	for _, row := range rows {
 		fix := row.SuggestedFix
 		if row.FixApplied {
-			fix = fix + " (applied)"
+			fix += " (applied)"
 		}
 		_, _ = fmt.Fprintf(tw, "%s#%d\t%s\t%s\t%s\n",
 			row.Repo, row.IssueNum, row.Severity, row.Diagnosis, fix)

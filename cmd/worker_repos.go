@@ -123,6 +123,7 @@ type workerMgmtServer struct {
 	listener net.Listener
 	addrFile string
 	baseURL  string
+	handler  http.Handler
 }
 
 func startWorkerMgmtServer(mgmtAddr, addrFile, authToken string, bindings *workerRepoBindingStore, st *store.Store, sessionsDir string, onChange func(context.Context, []string) error, onConfigReload func(context.Context) (any, error)) (*workerMgmtServer, error) {
@@ -230,7 +231,10 @@ func startWorkerMgmtServer(mgmtAddr, addrFile, authToken string, bindings *worke
 		sessionAPI.SetSessionsDir(sessionsDir)
 		sessionAPIMux := http.NewServeMux()
 		sessionAPI.RegisterSessionsOnly(sessionAPIMux)
+		sessionAPI.RegisterAPISessions(sessionAPIMux)
 		mux.Handle("/sessions/", protected(sessionAPIMux))
+		mux.Handle("/api/v1/sessions", protected(sessionAPIMux))
+		mux.Handle("/api/v1/sessions/", protected(sessionAPIMux))
 	}
 
 	srv := &http.Server{Handler: mux}
@@ -250,7 +254,15 @@ func startWorkerMgmtServer(mgmtAddr, addrFile, authToken string, bindings *worke
 		listener: ln,
 		addrFile: addrFile,
 		baseURL:  addr,
+		handler:  mux,
 	}, nil
+}
+
+func (s *workerMgmtServer) Handler() http.Handler {
+	if s == nil || s.handler == nil {
+		return http.NotFoundHandler()
+	}
+	return s.handler
 }
 
 func (s *workerMgmtServer) Close(ctx context.Context) error {
@@ -476,7 +488,7 @@ func resolveWorkerRepoBindings(opts *workerOpts, configRepo, defaultPath string)
 	return nil, fmt.Errorf("worker: repo is required")
 }
 
-func registerWorkerRepos(ctx context.Context, client *workerclient.Client, workerID string, roles []string, runtime, mgmtBaseURL, auditURL string, bindings []workerRepoBinding, openSessions []workerclient.SessionAnnounce) error {
+func registerWorkerRepos(ctx context.Context, client *workerclient.Client, workerID string, roles []string, runtime, mgmtBaseURL, auditURL string, tunnel bool, bindings []workerRepoBinding, openSessions []workerclient.SessionAnnounce) error {
 	if len(bindings) == 0 {
 		return fmt.Errorf("worker: at least one repo binding is required")
 	}
@@ -492,6 +504,7 @@ func registerWorkerRepos(ctx context.Context, client *workerclient.Client, worke
 		Repos:        repos,
 		Hostname:     hostnameOrUnknown(),
 		MgmtBaseURL:  strings.TrimRight(strings.TrimSpace(mgmtBaseURL), "/"),
+		Tunnel:       tunnel,
 		AuditURL:     strings.TrimRight(strings.TrimSpace(auditURL), "/"),
 		OpenSessions: openSessions,
 	})

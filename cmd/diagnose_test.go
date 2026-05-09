@@ -33,7 +33,7 @@ func TestRunDiagnoseWithOpts(t *testing.T) {
 		if err != nil {
 			t.Fatalf("runDiagnoseWithOpts: %v", err)
 		}
-		if strings.TrimSpace(out.String()) != "Pipeline healthy: no issues detected" {
+		if !strings.Contains(out.String(), "Pipeline healthy: no issues detected") || !strings.Contains(out.String(), "tunnel: disconnected") {
 			t.Fatalf("unexpected output: %q", out.String())
 		}
 	})

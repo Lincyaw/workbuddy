@@ -21,6 +21,8 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/tasknotify"
 	"github.com/Lincyaw/workbuddy/internal/taskprep"
+	"github.com/Lincyaw/workbuddy/internal/wstunnel"
+	"github.com/coder/websocket"
 )
 
 // FullCoordinatorServer is the distributed coordinator's HTTP control plane:
@@ -37,6 +39,7 @@ type FullCoordinatorServer struct {
 	Config      *CoordinatorConfigRuntime
 	AuthEnabled bool
 	AuthToken   string
+	Tunnels     *wstunnel.Registry
 	// CookieInsecure drops the Secure attribute on session cookies. Default
 	// false (Secure required); set true only for HTTP reverse-proxy fronts
 	// where TLS terminates upstream.
@@ -47,6 +50,50 @@ type FullCoordinatorServer struct {
 	// registered worker becomes visible immediately rather than after the
 	// 5s TTL. nil = no-op.
 	OnWorkerMembershipChange func()
+}
+
+// HandleWorkerTunnel upgrades GET /api/v1/workers/tunnel to the worker
+// management reverse tunnel. Auth is handled by the normal coordinator wrapper.
+func (s *FullCoordinatorServer) HandleWorkerTunnel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		CoordWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	workerID := strings.TrimSpace(r.URL.Query().Get("worker_id"))
+	if workerID == "" {
+		CoordWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "worker_id is required"})
+		return
+	}
+	if s.Tunnels == nil {
+		s.Tunnels = wstunnel.NewRegistry()
+	}
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+	if err != nil {
+		log.Printf("[coordinator] tunnel accept failed for %s: %v", workerID, err)
+		return
+	}
+	ep := wstunnel.NewEndpoint(conn)
+	if prev := s.Tunnels.Status(workerID); prev.Connected {
+		log.Printf("[coordinator] replacing existing tunnel for worker %s", workerID)
+	}
+	s.Tunnels.Register(workerID, ep)
+	log.Printf("[coordinator] worker tunnel connected: %s", workerID)
+	if s.Registry != nil {
+		_ = s.Registry.Heartbeat(workerID)
+	}
+	if s.Store != nil {
+		_ = s.Store.UpdateWorkerStatus(workerID, "online")
+	}
+	ctx := s.RootCtx
+	if ctx == nil {
+		ctx = r.Context()
+	}
+	err = ep.Run(ctx)
+	removed := s.Tunnels.Remove(workerID, ep)
+	if removed && s.Store != nil {
+		_ = s.Store.UpdateWorkerStatus(workerID, "offline")
+	}
+	log.Printf("[coordinator] worker tunnel disconnected: %s: %v", workerID, err)
 }
 
 // SessionCookieName is the HTTP cookie that carries the bearer token after
@@ -66,6 +113,7 @@ type WorkerRegisterRequest struct {
 	Repos       []string `json:"repos,omitempty"`
 	Hostname    string   `json:"hostname"`
 	MgmtBaseURL string   `json:"mgmt_base_url,omitempty"`
+	Tunnel      bool     `json:"tunnel,omitempty"`
 	// AuditURL is the worker-advertised base URL of its audit HTTP
 	// server. Phase 1 of the session-data ownership refactor: the
 	// coordinator persists this verbatim so Phase 2 can proxy session
@@ -488,7 +536,10 @@ func (s *FullCoordinatorServer) HandleRegisterWorker(w http.ResponseWriter, r *h
 			return
 		}
 	}
-	if err := s.Registry.RegisterWithRepos(req.WorkerID, req.Repo, req.Repos, req.Roles, req.Runtime, req.Hostname, req.MgmtBaseURL, req.AuditURL); err != nil {
+	if req.Tunnel {
+		req.MgmtBaseURL = strings.TrimSpace(req.MgmtBaseURL)
+	}
+	if err := s.Registry.RegisterWithReposTunnel(req.WorkerID, req.Repo, req.Repos, req.Roles, req.Runtime, req.Hostname, req.MgmtBaseURL, req.AuditURL, req.Tunnel); err != nil {
 		CoordWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -521,6 +572,7 @@ func (s *FullCoordinatorServer) HandleRegisterWorker(w http.ResponseWriter, r *h
 		"hostname":  req.Hostname,
 		"mgmt_url":  req.MgmtBaseURL,
 		"audit_url": req.AuditURL,
+		"tunnel":    req.Tunnel,
 	})
 	// Phase 3 (REQ-122): drop the sessionproxy listing cache so the new
 	// worker shows up in the next /api/v1/sessions call without waiting
