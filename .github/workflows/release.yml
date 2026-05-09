@@ -34,7 +34,9 @@ jobs:
           node-version: "22"
 
       - name: Enable corepack
-        run: corepack enable
+        run: |
+          corepack enable
+          corepack prepare pnpm@9.15.0 --activate
 
       - name: Build SPA bundle for embed
         run: |
