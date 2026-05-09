@@ -34,6 +34,32 @@ workbuddy worker \
   --mgmt-public-url https://worker-b.example.com/workbuddy
 ```
 
+### 原生 TLS（v0.6.1+，REQ-129 / REQ-130）
+
+Coordinator 可以直接提供 HTTPS，无需外部反向代理：
+
+```
+# 机器 A
+workbuddy coordinator \
+  --listen 0.0.0.0:443 \
+  --tls-cert /etc/workbuddy/cert.pem \
+  --tls-key /etc/workbuddy/key.pem \
+  --report-base-url https://workbuddy.example.com \
+  --auth
+
+# 机器 B —— 自签名证书需指定 CA
+workbuddy worker \
+  --coordinator https://A \
+  --ca-cert /home/<you>/.config/workbuddy/coordinator-ca.pem \
+  --token <secret> \
+  --role dev,review \
+  --repos owner/repo=/srv/workbuddy-worker
+```
+
+- `--tls-cert` / `--tls-key`：Coordinator 的证书和私钥路径。两者同时提供时启用 `ListenAndServeTLS`；否则保持原有 HTTP 行为。
+- `--ca-cert`：Worker 的自定义 CA 证书路径。当 Coordinator 使用自签名证书时，Worker 通过该 CA 验证 TLS 连接；省略则使用系统默认信任库。
+- 证书需包含 SAN（Subject Alternative Name）匹配访问域名，以及正确的 `keyUsage`（`digitalSignature, keyEncipherment`）和 `extendedKeyUsage = serverAuth`，否则浏览器会报 `ERR_SSL_KEY_USAGE_INCOMPATIBLE`。
+
 `--report-base-url` 决定了写入 GitHub issue 评论的 session 链接 host。当 coordinator/serve 绑定到非 loopback 地址时，必须显式提供该值（可改用环境变量 `WORKBUDDY_REPORT_BASE_URL`）；loopback 绑定时可省略，自动落到 `http://<listen>`。Worker 同理：当 `--mgmt-addr` 不是 loopback 时，必须配置非 loopback 的 `--mgmt-public-url`，否则启动失败并给出修复建议。
 
 - Coordinator 负责：GitHub Poller、状态机、任务路由、HTTP API、审计

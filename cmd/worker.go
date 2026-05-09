@@ -2,9 +2,12 @@ package cmd
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -81,6 +84,9 @@ type workerOpts struct {
 	// after every successful mgmt mutation. Empty disables persistence,
 	// in which case --repos and config-bootstrap remain the only source.
 	reposFile string
+	// caCert is the path to a PEM-encoded CA certificate used to verify
+	// the coordinator's TLS certificate when connecting over HTTPS.
+	caCert string
 }
 
 type workerIssueReader interface {
@@ -167,6 +173,7 @@ func bindWorkerFlags(cmd *cobra.Command) {
 	cmd.Flags().String("config-dir", ".github/workbuddy", "Configuration directory (relative to each bound repo unless absolute)")
 	cmd.Flags().String("repos", "", "Repo bindings: comma-separated OWNER/NAME=/path entries (path defaults to cwd)")
 	cmd.Flags().String("repos-file", "", "Persistent YAML file recording runtime repo bindings; survives worker restart. Default: $XDG_CONFIG_HOME/workbuddy/worker-repos.yaml (or ~/.config/workbuddy/worker-repos.yaml). Empty value disables persistence.")
+	cmd.Flags().String("ca-cert", "", "Path to PEM-encoded CA certificate for verifying coordinator HTTPS (self-signed certs)")
 }
 
 func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
@@ -176,6 +183,7 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	configDir, _ := cmd.Flags().GetString("config-dir")
 	reposCSV, _ := cmd.Flags().GetString("repos")
 	reposFile, _ := cmd.Flags().GetString("repos-file")
+	caCert, _ := cmd.Flags().GetString("ca-cert")
 	workerID, _ := cmd.Flags().GetString("id")
 	mgmtAddr, _ := cmd.Flags().GetString("mgmt-addr")
 	mgmtPublicURL, _ := cmd.Flags().GetString("mgmt-public-url")
@@ -224,6 +232,7 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 		supervisorSocket:  strings.TrimSpace(supervisorSocket),
 		auditListen:       strings.TrimSpace(auditListen),
 		auditPublicURL:    strings.TrimSpace(auditPublicURL),
+		caCert:            strings.TrimSpace(caCert),
 	}, nil
 }
 
@@ -398,7 +407,23 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	sessionManager := runtimepkg.NewSessionManager(opts.sessionsDir, localStore)
 	lnch.SetSessionManager(sessionManager)
 
-	client := workerclient.New(opts.coordinatorURL, opts.token, nil)
+	var httpClient *http.Client
+	if opts.caCert != "" {
+		caData, err := os.ReadFile(opts.caCert)
+		if err != nil {
+			return fmt.Errorf("worker: read CA cert %s: %w", opts.caCert, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caData) {
+			return fmt.Errorf("worker: invalid CA cert %s", opts.caCert)
+		}
+		httpClient = &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{RootCAs: pool},
+			},
+		}
+	}
+	client := workerclient.New(opts.coordinatorURL, opts.token, httpClient)
 	// Hook the announce RPC so each freshly-created session immediately
 	// installs a session_id → worker_id route on the coordinator. Without
 	// this, the coordinator's sessionproxy can't find the owning worker

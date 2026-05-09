@@ -4713,3 +4713,54 @@ requirements:
       - internal/reporter/infra_dedup_test.go
     deps:
       - REQ-001
+
+  - id: REQ-129
+    title: Coordinator native TLS termination
+    description: >
+      Coordinator previously only served plain HTTP. Operators deploying to
+      remote hosts had to run a reverse proxy (Caddy, nginx, etc.) for HTTPS,
+      which added memory overhead and operational complexity. This REQ adds
+      native TLS support via Go's crypto/tls: --tls-cert and --tls-key flags
+      on `workbuddy coordinator`. When both are provided, ListenAndServeTLS
+      is used; otherwise the existing plain-HTTP path is preserved. The cert
+      must include a SAN matching the host and correct keyUsage for browser
+      compatibility (digitalSignature + keyEncipherment, extendedKeyUsage
+      serverAuth).
+    priority: P1
+    version: v0.6.1
+    status: implemented
+    acceptance_criteria:
+      - "AC-129-1: coordinatorOpts gains tlsCert and tlsKey string fields."
+      - "AC-129-2: `workbuddy coordinator` registers --tls-cert and --tls-key flags."
+      - "AC-129-3: runCoordinatorWithOpts uses ListenAndServeTLS when both flags are non-empty, otherwise falls back to ListenAndServe."
+      - "AC-129-4: --report-base-url is still required for non-loopback binds and must use https:// when TLS is enabled."
+    code:
+      - cmd/coordinator.go
+    tests: []
+    deps:
+      - REQ-027
+
+  - id: REQ-130
+    title: Worker CA-cert pinning for self-signed coordinator TLS
+    description: >
+      When the coordinator serves HTTPS with a self-signed certificate, the
+      Go http.Client used by the worker rejects the connection because the
+      cert is not in the system trust store. This REQ adds --ca-cert on
+      `workbuddy worker`: a PEM-encoded CA certificate file that is loaded
+      into a custom x509.CertPool and wired into the worker's HTTP client
+      via TLSClientConfig{RootCAs}. When omitted, the default system pool
+      is used (existing behavior).
+    priority: P1
+    version: v0.6.1
+    status: implemented
+    acceptance_criteria:
+      - "AC-130-1: workerOpts gains caCert string field."
+      - "AC-130-2: `workbuddy worker` registers --ca-cert flag."
+      - "AC-130-3: runWorkerWithOpts reads the PEM file, validates it with x509.NewCertPool().AppendCertsFromPEM, and creates an http.Client with TLSClientConfig{RootCAs: pool} when caCert is set."
+      - "AC-130-4: workerclient.New receives the custom http.Client (or nil for default)."
+    code:
+      - cmd/worker.go
+      - internal/workerclient/client.go
+    tests: []
+    deps:
+      - REQ-028

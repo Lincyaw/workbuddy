@@ -64,6 +64,8 @@ type coordinatorOpts struct {
 	trustedAuthors    string
 	trustedAuthorsSet bool
 	cookieInsecure    bool
+	tlsCert           string
+	tlsKey            string
 	// reportBaseURL is the URL the Reporter writes into GitHub issue comments
 	// as the prefix of session links. Required when --listen is non-loopback;
 	// optional (defaults to http://<listen>) when --listen is loopback.
@@ -158,6 +160,8 @@ func init() {
 	coordinatorCmd.Flags().Bool("auth", false, "Require WORKBUDDY_AUTH_TOKEN for worker and repo registration APIs")
 	coordinatorCmd.Flags().String("trusted-authors", "", "Comma-separated GitHub logins allowed to trigger agent work")
 	coordinatorCmd.Flags().Bool("cookie-insecure", false, "Drop the Secure attribute on session cookies (HTTP reverse-proxy fronts only)")
+	coordinatorCmd.Flags().String("tls-cert", "", "TLS certificate file path; when set together with --tls-key, coordinator serves HTTPS natively")
+	coordinatorCmd.Flags().String("tls-key", "", "TLS private key file path; counterpart to --tls-cert")
 	coordinatorCmd.Flags().String("report-base-url", "", "Required when --listen is not a loopback address. The URL written into GitHub issue comments as the prefix of session links. Must be reachable from where you'll click the link in a browser. Falls back to WORKBUDDY_REPORT_BASE_URL when unset.")
 
 	coordinatorTokenCreateCmd.Flags().String("db", ".workbuddy/workbuddy.db", "SQLite database path")
@@ -204,6 +208,8 @@ func parseCoordinatorFlags(cmd *cobra.Command) (*coordinatorOpts, error) {
 	trustedAuthors, _ := cmd.Flags().GetString("trusted-authors")
 	trustedAuthorsSet := cmd.Flags().Changed("trusted-authors")
 	cookieInsecure, _ := cmd.Flags().GetBool("cookie-insecure")
+	tlsCert, _ := cmd.Flags().GetString("tls-cert")
+	tlsKey, _ := cmd.Flags().GetString("tls-key")
 	reportBaseURL, _ := cmd.Flags().GetString("report-base-url")
 	hooksConfig, _ := cmd.Flags().GetString(flagHooksConfig)
 	if strings.TrimSpace(listenAddr) == "" {
@@ -230,6 +236,8 @@ func parseCoordinatorFlags(cmd *cobra.Command) (*coordinatorOpts, error) {
 		trustedAuthors:    trustedAuthors,
 		trustedAuthorsSet: trustedAuthorsSet,
 		cookieInsecure:    cookieInsecure,
+		tlsCert:           tlsCert,
+		tlsKey:            tlsKey,
 		reportBaseURL:     resolvedReportURL,
 		hooksConfig:       hooksConfig,
 	}, nil
@@ -465,7 +473,13 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		var err error
+		if opts.tlsCert != "" && opts.tlsKey != "" {
+			err = srv.ListenAndServeTLS(opts.tlsCert, opts.tlsKey)
+		} else {
+			err = srv.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("[coordinator] HTTP server error: %v", err)
 		}
 	}()
