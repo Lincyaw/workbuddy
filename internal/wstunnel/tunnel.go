@@ -110,6 +110,9 @@ func (e *Endpoint) Requests() <-chan Frame { return e.requests }
 
 func (e *Endpoint) Close() error {
 	e.fail(ErrClosed)
+	if e.conn == nil {
+		return nil
+	}
 	return e.conn.Close(websocket.StatusNormalClosure, "closed")
 }
 
@@ -358,15 +361,17 @@ func (r *Registry) Register(workerID string, ep *Endpoint) *Tunnel {
 	return t
 }
 
-func (r *Registry) Remove(workerID string, ep *Endpoint) {
+func (r *Registry) Remove(workerID string, ep *Endpoint) bool {
 	if r == nil {
-		return
+		return false
 	}
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	if cur := r.tunnels[workerID]; cur != nil && (ep == nil || cur.Endpoint == ep) {
 		delete(r.tunnels, workerID)
+		return true
 	}
-	r.mu.Unlock()
+	return false
 }
 
 func (r *Registry) Do(ctx context.Context, workerID string, req *http.Request) (*http.Response, error) {

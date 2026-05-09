@@ -24,10 +24,13 @@ func TestCoordinatorTunnelSessionProxyEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	workerID := "worker-tunnel-1"
 	if err := st.InsertWorker(store.WorkerRecord{ID: workerID, Repo: "owner/repo", ReposJSON: `["owner/repo"]`, Roles: `["role:dev"]`, Runtime: "codex", Hostname: "worker", Tunnel: true, Status: "online"}); err != nil {
 		t.Fatalf("insert worker: %v", err)
+	}
+	if err := st.UpsertSessionRoute(store.SessionRoute{SessionID: "s-tunnel", WorkerID: workerID, Repo: "owner/repo", IssueNum: 309}); err != nil {
+		t.Fatalf("insert session route: %v", err)
 	}
 	tunnels := wstunnel.NewRegistry()
 	api := &app.FullCoordinatorServer{Store: st, Registry: registry.NewRegistry(st, time.Second), Eventlog: eventlog.NewEventLogger(st), Tunnels: tunnels}
@@ -35,6 +38,7 @@ func TestCoordinatorTunnelSessionProxyEndToEnd(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/workers/tunnel", api.HandleWorkerTunnel)
 	mux.HandleFunc("/api/v1/sessions", proxy.ServeHTTP)
+	mux.HandleFunc("/api/v1/sessions/", proxy.ServeHTTP)
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -47,6 +51,12 @@ func TestCoordinatorTunnelSessionProxyEndToEnd(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `[{"session_id":"s-tunnel","repo":"owner/repo","created_at":"2026-05-09T00:00:00Z"}]`)
+		case "/api/v1/sessions/s-tunnel":
+			if r.URL.Query().Get("block") == "1" {
+				<-block
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"session_id":"s-tunnel","repo":"owner/repo"}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -71,7 +81,7 @@ func TestCoordinatorTunnelSessionProxyEndToEnd(t *testing.T) {
 
 	pending := make(chan int, 1)
 	go func() {
-		resp, err := srv.Client().Get(srv.URL + "/api/v1/sessions?block=1")
+		resp, err := srv.Client().Get(srv.URL + "/api/v1/sessions/s-tunnel?block=1")
 		if err != nil {
 			pending <- 0
 			return
@@ -84,8 +94,8 @@ func TestCoordinatorTunnelSessionProxyEndToEnd(t *testing.T) {
 	_ = ep.Close()
 	select {
 	case code := <-pending:
-		if code != http.StatusOK && code != http.StatusBadGateway {
-			t.Fatalf("pending status=%d, want 502 or degraded 200", code)
+		if code != http.StatusBadGateway {
+			t.Fatalf("pending status=%d, want 502", code)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("pending request did not finish after tunnel close")
@@ -117,6 +127,6 @@ func dialTestWorkerTunnel(t *testing.T, baseURL, workerID string, handler http.H
 	}
 	ep := wstunnel.NewEndpoint(conn)
 	go ep.ServeRequests(context.Background(), handler)
-	go ep.Run(context.Background())
+	go func() { _ = ep.Run(context.Background()) }()
 	return ep, func() { _ = ep.Close(); cancel() }
 }

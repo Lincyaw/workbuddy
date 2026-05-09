@@ -4777,7 +4777,7 @@ requirements:
       legacy mgmt/audit URL fallback for workers that register tunnel=false.
     priority: P1
     version: v0.6.1
-    status: implemented
+    status: tested
     acceptance_criteria:
       - "AC-131-1: coordinator exposes GET /api/v1/workers/tunnel under the existing bearer auth wrapper."
       - "AC-131-2: internal/wstunnel provides JSON-header-plus-body frames, stream IDs, concurrent request/response multiplexing, close handling, and invalid-frame shutdown tests."
@@ -4800,4 +4800,3 @@ requirements:
       - cmd/coordinator_tunnel_test.go
     deps:
       - REQ-122
-

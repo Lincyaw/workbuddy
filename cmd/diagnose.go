@@ -162,13 +162,27 @@ func renderDiagnoseTunnelStatus(w io.Writer, st *store.Store) {
 		_, _ = fmt.Fprintf(w, "tunnel: disconnected (last_handshake=unknown; status_error=%v)\n", err)
 		return
 	}
+	var latest store.WorkerRecord
 	for _, worker := range workers {
-		if worker.Tunnel && worker.Status == "online" {
-			_, _ = fmt.Fprintf(w, "tunnel: connected (worker=%s last_handshake=unknown)\n", worker.ID)
+		if !worker.Tunnel {
+			continue
+		}
+		if latest.ID == "" || worker.RegisteredAt.After(latest.RegisteredAt) {
+			latest = worker
+		}
+		if worker.Status == "online" {
+			_, _ = fmt.Fprintf(w, "tunnel: connected (worker=%s last_handshake=%s)\n", worker.ID, formatTunnelHandshake(worker.RegisteredAt))
 			return
 		}
 	}
-	_, _ = fmt.Fprintln(w, "tunnel: disconnected (last_handshake=unknown)")
+	_, _ = fmt.Fprintf(w, "tunnel: disconnected (last_handshake=%s)\n", formatTunnelHandshake(latest.RegisteredAt))
+}
+
+func formatTunnelHandshake(t time.Time) string {
+	if t.IsZero() {
+		return "unknown"
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 func applyDiagnoseFindingFix(st *store.Store, finding diag.Finding) error {
@@ -191,7 +205,7 @@ func renderDiagnoseTable(w io.Writer, rows []diagnoseResult) {
 	for _, row := range rows {
 		fix := row.SuggestedFix
 		if row.FixApplied {
-			fix = fix + " (applied)"
+			fix += " (applied)"
 		}
 		_, _ = fmt.Fprintf(tw, "%s#%d\t%s\t%s\t%s\n",
 			row.Repo, row.IssueNum, row.Severity, row.Diagnosis, fix)

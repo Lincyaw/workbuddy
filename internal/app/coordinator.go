@@ -89,8 +89,8 @@ func (s *FullCoordinatorServer) HandleWorkerTunnel(w http.ResponseWriter, r *htt
 		ctx = r.Context()
 	}
 	err = ep.Run(ctx)
-	s.Tunnels.Remove(workerID, ep)
-	if s.Store != nil {
+	removed := s.Tunnels.Remove(workerID, ep)
+	if removed && s.Store != nil {
 		_ = s.Store.UpdateWorkerStatus(workerID, "offline")
 	}
 	log.Printf("[coordinator] worker tunnel disconnected: %s: %v", workerID, err)

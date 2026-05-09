@@ -38,7 +38,7 @@ func tunnelPair(t *testing.T, handler http.Handler) (*Endpoint, func()) {
 		t.Fatalf("dial: %v", err)
 	}
 	clientEP := NewEndpoint(c)
-	go clientEP.Run(context.Background())
+	go func() { _ = clientEP.Run(context.Background()) }()
 	select {
 	case <-serverEPCh:
 	case <-ctx.Done():
@@ -152,5 +152,25 @@ func TestFrameParseErrorClosesTunnel(t *testing.T) {
 	_, _, err = c.Read(ctx)
 	if err == nil {
 		t.Fatal("expected connection close after parse error")
+	}
+}
+
+func TestRegistryRemoveOnlyCurrentTunnel(t *testing.T) {
+	r := NewRegistry()
+	ep1 := NewEndpoint(nil)
+	ep2 := NewEndpoint(nil)
+	r.Register("worker-1", ep1)
+	r.Register("worker-1", ep2)
+	if removed := r.Remove("worker-1", ep1); removed {
+		t.Fatal("old endpoint removal should not evict replacement tunnel")
+	}
+	if st := r.Status("worker-1"); !st.Connected {
+		t.Fatal("replacement tunnel should remain connected")
+	}
+	if removed := r.Remove("worker-1", ep2); !removed {
+		t.Fatal("current endpoint removal should succeed")
+	}
+	if st := r.Status("worker-1"); st.Connected {
+		t.Fatal("current endpoint removal should clear tunnel")
 	}
 }
