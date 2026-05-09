@@ -167,15 +167,15 @@ func renderDiagnoseTunnelStatus(w io.Writer, st *store.Store) {
 		if !worker.Tunnel {
 			continue
 		}
-		if latest.ID == "" || worker.RegisteredAt.After(latest.RegisteredAt) {
+		if latest.ID == "" || worker.LastHeartbeat.After(latest.LastHeartbeat) {
 			latest = worker
 		}
 		if worker.Status == "online" {
-			_, _ = fmt.Fprintf(w, "tunnel: connected (worker=%s last_handshake=%s)\n", worker.ID, formatTunnelHandshake(worker.RegisteredAt))
+			_, _ = fmt.Fprintf(w, "tunnel: connected (worker=%s last_handshake=%s)\n", worker.ID, formatTunnelHandshake(worker.LastHeartbeat))
 			return
 		}
 	}
-	_, _ = fmt.Fprintf(w, "tunnel: disconnected (last_handshake=%s)\n", formatTunnelHandshake(latest.RegisteredAt))
+	_, _ = fmt.Fprintf(w, "tunnel: disconnected (last_handshake=%s)\n", formatTunnelHandshake(latest.LastHeartbeat))
 }
 
 func formatTunnelHandshake(t time.Time) string {
