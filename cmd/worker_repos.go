@@ -21,6 +21,7 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/auditapi"
 	"github.com/Lincyaw/workbuddy/internal/store"
+	"github.com/Lincyaw/workbuddy/internal/webui"
 	"github.com/Lincyaw/workbuddy/internal/workerclient"
 	"github.com/spf13/cobra"
 )
@@ -229,6 +230,10 @@ func startWorkerMgmtServer(mgmtAddr, addrFile, authToken string, bindings *worke
 	if st != nil {
 		sessionAPI := auditapi.NewHandler(st)
 		sessionAPI.SetSessionsDir(sessionsDir)
+		sessionUI := webui.NewHandler(st)
+		sessionUI.SetSessionsDir(sessionsDir)
+		sessionAPI.SetSessionEventsHandler(sessionUI.HandleAPISessionEvents)
+		sessionAPI.SetSessionStreamHandler(sessionUI.HandleAPISessionStream)
 		sessionAPIMux := http.NewServeMux()
 		sessionAPI.RegisterSessionsOnly(sessionAPIMux)
 		sessionAPI.RegisterAPISessions(sessionAPIMux)
