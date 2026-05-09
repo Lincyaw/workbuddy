@@ -24,6 +24,10 @@ type LocalHandler interface {
 	ServeHTTP(http.ResponseWriter, *http.Request)
 }
 
+type TunnelRoundTripper interface {
+	Do(context.Context, string, *http.Request) (*http.Response, error)
+}
+
 // Handler is the http.Handler that owns /api/v1/sessions and
 // /api/v1/sessions/{id}[/events|/stream] on the coordinator.
 type Handler struct {
@@ -35,6 +39,7 @@ type Handler struct {
 	// listClient is used for fan-out listing calls; a separate http.Client
 	// lets us tune its timeout independently from the streaming client.
 	listClient *http.Client
+	tunnels    TunnelRoundTripper
 
 	// listing cache (5s TTL).
 	cacheMu  sync.Mutex
@@ -74,6 +79,8 @@ type HandlerConfig struct {
 	OverallTimeout time.Duration
 	// Now is the clock; tests inject.
 	Now func() time.Time
+	// Tunnels routes requests to workers that registered tunnel=true.
+	Tunnels TunnelRoundTripper
 }
 
 // NewHandler constructs the proxy handler.
@@ -84,6 +91,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		authToken:        strings.TrimSpace(cfg.AuthToken),
 		client:           cfg.HTTPClient,
 		listClient:       cfg.ListClient,
+		tunnels:          cfg.Tunnels,
 		listings:         map[string]listingCacheEntry{},
 		cacheTTL:         cfg.CacheTTL,
 		perWorkerTimeout: cfg.PerWorkerTimeout,
@@ -189,6 +197,15 @@ func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request) {
 	if h.dispatchHook != nil {
 		h.dispatchHook(res.WorkerID)
 	}
+	if res.Tunnel {
+		switch suffix {
+		case "stream":
+			h.proxyTunnelStream(w, r, res.WorkerID, target)
+		default:
+			h.proxyTunnelJSON(w, r, res.WorkerID, target)
+		}
+		return
+	}
 
 	switch suffix {
 	case "stream":
@@ -231,6 +248,34 @@ func (h *Handler) proxyJSON(w http.ResponseWriter, r *http.Request, workerID, ta
 		w.Header().Set("Content-Type", ct)
 	}
 	// Surface worker_id to the browser for debugging; the SPA can ignore.
+	w.Header().Set("X-Workbuddy-Origin-Worker", workerID)
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
+func (h *Handler) proxyTunnelJSON(w http.ResponseWriter, r *http.Request, workerID, target string) {
+	if h.tunnels == nil {
+		writeJSONError(w, http.StatusBadGateway, "worker_offline", workerID)
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target, nil)
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, "build upstream request failed", workerID)
+		return
+	}
+	copyBrowserHeaders(req.Header, r.Header)
+	if h.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+h.authToken)
+	}
+	resp, err := h.tunnels.Do(r.Context(), workerID, req)
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, "worker_offline", workerID)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
 	w.Header().Set("X-Workbuddy-Origin-Worker", workerID)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
@@ -310,6 +355,67 @@ func (h *Handler) proxyStream(w http.ResponseWriter, r *http.Request, workerID, 
 		if r.Context().Err() != nil {
 			return
 		}
+	}
+}
+
+func (h *Handler) proxyTunnelStream(w http.ResponseWriter, r *http.Request, workerID, target string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSONError(w, http.StatusInternalServerError, "stream not supported", workerID)
+		return
+	}
+	if h.tunnels == nil {
+		streamError(w, flusher, "worker_offline", workerID)
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target, nil)
+	if err != nil {
+		streamError(w, flusher, "build upstream request failed", workerID)
+		return
+	}
+	copyBrowserHeaders(req.Header, r.Header)
+	if h.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+h.authToken)
+	}
+	resp, err := h.tunnels.Do(r.Context(), workerID, req)
+	if err != nil {
+		streamError(w, flusher, "worker_offline", workerID)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		streamError(w, flusher, "upstream status "+strconv.Itoa(resp.StatusCode), workerID)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("X-Workbuddy-Origin-Worker", workerID)
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+	buf := make([]byte, 4096)
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				return
+			}
+			flusher.Flush()
+		}
+		if readErr != nil {
+			return
+		}
+	}
+}
+
+func copyBrowserHeaders(dst, src http.Header) {
+	for _, key := range []string{"Last-Event-ID", "Cache-Control", "Accept"} {
+		if v := strings.TrimSpace(src.Get(key)); v != "" {
+			dst.Set(key, v)
+		}
+	}
+	if dst.Get("Accept") == "" {
+		dst.Set("Accept", "application/json")
 	}
 }
 
@@ -479,6 +585,18 @@ func (h *Handler) fanOutListing(parent context.Context, q map[string][]string) (
 	// local handler they degrade to "offline" with reason no_audit_url.
 	emptyAuditWorkers := make([]string, 0)
 	for _, worker := range workers {
+		if worker.Tunnel {
+			wg.Add(1)
+			go func(workerID string) {
+				defer wg.Done()
+				rows, ferr := h.fetchTunnelListing(ctx, workerID, downstreamQ)
+				if h.dispatchHook != nil {
+					h.dispatchHook(workerID)
+				}
+				results <- workerResult{workerID: workerID, rows: rows, err: ferr}
+			}(worker.ID)
+			continue
+		}
 		auditURL := strings.TrimRight(strings.TrimSpace(worker.AuditURL), "/")
 		if auditURL == "" {
 			emptyAuditWorkers = append(emptyAuditWorkers, worker.ID)
@@ -641,7 +759,45 @@ func (h *Handler) fetchWorkerListing(ctx context.Context, workerID, auditURL str
 	if h.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+h.authToken)
 	}
+	if h.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+h.authToken)
+	}
 	resp, err := h.listClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("worker %s: %w", workerID, ErrWorkerOffline)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("worker %s: status %d: %w", workerID, resp.StatusCode, ErrWorkerOffline)
+	}
+	var rows []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		return nil, fmt.Errorf("worker %s: decode body: %w", workerID, err)
+	}
+	return rows, nil
+}
+
+func (h *Handler) fetchTunnelListing(ctx context.Context, workerID string, query map[string][]string) ([]map[string]any, error) {
+	if h.tunnels == nil {
+		return nil, fmt.Errorf("worker %s: %w", workerID, ErrWorkerOffline)
+	}
+	upstream := "http://worker.local/api/v1/sessions"
+	values := url.Values{}
+	for _, key := range []string{"repo", "agent", "issue", "limit", "offset"} {
+		if vs, ok := query[key]; ok && len(vs) > 0 && vs[0] != "" {
+			values.Set(key, vs[0])
+		}
+	}
+	if encoded := values.Encode(); encoded != "" {
+		upstream += "?" + encoded
+	}
+	cctx, cancel := context.WithTimeout(ctx, h.perWorkerTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(cctx, http.MethodGet, upstream, nil)
+	if err != nil {
+		return nil, fmt.Errorf("worker %s: build request: %w", workerID, err)
+	}
+	resp, err := h.tunnels.Do(cctx, workerID, req)
 	if err != nil {
 		return nil, fmt.Errorf("worker %s: %w", workerID, ErrWorkerOffline)
 	}

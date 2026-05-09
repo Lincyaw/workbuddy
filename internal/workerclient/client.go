@@ -35,6 +35,7 @@ type RegisterRequest struct {
 	Repos       []string `json:"repos,omitempty"`
 	Hostname    string   `json:"hostname,omitempty"`
 	MgmtBaseURL string   `json:"mgmt_base_url,omitempty"`
+	Tunnel      bool     `json:"tunnel,omitempty"`
 	// AuditURL is the worker-advertised base URL of its session audit
 	// HTTP server (Phase 1 of the session-data ownership refactor). Empty
 	// when the worker did not start an audit listener (e.g.

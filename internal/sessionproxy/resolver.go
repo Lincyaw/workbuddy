@@ -58,6 +58,9 @@ type Resolution struct {
 	// Empty when the resolver decides the request should be served
 	// locally (see Local).
 	AuditURL string
+	// Tunnel is true when the worker asked the coordinator to route the
+	// management request through the reverse WebSocket tunnel.
+	Tunnel bool
 	// Local is true when the request should fall through to the
 	// coordinator's local audit handler instead of being proxied. Two
 	// situations trigger this:
@@ -183,6 +186,9 @@ func (r *Resolver) Resolve(sessionID string) (*Resolution, error) {
 		// session row's local artefacts may still be reachable on the
 		// coordinator host — fall back to local before giving up.
 		return &Resolution{WorkerID: workerID, Local: true}, nil
+	}
+	if worker.Tunnel {
+		return &Resolution{WorkerID: workerID, Tunnel: true}, nil
 	}
 	auditURL := strings.TrimRight(strings.TrimSpace(worker.AuditURL), "/")
 	if auditURL == "" {

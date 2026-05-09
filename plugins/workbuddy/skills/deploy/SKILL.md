@@ -36,30 +36,6 @@ workbuddy deploy install --scope user \
   --worker-args=--repos=OWNER/REPO=$PWD
 ```
 
-### HTTPS / native TLS (v0.6.1+)
-
-If the coordinator is on a remote host and you want HTTPS without a reverse proxy:
-
-```bash
-# Coordinator — serve HTTPS natively
-workbuddy deploy install --scope system \
-  --coordinator-args=--listen=0.0.0.0:443 \
-  --coordinator-args=--tls-cert=/etc/workbuddy/cert.pem \
-  --coordinator-args=--tls-key=/etc/workbuddy/key.pem \
-  --coordinator-args=--report-base-url=https://workbuddy.example.com \
-  --coordinator-args=--auth
-
-# Worker — trust the coordinator's CA (required for self-signed certs)
-workbuddy deploy install --scope user \
-  --worker-args=--coordinator=https://workbuddy.example.com \
-  --worker-args=--ca-cert=/home/<you>/.config/workbuddy/coordinator-ca.pem \
-  --worker-args=--token-file=/home/<you>/.config/workbuddy/auth-token \
-  --worker-args=--repos=OWNER/REPO=$PWD
-```
-
-- `--tls-cert` / `--tls-key` must both be provided; otherwise coordinator falls back to HTTP.
-- `--ca-cert` on the worker loads a custom CA into the TLS trust pool. Omit it when the coordinator uses a publicly-trusted certificate (Let's Encrypt, etc.).
-
 The `--bundle` flag is no longer required — it is accepted as a no-op alias
 for backwards compatibility with existing scripts.
 
