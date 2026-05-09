@@ -938,5 +938,8 @@ func workerTunnelHTTPClient(opts *workerOpts) *http.Client {
 		log.Printf("[worker] tunnel CA cert is invalid: %s", opts.caCert)
 		return http.DefaultClient
 	}
-	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
+	return &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: pool, NextProtos: []string{"http/1.1"}},
+		TLSNextProto:    map[string]func(string, *tls.Conn) http.RoundTripper{},
+	}}
 }
