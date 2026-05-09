@@ -53,6 +53,12 @@ func (r *Registry) Register(id, repo string, roles []string, runtime string, hos
 // ownership refactor (REQ-120); empty values are tolerated and ignored by
 // today's coordinator code paths.
 func (r *Registry) RegisterWithRepos(id, repo string, repos []string, roles []string, runtime, hostname, mgmtBaseURL, auditURL string) error {
+	return r.RegisterWithReposTunnel(id, repo, repos, roles, runtime, hostname, mgmtBaseURL, auditURL, false)
+}
+
+// RegisterWithReposTunnel adds a worker and records whether its management
+// surface should be reached through the coordinator WebSocket tunnel.
+func (r *Registry) RegisterWithReposTunnel(id, repo string, repos []string, roles []string, runtime, hostname, mgmtBaseURL, auditURL string, tunnel bool) error {
 	rolesJSON, err := json.Marshal(roles)
 	if err != nil {
 		return fmt.Errorf("registry: marshal roles: %w", err)
@@ -70,6 +76,7 @@ func (r *Registry) RegisterWithRepos(id, repo string, repos []string, roles []st
 		Hostname:    hostname,
 		MgmtBaseURL: mgmtBaseURL,
 		AuditURL:    auditURL,
+		Tunnel:      tunnel,
 		Status:      "online",
 	})
 }

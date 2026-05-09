@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -29,6 +30,8 @@ import (
 	workersession "github.com/Lincyaw/workbuddy/internal/worker/session"
 	"github.com/Lincyaw/workbuddy/internal/workerclient"
 	"github.com/Lincyaw/workbuddy/internal/workspace"
+	"github.com/Lincyaw/workbuddy/internal/wstunnel"
+	"github.com/coder/websocket"
 	"github.com/spf13/cobra"
 )
 
@@ -87,6 +90,9 @@ type workerOpts struct {
 	// caCert is the path to a PEM-encoded CA certificate used to verify
 	// the coordinator's TLS certificate when connecting over HTTPS.
 	caCert string
+	// coordinatorTunnel enables the worker-initiated WebSocket tunnel used for
+	// coordinator-to-worker management/session API reads behind NAT.
+	coordinatorTunnel bool
 }
 
 type workerIssueReader interface {
@@ -117,6 +123,8 @@ func init() {
 	workerCmd.Flags().String("supervisor-socket", "", "Unix socket of the local agent supervisor (default: $XDG_RUNTIME_DIR/workbuddy-supervisor.sock)")
 	workerCmd.Flags().String("audit-listen", "127.0.0.1:0", "Bind address for the worker-side session audit HTTP server. \"\" or \"disabled\" turns the audit server off; \"127.0.0.1:0\" (default) lets the kernel pick a port; \"0.0.0.0:8091\" exposes it on all interfaces.")
 	workerCmd.Flags().String("audit-public-url", "", "Override the audit URL advertised to the coordinator (for split-host deployments behind a NAT/reverse proxy). Defaults to http://<bind-host>:<bind-port>; when --audit-listen binds 0.0.0.0/::, the worker hostname is substituted.")
+	workerCmd.Flags().Bool("coordinator-tunnel", true, "Open a reverse WebSocket tunnel to the coordinator for worker management/session APIs")
+	workerCmd.Flags().Bool("no-coordinator-tunnel", false, "Disable the reverse WebSocket tunnel and fall back to --mgmt-public-url/audit-public-url")
 	_ = workerCmd.MarkFlagRequired("coordinator")
 
 	workerUnregisterCmd.Flags().String("coordinator", "", "Coordinator base URL")
@@ -192,6 +200,11 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	supervisorSocket, _ := cmd.Flags().GetString("supervisor-socket")
 	auditListen, _ := cmd.Flags().GetString("audit-listen")
 	auditPublicURL, _ := cmd.Flags().GetString("audit-public-url")
+	coordinatorTunnel, _ := cmd.Flags().GetBool("coordinator-tunnel")
+	noCoordinatorTunnel, _ := cmd.Flags().GetBool("no-coordinator-tunnel")
+	if noCoordinatorTunnel {
+		coordinatorTunnel = false
+	}
 	if concurrency < 1 {
 		concurrency = 1
 	}
@@ -205,8 +218,10 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 	if err := validateWorkerMgmtPublicURL(mgmtPublicURL); err != nil {
 		return nil, err
 	}
-	if err := validateWorkerMgmtBind(mgmtAddr, mgmtPublicURL); err != nil {
-		return nil, err
+	if !coordinatorTunnel {
+		if err := validateWorkerMgmtBind(mgmtAddr, mgmtPublicURL); err != nil {
+			return nil, err
+		}
 	}
 	resolvedMgmtAuthToken := defaultWorkerMgmtAuthToken(strings.TrimSpace(mgmtAuthToken))
 	if err := validateWorkerMgmtPublicURLAuth(strings.TrimSpace(mgmtPublicURL), strings.TrimSpace(token), resolvedMgmtAuthToken); err != nil {
@@ -233,6 +248,7 @@ func parseWorkerFlags(cmd *cobra.Command) (*workerOpts, error) {
 		auditListen:       strings.TrimSpace(auditListen),
 		auditPublicURL:    strings.TrimSpace(auditPublicURL),
 		caCert:            strings.TrimSpace(caCert),
+		coordinatorTunnel: coordinatorTunnel,
 	}, nil
 }
 
@@ -276,8 +292,10 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	if err := validateWorkerMgmtPublicURL(opts.mgmtPublicURL); err != nil {
 		return err
 	}
-	if err := validateWorkerMgmtBind(opts.mgmtAddr, opts.mgmtPublicURL); err != nil {
-		return err
+	if !opts.coordinatorTunnel {
+		if err := validateWorkerMgmtBind(opts.mgmtAddr, opts.mgmtPublicURL); err != nil {
+			return err
+		}
 	}
 	if err := validateWorkerMgmtPublicURLAuth(opts.mgmtPublicURL, opts.token, opts.mgmtAuthToken); err != nil {
 		return err
@@ -500,7 +518,7 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 		if len(currentRoles) == 0 {
 			return nil, fmt.Errorf("worker: at least one role is required")
 		}
-		if err := registerWorkerRepos(changeCtx, client, workerID, currentRoles, publicRuntime, advertisedWorkerMgmtBaseURL(opts, mgmtServer.baseURL), auditURL, bindings.list(), workerOpenSessions(localStore, workerID)); err != nil {
+		if err := registerWorkerRepos(changeCtx, client, workerID, currentRoles, publicRuntime, advertisedWorkerMgmtBaseURL(opts, mgmtServer.baseURL), auditURL, opts.coordinatorTunnel, bindings.list(), workerOpenSessions(localStore, workerID)); err != nil {
 			return nil, err
 		}
 		return summary, nil
@@ -548,14 +566,31 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 		}
 	}()
 
-	if err := registerWorkerRepos(ctx, client, workerID, roles, publicRuntime, advertisedWorkerMgmtBaseURL(opts, mgmtServer.baseURL), auditURL, bindings.list(), workerOpenSessions(localStore, workerID)); err != nil {
-		if errors.Is(err, workerclient.ErrUnauthorized) {
-			return &cliExitError{
-				msg:  "worker: coordinator rejected the provided token",
-				code: ExitCodeUnauthorized,
+	registerCurrentWorker := func(registerCtx context.Context) error {
+		if err := registerWorkerRepos(registerCtx, client, workerID, roles, publicRuntime, advertisedWorkerMgmtBaseURL(opts, mgmtServer.baseURL), auditURL, opts.coordinatorTunnel, bindings.list(), workerOpenSessions(localStore, workerID)); err != nil {
+			if errors.Is(err, workerclient.ErrUnauthorized) {
+				return &cliExitError{
+					msg:  "worker: coordinator rejected the provided token",
+					code: ExitCodeUnauthorized,
+				}
 			}
+			return fmt.Errorf("worker: register with coordinator: %w", err)
 		}
-		return fmt.Errorf("worker: register with coordinator: %w", err)
+		return nil
+	}
+	if opts.coordinatorTunnel {
+		ready := make(chan error, 1)
+		go runWorkerTunnelLoop(ctx, opts, workerID, mgmtServer.Handler(), ready, registerCurrentWorker)
+		select {
+		case err := <-ready:
+			if err != nil {
+				return err
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	} else if err := registerCurrentWorker(ctx); err != nil {
+		return err
 	}
 
 	concurrency := opts.concurrency
@@ -802,4 +837,106 @@ func workerOpenSessions(st *store.Store, workerID string) []workerclient.Session
 		})
 	}
 	return out
+}
+
+func runWorkerTunnelLoop(ctx context.Context, opts *workerOpts, workerID string, handler http.Handler, ready chan<- error, onConnect func(context.Context) error) {
+	backoff := time.Second
+	signaled := false
+	for ctx.Err() == nil {
+		if err := runWorkerTunnelOnce(ctx, opts, workerID, handler, func() {
+			backoff = time.Second
+			registerCtx, cancel := context.WithTimeout(ctx, defaultWorkerTaskAPITimeout)
+			err := error(nil)
+			if onConnect != nil {
+				err = onConnect(registerCtx)
+			}
+			cancel()
+			if !signaled {
+				ready <- err
+				signaled = true
+			}
+			if err != nil {
+				log.Printf("[worker] register after tunnel connect failed: %v", err)
+			}
+		}); err != nil && ctx.Err() == nil {
+			log.Printf("[worker] coordinator tunnel disconnected: %v", err)
+		} else if ctx.Err() != nil {
+			return
+		}
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+			if backoff > 30*time.Second {
+				backoff = 30 * time.Second
+			}
+		}
+	}
+}
+
+func runWorkerTunnelOnce(ctx context.Context, opts *workerOpts, workerID string, handler http.Handler, onConnect func()) error {
+	tunnelURL, err := workerTunnelURL(opts.coordinatorURL, workerID)
+	if err != nil {
+		return err
+	}
+	headers := http.Header{}
+	if strings.TrimSpace(opts.token) != "" {
+		headers.Set("Authorization", "Bearer "+strings.TrimSpace(opts.token))
+	}
+	conn, _, err := websocket.Dial(ctx, tunnelURL, &websocket.DialOptions{HTTPHeader: headers, HTTPClient: workerTunnelHTTPClient(opts)})
+	if err != nil {
+		return err
+	}
+	log.Printf("[worker] coordinator tunnel connected: %s", tunnelURL)
+	if onConnect != nil {
+		onConnect()
+	}
+	ep := wstunnel.NewEndpoint(conn)
+	go ep.ServeRequests(ctx, handler)
+	return ep.Run(ctx)
+}
+
+func workerTunnelURL(coordinatorURL, workerID string) (string, error) {
+	base := strings.TrimSpace(coordinatorURL)
+	if base == "" {
+		return "", fmt.Errorf("worker: coordinator URL is required")
+	}
+	u, err := url.Parse(base)
+	if err != nil {
+		return "", fmt.Errorf("worker: parse coordinator URL: %w", err)
+	}
+	switch u.Scheme {
+	case "http":
+		u.Scheme = "ws"
+	case "https":
+		u.Scheme = "wss"
+	case "ws", "wss":
+	default:
+		return "", fmt.Errorf("worker: coordinator URL must use http or https")
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + "/api/v1/workers/tunnel"
+	q := u.Query()
+	q.Set("worker_id", workerID)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+func workerTunnelHTTPClient(opts *workerOpts) *http.Client {
+	if opts == nil || strings.TrimSpace(opts.caCert) == "" {
+		return http.DefaultClient
+	}
+	caData, err := os.ReadFile(opts.caCert)
+	if err != nil {
+		log.Printf("[worker] tunnel CA cert unavailable: %v", err)
+		return http.DefaultClient
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caData) {
+		log.Printf("[worker] tunnel CA cert is invalid: %s", opts.caCert)
+		return http.DefaultClient
+	}
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
 }

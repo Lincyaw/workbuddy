@@ -221,10 +221,11 @@ func (s *Store) createTables() error {
 			repos_json TEXT NOT NULL DEFAULT '[]',
 			roles TEXT NOT NULL,
 			runtime TEXT NOT NULL DEFAULT '',
-			hostname TEXT,
-			mgmt_base_url TEXT NOT NULL DEFAULT '',
-			audit_url TEXT NOT NULL DEFAULT '',
-			status TEXT NOT NULL DEFAULT 'online',
+				hostname TEXT,
+				mgmt_base_url TEXT NOT NULL DEFAULT '',
+				audit_url TEXT NOT NULL DEFAULT '',
+				tunnel INTEGER NOT NULL DEFAULT 0,
+				status TEXT NOT NULL DEFAULT 'online',
 			token_kid TEXT,
 			token_hash TEXT,
 			token_revoked_at DATETIME,
@@ -416,6 +417,9 @@ func (s *Store) createTables() error {
 	// the coordinator simply ignores.
 	if _, err := s.db.Exec(`ALTER TABLE workers ADD COLUMN audit_url TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("store: alter workers add audit_url: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE workers ADD COLUMN tunnel INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("store: alter workers add tunnel: %w", err)
 	}
 	if _, err := s.db.Exec(`ALTER TABLE issue_cycle_state ADD COLUMN synth_cycle_count INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("store: alter issue_cycle_state add synth_cycle_count: %w", err)
@@ -1277,8 +1281,8 @@ func (s *Store) InsertWorker(w WorkerRecord) error {
 		w.ReposJSON = "[]"
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO workers (id, repo, repos_json, roles, runtime, hostname, mgmt_base_url, audit_url, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO workers (id, repo, repos_json, roles, runtime, hostname, mgmt_base_url, audit_url, tunnel, status)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		 repo = excluded.repo,
 		 repos_json = excluded.repos_json,
@@ -1286,10 +1290,11 @@ func (s *Store) InsertWorker(w WorkerRecord) error {
 		 runtime = excluded.runtime,
 		 hostname = excluded.hostname,
 		 mgmt_base_url = excluded.mgmt_base_url,
-		 audit_url = excluded.audit_url,
+			 audit_url = excluded.audit_url,
+			 tunnel = excluded.tunnel,
 		 status = excluded.status,
 		 last_heartbeat = CURRENT_TIMESTAMP`,
-		w.ID, w.Repo, w.ReposJSON, w.Roles, w.Runtime, w.Hostname, w.MgmtBaseURL, w.AuditURL, w.Status,
+		w.ID, w.Repo, w.ReposJSON, w.Roles, w.Runtime, w.Hostname, w.MgmtBaseURL, w.AuditURL, boolToInt(w.Tunnel), w.Status,
 	)
 	if err != nil {
 		return fmt.Errorf("store: insert worker: %w", err)
@@ -1299,7 +1304,7 @@ func (s *Store) InsertWorker(w WorkerRecord) error {
 
 // QueryWorkers returns workers filtered by repo (empty = all).
 func (s *Store) QueryWorkers(repo string) ([]WorkerRecord, error) {
-	rows, err := s.db.Query(`SELECT id, repo, repos_json, roles, runtime, hostname, mgmt_base_url, audit_url, status, last_heartbeat, registered_at FROM workers ORDER BY id`)
+	rows, err := s.db.Query(`SELECT id, repo, repos_json, roles, runtime, hostname, mgmt_base_url, audit_url, tunnel, status, last_heartbeat, registered_at FROM workers ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("store: query workers: %w", err)
 	}
@@ -1309,7 +1314,7 @@ func (s *Store) QueryWorkers(repo string) ([]WorkerRecord, error) {
 	for rows.Next() {
 		var w WorkerRecord
 		var hb, ra string
-		if err := rows.Scan(&w.ID, &w.Repo, &w.ReposJSON, &w.Roles, &w.Runtime, &w.Hostname, &w.MgmtBaseURL, &w.AuditURL, &w.Status, &hb, &ra); err != nil {
+		if err := rows.Scan(&w.ID, &w.Repo, &w.ReposJSON, &w.Roles, &w.Runtime, &w.Hostname, &w.MgmtBaseURL, &w.AuditURL, &w.Tunnel, &w.Status, &hb, &ra); err != nil {
 			return nil, fmt.Errorf("store: scan worker: %w", err)
 		}
 		w.LastHeartbeat, _ = ParseTimestamp(hb, "worker.last_heartbeat")
@@ -1324,10 +1329,10 @@ func (s *Store) QueryWorkers(repo string) ([]WorkerRecord, error) {
 
 // GetWorker returns a single registered worker by ID, or nil when absent.
 func (s *Store) GetWorker(workerID string) (*WorkerRecord, error) {
-	row := s.db.QueryRow(`SELECT id, repo, repos_json, roles, runtime, hostname, mgmt_base_url, audit_url, status, last_heartbeat, registered_at FROM workers WHERE id = ?`, workerID)
+	row := s.db.QueryRow(`SELECT id, repo, repos_json, roles, runtime, hostname, mgmt_base_url, audit_url, tunnel, status, last_heartbeat, registered_at FROM workers WHERE id = ?`, workerID)
 	var w WorkerRecord
 	var hb, ra string
-	if err := row.Scan(&w.ID, &w.Repo, &w.ReposJSON, &w.Roles, &w.Runtime, &w.Hostname, &w.MgmtBaseURL, &w.AuditURL, &w.Status, &hb, &ra); err != nil {
+	if err := row.Scan(&w.ID, &w.Repo, &w.ReposJSON, &w.Roles, &w.Runtime, &w.Hostname, &w.MgmtBaseURL, &w.AuditURL, &w.Tunnel, &w.Status, &hb, &ra); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}

@@ -144,14 +144,31 @@ func runDiagnoseWithOpts(_ context.Context, opts *diagnoseOpts, stdout io.Writer
 		}
 	} else if len(results) == 0 {
 		_, _ = fmt.Fprintln(stdout, "Pipeline healthy: no issues detected")
+		renderDiagnoseTunnelStatus(stdout, st)
 	} else {
 		renderDiagnoseTable(stdout, results)
+		renderDiagnoseTunnelStatus(stdout, st)
 	}
 
 	if len(results) > 0 {
 		return &cliExitError{code: exitCodeFailure}
 	}
 	return nil
+}
+
+func renderDiagnoseTunnelStatus(w io.Writer, st *store.Store) {
+	workers, err := st.QueryWorkers("")
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "tunnel: disconnected (last_handshake=unknown; status_error=%v)\n", err)
+		return
+	}
+	for _, worker := range workers {
+		if worker.Tunnel && worker.Status == "online" {
+			_, _ = fmt.Fprintf(w, "tunnel: connected (worker=%s last_handshake=unknown)\n", worker.ID)
+			return
+		}
+	}
+	_, _ = fmt.Fprintln(w, "tunnel: disconnected (last_handshake=unknown)")
 }
 
 func applyDiagnoseFindingFix(st *store.Store, finding diag.Finding) error {

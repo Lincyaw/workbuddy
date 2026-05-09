@@ -31,6 +31,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/tasknotify"
 	"github.com/Lincyaw/workbuddy/internal/webui"
+	"github.com/Lincyaw/workbuddy/internal/wstunnel"
 	"github.com/spf13/cobra"
 )
 
@@ -449,6 +450,7 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 		Pollers:        app.NewPollerManager(ctx, st, reg, evlog, alertBus, ghReader, rep, mustRepoRoot(), pollInterval, secRuntime),
 		AuthEnabled:    opts.auth,
 		AuthToken:      authToken,
+		Tunnels:        wstunnel.NewRegistry(),
 		CookieInsecure: opts.cookieInsecure,
 	}
 	if watchSecurityFile {
@@ -677,6 +679,7 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 		Resolver:  resolver,
 		Local:     dashboardMux,
 		AuthToken: api.AuthToken,
+		Tunnels:   api.Tunnels,
 	})
 	// Phase 3 (REQ-122): the coordinator's issue-detail endpoint used to
 	// read sessions from the local store. Now that the coordinator drops
@@ -708,6 +711,7 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog 
 	mux.Handle("/api/v1/repos/register", api.WrapAuth(http.HandlerFunc(api.HandleRegisterRepo)))
 	mux.Handle("/api/v1/repos/", api.WrapAuth(http.HandlerFunc(api.HandleRepoByPath)))
 	mux.Handle("/api/v1/repos", api.WrapAuth(http.HandlerFunc(api.HandleListRepos)))
+	mux.Handle("/api/v1/workers/tunnel", api.WrapAuth(http.HandlerFunc(api.HandleWorkerTunnel)))
 	mux.Handle("/api/v1/workers/register", api.WrapAuth(http.HandlerFunc(api.HandleRegisterWorker)))
 	mux.Handle("/api/v1/workers/", api.WrapAuth(http.HandlerFunc(api.HandleWorkerByPath)))
 	mux.Handle("/workers/", api.WrapAuth(newCoordinatorSessionProxy(st, api.AuthToken)))
