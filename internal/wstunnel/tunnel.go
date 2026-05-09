@@ -51,7 +51,16 @@ type Endpoint struct {
 	next     atomic.Uint64
 }
 
+// MaxFrameBytes caps a single tunnel WebSocket message at 64 MiB. The
+// default nhooyr/websocket limit is 32 KiB, far too small for session
+// listings or events responses that are buffered into one frame today
+// (REQ-132 will introduce body streaming).
+const MaxFrameBytes = 64 << 20
+
 func NewEndpoint(conn *websocket.Conn) *Endpoint {
+	if conn != nil {
+		conn.SetReadLimit(MaxFrameBytes)
+	}
 	return &Endpoint{
 		conn:     conn,
 		streams:  make(map[string]chan Frame),
