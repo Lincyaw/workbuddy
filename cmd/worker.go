@@ -26,6 +26,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/supervisor"
 	supclient "github.com/Lincyaw/workbuddy/internal/supervisor/client"
+	"github.com/Lincyaw/workbuddy/internal/tracing"
 	workerexec "github.com/Lincyaw/workbuddy/internal/worker"
 	workersession "github.com/Lincyaw/workbuddy/internal/worker/session"
 	"github.com/Lincyaw/workbuddy/internal/workerclient"
@@ -289,6 +290,15 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	if opts == nil {
 		return fmt.Errorf("worker: options are required")
 	}
+	tracingShutdown, tracingErr := tracing.Init(context.Background(), "worker")
+	if tracingErr != nil {
+		log.Printf("[worker] warning: tracing init failed: %v", tracingErr)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tracingShutdown(shutdownCtx)
+	}()
 	if err := validateWorkerMgmtPublicURL(opts.mgmtPublicURL); err != nil {
 		return err
 	}

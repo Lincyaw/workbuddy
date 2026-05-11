@@ -13,6 +13,8 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/ghutil"
 	"github.com/Lincyaw/workbuddy/internal/store"
+	"github.com/Lincyaw/workbuddy/internal/tracing"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // ---------------------------------------------------------------------------
@@ -193,6 +195,11 @@ func (p *Poller) Run(ctx context.Context) error {
 // cycle will re-diff the same issues and no changes are silently lost. See
 // issue #145 finding #3.
 func (p *Poller) poll(ctx context.Context) {
+	ctx, span := tracing.Start(ctx, "poller.cycle",
+		attribute.String("workbuddy.repo", p.repo),
+	)
+	defer span.End()
+
 	// --- Phase 1: collect everything in memory ---
 	var pending []ChangeEvent
 	var cacheOps []func() error

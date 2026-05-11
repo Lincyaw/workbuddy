@@ -22,6 +22,9 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/taskprep"
+	"github.com/Lincyaw/workbuddy/internal/tracing"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // WorkerTask is re-exported from internal/taskprep so existing consumers
@@ -139,11 +142,22 @@ func (r *Router) Run(ctx context.Context, dispatchCh <-chan statemachine.Dispatc
 // handleDispatch applies scheduling policy and hands the decision to the
 // preparer.
 func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRequest) {
+	ctx, span := tracing.Start(ctx, "router.handleDispatch",
+		attribute.String("workbuddy.repo", req.Repo),
+		attribute.Int("workbuddy.issue", req.IssueNum),
+		attribute.String("workbuddy.agent", req.AgentName),
+		attribute.String("workbuddy.workflow", req.Workflow),
+		attribute.String("workbuddy.state", req.State),
+	)
+	defer span.End()
 	decision, ok := r.decide(req)
 	if !ok {
+		span.SetAttributes(attribute.Bool("workbuddy.dispatch.skipped", true))
 		return
 	}
 	if err := r.preparer.Prepare(ctx, decision); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		log.Printf("[router] prepare failed for %s#%d: %v", req.Repo, req.IssueNum, err)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/supervisor"
+	"github.com/Lincyaw/workbuddy/internal/tracing"
 	"github.com/spf13/cobra"
 )
 
@@ -38,6 +39,16 @@ func init() {
 }
 
 func runSupervisor(cmd *cobra.Command, _ []string) error {
+	tracingShutdown, tracingErr := tracing.Init(context.Background(), "supervisor")
+	if tracingErr != nil {
+		log.Printf("supervisor: warning: tracing init failed: %v", tracingErr)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tracingShutdown(shutdownCtx)
+	}()
+
 	socket, _ := cmd.Flags().GetString("socket")
 	stateDir, _ := cmd.Flags().GetString("state-dir")
 	grace, _ := cmd.Flags().GetDuration("cancel-grace")
