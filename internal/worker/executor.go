@@ -12,7 +12,9 @@ import (
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 	"github.com/Lincyaw/workbuddy/internal/store"
+	"github.com/Lincyaw/workbuddy/internal/tracing"
 	workersession "github.com/Lincyaw/workbuddy/internal/worker/session"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // IssueLabelReader reads current issue labels for pre/post execution snapshots.
@@ -60,6 +62,16 @@ func (e *Executor) Execute(ctx context.Context, task Task) Execution {
 	e.Start()
 	ctx, cancelLifecycle := e.withLifecycleContext(ctx)
 	defer cancelLifecycle()
+
+	ctx, span := tracing.Start(ctx, "worker.executeTask",
+		attribute.String("workbuddy.repo", task.Repo),
+		attribute.Int("workbuddy.issue", task.IssueNum),
+		attribute.String("workbuddy.task_id", task.TaskID),
+		attribute.String("workbuddy.agent", task.AgentName),
+		attribute.String("workbuddy.workflow", task.Workflow),
+		attribute.String("workbuddy.worker_id", task.WorkerID),
+	)
+	defer span.End()
 
 	exec := Execution{Task: task}
 	lock := e.locks.Acquire(task.Repo, task.IssueNum)

@@ -10,6 +10,9 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/Lincyaw/workbuddy/internal/tracing"
+	"go.opentelemetry.io/otel/codes"
 )
 
 const (
@@ -56,9 +59,13 @@ type RateLimitBudget struct {
 //
 // On failure it returns a wrapped error that is safe to propagate or log.
 func CurrentRateLimitBudget(ctx context.Context) (RateLimitBudget, error) {
+	ctx, span := tracing.Start(ctx, "gh.cli gh api rate_limit")
+	defer span.End()
 	cmd := exec.CommandContext(ctx, "gh", "api", "rate_limit")
 	out, err := cmd.Output()
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return RateLimitBudget{}, fmt.Errorf("gh api rate_limit: %w", err)
 	}
 

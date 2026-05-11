@@ -4800,3 +4800,45 @@ requirements:
       - cmd/coordinator_tunnel_test.go
     deps:
       - REQ-122
+
+  - id: REQ-132
+    title: OpenTelemetry distributed tracing
+    description: >
+      Workbuddy emits OpenTelemetry traces from the coordinator, worker,
+      supervisor and combined-`serve` processes. Initialization is gated on
+      OTEL_EXPORTER_OTLP_ENDPOINT (or the traces-specific variant): when
+      unset a no-op TracerProvider is installed so emitting code paths stay
+      cheap. Transport is OTLP and selectable via OTEL_EXPORTER_OTLP_PROTOCOL
+      (grpc default, http/protobuf supported); all other OTEL_* env vars
+      flow through the upstream exporter. Service names default to
+      `workbuddy-<role>` and remain overridable by OTEL_SERVICE_NAME.
+      Spans cover the coordinator HTTP server, worker → coordinator HTTP
+      client (with W3C TraceContext propagation), poll cycles, state-machine
+      event handling, dispatch decisions, router dispatch, worker task
+      execution, and gh CLI subprocess invocations. Multiple in-process
+      initializations (notably `serve` invoking both coordinator and
+      worker code) are idempotent.
+    priority: P2
+    version: v0.7.0
+    status: implemented
+    acceptance_criteria:
+      - "AC-132-1: internal/tracing.Init returns a no-op shutdown when no OTLP endpoint is configured and installs a sdktrace TracerProvider with an OTLP exporter otherwise."
+      - "AC-132-2: OTEL_EXPORTER_OTLP_PROTOCOL=grpc and http/protobuf both select the matching exporter; any other value returns an error from Init."
+      - "AC-132-3: coordinator HTTP server is wrapped in otelhttp.NewHandler and worker → coordinator HTTP client uses otelhttp.NewTransport so trace context propagates end-to-end."
+      - "AC-132-4: poller cycles, statemachine.HandleEvent / DispatchAgent, router.handleDispatch, worker.Executor.Execute and ghadapter/ghutil gh CLI calls emit named spans with workbuddy.repo / workbuddy.issue / workbuddy.agent attributes where applicable."
+      - "AC-132-5: `go build ./...`, `go vet ./...`, and `go test ./...` all pass with tracing wired in."
+    code:
+      - internal/tracing/tracing.go
+      - cmd/coordinator.go
+      - cmd/worker.go
+      - cmd/serve.go
+      - cmd/supervisor.go
+      - internal/workerclient/client.go
+      - internal/poller/poller.go
+      - internal/statemachine/statemachine.go
+      - internal/router/router.go
+      - internal/worker/executor.go
+      - internal/ghadapter/ghcli.go
+      - internal/ghutil/ghutil.go
+    tests: []
+    deps: []

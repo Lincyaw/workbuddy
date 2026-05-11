@@ -13,6 +13,10 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
+	"github.com/Lincyaw/workbuddy/internal/tracing"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type RunCommand func(ctx context.Context, name string, args ...string) ([]byte, error)
@@ -71,17 +75,57 @@ func defaultRunCombined(ctx context.Context, name string, args ...string) ([]byt
 }
 
 func (c *CLI) runCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
+	ctx, span := startGHSpan(ctx, name, args)
+	defer span.End()
+	var out []byte
+	var err error
 	if c == nil || c.run == nil {
-		return defaultRunCommand(ctx, name, args...)
+		out, err = defaultRunCommand(ctx, name, args...)
+	} else {
+		out, err = c.run(ctx, name, args...)
 	}
-	return c.run(ctx, name, args...)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return out, err
 }
 
 func (c *CLI) runCommandCombined(ctx context.Context, name string, args ...string) ([]byte, error) {
+	ctx, span := startGHSpan(ctx, name, args)
+	defer span.End()
+	var out []byte
+	var err error
 	if c == nil || c.runCombined == nil {
-		return defaultRunCombined(ctx, name, args...)
+		out, err = defaultRunCombined(ctx, name, args...)
+	} else {
+		out, err = c.runCombined(ctx, name, args...)
 	}
-	return c.runCombined(ctx, name, args...)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return out, err
+}
+
+// startGHSpan opens a span describing a `gh` subprocess invocation. The span
+// records the binary and the first two subcommand tokens (e.g. "issue list");
+// repo/issue identifiers can be added by callers via SetAttributes if needed.
+func startGHSpan(ctx context.Context, name string, args []string) (context.Context, trace.Span) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	op := name
+	if len(args) > 0 {
+		op = op + " " + args[0]
+	}
+	if len(args) > 1 {
+		op = op + " " + args[1]
+	}
+	return tracing.Start(ctx, "gh.cli "+op,
+		attribute.String("gh.binary", name),
+		attribute.Int("gh.argc", len(args)),
+	)
 }
 
 func (c *CLI) ListIssues(repo string) ([]poller.Issue, error) {

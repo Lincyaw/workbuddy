@@ -14,6 +14,7 @@ import (
 	"time"
 
 	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 var ErrUnauthorized = errors.New("workerclient: unauthorized")
@@ -106,12 +107,29 @@ func New(baseURL, token string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
+	httpClient = wrapHTTPClientForTracing(httpClient)
 	return &Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		token:      strings.TrimSpace(token),
 		httpClient: httpClient,
 		maxBackoff: defaultMaxBackoff,
 	}
+}
+
+// wrapHTTPClientForTracing returns a shallow copy of c with its Transport
+// wrapped by otelhttp so worker → coordinator calls propagate trace context.
+// The original *http.Client is left untouched (callers may share it).
+func wrapHTTPClientForTracing(c *http.Client) *http.Client {
+	base := c.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	if _, alreadyWrapped := base.(*otelhttp.Transport); alreadyWrapped {
+		return c
+	}
+	clone := *c
+	clone.Transport = otelhttp.NewTransport(base)
+	return &clone
 }
 
 func (c *Client) Register(ctx context.Context, req RegisterRequest) error {

@@ -18,6 +18,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
+	"github.com/Lincyaw/workbuddy/internal/tracing"
 	"github.com/spf13/cobra"
 )
 
@@ -127,6 +128,16 @@ func runServeWithOutput(opts *serveOpts, ghReader poller.GHReader, launcherOverr
 	if err != nil {
 		return err
 	}
+	// Tracing: init once for the combined process; coordinator/worker calls become no-ops.
+	tracingShutdown, tracingErr := tracing.Init(context.Background(), "serve")
+	if tracingErr != nil {
+		fmt.Fprintf(os.Stderr, "[serve] warning: tracing init failed: %v\n", tracingErr)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tracingShutdown(shutdownCtx)
+	}()
 	if stdout == nil {
 		stdout = io.Discard
 	}

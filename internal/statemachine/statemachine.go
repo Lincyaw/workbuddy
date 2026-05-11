@@ -23,7 +23,10 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 	"github.com/Lincyaw/workbuddy/internal/store"
+	"github.com/Lincyaw/workbuddy/internal/tracing"
 	"github.com/Lincyaw/workbuddy/internal/workflow"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // ChangeEvent represents a state change detected by the Poller.
@@ -315,6 +318,14 @@ func (sm *StateMachine) ResetDedup() {
 
 // HandleEvent processes a single ChangeEvent from the Poller.
 func (sm *StateMachine) HandleEvent(ctx context.Context, event ChangeEvent) error {
+	ctx, span := tracing.Start(ctx, "statemachine.handleEvent",
+		attribute.String("workbuddy.event.type", event.Type),
+		attribute.String("workbuddy.repo", event.Repo),
+		attribute.Int("workbuddy.issue", event.IssueNum),
+		attribute.String("workbuddy.event.detail", event.Detail),
+	)
+	defer span.End()
+
 	// Idempotency: build a unique key for this event.
 	eventKey := fmt.Sprintf("%s#%d#%s#%s", event.Repo, event.IssueNum, event.Type, event.Detail)
 	if _, loaded := sm.processedEvents.LoadOrStore(eventKey, struct{}{}); loaded {
@@ -777,7 +788,17 @@ func (sm *StateMachine) ensureWorkflowInstance(workflowName, repo string, issueN
 
 // DispatchAgent sends a dispatch request for the given agent, respecting in-flight group locking.
 func (sm *StateMachine) DispatchAgent(ctx context.Context, repo string, issueNum int, agentName, workflow, state string) error {
+	ctx, span := tracing.Start(ctx, "statemachine.dispatchAgent",
+		attribute.String("workbuddy.repo", repo),
+		attribute.Int("workbuddy.issue", issueNum),
+		attribute.String("workbuddy.agent", agentName),
+		attribute.String("workbuddy.workflow", workflow),
+		attribute.String("workbuddy.state", state),
+	)
+	defer span.End()
 	if blocked, err := sm.isBlockedByDone(repo, issueNum, agentName); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	} else if blocked {
 		return nil

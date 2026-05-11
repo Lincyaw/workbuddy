@@ -30,9 +30,11 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/sessionproxy"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/tasknotify"
+	"github.com/Lincyaw/workbuddy/internal/tracing"
 	"github.com/Lincyaw/workbuddy/internal/webui"
 	"github.com/Lincyaw/workbuddy/internal/wstunnel"
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // Aliases so cmd-internal call sites (and some infrastructure tests in
@@ -354,6 +356,17 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	}
 	port, pollInterval := resolveCoordinatorTiming(opts, bootstrapCfg)
 
+	// Tracing: initialize before any spans are emitted. No-op if OTEL_EXPORTER_OTLP_ENDPOINT unset.
+	tracingShutdown, err := tracing.Init(context.Background(), "coordinator")
+	if err != nil {
+		log.Printf("[coordinator] warning: tracing init failed: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tracingShutdown(shutdownCtx)
+	}()
+
 	authToken := strings.TrimSpace(os.Getenv("WORKBUDDY_AUTH_TOKEN"))
 	if opts.auth && authToken == "" {
 		return fmt.Errorf("coordinator: --auth requires WORKBUDDY_AUTH_TOKEN")
@@ -467,8 +480,11 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 
 	hooksConfigPath := ResolveHooksConfigPath(opts.hooksConfig)
 	srv := &http.Server{
-		Addr:    resolveListenAddr(opts.listenAddr, port),
-		Handler: buildCoordinatorMux(api, st, evlog, opts.dbPath, taskHub, hooksDispatcher, hooksConfigPath),
+		Addr: resolveListenAddr(opts.listenAddr, port),
+		Handler: otelhttp.NewHandler(
+			buildCoordinatorMux(api, st, evlog, opts.dbPath, taskHub, hooksDispatcher, hooksConfigPath),
+			"workbuddy.coordinator.http",
+		),
 	}
 
 	var wg sync.WaitGroup
