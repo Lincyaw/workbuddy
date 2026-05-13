@@ -37,6 +37,12 @@ type Task struct {
 	OnPrepared        func(ctx context.Context, task Task)
 	RunSession        SessionRunner
 	EventDrainTimeout time.Duration
+	// RootTraceID is the persisted issue/PR trace_id propagated from the
+	// coordinator dispatch path (REQ-138 / #320) so worker spans
+	// correlate with the issue's long lifecycle. Empty means the row
+	// predates REQ-137 or the coordinator did not stamp the request;
+	// the executor falls back to starting a fresh trace.
+	RootTraceID string
 }
 
 // Execution captures the shared runtime/session execution outcome.

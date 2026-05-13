@@ -142,6 +142,10 @@ func (r *Router) Run(ctx context.Context, dispatchCh <-chan statemachine.Dispatc
 // handleDispatch applies scheduling policy and hands the decision to the
 // preparer.
 func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRequest) {
+	// REQ-138 (#320): reparent under the persisted issue trace_id when
+	// the dispatch request carries one. Empty is a no-op.
+	ctx = tracing.ContextFromTraceID(ctx, req.RootTraceID)
+	role, runtime := r.lookupAgentMeta(req.AgentName)
 	ctx, span := tracing.Start(ctx, "router.handleDispatch",
 		attribute.String("workbuddy.repo", req.Repo),
 		attribute.Int("workbuddy.issue", req.IssueNum),
@@ -149,6 +153,7 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 		attribute.String("workbuddy.workflow", req.Workflow),
 		attribute.String("workbuddy.state", req.State),
 	)
+	tracing.SetIssueAttrs(span, req.Repo, req.IssueNum, 0, role, runtime)
 	defer span.End()
 	decision, ok := r.decide(req)
 	if !ok {
@@ -160,6 +165,20 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 		span.SetStatus(codes.Error, err.Error())
 		log.Printf("[router] prepare failed for %s#%d: %v", req.Repo, req.IssueNum, err)
 	}
+}
+
+// lookupAgentMeta returns the (role, runtime) tuple for an agent, or
+// ("","") when the agent is not registered. Used to stamp the standard
+// span attributes for REQ-138 (#320).
+func (r *Router) lookupAgentMeta(name string) (string, string) {
+	if r == nil || r.agents == nil {
+		return "", ""
+	}
+	a, ok := r.agents[name]
+	if !ok || a == nil {
+		return "", ""
+	}
+	return a.Role, a.Runtime
 }
 
 // decide is the pure scheduling core: no side effects other than logging.
