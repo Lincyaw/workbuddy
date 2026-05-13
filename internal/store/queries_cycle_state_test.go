@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func newCycleTestStore(t *testing.T) *Store {
+func newCycleTestStore(t *testing.T) Store {
 	t.Helper()
 	dir := t.TempDir()
 	st, err := NewStore(filepath.Join(dir, "cycle.db"))

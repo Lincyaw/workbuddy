@@ -31,12 +31,12 @@ func (a *cycleCapReporterAdapter) ReportDevReviewCycleCap(ctx context.Context, r
 // embeds in its needs-human comment. The digest is intentionally built from
 // stored events — no agent re-invocation is required (REQ-085 AC-3).
 type cycleCapTrailLoader struct {
-	store *store.Store
+	store store.Store
 }
 
 // NewCycleCapTrailLoader builds the production trail loader bound to the
 // given store. Exposed for wiring in repo_runtime.go.
-func NewCycleCapTrailLoader(st *store.Store) reporter.CycleCapTrailLoader {
+func NewCycleCapTrailLoader(st store.Store) reporter.CycleCapTrailLoader {
 	return &cycleCapTrailLoader{store: st}
 }
 

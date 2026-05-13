@@ -305,7 +305,7 @@ func TestLogsCommand_E2E(t *testing.T) {
 type logsFixture struct {
 	dbPath      string
 	sessionsDir string
-	store       *store.Store
+	store       store.Store
 }
 
 func newLogsFixture(t *testing.T) *logsFixture {
@@ -337,7 +337,7 @@ func newLogsFixture(t *testing.T) *logsFixture {
 	return &logsFixture{dbPath: dbPath, sessionsDir: sessionsDir, store: st}
 }
 
-func insertSessionFixture(t *testing.T, st *store.Store, taskID, sessionID, status string) {
+func insertSessionFixture(t *testing.T, st store.Store, taskID, sessionID, status string) {
 	t.Helper()
 	if err := st.InsertTask(store.TaskRecord{
 		ID:        taskID,

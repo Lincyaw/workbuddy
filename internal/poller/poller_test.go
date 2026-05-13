@@ -47,7 +47,7 @@ func (m *mockGHReader) ReadIssue(_ string, issueNum int) (IssueDetails, error) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-func testStore(t *testing.T) *store.Store {
+func testStore(t *testing.T) store.Store {
 	t.Helper()
 	dir := t.TempDir()
 	s, err := store.NewStore(filepath.Join(dir, "test.db"))

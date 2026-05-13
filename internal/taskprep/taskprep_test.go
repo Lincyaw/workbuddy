@@ -26,7 +26,7 @@ func (fakeReader) ListRelatedPRs(_ string, _ int) ([]runtimepkg.PRSummary, error
 	return nil, nil
 }
 
-func newTestStore(t *testing.T) *store.Store {
+func newTestStore(t *testing.T) store.Store {
 	t.Helper()
 	st, err := store.NewStore(t.TempDir() + "/test.db")
 	if err != nil {

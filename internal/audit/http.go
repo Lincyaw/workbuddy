@@ -22,7 +22,7 @@ const (
 )
 
 type HTTPHandler struct {
-	store *store.Store
+	store store.Store
 	now   func() time.Time
 }
 
@@ -54,7 +54,7 @@ type IssueStateResponse struct {
 	LongFlight          bool       `json:"long_flight"`
 }
 
-func NewHTTPHandler(st *store.Store) *HTTPHandler {
+func NewHTTPHandler(st store.Store) *HTTPHandler {
 	return &HTTPHandler{
 		store: st,
 		now:   time.Now,

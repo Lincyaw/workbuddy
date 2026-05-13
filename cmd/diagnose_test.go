@@ -197,7 +197,7 @@ func TestDiagnoseHelpTextUsesFormatJSONCanonically(t *testing.T) {
 	}
 }
 
-func seedHeartbeatZombieTask(st *store.Store, sessionDir, taskID string, issueNum int, labels string, now time.Time, sessionAge time.Duration) error {
+func seedHeartbeatZombieTask(st store.Store, sessionDir, taskID string, issueNum int, labels string, now time.Time, sessionAge time.Duration) error {
 	if err := st.UpsertIssueCache(store.IssueCache{
 		Repo:     "owner/repo",
 		IssueNum: issueNum,
@@ -217,7 +217,7 @@ func seedHeartbeatZombieTask(st *store.Store, sessionDir, taskID string, issueNu
 	}); err != nil {
 		return err
 	}
-	if _, err := st.DB().Exec(
+	if _, err := st.Exec(
 		`UPDATE task_queue
 		 SET created_at = ?, acked_at = ?, heartbeat_at = ?, updated_at = ?, lease_expires_at = ?
 		 WHERE id = ?`,

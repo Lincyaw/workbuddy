@@ -156,7 +156,7 @@ func runDiagnoseWithOpts(_ context.Context, opts *diagnoseOpts, stdout io.Writer
 	return nil
 }
 
-func renderDiagnoseTunnelStatus(w io.Writer, st *store.Store) {
+func renderDiagnoseTunnelStatus(w io.Writer, st store.Store) {
 	workers, err := st.QueryWorkers("")
 	if err != nil {
 		_, _ = fmt.Fprintf(w, "tunnel: disconnected (last_handshake=unknown; status_error=%v)\n", err)
@@ -185,7 +185,7 @@ func formatTunnelHandshake(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-func applyDiagnoseFindingFix(st *store.Store, finding diag.Finding) error {
+func applyDiagnoseFindingFix(st store.Store, finding diag.Finding) error {
 	switch finding.FixAction {
 	case "", "cache_invalidate":
 		_, err := runCacheInvalidateStore(st, finding.Repo, []int{finding.IssueNum}, "cli:diagnose --fix", false)

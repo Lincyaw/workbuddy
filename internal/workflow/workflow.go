@@ -33,8 +33,8 @@ type WorkflowInstance struct {
 var ErrWorkflowInstanceNotFound = errors.New("workflow instance not found")
 
 // Repository is the narrow persistence surface required by Manager. It is
-// satisfied by *store.Store and is defined here so workflow.Manager does not
-// have to reach through to a raw *sql.DB.
+// satisfied by store.Store and is defined here so workflow.Manager does not
+// have to reach through to raw SQL.
 type Repository interface {
 	CreateWorkflowInstanceIfMissing(id, workflowName, repo string, issueNum int, currentState string) error
 	AdvanceWorkflowInstance(id, fromState, toState, triggerAgent string, at time.Time) error

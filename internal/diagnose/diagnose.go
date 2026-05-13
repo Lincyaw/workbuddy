@@ -50,7 +50,7 @@ type Finding struct {
 	FixAction    string `json:"-"`
 }
 
-func Analyze(st *store.Store, repo string, now time.Time) ([]Finding, error) {
+func Analyze(st store.Store, repo string, now time.Time) ([]Finding, error) {
 	cfg, err := loadDiagnoseConfig("")
 	if err != nil {
 		return nil, err
@@ -109,7 +109,7 @@ var listTaskProcesses = func() ([]taskProcess, error) {
 
 var statPath = os.Stat
 
-func analyzeWithConfig(st *store.Store, repo string, now time.Time, cfg diagnoseConfig) ([]Finding, error) {
+func analyzeWithConfig(st store.Store, repo string, now time.Time, cfg diagnoseConfig) ([]Finding, error) {
 	caches, err := listIssueCaches(st, repo)
 	if err != nil {
 		return nil, err
@@ -387,7 +387,7 @@ func orphanedThresholdForTask(task store.TaskRecord, agentTimeouts map[string]ti
 	return 2 * timeout
 }
 
-func taskSessionSignal(st *store.Store, task store.TaskRecord, now time.Time, idleThreshold time.Duration) (string, time.Duration, bool, error) {
+func taskSessionSignal(st store.Store, task store.TaskRecord, now time.Time, idleThreshold time.Duration) (string, time.Duration, bool, error) {
 	record, err := latestSessionForTask(st, task)
 	if err != nil || record == nil {
 		return "", 0, false, err
@@ -407,7 +407,7 @@ func taskSessionSignal(st *store.Store, task store.TaskRecord, now time.Time, id
 	return sessionWorktreeRoot(record.Dir), idleFor, idleFor > 2*idleThreshold, nil
 }
 
-func latestSessionForTask(st *store.Store, task store.TaskRecord) (*store.SessionRecord, error) {
+func latestSessionForTask(st store.Store, task store.TaskRecord) (*store.SessionRecord, error) {
 	records, err := st.ListSessions(store.SessionFilter{
 		Repo:      task.Repo,
 		IssueNum:  task.IssueNum,
@@ -519,7 +519,7 @@ func orphanedTaskSuggestedFix(advanced bool) string {
 	return "mark task failed so coordinator can redispatch cleanly; inspect worker/session artifacts for the zombie source"
 }
 
-func listIssueCaches(st *store.Store, repo string) ([]store.IssueCache, error) {
+func listIssueCaches(st store.Store, repo string) ([]store.IssueCache, error) {
 	if repo != "" {
 		caches, err := st.ListIssueCaches(repo)
 		if err != nil {
@@ -595,7 +595,7 @@ func parseFailureKey(raw string) (string, int, string) {
 	return parts[0], issueNum, parts[2]
 }
 
-func pipelineHazardDiagnosis(st *store.Store, hazard store.PipelineHazard) string {
+func pipelineHazardDiagnosis(st store.Store, hazard store.PipelineHazard) string {
 	switch hazard.Kind {
 	case store.HazardKindNoWorkflowMatch:
 		return "issue carries a status:* label but no workflow trigger label matched, so the state machine cannot enter it"
@@ -614,7 +614,7 @@ func pipelineHazardDiagnosis(st *store.Store, hazard store.PipelineHazard) strin
 	}
 }
 
-func pipelineHazardSuggestedFix(st *store.Store, hazard store.PipelineHazard) string {
+func pipelineHazardSuggestedFix(st store.Store, hazard store.PipelineHazard) string {
 	switch hazard.Kind {
 	case store.HazardKindNoWorkflowMatch:
 		return "add the workflow trigger label, e.g. `workbuddy`"
@@ -633,7 +633,7 @@ func pipelineHazardSuggestedFix(st *store.Store, hazard store.PipelineHazard) st
 	}
 }
 
-func firstInvalidDependency(st *store.Store, hazard store.PipelineHazard) (dependency.ParsedDependency, bool) {
+func firstInvalidDependency(st store.Store, hazard store.PipelineHazard) (dependency.ParsedDependency, bool) {
 	if st == nil {
 		return dependency.ParsedDependency{}, false
 	}

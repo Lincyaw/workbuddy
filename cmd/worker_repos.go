@@ -126,7 +126,7 @@ type workerMgmtServer struct {
 	handler  http.Handler
 }
 
-func startWorkerMgmtServer(mgmtAddr, addrFile, authToken string, bindings *workerRepoBindingStore, st *store.Store, sessionsDir string, onChange func(context.Context, []string) error, onConfigReload func(context.Context) (any, error)) (*workerMgmtServer, error) {
+func startWorkerMgmtServer(mgmtAddr, addrFile, authToken string, bindings *workerRepoBindingStore, st store.Store, sessionsDir string, onChange func(context.Context, []string) error, onConfigReload func(context.Context) (any, error)) (*workerMgmtServer, error) {
 	if strings.TrimSpace(mgmtAddr) == "" {
 		mgmtAddr = defaultWorkerMgmtAddr
 	}

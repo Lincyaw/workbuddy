@@ -78,7 +78,7 @@ func TestInFlightTasksForWorker(t *testing.T) {
 	}
 }
 
-func mustInsertRunningTask(t *testing.T, s *Store, taskID, workerID, agentID, dir string) {
+func mustInsertRunningTask(t *testing.T, s Store, taskID, workerID, agentID, dir string) {
 	t.Helper()
 	if err := s.InsertTask(TaskRecord{ID: taskID, Repo: "org/r", IssueNum: 1, AgentName: "dev"}); err != nil {
 		t.Fatalf("InsertTask %s: %v", taskID, err)

@@ -6,7 +6,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
-func NewSessionManager(baseDir string, st *store.Store) *SessionManager {
+func NewSessionManager(baseDir string, st store.Store) *SessionManager {
 	return runtimepkg.NewSessionManager(baseDir, st)
 }
 

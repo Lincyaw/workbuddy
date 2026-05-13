@@ -19,7 +19,7 @@ import (
 // rather than starting an unauthenticated audit server. Operators who do
 // not want an audit listener must pass --audit-listen=disabled (or
 // --audit-listen=) explicitly.
-func startWorkerAuditServer(opts *workerOpts, st *store.Store) (*workeraudit.Server, string, error) {
+func startWorkerAuditServer(opts *workerOpts, st store.Store) (*workeraudit.Server, string, error) {
 	if opts == nil {
 		return nil, "", nil
 	}

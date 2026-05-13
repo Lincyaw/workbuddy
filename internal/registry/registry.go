@@ -21,14 +21,14 @@ var (
 
 // Registry manages worker registration, heartbeat, and online/offline detection.
 type Registry struct {
-	store        *store.Store
+	store        store.Store
 	mu           sync.RWMutex
 	pollInterval time.Duration
 }
 
 // NewRegistry creates a Registry backed by the given store.
 // pollInterval is used to calculate the staleness threshold (3 * pollInterval).
-func NewRegistry(s *store.Store, pollInterval time.Duration) *Registry {
+func NewRegistry(s store.Store, pollInterval time.Duration) *Registry {
 	return &Registry{
 		store:        s,
 		pollInterval: pollInterval,
@@ -98,33 +98,8 @@ func (r *Registry) MarkStaleOffline() error {
 	r.mu.RLock()
 	threshold := 3 * r.pollInterval
 	r.mu.RUnlock()
-	db := r.store.DB()
-
-	rows, err := db.Query(
-		`SELECT id FROM workers WHERE status = 'online' AND last_heartbeat < datetime('now', ?)`,
-		fmt.Sprintf("-%d seconds", int(threshold.Seconds())),
-	)
-	if err != nil {
-		return fmt.Errorf("registry: query stale workers: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var staleIDs []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return fmt.Errorf("registry: scan stale worker: %w", err)
-		}
-		staleIDs = append(staleIDs, id)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("registry: iterate stale workers: %w", err)
-	}
-
-	for _, id := range staleIDs {
-		if err := r.store.UpdateWorkerStatus(id, "offline"); err != nil {
-			return fmt.Errorf("registry: mark worker %q offline: %w", id, err)
-		}
+	if err := r.store.MarkStaleWorkersOffline(threshold); err != nil {
+		return fmt.Errorf("registry: %w", err)
 	}
 	return nil
 }

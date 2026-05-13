@@ -4875,3 +4875,48 @@ requirements:
       - internal/validate/cross_refs_test.go
     deps:
       - REQ-132
+
+  - id: REQ-135
+    title: Abstract DB layer behind Store interface
+    description: >
+      First step in the v0.5 storage refactor (issue #314,
+      docs/decisions/2026-05-13-k8s-agentm-otel.md Block 3 § Storage).
+      The previously-concrete `*store.Store` struct is split into a
+      `Store` interface in internal/store and an unexported
+      `sqliteStore` implementation. A `New(dsn) (Store, error)` factory
+      returns the interface; `NewStore` and `NewCoordinatorStore` retain
+      their names but also return the interface. Every external call
+      site that used to hold `*store.Store` now holds `store.Store`, and
+      the `DB() *sql.DB` escape hatch is removed. The remaining three
+      external raw-SQL call sites (recover's table reset, operator's
+      task count and recent-alert lookup, registry's stale-worker sweep)
+      are replaced by typed methods on the interface. This is a pure
+      refactor with no behaviour change; MySQL ships as a separate
+      implementation in a follow-up issue.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-133-1: A Store interface in internal/store covers all DB operations called from outside the package; *sql.DB does not appear outside internal/store (with the documented exception of internal/supervisor, which manages a separate OS-level subprocess DB out of scope for this refactor)."
+      - "AC-133-2: sqliteStore is the sole implementation; New(dsn) Store factory returns it."
+      - "AC-133-3: go build ./..., go vet ./..., and go test ./... -count=1 all pass."
+      - "AC-133-4: This index entry references issue #314 and the decision doc, with status tested."
+    code:
+      - internal/store/iface.go
+      - internal/store/store.go
+      - internal/store/queries.go
+      - internal/store/pipeline_hazards.go
+      - internal/store/worker_tokens.go
+      - internal/store/typed_helpers.go
+      - internal/recover/recover.go
+      - internal/operator/detector.go
+      - internal/registry/registry.go
+    tests:
+      - internal/store/store_test.go
+      - internal/store/queries_test.go
+      - internal/store/queries_cycle_state_test.go
+      - internal/store/store_audit_url_test.go
+      - internal/store/store_inflight_for_worker_test.go
+      - internal/store/store_session_routes_test.go
+      - internal/store/store_supervisor_agent_id_test.go
+    deps: []
