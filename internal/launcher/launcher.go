@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/Lincyaw/workbuddy/internal/agent"
+	"github.com/Lincyaw/workbuddy/internal/agent/agentm"
 	"github.com/Lincyaw/workbuddy/internal/agent/codex"
 	"github.com/Lincyaw/workbuddy/internal/config"
 	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
@@ -44,4 +45,7 @@ func RegisterBuiltins(l *runtimepkg.Registry) {
 	l.Register(newAgentBridgeRuntime(config.RuntimeCodex, func() (agent.Backend, error) {
 		return codex.NewBackend(codex.Config{})
 	}), config.RuntimeCodex, config.RuntimeCodexServer)
+	l.Register(newAgentBridgeRuntime(config.RuntimeAgentM, func() (agent.Backend, error) {
+		return agentm.NewBackend(), nil
+	}), config.RuntimeAgentM)
 }

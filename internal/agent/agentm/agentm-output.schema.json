@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Lincyaw/workbuddy/schemas/agentm-output.schema.json",
+  "title": "AgentM structured output (workbuddy v0.5 host-exec contract)",
+  "description": "Schema for the JSON object an `agentm` runtime invocation MUST emit on its stdout `RESULT:` line so the workbuddy worker can drive the state machine. See docs/planned/agentm-runtime.md for the full invocation/output contract and docs/decisions/2026-05-13-k8s-agentm-otel.md (Block 1) for design context. v0.5 covers host-exec only; v0.6 will extend this contract for coordinator-managed sandbox dispatch.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["success", "next_label"],
+  "properties": {
+    "success": {
+      "type": "boolean",
+      "description": "Whether the agent run satisfied its task. `false` means workbuddy should route the issue down a failure transition; `failure_reason` SHOULD be populated."
+    },
+    "next_label": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^status:[a-z0-9][a-z0-9_-]*$",
+      "description": "The next `status:*` label the agent is asking workbuddy to set on the issue. Mirrors the `gh issue edit --add-label` value other runtimes flip themselves; the agentm runtime delegates the flip to workbuddy so AgentM does not need GitHub credentials in v0.6 coordinator-managed mode."
+    },
+    "artifact_path": {
+      "type": "string",
+      "description": "Absolute path (inside the agent workspace) to the primary artifact the run produced (patch/diff/test-output/etc.). Optional when `success=false` and the run produced nothing usable."
+    },
+    "session_log_path": {
+      "type": "string",
+      "description": "Absolute path to the session-data log AgentM's `observability` atom wrote (conversation events + tool-call history) so workbuddy's session-data layer can ingest it. Required when `success=true`; recommended on failure for debuggability."
+    },
+    "failure_reason": {
+      "type": "string",
+      "description": "Short human-readable reason for failure. REQUIRED when `success=false`. SHOULD be a single line; longer rationale belongs in `session_log_path`."
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"success": {"const": false}}, "required": ["success"]},
+      "then": {"required": ["failure_reason"]}
+    },
+    {
+      "if": {"properties": {"success": {"const": true}}, "required": ["success"]},
+      "then": {"required": ["session_log_path"]}
+    }
+  ]
+}
