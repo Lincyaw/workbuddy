@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -124,5 +126,76 @@ func TestAgentMBridge_TaskFailure(t *testing.T) {
 	// from the agent, not a contract violation.
 	if IsInfraFailure(res) {
 		t.Fatalf("clean failure should NOT be infra-failure")
+	}
+}
+
+// TestAgentMBridge_DevContainerImageEnv covers REQ-140 / issue #328 AC-1-1:
+// when the agent config sets dev_container_image and runtime=agentm, the
+// AgentM subprocess MUST receive WORKBUDDY_DEV_CONTAINER_IMAGE in its env.
+// workbuddy passes the image name only — AgentM owns the actual sandbox
+// dispatch, so this is a pass-through assertion, not an end-to-end one.
+func TestAgentMBridge_DevContainerImageEnv(t *testing.T) {
+	envDump := filepath.Join(t.TempDir(), "env.dump")
+	fake := agentmtest.BuildFake(t, agentmtest.Config{
+		Mode:        agentmtest.ModeSuccess,
+		EnvDumpPath: envDump,
+	})
+	rt := NewAgentBridgeRuntime(config.RuntimeAgentM, func() (agent.Backend, error) {
+		return &agentm.Backend{Binary: fake}, nil
+	})
+
+	work := t.TempDir()
+	task := &TaskContext{
+		Repo:     "Lincyaw/workbuddy",
+		WorkDir:  work,
+		RepoRoot: work,
+		Issue:    IssueContext{Number: 328},
+		Session:  SessionContext{ID: "test-session"},
+	}
+	agentCfg := &config.AgentConfig{
+		Name:              "dev-agent",
+		Runtime:           config.RuntimeAgentM,
+		Role:              "dev",
+		Prompt:            "ship REQ-140",
+		DevContainerImage: "ghcr.io/lincyaw/workbuddy-dev:latest",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := rt.Launch(ctx, agentCfg, task); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+
+	data, err := os.ReadFile(envDump)
+	if err != nil {
+		t.Fatalf("read env dump: %v", err)
+	}
+	want := EnvDevContainerImage + "=ghcr.io/lincyaw/workbuddy-dev:latest"
+	if !strings.Contains(string(data), want) {
+		t.Fatalf("env dump missing %q; got:\n%s", want, data)
+	}
+}
+
+// TestAgentMBridge_DevContainerImageNotInjectedForOtherRuntimes asserts the
+// pass-through is gated on runtime=agentm; for hypothetical claude-code /
+// codex agents that happen to carry the field (config validation warns but
+// permits it) the env var MUST NOT appear, since only AgentM understands it.
+func TestAgentMBridge_DevContainerImageNotInjectedForOtherRuntimes(t *testing.T) {
+	env := injectAgentMEnv(&config.AgentConfig{
+		Name:              "dev-agent",
+		Runtime:           config.RuntimeClaudeCode,
+		DevContainerImage: "ghcr.io/x:y",
+	}, map[string]string{})
+	if _, ok := env[EnvDevContainerImage]; ok {
+		t.Fatalf("dev_container_image must not leak into non-agentm runtime env, got %v", env)
+	}
+
+	env2 := injectAgentMEnv(&config.AgentConfig{
+		Name:    "dev-agent",
+		Runtime: config.RuntimeAgentM,
+		// no DevContainerImage: AgentM falls back to its own default
+	}, map[string]string{})
+	if _, ok := env2[EnvDevContainerImage]; ok {
+		t.Fatalf("empty dev_container_image must not be injected, got %v", env2)
 	}
 }

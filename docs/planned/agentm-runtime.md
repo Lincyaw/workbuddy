@@ -87,6 +87,7 @@ inherits):
 | `WORKBUDDY_REPO` | yes | `owner/repo` form. |
 | `GH_TOKEN` | host-exec only | Same PAT codex/claude-code receive today. **In v0.6 sandbox mode this MUST NOT be injected.** |
 | `ANTHROPIC_API_KEY` / provider keys | provider-dependent | AgentM expects its provider extension to find these in env. |
+| `WORKBUDDY_DEV_CONTAINER_IMAGE` | optional, v0.6+ | Dev container image AgentM should run the task inside, sourced from the agent config field `dev_container_image` (issue #328 / REQ-140). Injected only when the agent's `runtime` is `agentm` and the field is non-empty. When unset, AgentM falls back to its own default image. workbuddy passes the image name through verbatim and does NOT talk to agent-env directly — sandbox dispatch is AgentM's job (see decision doc Block 2). Setting `dev_container_image` on other runtimes is a config warning, not an error. |
 
 ### stdin
 

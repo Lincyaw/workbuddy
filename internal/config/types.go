@@ -134,7 +134,18 @@ type AgentConfig struct {
 	GitHubActions  GitHubActionsRunnerConfig `yaml:"github_actions"`
 	OutputContract OutputContractConfig      `yaml:"output_contract"`
 	Timeout        time.Duration             `yaml:"timeout"`
-	SourcePath     string                    `yaml:"-"`
+	// DevContainerImage names the dev container image AgentM should run
+	// inside when the runtime is `agentm`. workbuddy passes the value
+	// through to the AgentM subprocess as the env var
+	// WORKBUDDY_DEV_CONTAINER_IMAGE; AgentM is responsible for the actual
+	// sandbox dispatch (workbuddy does not talk to agent-env directly).
+	// See docs/planned/agentm-runtime.md for the invocation contract and
+	// docs/decisions/2026-05-13-k8s-agentm-otel.md (Block 2) for design
+	// context. Optional; only meaningful for `runtime: agentm`. Setting
+	// it on other runtimes emits a config warning (not an error) so a
+	// per-agent override can be staged ahead of an upcoming migration.
+	DevContainerImage string `yaml:"dev_container_image,omitempty"`
+	SourcePath        string `yaml:"-"`
 }
 
 // TriggerRule defines when an agent is activated. The agent references workflow
