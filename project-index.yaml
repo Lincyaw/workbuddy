@@ -5545,3 +5545,77 @@ requirements:
       - deploy/helm/workbuddy/values.yaml
     deps:
       - REQ-143
+
+  - id: REQ-146
+    title: Wire AgentM next_label from Result.Meta to coordinator-side label writer (v0.6)
+    description: >
+      Per docs/decisions/2026-05-13-k8s-agentm-otel.md Block 2 § Two
+      execution modes and the CLAUDE.md exception for runtime=agentm,
+      AgentM declares the next state-machine label in its structured
+      Result (surfaced on Result.Meta["agentm_next_label"]) and the
+      coordinator owns the actual `gh issue edit` / Gitea label POST
+      via internal/labelwriter (#329). v0.6 closes that loop: after a
+      successful AgentM run AND a successful gitops publish (#330) the
+      bridge invokes the LabelWriter with the agent-suggested label.
+
+      Sequencing contract (strict):
+
+      1. AgentM success=false → no publish, no label write. failure_reason
+         continues to flow into Result.Meta for the reporter.
+      2. AgentM success=true, gitops publish error → infra failure, no
+         label write. Advancing the state machine without an open PR
+         would lie to downstream consumers.
+      3. AgentM success=true, gitops succeeded (including no-changes
+         no-op) → LabelWriter.ApplyNextLabel(repo, issue, label) with
+         the exact value from agentm_next_label.
+
+      Implementation:
+
+      - `internal/runtime/agent_bridge.go` grows an AgentMLabelWriter
+        interface, a LabelWriter field on AgentBridgeRuntime /
+        AgentBridgeSession, and an applyAgentMNextLabel helper. The
+        helper opens a span "runtime.agentm.apply_next_label" carrying
+        wb.next_label.candidate / wb.next_label.applied so dashboards
+        can attribute coordinator-managed state advances distinctly
+        from agent-driven `gh issue edit` calls.
+
+      - `internal/runtime/registry.go` exposes SetAgentMLabelWriter,
+        which mutates only the AgentBridgeRuntime registered under
+        config.RuntimeAgentM. Claude-code / codex runtimes are
+        untouched and continue to flip their own labels from inside
+        the agent subprocess.
+
+      - `internal/launcher/labelwriter_bridge.go` adapts
+        labelwriter.Writer to the AgentMLabelWriter interface.
+        `cmd/worker.go` calls SetAgentMLabelWriter with the worker's
+        SQLite store right after NewLauncher, mirroring the v0.6
+        gitops wiring.
+
+      - Only AgentM runs participate, by structural construction:
+        the bridge's next_label branch sits inside the AgentM-only
+        type-assertion gate that also pulls Output()/SessionLogPath().
+        Claude/codex sessions don't implement that interface, so the
+        whole block is unreachable for them even if the field were
+        somehow set.
+    priority: P1
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-1-1: Happy-path AgentM run with next_label=`status:reviewing` triggers AgentMLabelWriter.ApplyNextLabel(repo, issueNum, `status:reviewing`) exactly once."
+      - "AC-1-2: AgentM run with success=false does NOT invoke the label writer; failure_reason still surfaces on Result.Meta."
+      - "AC-1-3: Runtime=claude-code / codex never invoke the label writer; the bridge gate is structural (Output() type assertion)."
+      - "AC-1-4: If gitops publish fails, the label writer MUST NOT fire — state machine MUST NOT advance when the PR was not opened."
+      - "AC-1-5: A span 'runtime.agentm.apply_next_label' is emitted with wb.next_label.applied=<label> stamped on success."
+      - "AC-1-6: `go build ./... && go vet ./... && go test ./... -count=1` all pass."
+      - "AC-1-7: project-index.yaml has this REQ entry referencing issue #332."
+    code:
+      - internal/runtime/agent_bridge.go
+      - internal/runtime/registry.go
+      - internal/launcher/labelwriter_bridge.go
+      - cmd/worker.go
+    tests:
+      - internal/runtime/agentm_labelwriter_test.go
+      - internal/launcher/labelwriter_bridge_test.go
+    deps:
+      - REQ-141
+      - REQ-142

@@ -50,6 +50,23 @@ func (l *Registry) SetAgentStartedHook(h AgentStartedHook) {
 	}
 }
 
+// SetAgentMLabelWriter installs the coordinator-managed label writer on
+// the AgentM bridge runtime, if one is registered. Re-applies to any
+// already-registered AgentBridgeRuntime keyed on config.RuntimeAgentM so
+// callers don't have to care about registration order. v0.6 / REQ-146:
+// only AgentM consults this hook — claude-code/codex keep flipping
+// labels from inside the agent subprocess.
+func (l *Registry) SetAgentMLabelWriter(lw AgentMLabelWriter) {
+	for name, rt := range l.runtimes {
+		if name != config.RuntimeAgentM {
+			continue
+		}
+		if br, ok := rt.(*AgentBridgeRuntime); ok {
+			br.LabelWriter = lw
+		}
+	}
+}
+
 // SupervisorClient returns the configured client (nil before SetSupervisorClient).
 func (l *Registry) SupervisorClient() *supclient.Client { return l.supervisorClient }
 
