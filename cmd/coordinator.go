@@ -56,7 +56,18 @@ const (
 )
 
 type coordinatorOpts struct {
-	dbPath       string
+	dbPath string
+	// dsn is the resolved Store DSN that will be passed to store.New /
+	// store.NewCoordinator. It follows the precedence:
+	//   1. `--db` value if it carries a scheme (sqlite://, mysql://);
+	//   2. WORKBUDDY_MYSQL_DSN env var, when non-empty (prefixed with
+	//      mysql:// if the user supplied a bare go-sql-driver DSN);
+	//   3. dbPath (bare filesystem path) — SQLite default.
+	//
+	// dbPath is retained for callers that still need a filesystem path
+	// (session dir derivation, etc.); when a non-SQLite backend is
+	// selected those paths fall back to ".workbuddy".
+	dsn          string
 	listenAddr   string
 	loopbackOnly bool
 	// Fields used by the full coordinator mode (runCoordinatorWithOpts).
@@ -230,6 +241,7 @@ func parseCoordinatorFlags(cmd *cobra.Command) (*coordinatorOpts, error) {
 	}
 	return &coordinatorOpts{
 		dbPath:            dbPath,
+		dsn:               resolveCoordinatorDSN(dbPath, os.Getenv("WORKBUDDY_MYSQL_DSN")),
 		listenAddr:        listenAddr,
 		loopbackOnly:      loopbackOnly,
 		port:              port,
@@ -244,6 +256,37 @@ func parseCoordinatorFlags(cmd *cobra.Command) (*coordinatorOpts, error) {
 		reportBaseURL:     resolvedReportURL,
 		hooksConfig:       hooksConfig,
 	}, nil
+}
+
+// resolveCoordinatorDSN returns the DSN that should be handed to
+// store.New / store.NewCoordinator. Precedence:
+//
+//  1. `--db` value, when it carries a known scheme prefix (sqlite://,
+//     mysql://). The user has explicitly asked for that backend.
+//  2. WORKBUDDY_MYSQL_DSN env var, when non-empty. This is the env
+//     surface set by the Helm chart so the pod picks up the cluster
+//     MySQL service without rewriting the launch command. If the user
+//     supplied a bare go-sql-driver DSN (no mysql:// prefix) we add
+//     it so store.New routes to the MySQL dialect.
+//  3. The bare dbPath — SQLite, the v0.1 default.
+//
+// Keeping this in cmd/ (not internal/store) lets the same precedence be
+// unit-tested against the env without spinning a real MySQL.
+func resolveCoordinatorDSN(dbFlag, envDSN string) string {
+	flag := strings.TrimSpace(dbFlag)
+	switch {
+	case strings.HasPrefix(flag, "sqlite://"),
+		strings.HasPrefix(flag, "mysql://"):
+		return flag
+	}
+	env := strings.TrimSpace(envDSN)
+	if env != "" {
+		if strings.HasPrefix(env, "mysql://") || strings.HasPrefix(env, "sqlite://") {
+			return env
+		}
+		return "mysql://" + env
+	}
+	return flag
 }
 
 func isLoopbackListenAddr(listenAddr string) bool {
@@ -376,16 +419,20 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	}
 
 	var st store.Store
+	dsn := opts.dsn
+	if strings.TrimSpace(dsn) == "" {
+		dsn = opts.dbPath
+	}
 	if opts.sharedStoreWithWorker {
 		// `workbuddy serve` topology: one DB, shared with the in-process
 		// worker. Phase 3 keeps the legacy session tables here because
 		// the worker side still writes to them.
-		st, err = store.NewStore(opts.dbPath)
+		st, err = store.New(dsn)
 	} else {
 		// Standalone coordinator: drop the legacy sessions /
 		// agent_sessions tables and short-circuit their reads.
 		// REQ-122 / Phase 3 of the session-data ownership refactor.
-		st, err = store.NewCoordinatorStore(opts.dbPath)
+		st, err = store.NewCoordinator(dsn)
 	}
 	if err != nil {
 		return fmt.Errorf("coordinator: init store: %w", err)
