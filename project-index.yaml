@@ -4956,3 +4956,49 @@ requirements:
       - internal/runtime/agentm_bridge_test.go
     deps:
       - REQ-133
+
+  - id: REQ-137
+    title: DB schema for root_trace_id on issues and PRs (v0.5)
+    description: >
+      Per docs/decisions/2026-05-13-k8s-agentm-otel.md Block 4
+      § Long-lifecycle trace correlation, long-lived OTel trace
+      correlation is implemented by persisting a root_trace_id per
+      issue and per PR, then reusing the trace_id across all
+      operations on that entity. This requirement covers only the
+      schema column, write-path mint, and read accessors; the cross-
+      span correlation logic (reusing the stored trace_id to parent
+      new spans) lands in #320.
+      Issues and PRs both live in the issue_cache table (PRs are
+      discriminated by state "pr:*"), so a single
+      `root_trace_id TEXT NOT NULL DEFAULT ''` column on issue_cache
+      covers both. On first insert (cache miss) the store mints a
+      fresh 32-hex OTel trace_id; existing rows preserve their value
+      on upsert. Read accessors GetIssueRootTraceID and
+      GetPRRootTraceID are added to the Store interface.
+      Schema migration is idempotent (ALTER TABLE ... ADD COLUMN
+      ... DEFAULT '') so existing SQLite databases gain the column
+      without data loss; pre-existing rows surface '' until they are
+      re-upserted by the poller.
+      PR-to-parent-issue trace_id linkage is intentionally NOT in
+      this slice — the issue_cache schema has no parent_issue_num
+      column yet, so PRs get their own freshly minted trace_id and
+      the test in root_trace_test.go locks in that "not-yet-linked"
+      behaviour. Cross-linking will land alongside #320.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-137-1: Schema migration applies cleanly to existing SQLite DBs (ALTER TABLE ADD COLUMN, idempotent on re-run); pre-existing rows surface root_trace_id = ''."
+      - "AC-137-2: Newly ingested issues have a non-empty 32-hex root_trace_id; subsequent upserts do not rotate it."
+      - "AC-137-3: PRs ingested into issue_cache also have a non-empty 32-hex root_trace_id (PR<->parent linkage deferred to #320)."
+      - "AC-137-4: Store.GetIssueRootTraceID(repo, issueNum) and Store.GetPRRootTraceID(repo, prNum) are exported on the Store interface and unit-tested."
+      - "AC-137-5: `go build ./... && go vet ./... && go test ./... -count=1` all pass."
+      - "AC-137-6: project-index.yaml has this REQ entry referencing issue #317."
+    code:
+      - internal/store/iface.go
+      - internal/store/store.go
+      - internal/store/root_trace.go
+    tests:
+      - internal/store/root_trace_test.go
+    deps:
+      - REQ-135
