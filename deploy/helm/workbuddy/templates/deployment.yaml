@@ -45,15 +45,48 @@ spec:
               containerPort: {{ .Values.service.port }}
               protocol: TCP
           env:
+            # ----------------------------------------------------------
+            # MySQL DSN — Secret keyRef when dsnSecretRef.name is set,
+            # otherwise the plaintext value. Empty values are still
+            # rendered so the coordinator can detect "unconfigured" and
+            # fall back to SQLite for dev.
+            # ----------------------------------------------------------
+            {{- if .Values.mysql.dsnSecretRef.name }}
             - name: WORKBUDDY_MYSQL_DSN
-              value: {{ .Values.mysql.dsn | quote }}
-            - name: WORKBUDDY_OTEL_ENDPOINT
-              value: {{ .Values.otel.endpoint | quote }}
-            - name: WORKBUDDY_GITEA_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "workbuddy.giteaSecretName" . }}
-                  key: token
+                  name: {{ .Values.mysql.dsnSecretRef.name | quote }}
+                  key: {{ .Values.mysql.dsnSecretRef.key | default "dsn" | quote }}
+            {{- else }}
+            - name: WORKBUDDY_MYSQL_DSN
+              value: {{ .Values.mysql.dsn | quote }}
+            {{- end }}
+            # ----------------------------------------------------------
+            # OpenTelemetry — standard SDK env vars consumed by
+            # internal/tracing/tracing.go. Empty endpoint disables export.
+            # ----------------------------------------------------------
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.otel.endpoint | quote }}
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: {{ .Values.otel.protocol | default "grpc" | quote }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ .Values.otel.serviceName | default "workbuddy" | quote }}
+            # ----------------------------------------------------------
+            # Gitea / GitHub token — one Secret value exposed as both
+            # env vars: GH_TOKEN (gh CLI in the poller) and GITEA_TOKEN
+            # (internal/labelwriter). Pre-existing Secret is required
+            # unless giteaToken.token is set for dev quickstart.
+            # ----------------------------------------------------------
+            - name: GH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "workbuddy.giteaSecretName" . | quote }}
+                  key: {{ .Values.giteaToken.secretKey | default "token" | quote }}
+            - name: GITEA_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "workbuddy.giteaSecretName" . | quote }}
+                  key: {{ .Values.giteaToken.secretKey | default "token" | quote }}
             - name: WORKBUDDY_AGENTS_DIR
               value: /etc/workbuddy/agents
           volumeMounts:
