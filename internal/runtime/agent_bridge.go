@@ -37,6 +37,45 @@ type AgentBridgeRuntime struct {
 	BackendMu   sync.Mutex
 	NewBackend  func() (agent.Backend, error)
 	RuntimeName string
+	// GitOps, when non-nil, is invoked by the AgentM bridge after a
+	// successful run with a non-empty artifact: the coordinator commits
+	// the artifact to a `workbuddy/issue-N` branch, pushes, and opens a
+	// PR. v0.6 coordinator-managed dispatch per
+	// docs/decisions/2026-05-13-k8s-agentm-otel.md (Block 2). Other
+	// runtimes (claude-code, codex) remain self-managed; this hook is
+	// only consulted when the underlying session is AgentM.
+	GitOps AgentMGitOps
+}
+
+// AgentMGitOps is the bridge between the runtime package and
+// internal/gitops. Defined locally so runtime stays a leaf-of-leaves;
+// production wiring constructs an adapter that satisfies this interface
+// around a *gitops.Client.
+type AgentMGitOps interface {
+	// PublishArtifact commits whatever is staged in req.RepoLocalPath
+	// (the AgentM workspace) onto req.Branch, pushes, and opens a PR.
+	// Returns the PR URL on success. An ErrNoChangesToPublish return
+	// means the agent produced no diff; the caller MUST treat that as
+	// a no-op publish, not a failure.
+	PublishArtifact(ctx context.Context, req AgentMPublishRequest) (prURL string, err error)
+}
+
+// ErrNoChangesToPublish signals that an AgentMGitOps.PublishArtifact call
+// found no working-tree changes — the agent declared success but its
+// workspace is identical to the base branch. Callers surface this as
+// metadata, not as a failure.
+var ErrNoChangesToPublish = fmt.Errorf("agent bridge: agentm produced no changes to publish")
+
+// AgentMPublishRequest is the input to AgentMGitOps.PublishArtifact.
+type AgentMPublishRequest struct {
+	Repo          string
+	IssueNumber   int
+	IssueTitle    string
+	Branch        string
+	CommitMessage string
+	PRTitle       string
+	PRBody        string
+	RepoLocalPath string
 }
 
 func NewAgentBridgeRuntime(runtimeName string, factory func() (agent.Backend, error)) *AgentBridgeRuntime {
@@ -114,6 +153,7 @@ func (r *AgentBridgeRuntime) Start(ctx context.Context, agentCfg *config.AgentCo
 		Handle:   handle,
 		AgentCfg: agentCfg,
 		Task:     task,
+		GitOps:   r.GitOps,
 	}, nil
 }
 
@@ -147,6 +187,9 @@ type AgentBridgeSession struct {
 	Handle   BridgeSessionHandle
 	AgentCfg *config.AgentConfig
 	Task     *TaskContext
+	// GitOps, when non-nil and the underlying session is AgentM,
+	// publishes the artifact (commit/push/PR) after a successful run.
+	GitOps AgentMGitOps
 }
 
 func (s *AgentBridgeSession) Run(ctx context.Context, events chan<- launcherevents.Event) (*Result, error) {
@@ -250,6 +293,23 @@ func (s *AgentBridgeSession) Run(ctx context.Context, events chan<- launchereven
 			if !out.Success {
 				meta["agentm_failure_reason"] = out.FailureReason
 			}
+			// Coordinator-managed publish path (REQ-142 / #330).
+			// Only invoked when the run succeeded; failed runs already
+			// surface failure_reason for the reporter to comment on.
+			if out.Success && s.GitOps != nil && s.Task != nil {
+				prURL, pubMeta, pubErr := s.publishAgentMArtifact(ctx, out)
+				for k, v := range pubMeta {
+					meta[k] = v
+				}
+				if pubErr != nil {
+					// Publish failure is infra failure: AgentM did its
+					// job, but the coordinator couldn't ship the diff.
+					meta[MetaInfraFailure] = "true"
+					meta[MetaInfraFailureReason] = "agentm publish: " + pubErr.Error()
+				} else if prURL != "" {
+					meta["pr_url"] = prURL
+				}
+			}
 		}
 	}
 
@@ -268,6 +328,85 @@ func (s *AgentBridgeSession) Run(ctx context.Context, events chan<- launchereven
 			Kind: agentResult.SessionRef.Kind,
 		},
 	}, err
+}
+
+// publishAgentMArtifact is the coordinator-managed commit+push+PR step
+// (REQ-142). It runs only when the underlying session is AgentM and the
+// bridge runtime has a GitOps adapter configured.
+func (s *AgentBridgeSession) publishAgentMArtifact(ctx context.Context, out *agentm.Output) (string, map[string]string, error) {
+	if s.Task == nil {
+		return "", nil, nil
+	}
+	repo := s.Task.Repo
+	issueNum := s.Task.Issue.Number
+	if repo == "" || issueNum <= 0 {
+		return "", nil, nil
+	}
+	workdir := s.Task.WorkDir
+	if workdir == "" {
+		workdir = s.Task.RepoRoot
+	}
+	if workdir == "" {
+		return "", nil, fmt.Errorf("no workdir on task context")
+	}
+
+	branch := fmt.Sprintf("workbuddy/issue-%d", issueNum)
+	commitMsg := fmt.Sprintf("workbuddy(agentm): resolve issue #%d", issueNum)
+	title := s.Task.Issue.Title
+	if title == "" {
+		title = fmt.Sprintf("workbuddy: resolve issue #%d", issueNum)
+	} else {
+		title = fmt.Sprintf("workbuddy: %s", title)
+	}
+	body := buildAgentMPRBody(repo, issueNum, out)
+
+	req := AgentMPublishRequest{
+		Repo:          repo,
+		IssueNumber:   issueNum,
+		IssueTitle:    s.Task.Issue.Title,
+		Branch:        branch,
+		CommitMessage: commitMsg,
+		PRTitle:       title,
+		PRBody:        body,
+		RepoLocalPath: workdir,
+	}
+
+	prURL, err := s.GitOps.PublishArtifact(ctx, req)
+	meta := map[string]string{}
+	if err != nil {
+		if isNoChangesErr(err) {
+			meta["agentm_publish"] = "no_changes"
+			return "", meta, nil
+		}
+		return "", meta, err
+	}
+	meta["agentm_publish"] = "published"
+	meta["agentm_pr_branch"] = branch
+	return prURL, meta, nil
+}
+
+func buildAgentMPRBody(repo string, issueNum int, out *agentm.Output) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Resolves %s#%d.\n\n", repo, issueNum)
+	b.WriteString("Generated by workbuddy AgentM coordinator-managed dispatch.\n")
+	if out != nil && out.NextLabel != "" {
+		fmt.Fprintf(&b, "\nAgent next_label: `%s`\n", out.NextLabel)
+	}
+	if out != nil && out.SessionLogPath != "" {
+		fmt.Fprintf(&b, "\nSession log: `%s`\n", out.SessionLogPath)
+	}
+	return b.String()
+}
+
+func isNoChangesErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == ErrNoChangesToPublish {
+		return true
+	}
+	return strings.Contains(err.Error(), "no changes to commit") ||
+		strings.Contains(err.Error(), "no changes to publish")
 }
 
 func (s *AgentBridgeSession) SetApprover(Approver) error { return ErrNotSupported }
