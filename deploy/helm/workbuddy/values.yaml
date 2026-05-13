@@ -43,6 +43,21 @@ giteaToken:
 agents:
   configMapName: ""
 
+# Ingress for the coordinator Service. Disabled by default; enable in K8s
+# topologies that need external webui + webhook access (decision doc Block 3
+# § Chart layout). Three routes are exposed when enabled: /webui, /api,
+# and /webhook — all backed by the same coordinator Service port.
+# cert-manager / ACME integration is out of scope: set tls.secretName to an
+# existing TLS Secret if you need HTTPS.
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  annotations: {}
+  tls:
+    enabled: false
+    secretName: ""
+
 resources: {}
 nodeSelector: {}
 tolerations: []
