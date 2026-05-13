@@ -87,7 +87,7 @@ func (r *AgentBridgeRuntime) Start(ctx context.Context, agentCfg *config.AgentCo
 		Model:    agentCfg.Policy.Model,
 		Sandbox:  agentCfg.Policy.Sandbox,
 		Approval: agentCfg.Policy.Approval,
-		Env:      injectTraceContext(ctx, envSliceToMap(BuildScopedEnv(agentCfg, task)), task),
+		Env:      injectAgentMEnv(agentCfg, injectTraceContext(ctx, envSliceToMap(BuildScopedEnv(agentCfg, task)), task)),
 		Tags: map[string]string{
 			"agent": agentCfg.Name,
 			"repo":  task.Repo,
@@ -318,6 +318,34 @@ func injectTraceContext(ctx context.Context, env map[string]string, task *TaskCo
 		if _, ok := env["WORKBUDDY_RUN_ID"]; !ok && task.Session.ID != "" {
 			env["WORKBUDDY_RUN_ID"] = task.Session.ID
 		}
+	}
+	return env
+}
+
+// EnvDevContainerImage is the env var workbuddy injects into the AgentM
+// subprocess to tell it which dev container image to dispatch into.
+// AgentM owns the actual agent-env Gateway call; workbuddy just forwards
+// the agent-config field. See docs/planned/agentm-runtime.md and
+// docs/decisions/2026-05-13-k8s-agentm-otel.md (Block 2).
+const EnvDevContainerImage = "WORKBUDDY_DEV_CONTAINER_IMAGE"
+
+// injectAgentMEnv adds AgentM-specific env vars derived from the agent
+// config. Today that's just dev_container_image → WORKBUDDY_DEV_CONTAINER_IMAGE,
+// injected only when runtime=agentm; other runtimes ignore the field
+// (and config validation already warned about it).
+func injectAgentMEnv(agentCfg *config.AgentConfig, env map[string]string) map[string]string {
+	if agentCfg == nil || agentCfg.Runtime != config.RuntimeAgentM {
+		return env
+	}
+	image := strings.TrimSpace(agentCfg.DevContainerImage)
+	if image == "" {
+		return env
+	}
+	if env == nil {
+		env = map[string]string{}
+	}
+	if _, exists := env[EnvDevContainerImage]; !exists {
+		env[EnvDevContainerImage] = image
 	}
 	return env
 }

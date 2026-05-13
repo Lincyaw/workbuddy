@@ -51,6 +51,12 @@ type Config struct {
 	NextLabel string
 	// FailureReason overrides the default reason in ModeFailure.
 	FailureReason string
+	// EnvDumpPath, when non-empty, makes the fake write its full process
+	// environment (one `KEY=VALUE` per line) to this absolute path before
+	// emitting RESULT:. Tests use it to assert workbuddy-injected env vars
+	// (TRACEPARENT, WORKBUDDY_DEV_CONTAINER_IMAGE, …) actually reach the
+	// AgentM subprocess.
+	EnvDumpPath string
 }
 
 // BuildFake writes a shell-script fake to a temp file marked executable and
@@ -130,6 +136,9 @@ fi
 echo "fake agentm starting in $WORKSPACE"
 echo "task file: $TASK_FILE"
 `
+	if cfg.EnvDumpPath != "" {
+		script += fmt.Sprintf("env > %q\n", cfg.EnvDumpPath)
+	}
 	if emitResult != "" {
 		script += emitResult + "\n"
 		script += `echo "RESULT: $BODY"` + "\n"

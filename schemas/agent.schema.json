@@ -113,6 +113,11 @@
       "type": "string",
       "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
       "description": "Deprecated alias of policy.timeout, kept for back-compat."
+    },
+    "dev_container_image": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Dev container image AgentM should run the task inside. Only meaningful for runtime=agentm; workbuddy injects it into the AgentM subprocess env as WORKBUDDY_DEV_CONTAINER_IMAGE (see docs/planned/agentm-runtime.md). Setting it on other runtimes produces a config warning, not an error. workbuddy does NOT talk to agent-env directly — image dispatch is AgentM's job."
     }
   }
 }

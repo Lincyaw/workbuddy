@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -236,6 +237,73 @@ func TestNormalizeAgentConfig_AcceptsAgentMRuntime(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestNormalizeAgentConfig_DevContainerImage covers REQ-140 / issue #328
+// AC-1-1 + AC-1-2: dev_container_image validates cleanly with runtime=agentm
+// (no warning, no error); setting it on runtime=claude-code produces a
+// warning (not an error) so configs can stage the field for an upcoming
+// runtime swap.
+func TestNormalizeAgentConfig_DevContainerImage(t *testing.T) {
+	t.Helper()
+
+	t.Run("agentm_no_warning", func(t *testing.T) {
+		agent := &AgentConfig{
+			Name:              "agentm-dev",
+			Runtime:           RuntimeAgentM,
+			DevContainerImage: "ghcr.io/lincyaw/workbuddy-dev:latest",
+		}
+		warnings, err := NormalizeAgentConfig(agent)
+		if err != nil {
+			t.Fatalf("NormalizeAgentConfig: %v", err)
+		}
+		for _, w := range warnings {
+			if strings.Contains(w.Message, "dev_container_image") {
+				t.Fatalf("unexpected dev_container_image warning for agentm runtime: %s", w.Message)
+			}
+		}
+		if agent.DevContainerImage != "ghcr.io/lincyaw/workbuddy-dev:latest" {
+			t.Fatalf("DevContainerImage should be preserved, got %q", agent.DevContainerImage)
+		}
+	})
+
+	t.Run("claude_code_warns_not_errors", func(t *testing.T) {
+		agent := &AgentConfig{
+			Name:              "claude-dev",
+			Runtime:           RuntimeClaudeCode,
+			Policy:            PolicyConfig{Sandbox: "read-only", Approval: "never"},
+			DevContainerImage: "ghcr.io/x:y",
+		}
+		warnings, err := NormalizeAgentConfig(agent)
+		if err != nil {
+			t.Fatalf("NormalizeAgentConfig: expected nil error, got %v", err)
+		}
+		found := false
+		for _, w := range warnings {
+			if strings.Contains(w.Message, "dev_container_image") && strings.Contains(w.Message, "claude-code") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("expected dev_container_image warning for runtime=claude-code, got warnings=%v", warnings)
+		}
+	})
+
+	t.Run("agentm_empty_no_warning", func(t *testing.T) {
+		agent := &AgentConfig{
+			Name:    "agentm-dev",
+			Runtime: RuntimeAgentM,
+		}
+		warnings, err := NormalizeAgentConfig(agent)
+		if err != nil {
+			t.Fatalf("NormalizeAgentConfig: %v", err)
+		}
+		for _, w := range warnings {
+			if strings.Contains(w.Message, "dev_container_image") {
+				t.Fatalf("unexpected warning when field unset: %s", w.Message)
+			}
+		}
+	})
 }
 
 // TestNormalizeAgentConfig_RejectsBadAgentMPolicy verifies the policy matrix
