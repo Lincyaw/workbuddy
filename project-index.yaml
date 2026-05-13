@@ -5099,6 +5099,69 @@ requirements:
       - REQ-135
       - REQ-136
 
+  - id: REQ-143
+    title: Workbuddy Helm chart skeleton (v0.6)
+    description: >
+      Per docs/decisions/2026-05-13-k8s-agentm-otel.md Block 3
+      § Chart layout, the K8s topology requires a Helm chart that
+      deploys the coordinator as a single-replica Deployment with
+      Recreate strategy, backed by external MySQL (reused from
+      AegisLab) and reporting to an external OTel collector.
+      Issue #331.
+
+      This slice is intentionally the skeleton: just enough to
+      `helm install` a renderable manifest set. Ingress (#333) and
+      the full values surface — MySQL host/user/pass/db split,
+      OTel resource attributes, AegisLab topology defaults (#334)
+      — are tracked separately.
+
+      Layout under deploy/helm/workbuddy/:
+        - Chart.yaml: apiVersion v2, type application, version
+          0.6.0, appVersion v0.6.0.
+        - values.yaml: minimal placeholders — image, mysql.dsn,
+          otel.endpoint, giteaToken.secretName / giteaToken.token,
+          agents.configMapName, service.type/port.
+        - templates/_helpers.tpl: standard helm helpers — name,
+          fullname, chart, labels, selectorLabels, image,
+          giteaSecretName, agentsConfigMapName.
+        - templates/deployment.yaml: single-replica coordinator,
+          strategy.type Recreate, env wired for WORKBUDDY_MYSQL_DSN,
+          WORKBUDDY_OTEL_ENDPOINT, WORKBUDDY_GITEA_TOKEN (from
+          secretKeyRef), WORKBUDDY_AGENTS_DIR. Mounts agents
+          ConfigMap at /etc/workbuddy/agents.
+        - templates/service.yaml: ClusterIP, port 8080 (default
+          coordinator port from cmd/init.go and cmd/coordinator.go).
+        - templates/configmap.yaml: agent-configs ConfigMap, only
+          rendered when agents.configMapName is empty. Uses
+          .Files.Glob "agents/*.md" so chart-bundled defaults are
+          picked up automatically.
+        - templates/secret.yaml: Gitea-token Secret, only rendered
+          when giteaToken.secretName is empty AND giteaToken.token
+          is set. Production deployments reference an existing
+          Secret out-of-band.
+        - README.md: brief install command + values reference +
+          pointer to #333 (ingress) and #334 (full values surface).
+    priority: P1
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-143-1: `helm lint deploy/helm/workbuddy/` passes with no failures (the only INFO is the optional icon recommendation)."
+      - "AC-143-2: `helm template my-release deploy/helm/workbuddy/ --set mysql.dsn=mysql://test/test --set giteaToken.secretName=test-gitea` renders Deployment, Service, and ConfigMap manifests without errors."
+      - "AC-143-3: README documents install command and points at #333 / #334 for the deferred surface."
+      - "AC-143-4: project-index.yaml has this REQ entry referencing issue #331 and the decision doc."
+    code:
+      - deploy/helm/workbuddy/Chart.yaml
+      - deploy/helm/workbuddy/values.yaml
+      - deploy/helm/workbuddy/README.md
+      - deploy/helm/workbuddy/templates/_helpers.tpl
+      - deploy/helm/workbuddy/templates/deployment.yaml
+      - deploy/helm/workbuddy/templates/service.yaml
+      - deploy/helm/workbuddy/templates/configmap.yaml
+      - deploy/helm/workbuddy/templates/secret.yaml
+    tests:
+      - deploy/helm/workbuddy/Chart.yaml
+    deps: []
+
   - id: REQ-138
     title: OTel cross-span correlation using persisted root_trace_id (v0.5)
     description: >
