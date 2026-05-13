@@ -1,0 +1,22 @@
+apiVersion: v2
+name: workbuddy
+description: |
+  Workbuddy coordinator — GitHub Issue-driven agent orchestration platform.
+  This chart deploys the coordinator process for the K8s topology (single-replica,
+  MySQL-backed, OTel-instrumented). Agent execution (claude-code, codex, agentm)
+  and ingress are configured separately; see the decision doc
+  docs/decisions/2026-05-13-k8s-agentm-otel.md for the full v0.6 design.
+type: application
+version: 0.6.0
+appVersion: "v0.6.0"
+keywords:
+  - workbuddy
+  - github
+  - agent
+  - orchestration
+  - coordinator
+home: https://github.com/Lincyaw/workbuddy
+sources:
+  - https://github.com/Lincyaw/workbuddy
+maintainers:
+  - name: Workbuddy maintainers

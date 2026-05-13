@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "workbuddy.fullname" . }}
+  labels:
+    {{- include "workbuddy.labels" . | nindent 4 }}
+spec:
+  # Single-replica + Recreate per decision doc Block 3 § Storage.
+  # Horizontal scale-out requires leader election and is deferred.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "workbuddy.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "workbuddy.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: coordinator
+          image: {{ include "workbuddy.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          args:
+            - coordinator
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            - name: WORKBUDDY_MYSQL_DSN
+              value: {{ .Values.mysql.dsn | quote }}
+            - name: WORKBUDDY_OTEL_ENDPOINT
+              value: {{ .Values.otel.endpoint | quote }}
+            - name: WORKBUDDY_GITEA_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "workbuddy.giteaSecretName" . }}
+                  key: token
+            - name: WORKBUDDY_AGENTS_DIR
+              value: /etc/workbuddy/agents
+          volumeMounts:
+            - name: agents
+              mountPath: /etc/workbuddy/agents
+              readOnly: true
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: agents
+          configMap:
+            name: {{ include "workbuddy.agentsConfigMapName" . }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
