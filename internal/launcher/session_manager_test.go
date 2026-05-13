@@ -131,7 +131,7 @@ func TestSessionManagerConcurrentWrites(t *testing.T) {
 	}
 }
 
-func newTestStoreForManager(t *testing.T) *store.Store {
+func newTestStoreForManager(t *testing.T) store.Store {
 	t.Helper()
 	st, err := store.NewStore(filepath.Join(t.TempDir(), "sessions.db"))
 	if err != nil {

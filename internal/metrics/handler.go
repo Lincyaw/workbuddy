@@ -25,9 +25,9 @@ type HookStatsSource interface {
 const stuckThreshold = time.Hour
 
 // Source is the narrow, read-only view of persistence required by the metrics
-// handler. It is satisfied by *store.Store and exists so this package never
-// touches a raw *sql.DB. Keeping the surface small (only aggregates, not
-// arbitrary SQL) is the point of issue #145 finding #9.
+// handler. It is satisfied by store.Store and exists so this package never
+// touches a raw database handle. Keeping the surface small (only aggregates,
+// not arbitrary SQL) is the point of issue #145 finding #9.
 type Source interface {
 	CountEventsByRepoType() ([]store.EventCountByRepoType, error)
 	TokenUsageEvents(eventType string) ([]store.TokenUsagePayload, error)
@@ -46,7 +46,7 @@ type Handler struct {
 }
 
 // NewHandler returns a handler bound to the provided metrics source. Any type
-// satisfying Source can be passed; in production this is *store.Store.
+// satisfying Source can be passed; in production this is store.Store.
 func NewHandler(src Source) *Handler {
 	return &Handler{
 		src: src,

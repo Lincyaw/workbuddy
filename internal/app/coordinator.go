@@ -31,7 +31,7 @@ import (
 // and live config reload to CoordinatorConfigRuntime.
 type FullCoordinatorServer struct {
 	RootCtx     context.Context
-	Store       *store.Store
+	Store       store.Store
 	Registry    *registry.Registry
 	Eventlog    *eventlog.EventLogger
 	TaskHub     *tasknotify.Hub

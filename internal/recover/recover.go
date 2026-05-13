@@ -4,7 +4,6 @@ package recover
 import (
 	"bufio"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,7 +18,7 @@ import (
 	"syscall"
 	"time"
 
-	_ "modernc.org/sqlite" // sqlite driver
+	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
 const (
@@ -407,24 +406,13 @@ func resetDB(dbPath string, opts Options) error {
 		return nil
 	}
 
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)")
+	st, err := store.New(dbPath)
 	if err != nil {
-		return fmt.Errorf("recover: open db: %w", err)
+		return fmt.Errorf("recover: open store: %w", err)
 	}
-	defer func() { _ = db.Close() }()
-
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("recover: begin reset tx: %w", err)
-	}
-	for _, table := range runtimeTables {
-		if _, err := tx.Exec("DELETE FROM " + table); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("recover: clear %s: %w", table, err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("recover: commit reset tx: %w", err)
+	defer func() { _ = st.Close() }()
+	if err := st.ResetTables(runtimeTables); err != nil {
+		return fmt.Errorf("recover: %w", err)
 	}
 	return nil
 }

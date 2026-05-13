@@ -242,7 +242,7 @@ func clearCoordinatorInflight(ctx context.Context, coordinatorURL, token, repo s
 	}
 }
 
-func inspectRestartIssueStore(st *store.Store, repo string, issueNum int) (restartIssueResult, error) {
+func inspectRestartIssueStore(st store.Store, repo string, issueNum int) (restartIssueResult, error) {
 	result := restartIssueResult{Repo: repo, IssueNum: issueNum}
 
 	cached, err := st.QueryIssueCache(repo, issueNum)
@@ -276,7 +276,7 @@ func inspectRestartIssueStore(st *store.Store, repo string, issueNum int) (resta
 	return result, nil
 }
 
-func runRestartIssueStore(st *store.Store, repo string, issueNum int, source string) (restartIssueResult, error) {
+func runRestartIssueStore(st store.Store, repo string, issueNum int, source string) (restartIssueResult, error) {
 	result, err := inspectRestartIssueStore(st, repo, issueNum)
 	if err != nil {
 		return result, err

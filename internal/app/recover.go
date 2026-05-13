@@ -11,7 +11,7 @@ import (
 
 // RecoverCoordinatorIssueClaims removes stale coordinator-owned claim rows for
 // prior coordinator PIDs before pollers start up again.
-func RecoverCoordinatorIssueClaims(st *store.Store, currentPID int) error {
+func RecoverCoordinatorIssueClaims(st store.Store, currentPID int) error {
 	stale, err := st.DeleteStaleCoordinatorIssueClaims(currentPID)
 	if err != nil {
 		return fmt.Errorf("sweep stale coordinator issue claims: %w", err)
@@ -30,7 +30,7 @@ func RecoverCoordinatorIssueClaims(st *store.Store, currentPID int) error {
 // and logs the count of pending tasks that will be re-dispatched through the
 // next poll cycle. It is a startup step shared by both serve and coordinator
 // topologies.
-func RecoverTasks(st *store.Store, alertBus *alertbus.Bus) error {
+func RecoverTasks(st store.Store, alertBus *alertbus.Bus) error {
 	running, err := st.QueryTasks(store.TaskStatusRunning)
 	if err != nil {
 		return fmt.Errorf("query running tasks: %w", err)

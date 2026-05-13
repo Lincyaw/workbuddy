@@ -92,7 +92,7 @@ func testWorkflow() *config.WorkflowConfig {
 	}
 }
 
-func newTestStore(t *testing.T) *store.Store {
+func newTestStore(t *testing.T) store.Store {
 	t.Helper()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
@@ -530,7 +530,7 @@ func TestDispatchSelfHealsDeletedInflightTask(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("InsertTask: %v", err)
 	}
-	if _, err := sm.store.DB().Exec(`DELETE FROM task_queue WHERE id = ?`, "task-review-deleted"); err != nil {
+	if _, err := sm.store.Exec(`DELETE FROM task_queue WHERE id = ?`, "task-review-deleted"); err != nil {
 		t.Fatalf("delete task: %v", err)
 	}
 
@@ -628,7 +628,7 @@ func TestDispatchSelfHealsExpiredInflightLease(t *testing.T) {
 	now := time.Now().UTC()
 	leaseStart := now.Add(-7 * defaultTaskLease)
 	leaseExpiry := leaseStart.Add(defaultTaskLease)
-	if _, err := sm.store.DB().Exec(
+	if _, err := sm.store.Exec(
 		`UPDATE task_queue SET heartbeat_at = ?, lease_expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 		leaseStart.Format("2006-01-02 15:04:05"),
 		leaseExpiry.Format("2006-01-02 15:04:05"),
@@ -1267,7 +1267,7 @@ func TestMarkAgentCompletedKeepsReplacedIssueClaim(t *testing.T) {
 	}
 
 	replacementToken := "replacement-token"
-	_, err = sm.store.DB().Exec(
+	_, err = sm.store.Exec(
 		`UPDATE issue_claim
 		 SET claim_token = ?, acquired_at = ?, expires_at = ?
 		 WHERE repo = ? AND issue_num = ? AND worker_id = ?`,

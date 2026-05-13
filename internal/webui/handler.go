@@ -34,7 +34,7 @@ type Handler struct {
 // NewHandler creates a Handler. The store argument is retained for API
 // stability; the events.json and stream endpoints read directly from the
 // per-session events-v1.jsonl files configured via SetSessionsDir.
-func NewHandler(_ *store.Store) *Handler {
+func NewHandler(_ store.Store) *Handler {
 	return &Handler{}
 }
 

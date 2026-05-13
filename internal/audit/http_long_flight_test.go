@@ -10,7 +10,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
-func newAuditTestStore(t *testing.T) *store.Store {
+func newAuditTestStore(t *testing.T) store.Store {
 	t.Helper()
 	dir := t.TempDir()
 	st, err := store.NewStore(filepath.Join(dir, "audit.db"))

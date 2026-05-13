@@ -69,13 +69,13 @@ type ResolveResult struct {
 }
 
 type Resolver struct {
-	store    *store.Store
+	store    store.Store
 	reader   IssueReader
 	eventlog EventRecorder
 	alertBus *alertbus.Bus
 }
 
-func NewResolver(st *store.Store, reader IssueReader, eventlog EventRecorder, alertBus *alertbus.Bus) *Resolver {
+func NewResolver(st store.Store, reader IssueReader, eventlog EventRecorder, alertBus *alertbus.Bus) *Resolver {
 	return &Resolver{store: st, reader: reader, eventlog: eventlog, alertBus: alertBus}
 }
 

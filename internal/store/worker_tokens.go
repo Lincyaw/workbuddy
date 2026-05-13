@@ -45,7 +45,7 @@ type WorkerAuthRecord struct {
 
 // IssueWorkerToken creates or rotates a worker token. The full bearer token is
 // returned once; only its hash is persisted.
-func (s *Store) IssueWorkerToken(workerID, repo string, roles []string, hostname string) (*IssuedWorkerToken, error) {
+func (s *sqliteStore) IssueWorkerToken(workerID, repo string, roles []string, hostname string) (*IssuedWorkerToken, error) {
 	rolesJSON, err := json.Marshal(roles)
 	if err != nil {
 		return nil, fmt.Errorf("store: marshal roles: %w", err)
@@ -86,7 +86,7 @@ func (s *Store) IssueWorkerToken(workerID, repo string, roles []string, hostname
 }
 
 // ListWorkerTokens returns persisted worker token metadata.
-func (s *Store) ListWorkerTokens(repo string) ([]WorkerTokenRecord, error) {
+func (s *sqliteStore) ListWorkerTokens(repo string) ([]WorkerTokenRecord, error) {
 	var (
 		rows *sql.Rows
 		err  error
@@ -134,7 +134,7 @@ func (s *Store) ListWorkerTokens(repo string) ([]WorkerTokenRecord, error) {
 }
 
 // RevokeWorkerToken invalidates a worker token immediately.
-func (s *Store) RevokeWorkerToken(workerID, kid string) error {
+func (s *sqliteStore) RevokeWorkerToken(workerID, kid string) error {
 	query := `UPDATE workers SET token_hash = NULL, token_revoked_at = CURRENT_TIMESTAMP WHERE id = ?`
 	args := []any{workerID}
 	if strings.TrimSpace(kid) != "" {
@@ -153,7 +153,7 @@ func (s *Store) RevokeWorkerToken(workerID, kid string) error {
 }
 
 // AuthenticateWorkerToken validates a bearer token against the stored worker token hash.
-func (s *Store) AuthenticateWorkerToken(token string) (*WorkerAuthRecord, error) {
+func (s *sqliteStore) AuthenticateWorkerToken(token string) (*WorkerAuthRecord, error) {
 	kid, ok := parseWorkerTokenKID(token)
 	if !ok {
 		return nil, ErrInvalidWorkerToken

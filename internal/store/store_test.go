@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func newTestStore(t *testing.T) *Store {
+func newTestStore(t *testing.T) Store {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "sub", "test.db")
 	s, err := NewStore(dbPath)
@@ -565,7 +565,7 @@ func TestClaimNextTaskDoesNotSelfReclaimExpiredRunningTask(t *testing.T) {
 		t.Fatalf("unexpected claimed task: %+v", task)
 	}
 
-	if _, err := s.DB().Exec(`UPDATE task_queue SET lease_expires_at = datetime('now', '-1 second') WHERE id = ?`, task.ID); err != nil {
+	if _, err := s.Exec(`UPDATE task_queue SET lease_expires_at = datetime('now', '-1 second') WHERE id = ?`, task.ID); err != nil {
 		t.Fatalf("expire lease: %v", err)
 	}
 
@@ -587,7 +587,7 @@ func TestClaimNextTaskDoesNotSelfReclaimExpiredRunningTask(t *testing.T) {
 }
 
 func TestClaimNextTaskFiltersByRuntime(t *testing.T) {
-	insertTask := func(t *testing.T, s *Store, id, runtime string) {
+	insertTask := func(t *testing.T, s Store, id, runtime string) {
 		t.Helper()
 		if err := s.InsertTask(TaskRecord{
 			ID:        id,
@@ -762,7 +762,7 @@ func TestLegacyAgentSessionsMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore phase 1: %v", err)
 	}
-	if _, err := s1.DB().Exec(`INSERT INTO agent_sessions (session_id, task_id, repo, issue_num, agent_name, summary, raw_path) VALUES ('legacy-1', 'task-1', 'org/repo', 7, 'dev', 'summary', '/tmp/raw')`); err != nil {
+	if _, err := s1.Exec(`INSERT INTO agent_sessions (session_id, task_id, repo, issue_num, agent_name, summary, raw_path) VALUES ('legacy-1', 'task-1', 'org/repo', 7, 'dev', 'summary', '/tmp/raw')`); err != nil {
 		t.Fatalf("insert legacy row: %v", err)
 	}
 	if err := s1.Close(); err != nil {
@@ -975,7 +975,7 @@ func TestWALMode(t *testing.T) {
 	s := newTestStore(t)
 
 	var mode string
-	err := s.DB().QueryRow("PRAGMA journal_mode").Scan(&mode)
+	err := s.QueryRow("PRAGMA journal_mode").Scan(&mode)
 	if err != nil {
 		t.Fatalf("PRAGMA journal_mode: %v", err)
 	}
@@ -1075,7 +1075,7 @@ func TestInsertWorkerReRegistrationBumpsHeartbeat(t *testing.T) {
 	}
 
 	// Force a stale heartbeat so we can prove re-registration refreshes it.
-	if _, err := s.DB().Exec(`UPDATE workers SET last_heartbeat = datetime('now', '-1 hour') WHERE id = 'w-rr'`); err != nil {
+	if _, err := s.Exec(`UPDATE workers SET last_heartbeat = datetime('now', '-1 hour') WHERE id = 'w-rr'`); err != nil {
 		t.Fatalf("force stale heartbeat: %v", err)
 	}
 	stale, err := s.GetWorker("w-rr")

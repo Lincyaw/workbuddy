@@ -18,7 +18,7 @@ type noopEventRecorder struct{}
 
 func (noopEventRecorder) Log(string, string, int, interface{}) {}
 
-func newCoordinatorTestStore(t *testing.T) *store.Store {
+func newCoordinatorTestStore(t *testing.T) store.Store {
 	t.Helper()
 	st, err := store.NewStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {

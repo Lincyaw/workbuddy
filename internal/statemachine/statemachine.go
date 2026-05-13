@@ -197,7 +197,7 @@ func snapshotDispatchGroup(group *dispatchGroup) *InflightGroupSnapshot {
 // manages transitions, detects cycles, and dispatches agent tasks.
 type StateMachine struct {
 	workflows map[string]*config.WorkflowConfig
-	store     *store.Store
+	store     store.Store
 	dispatch  chan<- DispatchRequest
 	eventlog  EventRecorder
 	alertBus  *alertbus.Bus
@@ -249,7 +249,7 @@ type completionRecord struct {
 // NewStateMachine creates a StateMachine.
 func NewStateMachine(
 	workflows map[string]*config.WorkflowConfig,
-	st *store.Store,
+	st store.Store,
 	dispatch chan<- DispatchRequest,
 	eventlog EventRecorder,
 	alertBus *alertbus.Bus,

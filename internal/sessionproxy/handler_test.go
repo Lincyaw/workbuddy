@@ -62,7 +62,7 @@ func (fw *fakeWorker) Auth() string {
 // newTestStore returns a fresh sqlite-backed store with a session →
 // worker mapping, mimicking what the coordinator would have after a
 // dispatch + register cycle.
-func newTestStore(t *testing.T, sessionID, workerID, auditURL string) *store.Store {
+func newTestStore(t *testing.T, sessionID, workerID, auditURL string) store.Store {
 	t.Helper()
 	st, err := store.NewStore(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {

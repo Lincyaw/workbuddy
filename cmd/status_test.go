@@ -305,7 +305,7 @@ func TestRunStatusWithOpts_SkipsMissingIssueState(t *testing.T) {
 	}
 }
 
-func newStatusTestStore(t *testing.T) *store.Store {
+func newStatusTestStore(t *testing.T) store.Store {
 	t.Helper()
 	st, err := store.NewStore(filepath.Join(t.TempDir(), "status.db"))
 	if err != nil {
@@ -315,7 +315,7 @@ func newStatusTestStore(t *testing.T) *store.Store {
 	return st
 }
 
-func fixtureStatusStore(t *testing.T, st *store.Store) {
+func fixtureStatusStore(t *testing.T, st store.Store) {
 	t.Helper()
 
 	for _, issue := range []struct {
@@ -344,7 +344,7 @@ func fixtureStatusStore(t *testing.T, st *store.Store) {
 		{Repo: "owner/repo", IssueNum: 2, FromState: "developing", ToState: "reviewing", Count: 1},
 		{Repo: "owner/repo", IssueNum: 3, FromState: "reviewing", ToState: "done", Count: 1},
 	} {
-		if _, err := st.DB().Exec(
+		if _, err := st.Exec(
 			`INSERT INTO transition_counts (repo, issue_num, from_state, to_state, count) VALUES (?, ?, ?, ?, ?)`,
 			transition.Repo, transition.IssueNum, transition.FromState, transition.ToState, transition.Count,
 		); err != nil {
@@ -376,7 +376,7 @@ func fixtureStatusStore(t *testing.T, st *store.Store) {
 	if err != nil {
 		t.Fatalf("InsertEvent(dispatch): %v", err)
 	}
-	if _, err := st.DB().Exec(`UPDATE events SET ts = ? WHERE id = ?`, now.Add(-5*time.Minute).Format("2006-01-02 15:04:05"), dispatchID); err != nil {
+	if _, err := st.Exec(`UPDATE events SET ts = ? WHERE id = ?`, now.Add(-5*time.Minute).Format("2006-01-02 15:04:05"), dispatchID); err != nil {
 		t.Fatalf("UPDATE dispatch event ts: %v", err)
 	}
 	claimBlockedID, err := st.InsertEvent(store.Event{
@@ -388,7 +388,7 @@ func fixtureStatusStore(t *testing.T, st *store.Store) {
 	if err != nil {
 		t.Fatalf("InsertEvent(dispatch_skipped_claim): %v", err)
 	}
-	if _, err := st.DB().Exec(`UPDATE events SET ts = ? WHERE id = ?`, now.Add(-30*time.Second).Format("2006-01-02 15:04:05"), claimBlockedID); err != nil {
+	if _, err := st.Exec(`UPDATE events SET ts = ? WHERE id = ?`, now.Add(-30*time.Second).Format("2006-01-02 15:04:05"), claimBlockedID); err != nil {
 		t.Fatalf("UPDATE dispatch_skipped_claim ts: %v", err)
 	}
 	for _, task := range []store.TaskRecord{
@@ -404,7 +404,7 @@ func fixtureStatusStore(t *testing.T, st *store.Store) {
 	}
 }
 
-func insertEventAt(t *testing.T, st *store.Store, repo string, issueNum int, ts time.Time) {
+func insertEventAt(t *testing.T, st store.Store, repo string, issueNum int, ts time.Time) {
 	t.Helper()
 	id, err := st.InsertEvent(store.Event{
 		Type:     "transition",
@@ -415,7 +415,7 @@ func insertEventAt(t *testing.T, st *store.Store, repo string, issueNum int, ts 
 	if err != nil {
 		t.Fatalf("InsertEvent(%d): %v", issueNum, err)
 	}
-	if _, err := st.DB().Exec(`UPDATE events SET ts = ? WHERE id = ?`, ts.Format("2006-01-02 15:04:05"), id); err != nil {
+	if _, err := st.Exec(`UPDATE events SET ts = ? WHERE id = ?`, ts.Format("2006-01-02 15:04:05"), id); err != nil {
 		t.Fatalf("UPDATE events ts issue %d: %v", issueNum, err)
 	}
 }

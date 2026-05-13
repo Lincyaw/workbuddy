@@ -14,7 +14,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
-func newTestStore(t *testing.T) *store.Store {
+func newTestStore(t *testing.T) store.Store {
 	t.Helper()
 	st, err := store.NewStore(filepath.Join(t.TempDir(), "worker.db"))
 	if err != nil {
@@ -26,7 +26,7 @@ func newTestStore(t *testing.T) *store.Store {
 
 // seedSession inserts a task + session record + on-disk artefacts that
 // mirror what runtime/session_manager produces in production.
-func seedSession(t *testing.T, st *store.Store, sessionsDir, sessionID, status, eventsBody string) {
+func seedSession(t *testing.T, st store.Store, sessionsDir, sessionID, status, eventsBody string) {
 	t.Helper()
 	dir := filepath.Join(sessionsDir, sessionID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -74,7 +74,7 @@ func seedSession(t *testing.T, st *store.Store, sessionsDir, sessionID, status, 
 	}
 }
 
-func newAuditFixture(t *testing.T, token string) (*httptest.Server, *store.Store, string) {
+func newAuditFixture(t *testing.T, token string) (*httptest.Server, store.Store, string) {
 	t.Helper()
 	st := newTestStore(t)
 	sessionsDir := filepath.Join(t.TempDir(), "sessions")

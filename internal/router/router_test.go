@@ -25,7 +25,7 @@ func (f *fakePreparer) Prepare(_ context.Context, d Decision) error {
 	return f.err
 }
 
-func newTestStore(t *testing.T) *store.Store {
+func newTestStore(t *testing.T) store.Store {
 	t.Helper()
 	st, err := store.NewStore(t.TempDir() + "/test.db")
 	if err != nil {
@@ -35,7 +35,7 @@ func newTestStore(t *testing.T) *store.Store {
 	return st
 }
 
-func newSchedulingRouter(t *testing.T, agents map[string]*config.AgentConfig) (*Router, *fakePreparer, *store.Store) {
+func newSchedulingRouter(t *testing.T, agents map[string]*config.AgentConfig) (*Router, *fakePreparer, store.Store) {
 	t.Helper()
 	st := newTestStore(t)
 	reg := registry.NewRegistry(st, 30*time.Second)

@@ -179,7 +179,7 @@ func runLogsWithOpts(ctx context.Context, opts *logsOpts, stdout io.Writer) erro
 	return runSummaryLogs(ctx, opts, stdout, st, session, eventsPath)
 }
 
-func runArtifactLogs(ctx context.Context, opts *logsOpts, stdout io.Writer, st *store.Store, session *store.AgentSession, eventsPath string) error {
+func runArtifactLogs(ctx context.Context, opts *logsOpts, stdout io.Writer, st store.Store, session *store.AgentSession, eventsPath string) error {
 	streamer := newLogsStreamer(opts.stream, stdout)
 	offset, err := streamer.drainFile(eventsPath)
 	if err != nil {
@@ -215,7 +215,7 @@ func runArtifactLogs(ctx context.Context, opts *logsOpts, stdout io.Writer, st *
 	}
 }
 
-func runSummaryLogs(ctx context.Context, opts *logsOpts, stdout io.Writer, st *store.Store, session *store.AgentSession, eventsPath string) error {
+func runSummaryLogs(ctx context.Context, opts *logsOpts, stdout io.Writer, st store.Store, session *store.AgentSession, eventsPath string) error {
 	current := session
 	if opts.follow && isSessionRunning(session.TaskStatus) {
 		if opts.pollInterval <= 0 {
@@ -247,7 +247,7 @@ func runSummaryLogs(ctx context.Context, opts *logsOpts, stdout io.Writer, st *s
 	return writeLogsSummary(stdout, summary, opts.format)
 }
 
-func resolveAttemptNumber(st *store.Store, session *store.AgentSession, issue, requested int) int {
+func resolveAttemptNumber(st store.Store, session *store.AgentSession, issue, requested int) int {
 	if session == nil {
 		return requested
 	}
@@ -475,7 +475,7 @@ type logsStoreTarget struct {
 	sessionsDir string
 }
 
-func resolveLogsStoreAndSession(opts *logsOpts) (*store.Store, *store.AgentSession, logsStoreTarget, error) {
+func resolveLogsStoreAndSession(opts *logsOpts) (store.Store, *store.AgentSession, logsStoreTarget, error) {
 	candidates := logsStoreCandidates(opts)
 	var artifactErr error
 	var sessionErr error
@@ -680,7 +680,7 @@ func dbPathFromCommand(manifest *deploymentManifest, runtime string, args []stri
 	}
 }
 
-func resolveLogsSession(st *store.Store, repo string, issue, attempt int) (*store.AgentSession, error) {
+func resolveLogsSession(st store.Store, repo string, issue, attempt int) (*store.AgentSession, error) {
 	sessions, err := st.QueryAgentSessions(repo, issue)
 	if err != nil {
 		return nil, fmt.Errorf("logs: query sessions: %w", err)

@@ -16,7 +16,7 @@ import (
 
 // Recorder centralizes worker-path session summary capture and structured event writes.
 type Recorder struct {
-	store       *store.Store
+	store       store.Store
 	auditor     *audit.Auditor
 	sessionsDir string
 	mu          sync.Mutex
@@ -36,7 +36,7 @@ type HealthIssue struct {
 	At        time.Time `json:"at"`
 }
 
-func NewRecorder(st *store.Store, sessionsDir string) *Recorder {
+func NewRecorder(st store.Store, sessionsDir string) *Recorder {
 	var auditor *audit.Auditor
 	if st != nil {
 		auditor = audit.NewAuditor(st, sessionsDir)
@@ -80,7 +80,7 @@ func (r *Recorder) RecordEventSession(sessionID, eventType, repo string, issueNu
 	return err
 }
 
-func RecordEvent(st *store.Store, eventType, repo string, issueNum int, payload any) error {
+func RecordEvent(st store.Store, eventType, repo string, issueNum int, payload any) error {
 	if st == nil {
 		return nil
 	}

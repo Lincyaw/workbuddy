@@ -22,7 +22,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
-func newTestStore(t *testing.T) *store.Store {
+func newTestStore(t *testing.T) store.Store {
 	t.Helper()
 	st, err := store.NewStore(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -32,7 +32,7 @@ func newTestStore(t *testing.T) *store.Store {
 	return st
 }
 
-func seedAuditData(t *testing.T, st *store.Store, sessionsDir string) {
+func seedAuditData(t *testing.T, st store.Store, sessionsDir string) {
 	t.Helper()
 	if _, err := st.InsertEvent(store.Event{
 		Type:     "dispatch",
@@ -519,7 +519,7 @@ func newDashboardFixture(t *testing.T) *dashboardFixture {
 	}
 }
 
-func seedDashboardData(t *testing.T, st *store.Store, sessionsDir string) {
+func seedDashboardData(t *testing.T, st store.Store, sessionsDir string) {
 	t.Helper()
 
 	insertSession := func(record store.SessionRecord, stdout, stderr string, finishedAfter time.Duration, exitCode int) {
@@ -567,7 +567,7 @@ func seedDashboardData(t *testing.T, st *store.Store, sessionsDir string) {
 			if err := st.UpdateSession(*saved); err != nil {
 				t.Fatalf("UpdateSession: %v", err)
 			}
-			if _, err := st.DB().Exec(`UPDATE task_queue SET completed_at = ? WHERE id = ?`, saved.ClosedAt.UTC().Format(time.RFC3339), record.TaskID); err != nil {
+			if _, err := st.Exec(`UPDATE task_queue SET completed_at = ? WHERE id = ?`, saved.ClosedAt.UTC().Format(time.RFC3339), record.TaskID); err != nil {
 				t.Fatalf("update task completed_at: %v", err)
 			}
 		}
@@ -1028,7 +1028,7 @@ func newInFlightFixture(t *testing.T) *dashboardFixture {
 	return &dashboardFixture{server: server, sessionsDir: sessionsDir}
 }
 
-func seedInFlightExtras(t *testing.T, st *store.Store) {
+func seedInFlightExtras(t *testing.T, st store.Store) {
 	t.Helper()
 	// Issue 40 is already seeded as "open" with status:reviewing label.
 	// Issue 41 needs an open in-flight cache too.
@@ -1064,7 +1064,7 @@ func seedInFlightExtras(t *testing.T, st *store.Store) {
 	// Insert the two transitions with explicit, ordered timestamps so the
 	// dashboard's ORDER BY ts ASC matches the insertion sequence and
 	// stuck_for_seconds can be asserted deterministically.
-	if _, err := st.DB().Exec(
+	if _, err := st.Exec(
 		`INSERT INTO events (ts, type, repo, issue_num, payload) VALUES
 		 ('2026-04-17 10:00:00','transition','owner/repo',40,'{"from":"developing","to":"reviewing","by":"dev-agent"}'),
 		 ('2026-04-17 11:30:00','transition','owner/repo',40,'{"from":"reviewing","to":"developing","by":"review-agent"}')`,
@@ -1283,7 +1283,7 @@ func TestDashboardSessionsEndpoint_AddedFields(t *testing.T) {
 	sessionsDir := filepath.Join(t.TempDir(), "sessions")
 	seedDashboardData(t, st, sessionsDir)
 	// Add task workflow + state so the new session-list fields populate.
-	if _, err := st.DB().Exec(`UPDATE task_queue SET workflow = 'default', state = 'reviewing' WHERE id = ?`, "task-40"); err != nil {
+	if _, err := st.Exec(`UPDATE task_queue SET workflow = 'default', state = 'reviewing' WHERE id = ?`, "task-40"); err != nil {
 		t.Fatalf("update task workflow: %v", err)
 	}
 

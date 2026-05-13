@@ -15,7 +15,7 @@ import (
 
 // seedSession writes a session row + an events-v1.jsonl file so the events.json
 // and stream paths have something to read.
-func seedSession(t *testing.T, st *store.Store, sessionsDir, sessionID string) {
+func seedSession(t *testing.T, st store.Store, sessionsDir, sessionID string) {
 	t.Helper()
 	dir := filepath.Join(sessionsDir, sessionID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
