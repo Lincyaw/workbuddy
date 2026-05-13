@@ -180,3 +180,130 @@ func TestLoadConfig_RejectsUnknownRolloutJoinKey(t *testing.T) {
 		t.Fatal("expected unknown rollout join key to fail")
 	}
 }
+
+// TestNormalizeAgentConfig_AcceptsAgentMRuntime covers AC-1-1 of issue #315:
+// `runtime: agentm` must pass config normalization with the same sandbox /
+// approval set as `codex`. v0.5 is host-exec only — see
+// docs/planned/agentm-runtime.md and docs/decisions/2026-05-13-k8s-agentm-otel.md.
+func TestNormalizeAgentConfig_AcceptsAgentMRuntime(t *testing.T) {
+	t.Helper()
+
+	cases := []struct {
+		name    string
+		policy  PolicyConfig
+		wantSbx string
+		wantApp string
+	}{
+		{
+			name:    "defaults_fill_in",
+			policy:  PolicyConfig{},
+			wantSbx: "read-only",
+			wantApp: "never",
+		},
+		{
+			name:    "workspace_write_ok",
+			policy:  PolicyConfig{Sandbox: "workspace-write", Approval: "on-failure"},
+			wantSbx: "workspace-write",
+			wantApp: "on-failure",
+		},
+		{
+			name:    "danger_full_access_ok",
+			policy:  PolicyConfig{Sandbox: "danger-full-access", Approval: "via-approver"},
+			wantSbx: "danger-full-access",
+			wantApp: "via-approver",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := &AgentConfig{
+				Name:    "agentm-dev",
+				Runtime: RuntimeAgentM,
+				Policy:  tc.policy,
+			}
+			warnings, err := NormalizeAgentConfig(agent)
+			if err != nil {
+				t.Fatalf("NormalizeAgentConfig: unexpected error: %v (warnings=%v)", err, warnings)
+			}
+			if agent.Runtime != RuntimeAgentM {
+				t.Errorf("Runtime was rewritten to %q; agentm must stay agentm", agent.Runtime)
+			}
+			if agent.Policy.Sandbox != tc.wantSbx {
+				t.Errorf("Policy.Sandbox = %q, want %q", agent.Policy.Sandbox, tc.wantSbx)
+			}
+			if agent.Policy.Approval != tc.wantApp {
+				t.Errorf("Policy.Approval = %q, want %q", agent.Policy.Approval, tc.wantApp)
+			}
+		})
+	}
+}
+
+// TestNormalizeAgentConfig_RejectsBadAgentMPolicy verifies the policy matrix
+// rejects clearly-invalid combinations, mirroring the codex matrix.
+func TestNormalizeAgentConfig_RejectsBadAgentMPolicy(t *testing.T) {
+	t.Helper()
+
+	cases := []PolicyConfig{
+		{Sandbox: "no-such-sandbox", Approval: "never"},
+		{Sandbox: "read-only", Approval: "no-such-approval"},
+	}
+	for _, p := range cases {
+		agent := &AgentConfig{
+			Name:    "agentm-dev",
+			Runtime: RuntimeAgentM,
+			Policy:  p,
+		}
+		if _, err := NormalizeAgentConfig(agent); err == nil {
+			t.Errorf("policy %+v: expected error, got nil", p)
+		}
+	}
+}
+
+// TestLoadConfig_AcceptsAgentMAgentFile covers AC-1-1 end-to-end: an agent
+// frontmatter declaring `runtime: agentm` loads cleanly from disk via
+// LoadConfig.
+func TestLoadConfig_AcceptsAgentMAgentFile(t *testing.T) {
+	t.Helper()
+
+	configDir := t.TempDir()
+	agentsDir := filepath.Join(configDir, "agents")
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatalf("mkdir agents: %v", err)
+	}
+
+	agentMD := "---\n" +
+		"name: agentm-dev\n" +
+		"description: AgentM-powered dev agent (v0.5 contract only)\n" +
+		"role: dev\n" +
+		"runtime: agentm\n" +
+		"triggers:\n" +
+		"  - state: developing\n" +
+		"context:\n" +
+		"  - Repo\n" +
+		"  - Issue.Number\n" +
+		"policy:\n" +
+		"  sandbox: workspace-write\n" +
+		"  approval: never\n" +
+		"  timeout: 30m\n" +
+		"---\n\n" +
+		"Implement issue {{.Issue.Number}} in {{.Repo}}.\n"
+	path := filepath.Join(agentsDir, "agentm-dev.md")
+	if err := os.WriteFile(path, []byte(agentMD), 0o644); err != nil {
+		t.Fatalf("write agent: %v", err)
+	}
+
+	cfg, _, err := LoadConfig(configDir)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	agent, ok := cfg.Agents["agentm-dev"]
+	if !ok {
+		t.Fatalf("agent agentm-dev not loaded; got %+v", cfg.Agents)
+	}
+	if agent.Runtime != RuntimeAgentM {
+		t.Errorf("Runtime = %q, want %q", agent.Runtime, RuntimeAgentM)
+	}
+	if agent.Policy.Sandbox != "workspace-write" {
+		t.Errorf("Policy.Sandbox = %q, want workspace-write", agent.Policy.Sandbox)
+	}
+}

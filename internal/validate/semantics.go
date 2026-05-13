@@ -50,6 +50,7 @@ var runtimeBinaries = map[string]string{
 	"codex":            "codex",
 	"claude-code":      "claude",
 	"claude-agent-sdk": "claude",
+	"agentm":           "agentm",
 }
 
 type semanticsOptions struct {

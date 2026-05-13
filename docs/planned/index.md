@@ -10,7 +10,9 @@
 
 ## 文档列表
 
-_当前无待落地的设计文档。_ Worker execution boundary (`#146`~`#151`) 已整体落地 (v0.4.0)，原设计锚点已迁移到 `docs/implemented/worker-execution-boundary.md`。
+- [agentm-runtime.md](agentm-runtime.md) — AgentM 作为第三个 runtime 的 invocation + output contract（v0.5 仅契约 + config 校验，dispatch 在 #319，sandbox 在 v0.6）。
+
+Worker execution boundary (`#146`~`#151`) 已整体落地 (v0.4.0)，原设计锚点已迁移到 `docs/implemented/worker-execution-boundary.md`。
 
 ## 维护规则
 
