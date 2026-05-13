@@ -820,7 +820,7 @@ func (a *workerSessionAnnouncer) AnnounceSession(ctx context.Context, sessionID,
 // already-known rows. Read errors are downgraded to "no sessions" — a
 // missed re-seed self-heals when the next session is created (its
 // AnnounceSession call repopulates the row).
-func workerOpenSessions(st *store.Store, workerID string) []workerclient.SessionAnnounce {
+func workerOpenSessions(st store.Store, workerID string) []workerclient.SessionAnnounce {
 	if st == nil || strings.TrimSpace(workerID) == "" {
 		return nil
 	}

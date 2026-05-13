@@ -38,13 +38,13 @@ type Filter struct {
 
 // Auditor captures and queries agent session artifacts.
 type Auditor struct {
-	store       *store.Store
+	store       store.Store
 	sessionsDir string // e.g. ".workbuddy/sessions"
 }
 
 // NewAuditor creates an Auditor that archives raw session files under sessionsDir
 // and persists summaries in the given store.
-func NewAuditor(s *store.Store, sessionsDir string) *Auditor {
+func NewAuditor(s store.Store, sessionsDir string) *Auditor {
 	return &Auditor{store: s, sessionsDir: sessionsDir}
 }
 

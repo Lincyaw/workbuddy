@@ -30,7 +30,7 @@ const announceTimeout = 3 * time.Second
 
 type SessionManager struct {
 	baseDir   string
-	store     *store.Store
+	store     store.Store
 	announcer SessionAnnouncer
 }
 
@@ -75,7 +75,7 @@ type ManagedSession struct {
 	eventsFile    *os.File
 }
 
-func NewSessionManager(baseDir string, st *store.Store) *SessionManager {
+func NewSessionManager(baseDir string, st store.Store) *SessionManager {
 	return &SessionManager{baseDir: baseDir, store: st}
 }
 

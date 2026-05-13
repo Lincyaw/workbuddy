@@ -96,7 +96,7 @@ type ConfigReloadSummary struct {
 // orchestration that applies a new config atomically (rolling back on error).
 type CoordinatorConfigRuntime struct {
 	configDir string
-	store     *store.Store
+	store     store.Store
 	eventlog  *eventlog.EventLogger
 	pollers   *PollerManager
 	registry  *registry.Registry
@@ -110,7 +110,7 @@ type CoordinatorConfigRuntime struct {
 
 // NewCoordinatorConfigRuntime wires a new CoordinatorConfigRuntime from the
 // coordinator's already-built dependencies.
-func NewCoordinatorConfigRuntime(configDir string, current *config.FullConfig, st *store.Store, evlog *eventlog.EventLogger, pollers *PollerManager, reg *registry.Registry, notifierSvc *NotifierRuntime, alertBus *alertbus.Bus, taskHub *tasknotify.Hub) *CoordinatorConfigRuntime {
+func NewCoordinatorConfigRuntime(configDir string, current *config.FullConfig, st store.Store, evlog *eventlog.EventLogger, pollers *PollerManager, reg *registry.Registry, notifierSvc *NotifierRuntime, alertBus *alertbus.Bus, taskHub *tasknotify.Hub) *CoordinatorConfigRuntime {
 	return &CoordinatorConfigRuntime{
 		configDir: strings.TrimSpace(configDir),
 		store:     st,

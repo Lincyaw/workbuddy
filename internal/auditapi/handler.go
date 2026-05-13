@@ -68,7 +68,7 @@ type IssueSessionsLister interface {
 
 // Handler serves the JSON audit API.
 type Handler struct {
-	store               *store.Store
+	store               store.Store
 	events              *eventlog.EventLogger
 	sessionsDir         string
 	reportBaseURL       string
@@ -103,7 +103,7 @@ type cachedPRDiff struct {
 }
 
 // NewHandler constructs a Handler backed by the given store.
-func NewHandler(st *store.Store) *Handler {
+func NewHandler(st store.Store) *Handler {
 	return &Handler{
 		store:       st,
 		events:      eventlog.NewEventLogger(st),

@@ -47,7 +47,7 @@ import (
 // touches neither the DB nor any worker), but the signature is kept so
 // the existing wiring in cmd/coordinator.go and the legacy test surface
 // compile unchanged.
-func newCoordinatorSessionProxy(_ *store.Store, _ string) http.Handler {
+func newCoordinatorSessionProxy(_ store.Store, _ string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, sessionPath, ok := parseWorkerSessionProxyPath(r.URL.Path)
 		if !ok {

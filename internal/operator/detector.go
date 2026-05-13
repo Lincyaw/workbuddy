@@ -54,7 +54,7 @@ type ProcessInspector interface {
 }
 
 type DetectorOptions struct {
-	Store                   *store.Store
+	Store                   store.Store
 	Config                  config.OperatorConfig
 	AlertBus                *alertbus.Bus
 	DefaultRepo             string
@@ -66,7 +66,7 @@ type DetectorOptions struct {
 
 // Detector periodically scans coordinator state and emits persisted alerts.
 type Detector struct {
-	store                   *store.Store
+	store                   store.Store
 	cfg                     config.OperatorConfig
 	alertBus                *alertbus.Bus
 	defaultRepo             string
@@ -319,12 +319,7 @@ func (d *Detector) detectRepoAlerts(ctx context.Context, repoCtx repoContext, no
 }
 
 func (d *Detector) countTasksForIssue(repo string, issueNum int) (int, error) {
-	var count int
-	err := d.store.DB().QueryRow(`SELECT COUNT(1) FROM task_queue WHERE repo = ? AND issue_num = ?`, repo, issueNum).Scan(&count)
-	if err != nil {
-		return 0, fmt.Errorf("operator: count tasks for %s#%d: %w", repo, issueNum, err)
-	}
-	return count, nil
+	return d.store.CountTasksByIssue(repo, issueNum)
 }
 
 func (d *Detector) emit(alert Alert) (bool, error) {
@@ -371,22 +366,14 @@ func (d *Detector) emit(alert Alert) (bool, error) {
 }
 
 func (d *Detector) isDuplicate(candidate Alert) (bool, error) {
-	rows, err := d.store.DB().Query(
-		`SELECT payload FROM events WHERE type = ? ORDER BY id DESC LIMIT 256`,
-		eventlog.TypeAlert,
-	)
+	payloads, err := d.store.RecentAlertPayloads(eventlog.TypeAlert, 256)
 	if err != nil {
-		return false, fmt.Errorf("operator: query recent alerts: %w", err)
+		return false, fmt.Errorf("operator: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
 
 	wantKey := candidate.Kind + "|" + stableResourceKey(candidate.Resource)
 	windowStart := candidate.Ts.Add(-d.cfg.DedupWindow)
-	for rows.Next() {
-		var payload string
-		if err := rows.Scan(&payload); err != nil {
-			return false, fmt.Errorf("operator: scan recent alert: %w", err)
-		}
+	for _, payload := range payloads {
 		var existing Alert
 		if err := json.Unmarshal([]byte(payload), &existing); err != nil {
 			continue
@@ -398,7 +385,7 @@ func (d *Detector) isDuplicate(candidate Alert) (bool, error) {
 			return true, nil
 		}
 	}
-	return false, rows.Err()
+	return false, nil
 }
 
 func (d *Detector) writeInbox(alert Alert, payload []byte) error {

@@ -64,7 +64,7 @@ type RepoStatus struct {
 // single channel, and shuts runtimes down on Deregister or parent cancel.
 type PollerManager struct {
 	rootCtx      context.Context
-	store        *store.Store
+	store        store.Store
 	registry     *registry.Registry
 	eventlog     *eventlog.EventLogger
 	alertBus     *alertbus.Bus
@@ -81,7 +81,7 @@ type PollerManager struct {
 
 // NewPollerManager wires a PollerManager and starts its event-dispatch
 // goroutine. The returned manager is ready to accept StartOrUpdate calls.
-func NewPollerManager(ctx context.Context, st *store.Store, reg *registry.Registry, evlog *eventlog.EventLogger, ab *alertbus.Bus, ghReader poller.GHReader, rep *reporter.Reporter, repoRoot string, pollInterval time.Duration, secRuntime *security.Runtime) *PollerManager {
+func NewPollerManager(ctx context.Context, st store.Store, reg *registry.Registry, evlog *eventlog.EventLogger, ab *alertbus.Bus, ghReader poller.GHReader, rep *reporter.Reporter, repoRoot string, pollInterval time.Duration, secRuntime *security.Runtime) *PollerManager {
 	pm := &PollerManager{
 		rootCtx:      ctx,
 		store:        st,

@@ -375,7 +375,7 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 		log.Printf("[coordinator] warning: WORKBUDDY_AUTH_TOKEN is not set; worker API is running without authentication")
 	}
 
-	var st *store.Store
+	var st store.Store
 	if opts.sharedStoreWithWorker {
 		// `workbuddy serve` topology: one DB, shared with the in-process
 		// worker. Phase 3 keeps the legacy session tables here because
@@ -561,7 +561,7 @@ func resolveCoordinatorTiming(opts *coordinatorOpts, bootstrapCfg *config.FullCo
 	return port, pollInterval
 }
 
-func startCoordinatorOperatorDetector(ctx context.Context, st *store.Store, alertBus *alertbus.Bus, bootstrapCfg *config.FullConfig, pollInterval time.Duration) {
+func startCoordinatorOperatorDetector(ctx context.Context, st store.Store, alertBus *alertbus.Bus, bootstrapCfg *config.FullConfig, pollInterval time.Duration) {
 	operatorCfg := config.OperatorConfig{Enabled: true}
 	defaultRepo := ""
 	if bootstrapCfg != nil {
@@ -590,7 +590,7 @@ func bootstrapCoordinatorRegistration(
 	ctx context.Context,
 	api *app.FullCoordinatorServer,
 	bootstrapCfg *config.FullConfig,
-	st *store.Store,
+	st store.Store,
 	evlog *eventlog.EventLogger,
 	reg *registry.Registry,
 	notifierRuntime *app.NotifierRuntime,
@@ -625,7 +625,7 @@ func resolveListenAddr(listenAddr string, port int) string {
 	return listenAddr
 }
 
-func buildCoordinatorMux(api *app.FullCoordinatorServer, st *store.Store, evlog *eventlog.EventLogger, dbPath string, taskHub *tasknotify.Hub, hooksDispatcher *hooks.Dispatcher, hooksConfigPath string) *http.ServeMux {
+func buildCoordinatorMux(api *app.FullCoordinatorServer, st store.Store, evlog *eventlog.EventLogger, dbPath string, taskHub *tasknotify.Hub, hooksDispatcher *hooks.Dispatcher, hooksConfigPath string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", api.HandleHealth)
 

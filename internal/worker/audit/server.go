@@ -59,7 +59,7 @@ type Config struct {
 	// Use the worker's existing WORKBUDDY_AUTH_TOKEN.
 	Token string
 	// Store is the worker's local store (.workbuddy/worker.db).
-	Store *store.Store
+	Store store.Store
 	// SessionsDir is the absolute path to the directory containing
 	// per-session artefacts (events-v1.jsonl, metadata.json, ...).
 	SessionsDir string

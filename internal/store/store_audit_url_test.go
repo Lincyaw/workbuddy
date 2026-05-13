@@ -133,7 +133,7 @@ func TestWorkerAuditURLAddedByMigration(t *testing.T) {
 		`ALTER TABLE workers_old RENAME TO workers`,
 	}
 	for _, stmt := range tx {
-		if _, err := s.DB().Exec(stmt); err != nil {
+		if _, err := s.Exec(stmt); err != nil {
 			t.Fatalf("simulate pre-migration: %s: %v", stmt, err)
 		}
 	}

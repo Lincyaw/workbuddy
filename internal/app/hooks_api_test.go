@@ -18,7 +18,7 @@ import (
 
 // freshStore opens a temp SQLite store for tests. Returned cleanup runs the
 // store.Close on test end.
-func freshStore(t *testing.T) (*store.Store, string) {
+func freshStore(t *testing.T) (store.Store, string) {
 	t.Helper()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")

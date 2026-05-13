@@ -100,7 +100,7 @@ type GHReader interface {
 // Poller periodically queries GitHub for issue/PR changes and emits events.
 type Poller struct {
 	gh         GHReader
-	store      *store.Store
+	store      store.Store
 	repo       string
 	interval   time.Duration
 	events     chan ChangeEvent
@@ -111,7 +111,7 @@ type Poller struct {
 
 // NewPoller creates a Poller with the given configuration.
 // Default interval is 30s; events channel has a buffer of 256.
-func NewPoller(gh GHReader, st *store.Store, repo string, interval time.Duration) *Poller {
+func NewPoller(gh GHReader, st store.Store, repo string, interval time.Duration) *Poller {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}

@@ -146,7 +146,7 @@ func runCacheInvalidateWithOpts(_ context.Context, opts *cacheInvalidateOpts, st
 	return nil
 }
 
-func runCacheInvalidateStore(st *store.Store, repo string, issues []int, source string, dryRun bool) ([]cacheInvalidateResult, error) {
+func runCacheInvalidateStore(st store.Store, repo string, issues []int, source string, dryRun bool) ([]cacheInvalidateResult, error) {
 	results := make([]cacheInvalidateResult, 0, len(issues))
 	for _, issueNum := range issues {
 		cached, err := st.QueryIssueCache(repo, issueNum)

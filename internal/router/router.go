@@ -80,7 +80,7 @@ type Router struct {
 func NewRouter(
 	agents map[string]*config.AgentConfig,
 	reg *registry.Registry,
-	st *store.Store,
+	st store.Store,
 	repo string,
 	repoRoot string,
 	taskChan chan<- WorkerTask,

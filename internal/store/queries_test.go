@@ -226,7 +226,7 @@ func TestWorkflowRepositoryMethods(t *testing.T) {
 	}
 }
 
-func mustInsertEvent(t *testing.T, s *Store, e Event) {
+func mustInsertEvent(t *testing.T, s Store, e Event) {
 	t.Helper()
 	if _, err := s.InsertEvent(e); err != nil {
 		t.Fatalf("InsertEvent: %v", err)

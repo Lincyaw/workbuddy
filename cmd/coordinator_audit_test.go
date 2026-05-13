@@ -28,7 +28,7 @@ func seedCoordinatorAuditDB(t *testing.T, dbPath string) {
 	}
 	defer func() { _ = st.Close() }()
 
-	if _, err := st.DB().Exec(
+	if _, err := st.Exec(
 		`INSERT INTO issue_cache (repo, issue_num, labels, body, state) VALUES (?, ?, ?, ?, ?)`,
 		"owner/repo-a", 11, `["workbuddy","status:developing"]`, "body", "open",
 	); err != nil {
@@ -54,7 +54,7 @@ func seedCoordinatorAuditDB(t *testing.T, dbPath string) {
 	if err != nil {
 		t.Fatalf("InsertEvent: %v", err)
 	}
-	if _, err := st.DB().Exec(`UPDATE events SET ts = ? WHERE id = ?`, time.Now().UTC().Format(time.RFC3339), eventID); err != nil {
+	if _, err := st.Exec(`UPDATE events SET ts = ? WHERE id = ?`, time.Now().UTC().Format(time.RFC3339), eventID); err != nil {
 		t.Fatalf("update event ts: %v", err)
 	}
 }

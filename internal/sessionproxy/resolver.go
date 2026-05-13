@@ -77,7 +77,7 @@ type Resolution struct {
 
 // Resolver looks up the worker that owns a given session.
 type Resolver struct {
-	store              *store.Store
+	store              store.Store
 	localAuditFallback bool
 	// localHosts is the set of host strings (lowercased, no port) that
 	// the resolver treats as "the coordinator itself" for the local
@@ -88,7 +88,7 @@ type Resolver struct {
 
 // NewResolver constructs a Resolver. The store is used for both the
 // session→worker lookup and the workers table read for the audit_url.
-func NewResolver(st *store.Store) *Resolver {
+func NewResolver(st store.Store) *Resolver {
 	r := &Resolver{
 		store:      st,
 		localHosts: map[string]struct{}{},

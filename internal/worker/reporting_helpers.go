@@ -17,7 +17,7 @@ import (
 
 const defaultWorkerTaskAPITimeout = 5 * time.Second
 
-func fetchCachedLabels(st *store.Store, repo string, issueNum int) []string {
+func fetchCachedLabels(st store.Store, repo string, issueNum int) []string {
 	if st == nil {
 		return nil
 	}

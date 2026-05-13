@@ -181,7 +181,7 @@ type Publisher interface {
 // while tracking failures on a per-instance health counter so operators can
 // detect degraded observability via Health().
 type EventLogger struct {
-	store     *store.Store
+	store     store.Store
 	errWriter io.Writer
 
 	writeFailures atomic.Int64
@@ -195,13 +195,13 @@ type EventLogger struct {
 }
 
 // NewEventLogger creates an EventLogger backed by the given Store.
-func NewEventLogger(s *store.Store) *EventLogger {
+func NewEventLogger(s store.Store) *EventLogger {
 	return NewEventLoggerWithWriter(s, os.Stderr)
 }
 
 // NewEventLoggerWithWriter creates an EventLogger backed by the given Store
 // and writes best-effort error diagnostics to errWriter.
-func NewEventLoggerWithWriter(s *store.Store, errWriter io.Writer) *EventLogger {
+func NewEventLoggerWithWriter(s store.Store, errWriter io.Writer) *EventLogger {
 	if errWriter == nil {
 		errWriter = io.Discard
 	}

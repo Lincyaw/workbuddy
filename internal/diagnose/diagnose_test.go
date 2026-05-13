@@ -172,7 +172,7 @@ type runningTaskFixture struct {
 	startedAt    time.Time
 }
 
-func newDiagnoseStore(t *testing.T) (*store.Store, string) {
+func newDiagnoseStore(t *testing.T) (store.Store, string) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "diagnose.db")
 	st, err := store.NewStore(dbPath)
@@ -182,7 +182,7 @@ func newDiagnoseStore(t *testing.T) (*store.Store, string) {
 	return st, dbPath
 }
 
-func seedRunningTask(t *testing.T, st *store.Store, now time.Time, fx runningTaskFixture) {
+func seedRunningTask(t *testing.T, st store.Store, now time.Time, fx runningTaskFixture) {
 	t.Helper()
 	if err := st.UpsertIssueCache(store.IssueCache{
 		Repo:     fx.repo,
@@ -203,7 +203,7 @@ func seedRunningTask(t *testing.T, st *store.Store, now time.Time, fx runningTas
 	}); err != nil {
 		t.Fatalf("InsertTask: %v", err)
 	}
-	if _, err := st.DB().Exec(
+	if _, err := st.Exec(
 		`UPDATE task_queue SET created_at = ?, acked_at = ?, heartbeat_at = ?, updated_at = ? WHERE id = ?`,
 		fx.startedAt.UTC().Format(time.RFC3339),
 		fx.startedAt.UTC().Format(time.RFC3339),
