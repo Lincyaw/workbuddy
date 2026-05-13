@@ -5241,3 +5241,63 @@ requirements:
       - internal/store/root_trace_test.go
     deps:
       - REQ-137
+
+  - id: REQ-141
+    title: Coordinator-side label writer for agentm coordinator-managed mode (v0.6)
+    description: >
+      Per docs/decisions/2026-05-13-k8s-agentm-otel.md Block 2
+      § Two execution modes, the agentm runtime executes inside an
+      agent-env sandbox with no credentials, so the agent cannot drive
+      the workbuddy state machine via `gh issue edit` itself. The
+      coordinator owns the GH / Gitea write surface and must apply the
+      next-state label change that the agent returns in its structured
+      Result.Meta.
+
+      This requirement introduces the dormant internal/labelwriter
+      package that lays down ApplyNextLabel(ctx, repo, issueNum, label)
+      and its unit tests. The function is **not** wired into any
+      dispatch path yet — that wiring is tracked separately under #332.
+      Until then it must compile and stay covered by tests so #332 can
+      flip the switch in a small follow-up PR.
+
+      Implementation:
+
+      - internal/labelwriter/labelwriter.go exports Writer (constructed
+        with store.Store) and the package-level ApplyNextLabel method.
+        It is a no-op for empty labels; otherwise it consults the
+        coordinator-side repo registration's ConfigJSON for a
+        host_kind field. host_kind=github (or absent) shells out to
+        `gh issue edit <issueNum> --repo <repo> --add-label <label>`
+        through an exec.LookPath indirection so tests can fake the
+        binary; host_kind=gitea POSTs to
+        <gitea_base_url>/api/v1/repos/<repo>/issues/<issueNum>/labels
+        with a GITEA_TOKEN bearer.
+
+      - A single OTel span "labelwriter.apply_next_label" is emitted
+        with wb.label_change.source="coordinator-managed" so dashboards
+        can separate coordinator-applied labels from agent-applied
+        labels (which today emit no such span — they happen inside the
+        agent subprocess).
+
+      - CLAUDE.md's "label changes are done by agent subprocesses
+        themselves" rule gains the explicit narrow exception for
+        runtime=agentm via internal/labelwriter.
+    priority: P1
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-141-1: internal/labelwriter exports ApplyNextLabel with the documented (ctx, repo, issueNum, label) signature."
+      - "AC-141-2: Unit tests assert the exact gh CLI args (`issue edit <n> --repo <repo> --add-label <label>`) for a representative label change."
+      - "AC-141-3: Unit tests assert the Gitea API call (URL, Authorization header, JSON body) for host_kind=gitea registrations."
+      - "AC-141-4: Empty label is a no-op (no exec, no HTTP request)."
+      - "AC-141-5: CLAUDE.md GH-call-boundary rule includes the narrow exception sentence for runtime=agentm."
+      - "AC-141-6: `go build ./... && go vet ./... && go test ./... -count=1` all pass."
+      - "AC-141-7: project-index.yaml has this REQ entry referencing issue #329."
+      - "AC-141-8: ApplyNextLabel is NOT imported by any production dispatch path (dormant until #332)."
+    code:
+      - internal/labelwriter/labelwriter.go
+      - CLAUDE.md
+    tests:
+      - internal/labelwriter/labelwriter_test.go
+    deps:
+      - REQ-134

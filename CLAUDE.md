@@ -133,7 +133,7 @@ Simpler code that maps clearly to requirements > clever abstractions.
 - File naming: Go standard — lowercase, underscore separated, `_test.go` suffix for tests
 - Agent config: `command` field MUST include routing instructions (gh issue edit for label changes)
 - Agent config: `runtime` field selects execution backend (claude-code | codex), default claude-code
-- GH call boundary: Go code only reads GitHub (Poller: gh issue/pr list) and writes comments (Reporter: gh issue comment). Label changes are done by agent subprocesses themselves via `gh issue edit`. Do not add GH write operations to Go code for label manipulation.
+- GH call boundary: Go code only reads GitHub (Poller: gh issue/pr list) and writes comments (Reporter: gh issue comment). Label changes are done by agent subprocesses themselves via `gh issue edit`. Do not add GH write operations to Go code for label manipulation. **Exception**: For `runtime: agentm` (coordinator-managed mode), label changes are applied by coordinator via `internal/labelwriter`. This is the only sanctioned Go-side label write path.
 - Session audit: Agent execution produces session artifacts (conversation logs, tool call history) that must be captured and stored alongside stdout/stderr
 - Editor JSON Schemas: `schemas/agent.schema.json` and `schemas/workflow.schema.json` describe the YAML frontmatter for `.github/workbuddy/agents/*.md` and `.github/workbuddy/workflows/*.md`. Wire them up in your editor (e.g. VSCode `yaml.schemas`) for autocomplete + inline lints. The state-machine YAML embedded in the workflow Markdown body is enforced by `workbuddy validate`, not by the workflow JSON Schema.
 
