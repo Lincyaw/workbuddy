@@ -298,6 +298,7 @@ func (s *sqliteStore) createTables() error {
 			labels TEXT,
 			body TEXT NOT NULL DEFAULT '',
 			state TEXT,
+			root_trace_id TEXT NOT NULL DEFAULT '',
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (repo, issue_num)
 		)`,
@@ -415,6 +416,12 @@ func (s *sqliteStore) createTables() error {
 	}
 	if _, err := s.db.Exec(`ALTER TABLE issue_cache ADD COLUMN body TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("store: alter issue_cache add body: %w", err)
+	}
+	// REQ-137 (#317): root_trace_id persists a per-issue / per-PR OTel
+	// trace_id so long-lifecycle operations correlate under one trace.
+	// Idempotent ALTER — duplicate column name on existing DBs is ignored.
+	if _, err := s.db.Exec(`ALTER TABLE issue_cache ADD COLUMN root_trace_id TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("store: alter issue_cache add root_trace_id: %w", err)
 	}
 	if _, err := s.db.Exec(`ALTER TABLE workers ADD COLUMN token_kid TEXT`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("store: alter workers add token_kid: %w", err)
@@ -1613,13 +1620,20 @@ func (s *sqliteStore) QueryTransitionCounts(repo string, issueNum int) ([]Transi
 // ---------------------------------------------------------------------------
 
 // UpsertIssueCache inserts or updates the cached state of an issue.
+//
+// REQ-137 (#317): on first insert (no existing row for (repo, issue_num)),
+// a fresh OTel trace_id is minted and persisted as root_trace_id so all
+// subsequent operations on this issue/PR correlate under one trace.
+// Existing rows keep their previously assigned trace_id — the upsert
+// path explicitly preserves root_trace_id on conflict.
 func (s *sqliteStore) UpsertIssueCache(ic IssueCache) error {
+	traceID := newRootTraceID()
 	_, err := s.db.Exec(
-		`INSERT INTO issue_cache (repo, issue_num, labels, body, state, updated_at)
-		 VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		`INSERT INTO issue_cache (repo, issue_num, labels, body, state, root_trace_id, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		 ON CONFLICT (repo, issue_num)
 		 DO UPDATE SET labels = excluded.labels, body = excluded.body, state = excluded.state, updated_at = CURRENT_TIMESTAMP`,
-		ic.Repo, ic.IssueNum, ic.Labels, ic.Body, ic.State,
+		ic.Repo, ic.IssueNum, ic.Labels, ic.Body, ic.State, traceID,
 	)
 	if err != nil {
 		return fmt.Errorf("store: upsert issue cache: %w", err)

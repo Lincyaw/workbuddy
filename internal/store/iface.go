@@ -104,6 +104,19 @@ type Store interface {
 	QueryIssueCache(repo string, issueNum int) (*IssueCache, error)
 	ListIssueCaches(repo string) ([]IssueCache, error)
 
+	// Root trace IDs (REQ-137 / #317). On first ingest of an issue or PR
+	// row into issue_cache, the store assigns a freshly minted OTel
+	// trace_id (32-hex). Subsequent operations on that entity look up the
+	// stored trace_id so all child spans correlate under the same trace.
+	//
+	// The PR/issue cross-linkage ("PR inherits parent issue's trace_id")
+	// is not yet implemented at the schema level — PRs and issues share
+	// the issue_cache table but there is no parent_issue_num column, so
+	// each row gets its own freshly minted trace_id. Cross-linking will
+	// land alongside the span-correlation work in #320.
+	GetIssueRootTraceID(repo string, issueNum int) (string, error)
+	GetPRRootTraceID(repo string, prNum int) (string, error)
+
 	// Transitions / cycle state.
 	IncrementTransition(repo string, issueNum int, fromState, toState string) (int, error)
 	CountConsecutiveAgentFailures(repo string, issueNum int, agentName string) (int, error)
