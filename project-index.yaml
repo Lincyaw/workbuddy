@@ -5619,3 +5619,81 @@ requirements:
     deps:
       - REQ-141
       - REQ-142
+
+  - id: REQ-147
+    title: End-to-end kind smoke for v0.6 K8s path (REQ-147 / #335)
+    description: >
+      Per docs/decisions/2026-05-13-k8s-agentm-otel.md Block 5
+      § Migration & rollout, the v0.6 K8s deployment plane needs a
+      local smoke validation before any tag is cut. Issue #335.
+
+      Scope: a `hack/e2e/` directory holding a `make e2e` target that
+      spins up a single-node kind cluster, installs in-cluster MySQL +
+      OTel collector + a stdlib-Python fake-gh server, `helm install`s
+      the workbuddy chart at `deploy/helm/workbuddy/`, waits for the
+      coordinator pod to become Ready, and asserts:
+
+        1. The chart's `WORKBUDDY_MYSQL_DSN` env reaches the in-cluster
+           MySQL — verified by `kubectl exec` into the MySQL pod and
+           confirming the workbuddy schema tables exist. This proves
+           the coordinator routed `store.New(dsn)` to MySQL rather
+           than silently falling back to SQLite.
+        2. The chart's OTel endpoint wiring is honored (soft signal:
+           debug exporter logs a workbuddy span within 30s).
+        3. The fake-gh `/_healthz` endpoint is reachable from inside
+           the cluster.
+
+      The AgentM dispatch + PR-creation + label-flip assertion stays
+      out of scope for this REQ: triggering it end-to-end requires
+      either a real Gitea or a fake-gh faithful enough to satisfy the
+      poller's gh-CLI JSON contract. The Makefile prints a SKIPPED
+      banner with the reason and `hack/e2e/README.md § Known
+      limitations` tracks the follow-up.
+
+      Coordinator MySQL wiring (G1 prerequisite, bundled here): a
+      previously-rendered chart value (`mysql.dsn`) was silently
+      ignored because `cmd/coordinator.go` always called the
+      SQLite-only `store.NewCoordinatorStore`. This REQ adds
+      `resolveCoordinatorDSN(flag, env)` and switches the dispatch
+      path to `store.NewCoordinator(dsn)` / `store.New(dsn)` with
+      precedence flag(scheme) > WORKBUDDY_MYSQL_DSN env > bare
+      SQLite path. Unit test in `cmd/coordinator_dsn_test.go` locks
+      the precedence.
+
+      Hard requirement: this smoke is **local-only**. There is no
+      CI job that runs `make e2e`; the docker-in-docker + kind cost
+      is not justified for a pre-release smoke gate (issue #335
+      § Out of scope). `make dry-validate` is the lightweight
+      offline path: helm lint + helm template + docker build, no
+      cluster.
+    priority: P1
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-1-1: `make e2e` on a developer machine with kind+helm+docker+kubectl on PATH spins everything up, runs the assertion phase, and returns 0."
+      - "AC-1-2: On failure the EXIT trap dumps coordinator/mysql/otel/fake-gh pod logs and exits non-zero."
+      - "AC-1-3: `hack/e2e/README.md` lists prerequisites and the run command."
+      - "AC-1-4: `project-index.yaml` has this REQ entry referencing issue #335."
+      - "AC-1-5: Coordinator honors `WORKBUDDY_MYSQL_DSN` via `resolveCoordinatorDSN`; unit test in `cmd/coordinator_dsn_test.go` asserts precedence (flag > env > SQLite default) and that the env-supplied bare DSN gets the `mysql://` scheme so `store.New` routes to the MySQL dialect."
+      - "AC-1-6: No CI workflow is added for `make e2e`. The smoke is local-only and `hack/e2e/README.md` documents this explicitly."
+    code:
+      - cmd/coordinator.go
+      - hack/e2e/Makefile
+      - hack/e2e/kind-config.yaml
+      - hack/e2e/README.md
+      - hack/e2e/values/workbuddy-values.yaml
+      - hack/e2e/manifests/mysql.yaml
+      - hack/e2e/manifests/otel-collector.yaml
+      - hack/e2e/manifests/fake-gh.yaml
+      - hack/e2e/workbuddy-image/Dockerfile
+      - hack/e2e/agentm-fake/Dockerfile
+      - hack/e2e/agentm-fake/agentm
+      - hack/e2e/fake-gh/Dockerfile
+      - hack/e2e/fake-gh/server.py
+    tests:
+      - cmd/coordinator_dsn_test.go
+      - hack/e2e/Makefile
+    deps:
+      - REQ-143
+      - REQ-144
+      - REQ-145

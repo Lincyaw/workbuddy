@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Fake AgentM binary for the kind smoke test (REQ-147 / #335).
+#
+# Mirrors the unit-test fake at internal/agent/agentm/agentmtest/fake.go
+# (ModeSuccess path). The real AgentM is gated behind agent-env and is too
+# heavy for a smoke. The coordinator-side gitops adapter then turns the
+# RESULT line + an artifact into a git push + `gh pr create`.
+#
+# Contract (see docs/planned/agentm-runtime.md):
+#   - flags: --workspace --task-file --session-log --result-file
+#   - on success: write a single `RESULT: {json}` line to stdout AND mirror
+#     the JSON body into $RESULT_FILE.
+#   - $SESSION_LOG must exist (JSONL transcript) so the host can ingest it.
+#
+# Artifact: drop a tiny README.md into $WORKSPACE so the coordinator-side
+# gitops CommitAndPush has something non-empty to commit. Without this the
+# bridge sets agentm_publish=no_changes and the smoke would not exercise
+# the PR-creation path.
+
+set -eu
+
+WORKSPACE=""
+TASK_FILE=""
+SESSION_LOG=""
+RESULT_FILE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --workspace)   WORKSPACE="$2"; shift 2 ;;
+    --task-file)   TASK_FILE="$2"; shift 2 ;;
+    --session-log) SESSION_LOG="$2"; shift 2 ;;
+    --result-file) RESULT_FILE="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+
+if [[ -n "$SESSION_LOG" ]]; then
+  mkdir -p "$(dirname "$SESSION_LOG")"
+  cat > "$SESSION_LOG" <<JSONL
+{"kind":"turn.started","ts":"$(ts)"}
+{"kind":"agent.message","ts":"$(ts)","text":"fake agentm (kind smoke) starting"}
+{"kind":"tool.invocation","ts":"$(ts)","name":"write_file","input":"README.md"}
+{"kind":"turn.completed","ts":"$(ts)"}
+JSONL
+fi
+
+if [[ -n "$WORKSPACE" && -d "$WORKSPACE" ]]; then
+  cat > "$WORKSPACE/SMOKE-NOTE.md" <<EOF
+# workbuddy kind smoke artifact
+
+Written by hack/e2e/agentm-fake/agentm at $(ts).
+
+This file exists so the coordinator-side gitops adapter (REQ-142) has a
+non-empty diff to commit onto the workbuddy/issue-N branch, which in
+turn drives the \`gh pr create\` assertion in the smoke.
+EOF
+fi
+
+echo "fake agentm: workspace=$WORKSPACE task=$TASK_FILE"
+
+BODY='{"success":true,"next_label":"status:review","session_log_path":"'"$SESSION_LOG"'"}'
+echo "RESULT: $BODY"
+if [[ -n "$RESULT_FILE" ]]; then
+  mkdir -p "$(dirname "$RESULT_FILE")"
+  echo "$BODY" > "$RESULT_FILE"
+fi

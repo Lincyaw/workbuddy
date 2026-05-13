@@ -1,0 +1,17 @@
+# Single-node kind cluster for the v0.6 K8s smoke test (REQ-147 / #335).
+#
+# Intentionally minimal: one control-plane + workload node, default CNI,
+# no ingress controller pre-installed (the smoke does not exercise the
+# Ingress route — see hack/e2e/README.md § "What's actually asserted").
+#
+# nodeImage is pinned via the KIND_NODE_IMAGE env in the Makefile to keep
+# the smoke reproducible across developer machines; override locally by
+# exporting KIND_NODE_IMAGE before `make e2e`.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: workbuddy-e2e
+nodes:
+  - role: control-plane
+    # extraPortMappings would only be needed if we exposed the Ingress;
+    # the smoke talks to ClusterIP Services via `kubectl port-forward`
+    # and `kubectl exec`, both of which work without host-port binding.

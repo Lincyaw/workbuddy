@@ -1,0 +1,40 @@
+# helm-values override for the workbuddy v0.6 kind smoke (REQ-147 / #335).
+#
+# Points the chart at the in-cluster fakes spun up by Makefile targets
+# `install-mysql`, `install-otel`, `install-fake-gh`. The image tag
+# `workbuddy:e2e` is loaded into kind by `kind load docker-image`
+# before `helm install` runs.
+
+image:
+  repository: workbuddy
+  tag: e2e
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8081
+
+# MySQL DSN in plaintext is acceptable for the smoke; production
+# deployments use mysql.dsnSecretRef instead (REQ-145).
+mysql:
+  dsn: "workbuddy:workbuddy@tcp(mysql.workbuddy-e2e.svc.cluster.local:3306)/workbuddy?parseTime=true"
+
+otel:
+  endpoint: "http://otel-collector.workbuddy-e2e.svc.cluster.local:4318"
+  protocol: "http/protobuf"
+  serviceName: "workbuddy-e2e"
+
+# Inline token (chart-created Secret). The fake-gh server accepts
+# any non-empty bearer.
+giteaToken:
+  secretName: ""
+  token: "e2e-smoke-token"
+
+# Use the chart-bundled agent configs. The smoke does not exercise
+# custom agents; the AgentM dispatch path is asserted via the fake
+# binary baked into workbuddy-agentm-fake:e2e (loaded separately).
+agents:
+  configMapName: ""
+
+ingress:
+  enabled: false

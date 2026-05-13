@@ -1,0 +1,74 @@
+# Bare MySQL 8.0 for the workbuddy v0.6 kind smoke (REQ-147 / #335).
+#
+# Intentionally NOT the AegisLab MySQL operator — the smoke validates
+# only that the chart's WORKBUDDY_MYSQL_DSN wiring reaches a working
+# MySQL endpoint. Single replica, emptyDir for storage, no PVC: the
+# whole cluster is torn down at the end of `make e2e`.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: workbuddy-e2e
+  labels:
+    app: mysql
+spec:
+  ports:
+    - port: 3306
+      targetPort: 3306
+  selector:
+    app: mysql
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  namespace: workbuddy-e2e
+  labels:
+    app: mysql
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          args:
+            # parseTime=true on the Go side requires a UTC server clock.
+            - "--default-authentication-plugin=mysql_native_password"
+            - "--character-set-server=utf8mb4"
+            - "--collation-server=utf8mb4_unicode_ci"
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              value: rootpw
+            - name: MYSQL_DATABASE
+              value: workbuddy
+            - name: MYSQL_USER
+              value: workbuddy
+            - name: MYSQL_PASSWORD
+              value: workbuddy
+          ports:
+            - containerPort: 3306
+              name: mysql
+          readinessProbe:
+            exec:
+              command:
+                - bash
+                - -c
+                - "mysqladmin ping -h 127.0.0.1 -uworkbuddy -pworkbuddy"
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+      volumes:
+        - name: data
+          emptyDir: {}
