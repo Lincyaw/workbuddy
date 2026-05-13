@@ -12,7 +12,7 @@
 //     active OTel tracer (so the value appears in the collector) and
 //     falling back to crypto/rand when no SDK is installed.
 //   - GetIssueRootTraceID / GetPRRootTraceID: read accessors on
-//     sqliteStore (the issue_cache row holds the value for both —
+//     dbStore (the issue_cache row holds the value for both —
 //     issues and PRs are differentiated only by the "pr:" prefix on
 //     state, so the same SELECT serves both with different keys).
 //
@@ -60,18 +60,18 @@ func newRootTraceID() string {
 // GetIssueRootTraceID returns the persisted root_trace_id for an issue
 // row in issue_cache. Returns "" and nil error when the row does not
 // exist yet (caller decides whether absence is fatal).
-func (s *sqliteStore) GetIssueRootTraceID(repo string, issueNum int) (string, error) {
+func (s *dbStore) GetIssueRootTraceID(repo string, issueNum int) (string, error) {
 	return s.getRootTraceID(repo, issueNum)
 }
 
 // GetPRRootTraceID returns the persisted root_trace_id for a PR row.
 // PRs share issue_cache with issues — the "pr:" prefix on state is the
 // only discriminator — so this is the same lookup keyed by PR number.
-func (s *sqliteStore) GetPRRootTraceID(repo string, prNum int) (string, error) {
+func (s *dbStore) GetPRRootTraceID(repo string, prNum int) (string, error) {
 	return s.getRootTraceID(repo, prNum)
 }
 
-func (s *sqliteStore) getRootTraceID(repo string, num int) (string, error) {
+func (s *dbStore) getRootTraceID(repo string, num int) (string, error) {
 	var tid string
 	err := s.db.QueryRow(
 		`SELECT root_trace_id FROM issue_cache WHERE repo = ? AND issue_num = ?`,
