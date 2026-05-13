@@ -5043,3 +5043,58 @@ requirements:
     tests:
       - internal/store/schema_parity_test.go
       - internal/store/store_mysql_integration_test.go
+
+  - id: REQ-139
+    title: workbuddy db migrate (SQLite -> MySQL one-shot)
+    description: >
+      Per docs/decisions/2026-05-13-k8s-agentm-otel.md Block 3
+      § Migration tool and Block 5 § Migration & rollout, this adds
+      the offline migration CLI for users moving from the systemd
+      (SQLite) topology to the K8s (MySQL) topology. Issue #318.
+      The command is `workbuddy db migrate --from <sqlite-dsn>
+      --to <mysql-dsn>`. It opens both sides via store.New, then
+      streams every row of every known workbuddy table from source
+      to destination using the raw Query/Exec escape hatches on
+      the Store interface. Rows are accumulated in a bounded batch
+      (default 1000) and flushed as a multi-VALUES INSERT so peak
+      memory is O(batch * columns), not O(total rows). Per-table
+      counts are SELECT COUNT(*) verified on both sides at the end;
+      a mismatch is a hard error.
+      Idempotency contract: if the destination is non-empty in any
+      known table the command refuses to run unless --force is
+      passed, in which case the destination is wiped (DELETE FROM
+      in reverse FK order so workflow_transitions clears before
+      workflow_instances) and then re-copied from source. The
+      "wipe + rewrite" semantics is the only one that keeps a
+      forced re-run row-count-consistent with source regardless of
+      what was previously in the destination.
+      Scope: forward direction only (SQLite -> MySQL), no reverse,
+      no schema upgrade across workbuddy versions, offline only
+      (coordinator must be stopped). Tests use a sqlite:// DSN as
+      the destination to keep CI hermetic — the same code path
+      that handles MySQL works for any Store backend; the test
+      verifies the migration *logic*, not the engine difference.
+      A mysql_integration-tagged variant targets real MySQL via
+      WORKBUDDY_MYSQL_TEST_DSN.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-139-1: `workbuddy db migrate --from sqlite://./old.db --to sqlite://./new.db` produces a destination DB whose per-table row counts match source across every known workbuddy table (TestDBMigrateHappyPath)."
+      - "AC-139-2: Re-running against a non-empty destination fails with a clear error naming the offending tables and suggesting --force (TestDBMigrateRefusesNonEmptyDestination)."
+      - "AC-139-3: `--force` wipes destination tables in FK-safe reverse order then re-copies, and a subsequent re-run remains consistent (TestDBMigrateForceOverwritesDestination)."
+      - "AC-139-4: migrationTables covers every table that internal/store creates on bootstrap (TestMigrateTablesCoverSchema)."
+      - "AC-139-5: Real-MySQL variant gated behind mysql_integration build tag and WORKBUDDY_MYSQL_TEST_DSN (TestDBMigrateToMySQL)."
+      - "AC-139-6: go build ./..., go vet ./..., and go test ./... -count=1 all pass."
+      - "AC-139-7: docs/upgrade-v0.4-to-v0.5.md documents the migration procedure end-to-end."
+      - "AC-139-8: This index entry references issue #318 and the decision doc, status tested."
+    code:
+      - cmd/db.go
+      - cmd/db_migrate.go
+      - docs/upgrade-v0.4-to-v0.5.md
+    tests:
+      - cmd/db_migrate_test.go
+      - cmd/db_migrate_mysql_test.go
+    deps:
+      - REQ-135
+      - REQ-136

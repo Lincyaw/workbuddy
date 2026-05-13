@@ -1,6 +1,56 @@
 # Upgrading workbuddy from v0.4.x to v0.5.0
 
-v0.5 splits the worker into two processes:
+## Optional: migrating the database from SQLite to MySQL
+
+v0.5 abstracts the persistence layer behind a `Store` interface and adds a
+MySQL backend selected by DSN scheme (`mysql://...`). systemd installs stay
+on SQLite by default; the MySQL backend is intended for K8s deployments
+(see `docs/decisions/2026-05-13-k8s-agentm-otel.md` Block 3 § Storage). If
+you are moving an existing systemd install onto K8s — or simply consolidating
+several SQLite files into a managed MySQL — use the offline migrator:
+
+```bash
+# 1) stop the coordinator (and any supervisor/worker units that share the DB)
+systemctl --user stop workbuddy-coordinator.service workbuddy-worker.service \
+                      workbuddy-supervisor.service
+
+# 2) run the one-shot migration
+workbuddy db migrate \
+  --from sqlite:///var/lib/workbuddy/workbuddy.db \
+  --to   'mysql://wb:secret@tcp(mysql.internal:3306)/workbuddy'
+
+# 3) update the coordinator's DSN config to point at MySQL, then start the
+#    coordinator again (workers do not need to be aware of the swap — they
+#    only talk to the coordinator over HTTP).
+systemctl --user start workbuddy-coordinator.service workbuddy-worker.service
+```
+
+Notes:
+
+- The migration is **offline and one-shot**. The coordinator must be stopped
+  on both sides; there is no live-replication mode.
+- The destination database must already exist and be reachable. `workbuddy
+  db migrate` opens the destination via the normal store factory, which
+  creates the workbuddy schema on first connect — you do **not** need to
+  pre-load `internal/store/mysql/schema.sql` by hand.
+- If the destination is non-empty, the command refuses to run unless you
+  pass `--force`, which first wipes every known workbuddy table on the
+  destination and then re-copies from the source. The error message lists
+  which tables had data so you can decide whether the destination is the
+  one you meant to target.
+- Per-table row counts are verified at the end. A mismatch is treated as a
+  hard error so a partial migration cannot silently become the new source
+  of truth.
+- Reverse migration (MySQL → SQLite) and cross-version schema upgrades are
+  intentionally out of scope — both sides must be on the same workbuddy
+  version.
+
+If you stay on SQLite, no action is required: every other v0.5 upgrade
+step below applies the same way.
+
+---
+
+v0.5 also splits the worker into two processes:
 
 - **worker** (stateless) — long-polls the coordinator and forwards events. Can be SIGKILL'd at any time without losing in-flight agent runs.
 - **agent supervisor** (long-lived) — owns claude-code / codex subprocesses behind a unix-socket IPC API. Survives worker restarts.
