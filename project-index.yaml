@@ -4920,3 +4920,39 @@ requirements:
       - internal/store/store_session_routes_test.go
       - internal/store/store_supervisor_agent_id_test.go
     deps: []
+
+  - id: REQ-134
+    title: AgentM host-exec dispatch + session artifact wiring (v0.5)
+    description: >
+      Implements the dispatch slice of the AgentM runtime introduced by
+      REQ-133. The worker recognizes `runtime: agentm`, exec's the AgentM
+      CLI as a subprocess (host-exec, self-managed), assembles inputs per
+      docs/planned/agentm-runtime.md (workspace, task file, env including
+      TRACEPARENT propagated from the current OTel context, WORKBUDDY_*),
+      parses the structured RESULT: line on stdout, validates it against
+      schemas/agentm-output.schema.json, emits the standard session
+      artifact shape, and surfaces next_label / failure_reason on the
+      runtime Result so reporter/audit render it. Malformed RESULT or
+      missing required schema fields are classified as infra failures.
+      Sandbox / coordinator-managed mode is v0.6.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-1-1: Issue with `runtime: agentm` dispatched on a worker that has `agentm` CLI on PATH completes a happy-path cycle in integration test (using fake AgentM)."
+      - "AC-1-2: Malformed JSON output from AgentM is caught and surfaces as a `status:failed` with a clear failure_reason in the issue comment."
+      - "AC-1-3: Session artifact for an AgentM run is readable through the same session-view UI as claude-code runs."
+      - "AC-1-4: `go build ./... && go vet ./... && go test ./... -count=1` all pass."
+      - "AC-1-5: `project-index.yaml` REQ updated with status `tested`."
+    code:
+      - internal/agent/agentm/backend.go
+      - internal/agent/agentm/output.go
+      - internal/agent/agentm/agentm-output.schema.json
+      - internal/agent/agentm/agentmtest/fake.go
+      - internal/runtime/agent_bridge.go
+      - internal/launcher/launcher.go
+    tests:
+      - internal/agent/agentm/backend_test.go
+      - internal/runtime/agentm_bridge_test.go
+    deps:
+      - REQ-133
