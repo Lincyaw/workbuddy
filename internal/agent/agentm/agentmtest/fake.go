@@ -54,7 +54,7 @@ type Config struct {
 	// EnvDumpPath, when non-empty, makes the fake write its full process
 	// environment (one `KEY=VALUE` per line) to this absolute path before
 	// emitting RESULT:. Tests use it to assert workbuddy-injected env vars
-	// (TRACEPARENT, WORKBUDDY_DEV_CONTAINER_IMAGE, …) actually reach the
+	// (TRACEPARENT, AGENTM_AGENT_ENV_IMAGE, …) actually reach the
 	// AgentM subprocess.
 	EnvDumpPath string
 }

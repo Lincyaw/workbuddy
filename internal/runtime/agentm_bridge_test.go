@@ -131,7 +131,7 @@ func TestAgentMBridge_TaskFailure(t *testing.T) {
 
 // TestAgentMBridge_DevContainerImageEnv covers REQ-140 / issue #328 AC-1-1:
 // when the agent config sets dev_container_image and runtime=agentm, the
-// AgentM subprocess MUST receive WORKBUDDY_DEV_CONTAINER_IMAGE in its env.
+// AgentM subprocess MUST receive AGENTM_AGENT_ENV_IMAGE in its env.
 // workbuddy passes the image name only — AgentM owns the actual sandbox
 // dispatch, so this is a pass-through assertion, not an end-to-end one.
 func TestAgentMBridge_DevContainerImageEnv(t *testing.T) {
