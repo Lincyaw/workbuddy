@@ -6,7 +6,7 @@ described in `docs/decisions/2026-05-13-k8s-agentm-otel.md` Block 3.
 
 This chart is intentionally minimal at v0.6.0. The full values surface
 (MySQL host/user/pass/db split, OTel resource attributes, AegisLab topology
-wiring, ingress) is hardened in **#334**. Ingress is **#333**.
+wiring) is hardened in **#334**. Ingress shipped via **#333** (REQ-144).
 
 ## Install
 
@@ -32,9 +32,39 @@ chart will materialize a Secret for dev use. Likewise, if
 from `deploy/helm/workbuddy/agents/*.md` (empty by default — bundle your
 defaults there or override).
 
+## Ingress
+
+Disabled by default. Enable to expose the coordinator's webui, JSON API,
+and webhook entrypoint through a single host:
+
+```bash
+helm install my-workbuddy deploy/helm/workbuddy \
+  --set mysql.dsn=mysql://user:pass@mysql.aegislab.svc:3306/workbuddy \
+  --set giteaToken.secretName=workbuddy-gitea \
+  --set ingress.enabled=true \
+  --set ingress.host=workbuddy.example.com
+```
+
+The chart renders one `Ingress` resource with three Prefix routes, all
+backed by the coordinator Service on port `service.port` (default 8080):
+
+| Path | Purpose |
+|------|---------|
+| `/webui` | SPA served from `internal/webui/dist`. |
+| `/api`   | JSON API consumed by the webui and by `workbuddy worker` long-poll. |
+| `/webhook` | Gitea / GitHub push webhook entrypoint. |
+
+Optional fields:
+
+| Key | Description |
+|-----|-------------|
+| `ingress.className` | Sets `ingressClassName` (omit to use cluster default). |
+| `ingress.annotations` | Free-form annotations (e.g. nginx rewrite rules). |
+| `ingress.tls.enabled` | Render a `tls:` block on the Ingress. |
+| `ingress.tls.secretName` | Existing TLS Secret name. cert-manager / ACME is out of scope — wire it externally. |
+
 ## What's not here yet
 
-- Ingress (tracked in **#333**).
 - Full values surface — split MySQL fields, OTel docs, AegisLab topology
   defaults (tracked in **#334**).
 - Worker deployment — K8s mode collapses worker into the coordinator
