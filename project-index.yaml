@@ -5301,3 +5301,68 @@ requirements:
       - internal/labelwriter/labelwriter_test.go
     deps:
       - REQ-134
+
+  - id: REQ-140
+    title: dev_container_image agent-config field + AgentM env pass-through (v0.6)
+    description: >
+      Per docs/decisions/2026-05-13-k8s-agentm-otel.md Block 2 v0.6
+      plan, workbuddy stays at host-exec for AgentM. AgentM internally
+      requests a sandbox from agent-env using the dev container image
+      workbuddy declares; workbuddy does NOT talk to agent-env
+      directly — that is AgentM's implementation detail. This
+      requirement adds the single config field workbuddy needs to
+      expose (which image AgentM should run inside) and the
+      env-passing wiring.
+
+      Implementation:
+
+      - internal/config/types.go AgentConfig adds an optional
+        `dev_container_image` string field (yaml tag omitempty).
+
+      - internal/config/loader.go normalizeAgentConfig appends a
+        warning (not an error) when dev_container_image is set on a
+        runtime other than agentm. This lets configs pre-stage the
+        field for a planned runtime swap without breaking validation.
+
+      - internal/runtime/agent_bridge.go declares the env-var name
+        EnvDevContainerImage = "WORKBUDDY_DEV_CONTAINER_IMAGE" and
+        adds injectAgentMEnv(agentCfg, env) which only injects the
+        var when runtime == agentm and dev_container_image is
+        non-empty. The injection runs after injectTraceContext so
+        it cannot accidentally override TRACEPARENT / WORKBUDDY_*
+        plumbing.
+
+      - schemas/agent.schema.json adds the dev_container_image
+        property to the frontmatter schema so editors get
+        autocomplete + inline lints.
+
+      - docs/planned/agentm-runtime.md adds the env var to the
+        invocation contract's environment table so AgentM
+        contributors know to consume it.
+
+      Out of scope (explicit non-goals):
+
+      - agent-env Gateway client (AgentM handles it).
+      - Sandbox dispatch logic (workbuddy stays host-exec for AgentM).
+      - Image registry validation.
+      - .devcontainer/devcontainer.json parsing.
+    priority: P1
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-140-1: Agent config with `dev_container_image: foo:bar` and `runtime: agentm` validates; the value reaches the AgentM subprocess env as WORKBUDDY_DEV_CONTAINER_IMAGE (asserted via env-dump fake)."
+      - "AC-140-2: Agent config with `dev_container_image` set on `runtime: claude-code` produces a config validation warning (not an error)."
+      - "AC-140-3: When `dev_container_image` is unset for `runtime: agentm`, the env var is NOT injected (AgentM falls back to its own default image)."
+      - "AC-140-4: docs/planned/agentm-runtime.md documents the env var."
+      - "AC-140-5: `go build ./... && go vet ./... && go test ./... -count=1` all pass."
+      - "AC-140-6: project-index.yaml has this REQ entry referencing issue #328."
+    code:
+      - internal/config/types.go
+      - internal/config/loader.go
+      - internal/runtime/agent_bridge.go
+      - internal/agent/agentm/agentmtest/fake.go
+      - schemas/agent.schema.json
+      - docs/planned/agentm-runtime.md
+    tests:
+      - internal/config/loader_test.go
+      - internal/runtime/agentm_bridge_test.go
