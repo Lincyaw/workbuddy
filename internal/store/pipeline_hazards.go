@@ -38,7 +38,7 @@ type PipelineHazard struct {
 // (repo, issue_num). It returns changed=true when the row was created or its
 // kind/fingerprint differs from a prior row, so callers can decide whether to
 // emit a fresh INFO event (idempotency contract).
-func (s *sqliteStore) UpsertIssuePipelineHazard(h PipelineHazard) (changed bool, err error) {
+func (s *dbStore) UpsertIssuePipelineHazard(h PipelineHazard) (changed bool, err error) {
 	prev, err := s.QueryIssuePipelineHazard(h.Repo, h.IssueNum)
 	if err != nil {
 		return false, err
@@ -73,7 +73,7 @@ func (s *sqliteStore) UpsertIssuePipelineHazard(h PipelineHazard) (changed bool,
 
 // QueryIssuePipelineHazard returns the hazard for the given issue, or nil if
 // none is recorded.
-func (s *sqliteStore) QueryIssuePipelineHazard(repo string, issueNum int) (*PipelineHazard, error) {
+func (s *dbStore) QueryIssuePipelineHazard(repo string, issueNum int) (*PipelineHazard, error) {
 	row := s.db.QueryRow(
 		`SELECT repo, issue_num, kind, fingerprint, detected_at
 			FROM issue_pipeline_hazards WHERE repo = ? AND issue_num = ?`,
@@ -98,7 +98,7 @@ func (s *sqliteStore) QueryIssuePipelineHazard(repo string, issueNum int) (*Pipe
 
 // ListIssuePipelineHazards returns every hazard for the given repo, or every
 // hazard across all repos when repo is empty.
-func (s *sqliteStore) ListIssuePipelineHazards(repo string) ([]PipelineHazard, error) {
+func (s *dbStore) ListIssuePipelineHazards(repo string) ([]PipelineHazard, error) {
 	var (
 		rows *sql.Rows
 		err  error
@@ -136,7 +136,7 @@ func (s *sqliteStore) ListIssuePipelineHazards(repo string) ([]PipelineHazard, e
 
 // ClearIssuePipelineHazard deletes the hazard row for the given issue. Returns
 // nil when the row does not exist.
-func (s *sqliteStore) ClearIssuePipelineHazard(repo string, issueNum int) error {
+func (s *dbStore) ClearIssuePipelineHazard(repo string, issueNum int) error {
 	_, err := s.db.Exec(
 		`DELETE FROM issue_pipeline_hazards WHERE repo = ? AND issue_num = ?`,
 		repo, issueNum,

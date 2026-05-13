@@ -1,8 +1,14 @@
-// Package store provides SQLite-backed persistence for workbuddy state.
+// Package store provides backend-abstract persistence for workbuddy state.
+//
+// Concrete backends are SQLite (systemd default) and MySQL (K8s default,
+// added in v0.5 per docs/decisions/2026-05-13-k8s-agentm-otel.md Block 3
+// § Storage and issue #316). The concrete struct is `dbStore`; the
+// `Store` interface in `iface.go` is the boundary every caller crosses.
 package store
 
 import (
 	"crypto/rand"
+	_ "embed"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -16,8 +22,12 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite" // sqlite driver
+	_ "github.com/go-sql-driver/mysql" // mysql driver
+	_ "modernc.org/sqlite"             // sqlite driver
 )
+
+//go:embed mysql/schema.sql
+var mysqlSchemaSQL string
 
 // ParseTimestamp attempts to parse a SQLite timestamp string using common formats.
 // Returns the parsed time and true on success, or zero time and false on failure
@@ -60,11 +70,19 @@ var (
 
 var coordinatorIssueClaimPattern = regexp.MustCompile(`^coordinator-.*-pid-(\d+)$`)
 
-// sqliteStore provides typed CRUD access to the workbuddy SQLite database.
-type sqliteStore struct {
-	db      *sql.DB
+// dbStore provides typed CRUD access to the workbuddy database. The
+// concrete backend (SQLite vs MySQL) is selected by the `dialect` field,
+// which `New` picks based on the DSN scheme.
+//
+// The `db` field is a thin wrapper around *sql.DB that rewrites
+// SQLite-flavoured SQL on the fly for MySQL (see db_adapter.go and
+// dialect.go). Internal call sites can use it interchangeably with
+// *sql.DB — Exec/Query/QueryRow/Begin all keep their signatures.
+type dbStore struct {
+	db      *dbHandle
+	dialect dialect
 	nowFunc func() time.Time
-	// coordinatorMode is true when this sqliteStore backs the coordinator's DB
+	// coordinatorMode is true when this dbStore backs the coordinator's DB
 	// (NewCoordinatorStore). Phase 3 of the session-data ownership
 	// refactor (REQ-122): the coordinator drops the legacy `sessions` and
 	// `agent_sessions` tables on startup and skips their re-creation.
@@ -93,12 +111,20 @@ func NewStore(dbPath string) (Store, error) {
 	return openStore(dbPath, storeMode{})
 }
 
-// New is the abstract Store factory. The DSN argument is interpreted as a
-// filesystem path (SQLite is currently the only backend). Future engines
-// (e.g. MySQL, per docs/decisions/2026-05-13-k8s-agentm-otel.md Block 3)
-// will be dispatched via a scheme prefix without changing this signature.
+// New is the abstract Store factory. The DSN argument is interpreted by
+// its scheme prefix:
+//
+//   - `sqlite://<path>` — SQLite database at the given filesystem path.
+//   - `mysql://<go-mysql-driver DSN>` — MySQL backend (v0.5+, REQ-136 /
+//     issue #316). The `mysql://` prefix is stripped before being handed
+//     to github.com/go-sql-driver/mysql. `parseTime=true` is enforced.
+//   - No scheme — defaults to SQLite for backward compatibility with
+//     existing call sites that pass a bare filesystem path.
+//
+// New is the only entry point that knows about schemes; the rest of the
+// package goes through `dbStore` / `Store` and is dialect-agnostic.
 func New(dsn string) (Store, error) {
-	return NewStore(dsn)
+	return newWithMode(dsn, storeMode{})
 }
 
 // NewCoordinatorStore is the coordinator-side variant of NewStore.
@@ -113,12 +139,19 @@ func New(dsn string) (Store, error) {
 // them outright. Worker DBs use NewStore unchanged.
 //
 // Idempotent: safe to call on a fresh DB and on a coordinator that has
-// already migrated. The companion guard `sqliteStore.coordinatorMode` then
+// already migrated. The companion guard `dbStore.coordinatorMode` then
 // makes per-method graceful: GetSession / ListSessions / ListSessionsForAPI
 // short-circuit to "no rows / not found" instead of erroring on the
 // missing table.
 func NewCoordinatorStore(dbPath string) (Store, error) {
 	return openStore(dbPath, storeMode{coordinator: true})
+}
+
+// NewCoordinator is the DSN-aware counterpart of NewCoordinatorStore. It
+// accepts the same scheme prefixes as New and applies the coordinator
+// session-table drop step on whichever backend is selected.
+func NewCoordinator(dsn string) (Store, error) {
+	return newWithMode(dsn, storeMode{coordinator: true})
 }
 
 type storeMode struct {
@@ -127,7 +160,7 @@ type storeMode struct {
 	coordinator bool
 }
 
-func openStore(dbPath string, mode storeMode) (*sqliteStore, error) {
+func openStore(dbPath string, mode storeMode) (*dbStore, error) {
 	dir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("store: create dir: %w", err)
@@ -144,8 +177,10 @@ func openStore(dbPath string, mode storeMode) (*sqliteStore, error) {
 		return nil, fmt.Errorf("store: enable WAL: %w", err)
 	}
 
-	s := &sqliteStore{
-		db:              db,
+	d := dialect{kind: dialectSQLite}
+	s := &dbStore{
+		db:              newDBHandle(db, d),
+		dialect:         d,
 		nowFunc:         time.Now,
 		coordinatorMode: mode.coordinator,
 	}
@@ -162,8 +197,71 @@ func openStore(dbPath string, mode storeMode) (*sqliteStore, error) {
 	return s, nil
 }
 
+// newWithMode dispatches by DSN scheme. Bare paths (no scheme) and
+// `sqlite://` go to openStore; `mysql://` opens the MySQL backend.
+func newWithMode(dsn string, mode storeMode) (Store, error) {
+	switch {
+	case strings.HasPrefix(dsn, "mysql://"):
+		return openMySQLStore(strings.TrimPrefix(dsn, "mysql://"), mode)
+	case strings.HasPrefix(dsn, "sqlite://"):
+		return openStore(strings.TrimPrefix(dsn, "sqlite://"), mode)
+	default:
+		return openStore(dsn, mode)
+	}
+}
+
+// openMySQLStore opens a MySQL backend at the given driver DSN (no scheme
+// prefix). The bootstrap path applies internal/store/mysql/schema.sql,
+// then runs the same Phase 3 legacy-session drop for coordinator-mode
+// stores. parseTime=true is enforced so DATETIME values come back as
+// time.Time values and the package's timestamp helpers stay uniform
+// across backends.
+func openMySQLStore(driverDSN string, mode storeMode) (*dbStore, error) {
+	if !strings.Contains(driverDSN, "parseTime=") {
+		sep := "?"
+		if strings.Contains(driverDSN, "?") {
+			sep = "&"
+		}
+		driverDSN = driverDSN + sep + "parseTime=true"
+	}
+	db, err := sql.Open("mysql", driverDSN)
+	if err != nil {
+		return nil, fmt.Errorf("store: open mysql db: %w", err)
+	}
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("store: ping mysql db: %w", err)
+	}
+
+	d := dialect{kind: dialectMySQL}
+	s := &dbStore{
+		db:              newDBHandle(db, d),
+		dialect:         d,
+		nowFunc:         time.Now,
+		coordinatorMode: mode.coordinator,
+	}
+
+	// Bootstrap schema. The schema file uses IF NOT EXISTS for every
+	// table, so re-runs are cheap. Split into individual statements so
+	// the multiStatements DSN flag is not required.
+	for _, stmt := range trimSchemaSQL(mysqlSchemaSQL) {
+		if _, err := db.Exec(stmt); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("store: bootstrap mysql schema: %w", err)
+		}
+	}
+
+	if mode.coordinator {
+		if err := s.dropLegacySessionTables(); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("store: drop legacy session tables: %w", err)
+		}
+	}
+	return s, nil
+}
+
 // Close closes the underlying database connection.
-func (s *sqliteStore) Close() error {
+func (s *dbStore) Close() error {
 	return s.db.Close()
 }
 
@@ -171,25 +269,25 @@ func (s *sqliteStore) Close() error {
 // exists so external packages (notably tests) can perform setup writes
 // without holding a *sql.DB handle. New production code should prefer
 // the typed repository methods on Store.
-func (s *sqliteStore) Exec(query string, args ...any) (sql.Result, error) {
+func (s *dbStore) Exec(query string, args ...any) (sql.Result, error) {
 	return s.db.Exec(query, args...)
 }
 
 // Query runs a row-returning SQL statement against the underlying engine.
 // See Exec for the rationale.
-func (s *sqliteStore) Query(query string, args ...any) (*sql.Rows, error) {
+func (s *dbStore) Query(query string, args ...any) (*sql.Rows, error) {
 	return s.db.Query(query, args...)
 }
 
 // QueryRow runs a single-row SQL statement against the underlying engine.
 // See Exec for the rationale.
-func (s *sqliteStore) QueryRow(query string, args ...any) *sql.Row {
+func (s *dbStore) QueryRow(query string, args ...any) *sql.Row {
 	return s.db.QueryRow(query, args...)
 }
 
 // SetNowFunc overrides the clock used for time-sensitive store operations.
 // Tests can inject a deterministic clock; passing nil restores time.Now.
-func (s *sqliteStore) SetNowFunc(nowFunc func() time.Time) {
+func (s *dbStore) SetNowFunc(nowFunc func() time.Time) {
 	if nowFunc == nil {
 		s.nowFunc = time.Now
 		return
@@ -197,14 +295,23 @@ func (s *sqliteStore) SetNowFunc(nowFunc func() time.Time) {
 	s.nowFunc = nowFunc
 }
 
-func (s *sqliteStore) now() time.Time {
+func (s *dbStore) now() time.Time {
 	if s != nil && s.nowFunc != nil {
 		return s.nowFunc().UTC()
 	}
 	return time.Now().UTC()
 }
 
-func (s *sqliteStore) createTables() error {
+func (s *dbStore) createTables() error {
+	if s.isMySQL() {
+		// MySQL bootstrap runs internal/store/mysql/schema.sql once in
+		// openMySQLStore. The SQLite create/migrate path below uses
+		// `INTEGER PRIMARY KEY AUTOINCREMENT`, `WITHOUT ROWID`-friendly
+		// shapes and incremental `ALTER TABLE ... ADD COLUMN` migrations
+		// that don't translate 1:1 to MySQL. Keep the two bootstrap
+		// paths separated; the schema parity test guards against drift.
+		return nil
+	}
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -496,7 +603,7 @@ func (s *sqliteStore) createTables() error {
 	return nil
 }
 
-func (s *sqliteStore) migrateLegacySessions() error {
+func (s *dbStore) migrateLegacySessions() error {
 	if s.coordinatorMode {
 		// Phase 3 (REQ-122): coordinator drops both tables right after
 		// createTables — populating sessions from agent_sessions only to
@@ -544,7 +651,7 @@ func (s *sqliteStore) migrateLegacySessions() error {
 // (docs/decisions/2026-05-01-session-data-ownership.md). The events
 // file on disk under .workbuddy/sessions/<id>/ is preserved — only
 // the DB rows go.
-func (s *sqliteStore) dropLegacySessionTables() error {
+func (s *dbStore) dropLegacySessionTables() error {
 	stmts := []string{
 		`DROP INDEX IF EXISTS idx_sessions_repo_issue`,
 		`DROP INDEX IF EXISTS idx_sessions_agent`,
@@ -570,7 +677,7 @@ func (s *sqliteStore) dropLegacySessionTables() error {
 // concurrent writer contention with WAL the driver still occasionally
 // surfaces SQLITE_BUSY. Retry transparently a few times with a small
 // backoff so observability writes don't silently drop.
-func (s *sqliteStore) InsertEvent(e Event) (int64, error) {
+func (s *dbStore) InsertEvent(e Event) (int64, error) {
 	var lastErr error
 	for _, delay := range []time.Duration{0, 5 * time.Millisecond, 25 * time.Millisecond, 125 * time.Millisecond} {
 		if delay > 0 {
@@ -584,7 +691,7 @@ func (s *sqliteStore) InsertEvent(e Event) (int64, error) {
 			return res.LastInsertId()
 		}
 		lastErr = err
-		if !isSQLiteBusyError(err) {
+		if !s.dialect.IsBusyError(err) {
 			break
 		}
 	}
@@ -592,7 +699,7 @@ func (s *sqliteStore) InsertEvent(e Event) (int64, error) {
 }
 
 // QueryEvents returns events matching the given repo (empty string = all repos).
-func (s *sqliteStore) QueryEvents(repo string) ([]Event, error) {
+func (s *dbStore) QueryEvents(repo string) ([]Event, error) {
 	var rows *sql.Rows
 	var err error
 	if repo == "" {
@@ -715,7 +822,7 @@ func scanTaskRecord(scan func(dest ...any) error) (TaskRecord, error) {
 }
 
 // InsertTask inserts a new task into the task_queue.
-func (s *sqliteStore) InsertTask(t TaskRecord) error {
+func (s *dbStore) InsertTask(t TaskRecord) error {
 	if t.Status == "" {
 		t.Status = TaskStatusPending
 	}
@@ -742,13 +849,13 @@ func (s *sqliteStore) InsertTask(t TaskRecord) error {
 }
 
 // QueryTasks returns tasks filtered by status (empty string = all).
-func (s *sqliteStore) QueryTasks(status string) ([]TaskRecord, error) {
+func (s *dbStore) QueryTasks(status string) ([]TaskRecord, error) {
 	return s.QueryTasksFiltered(TaskFilter{Status: status})
 }
 
 // QueryTasksFiltered returns tasks matching the given filter.
 // When no status filter is set, completed tasks are excluded by default.
-func (s *sqliteStore) QueryTasksFiltered(filter TaskFilter) ([]TaskRecord, error) {
+func (s *dbStore) QueryTasksFiltered(filter TaskFilter) ([]TaskRecord, error) {
 	const selectTasks = `SELECT
 		tq.id, tq.repo, tq.issue_num, tq.agent_name, ic.labels, tq.role, tq.runtime, tq.workflow, tq.state,
 		tq.worker_id, tq.claim_token, tq.status, tq.lease_expires_at, tq.acked_at, tq.heartbeat_at,
@@ -789,7 +896,7 @@ func (s *sqliteStore) QueryTasksFiltered(filter TaskFilter) ([]TaskRecord, error
 }
 
 // GetTask loads a task by ID.
-func (s *sqliteStore) GetTask(taskID string) (*TaskRecord, error) {
+func (s *dbStore) GetTask(taskID string) (*TaskRecord, error) {
 	row := s.db.QueryRow(`SELECT
 		tq.id, tq.repo, tq.issue_num, tq.agent_name, ic.labels, tq.role, tq.runtime, tq.workflow, tq.state,
 		tq.worker_id, tq.claim_token, tq.status, tq.lease_expires_at, tq.acked_at, tq.heartbeat_at,
@@ -810,7 +917,7 @@ func (s *sqliteStore) GetTask(taskID string) (*TaskRecord, error) {
 
 // ListIssueTasks returns every task row for one issue, including terminal
 // tasks, ordered from oldest to newest.
-func (s *sqliteStore) ListIssueTasks(repo string, issueNum int) ([]TaskRecord, error) {
+func (s *dbStore) ListIssueTasks(repo string, issueNum int) ([]TaskRecord, error) {
 	rows, err := s.db.Query(`SELECT
 		tq.id, tq.repo, tq.issue_num, tq.agent_name, ic.labels, tq.role, tq.runtime, tq.workflow, tq.state,
 		tq.worker_id, tq.claim_token, tq.status, tq.lease_expires_at, tq.acked_at, tq.heartbeat_at,
@@ -840,7 +947,7 @@ func (s *sqliteStore) ListIssueTasks(repo string, issueNum int) ([]TaskRecord, e
 }
 
 // ListTasksForIssue is a backward-compatible alias used by newer audit code.
-func (s *sqliteStore) ListTasksForIssue(repo string, issueNum int) ([]TaskRecord, error) {
+func (s *dbStore) ListTasksForIssue(repo string, issueNum int) ([]TaskRecord, error) {
 	return s.ListIssueTasks(repo, issueNum)
 }
 
@@ -848,7 +955,7 @@ func (s *sqliteStore) ListTasksForIssue(repo string, issueNum int) ([]TaskRecord
 // task row. Used by the worker immediately after POSTing to the supervisor
 // IPC API so a coordinator-side resume path can find the agent on restart
 // (issue #234).
-func (s *sqliteStore) UpdateTaskSupervisorAgentID(taskID, agentID string) error {
+func (s *dbStore) UpdateTaskSupervisorAgentID(taskID, agentID string) error {
 	res, err := s.db.Exec(
 		`UPDATE task_queue SET supervisor_agent_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 		agentID, taskID,
@@ -864,7 +971,7 @@ func (s *sqliteStore) UpdateTaskSupervisorAgentID(taskID, agentID string) error 
 }
 
 // UpdateTaskStatus updates the status and updated_at of a task.
-func (s *sqliteStore) UpdateTaskStatus(taskID, status string) error {
+func (s *dbStore) UpdateTaskStatus(taskID, status string) error {
 	res, err := s.db.Exec(
 		`UPDATE task_queue SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 		status, taskID,
@@ -890,7 +997,7 @@ var ErrTaskStatusTerminal = errors.New("store: task is already in terminal statu
 // TransitionTaskStatusIfRunning updates status only when the task is currently
 // in pending or running state. If the task is already in a terminal state,
 // returns ErrTaskStatusTerminal without modifying the row.
-func (s *sqliteStore) TransitionTaskStatusIfRunning(taskID, status string) error {
+func (s *dbStore) TransitionTaskStatusIfRunning(taskID, status string) error {
 	res, err := s.db.Exec(
 		`UPDATE task_queue
 		 SET status = ?, updated_at = CURRENT_TIMESTAMP
@@ -925,7 +1032,7 @@ func (s *sqliteStore) TransitionTaskStatusIfRunning(taskID, status string) error
 // FinalizeTaskForOperator moves a pending/running task to a terminal status
 // without requiring live worker ownership. It is intended for explicit
 // operator/admin flows such as diagnose --fix.
-func (s *sqliteStore) FinalizeTaskForOperator(taskID, status string, exitCode int) error {
+func (s *dbStore) FinalizeTaskForOperator(taskID, status string, exitCode int) error {
 	switch status {
 	case TaskStatusCompleted, TaskStatusFailed, TaskStatusTimeout:
 	default:
@@ -964,7 +1071,7 @@ func (s *sqliteStore) FinalizeTaskForOperator(taskID, status string, exitCode in
 
 // ClaimTask atomically assigns a pending task to a worker and marks it running.
 // It returns true when the claim succeeded, or false when the task was no longer pending.
-func (s *sqliteStore) ClaimTask(taskID, workerID string) (bool, error) {
+func (s *dbStore) ClaimTask(taskID, workerID string) (bool, error) {
 	res, err := s.db.Exec(
 		`UPDATE task_queue
 		 SET worker_id = ?, status = ?, updated_at = CURRENT_TIMESTAMP
@@ -983,7 +1090,7 @@ func (s *sqliteStore) ClaimTask(taskID, workerID string) (bool, error) {
 
 // ReleaseTask atomically requeues a running task owned by the given worker.
 // It returns true when the task was released back to pending.
-func (s *sqliteStore) ReleaseTask(taskID, workerID string) (bool, error) {
+func (s *dbStore) ReleaseTask(taskID, workerID string) (bool, error) {
 	res, err := s.db.Exec(
 		`UPDATE task_queue
 		 SET worker_id = NULL, status = ?, updated_at = CURRENT_TIMESTAMP
@@ -1003,13 +1110,13 @@ func (s *sqliteStore) ReleaseTask(taskID, workerID string) (bool, error) {
 // ClaimNextTask assigns the next dispatchable task to workerID. If the same
 // worker repeats the request with the same non-empty claimToken before the
 // lease expires, the previously claimed task is returned.
-func (s *sqliteStore) ClaimNextTask(workerID string, roles []string, repos []string, runtime string, claimToken string, lease time.Duration) (*TaskRecord, error) {
+func (s *dbStore) ClaimNextTask(workerID string, roles []string, repos []string, runtime string, claimToken string, lease time.Duration) (*TaskRecord, error) {
 	if lease <= 0 {
 		lease = 30 * time.Second
 	}
 	for attempt := 0; attempt < 5; attempt++ {
 		task, err := s.claimNextTaskOnce(workerID, roles, repos, runtime, claimToken, lease)
-		if err == nil || !isSQLiteBusyError(err) {
+		if err == nil || !s.dialect.IsBusyError(err) {
 			return task, err
 		}
 		time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
@@ -1017,7 +1124,7 @@ func (s *sqliteStore) ClaimNextTask(workerID string, roles []string, repos []str
 	return s.claimNextTaskOnce(workerID, roles, repos, runtime, claimToken, lease)
 }
 
-func (s *sqliteStore) claimNextTaskOnce(workerID string, roles []string, repos []string, runtime string, claimToken string, lease time.Duration) (*TaskRecord, error) {
+func (s *dbStore) claimNextTaskOnce(workerID string, roles []string, repos []string, runtime string, claimToken string, lease time.Duration) (*TaskRecord, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("store: begin claim tx: %w", err)
@@ -1158,7 +1265,7 @@ func isSQLiteUniqueConstraint(err error) bool {
 		strings.Contains(msg, "constraint failed")
 }
 
-func (s *sqliteStore) ensureTaskOwnership(tx *sql.Tx, taskID, workerID string) (*TaskRecord, error) {
+func (s *dbStore) ensureTaskOwnership(tx *txHandle, taskID, workerID string) (*TaskRecord, error) {
 	row := tx.QueryRow(`SELECT
 		id, repo, issue_num, agent_name, NULL, role, runtime, workflow, state,
 		worker_id, claim_token, status, lease_expires_at, acked_at, heartbeat_at,
@@ -1181,7 +1288,7 @@ func (s *sqliteStore) ensureTaskOwnership(tx *sql.Tx, taskID, workerID string) (
 }
 
 // AckTask records that a claimed task has started.
-func (s *sqliteStore) AckTask(taskID, workerID string, lease time.Duration) error {
+func (s *dbStore) AckTask(taskID, workerID string, lease time.Duration) error {
 	if lease <= 0 {
 		lease = 30 * time.Second
 	}
@@ -1215,13 +1322,13 @@ func (s *sqliteStore) AckTask(taskID, workerID string, lease time.Duration) erro
 }
 
 // HeartbeatTask updates liveness for a claimed task.
-func (s *sqliteStore) HeartbeatTask(taskID, workerID string, lease time.Duration) error {
+func (s *dbStore) HeartbeatTask(taskID, workerID string, lease time.Duration) error {
 	if lease <= 0 {
 		lease = 30 * time.Second
 	}
 	for attempt := 0; attempt < 3; attempt++ {
 		err := s.heartbeatTaskOnce(taskID, workerID, lease)
-		if err == nil || !isSQLiteBusyError(err) {
+		if err == nil || !s.dialect.IsBusyError(err) {
 			return err
 		}
 		time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
@@ -1229,7 +1336,7 @@ func (s *sqliteStore) HeartbeatTask(taskID, workerID string, lease time.Duration
 	return s.heartbeatTaskOnce(taskID, workerID, lease)
 }
 
-func (s *sqliteStore) heartbeatTaskOnce(taskID, workerID string, lease time.Duration) error {
+func (s *dbStore) heartbeatTaskOnce(taskID, workerID string, lease time.Duration) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("store: begin heartbeat tx: %w", err)
@@ -1263,7 +1370,7 @@ func (s *sqliteStore) heartbeatTaskOnce(taskID, workerID string, lease time.Dura
 }
 
 // CompleteTask finalizes a claimed task and stores result metadata.
-func (s *sqliteStore) CompleteTask(taskID, workerID string, exitCode int, sessionRefs string) error {
+func (s *dbStore) CompleteTask(taskID, workerID string, exitCode int, sessionRefs string) error {
 	if sessionRefs == "" {
 		sessionRefs = "[]"
 	}
@@ -1306,7 +1413,7 @@ func (s *sqliteStore) CompleteTask(taskID, workerID string, exitCode int, sessio
 // ---------------------------------------------------------------------------
 
 // InsertWorker registers a worker.
-func (s *sqliteStore) InsertWorker(w WorkerRecord) error {
+func (s *dbStore) InsertWorker(w WorkerRecord) error {
 	if strings.TrimSpace(w.ReposJSON) == "" {
 		w.ReposJSON = "[]"
 	}
@@ -1333,7 +1440,7 @@ func (s *sqliteStore) InsertWorker(w WorkerRecord) error {
 }
 
 // QueryWorkers returns workers filtered by repo (empty = all).
-func (s *sqliteStore) QueryWorkers(repo string) ([]WorkerRecord, error) {
+func (s *dbStore) QueryWorkers(repo string) ([]WorkerRecord, error) {
 	rows, err := s.db.Query(`SELECT id, repo, repos_json, roles, runtime, hostname, mgmt_base_url, audit_url, tunnel, status, last_heartbeat, registered_at FROM workers ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("store: query workers: %w", err)
@@ -1358,7 +1465,7 @@ func (s *sqliteStore) QueryWorkers(repo string) ([]WorkerRecord, error) {
 }
 
 // GetWorker returns a single registered worker by ID, or nil when absent.
-func (s *sqliteStore) GetWorker(workerID string) (*WorkerRecord, error) {
+func (s *dbStore) GetWorker(workerID string) (*WorkerRecord, error) {
 	row := s.db.QueryRow(`SELECT id, repo, repos_json, roles, runtime, hostname, mgmt_base_url, audit_url, tunnel, status, last_heartbeat, registered_at FROM workers WHERE id = ?`, workerID)
 	var w WorkerRecord
 	var hb, ra string
@@ -1374,7 +1481,7 @@ func (s *sqliteStore) GetWorker(workerID string) (*WorkerRecord, error) {
 }
 
 // UpdateWorkerHeartbeat updates the last_heartbeat timestamp.
-func (s *sqliteStore) UpdateWorkerHeartbeat(workerID string) error {
+func (s *dbStore) UpdateWorkerHeartbeat(workerID string) error {
 	res, err := s.db.Exec(
 		`UPDATE workers SET last_heartbeat = CURRENT_TIMESTAMP WHERE id = ?`,
 		workerID,
@@ -1390,7 +1497,7 @@ func (s *sqliteStore) UpdateWorkerHeartbeat(workerID string) error {
 }
 
 // UpdateWorkerStatus updates a worker's status (online/offline).
-func (s *sqliteStore) UpdateWorkerStatus(workerID, status string) error {
+func (s *dbStore) UpdateWorkerStatus(workerID, status string) error {
 	res, err := s.db.Exec(
 		`UPDATE workers SET status = ? WHERE id = ?`,
 		status, workerID,
@@ -1407,7 +1514,7 @@ func (s *sqliteStore) UpdateWorkerStatus(workerID, status string) error {
 
 // DeleteWorker removes a worker record from the registry.
 // Returns true if a row was deleted, false if the worker did not exist.
-func (s *sqliteStore) DeleteWorker(workerID string) (bool, error) {
+func (s *dbStore) DeleteWorker(workerID string) (bool, error) {
 	res, err := s.db.Exec(`DELETE FROM workers WHERE id = ?`, workerID)
 	if err != nil {
 		return false, fmt.Errorf("store: delete worker: %w", err)
@@ -1417,7 +1524,7 @@ func (s *sqliteStore) DeleteWorker(workerID string) (bool, error) {
 }
 
 // WorkerHasRunningTask returns true if the worker currently owns a running task.
-func (s *sqliteStore) WorkerHasRunningTask(workerID string) (bool, error) {
+func (s *dbStore) WorkerHasRunningTask(workerID string) (bool, error) {
 	var count int
 	err := s.db.QueryRow(
 		`SELECT COUNT(1) FROM task_queue WHERE worker_id = ? AND status = ?`,
@@ -1434,7 +1541,7 @@ func (s *sqliteStore) WorkerHasRunningTask(workerID string) (bool, error) {
 // ---------------------------------------------------------------------------
 
 // UpsertRepoRegistration inserts or updates a repo registration.
-func (s *sqliteStore) UpsertRepoRegistration(rec RepoRegistrationRecord) error {
+func (s *dbStore) UpsertRepoRegistration(rec RepoRegistrationRecord) error {
 	if strings.TrimSpace(rec.Status) == "" {
 		rec.Status = "active"
 	}
@@ -1458,7 +1565,7 @@ func (s *sqliteStore) UpsertRepoRegistration(rec RepoRegistrationRecord) error {
 }
 
 // GetRepoRegistration loads a repo registration by repo slug.
-func (s *sqliteStore) GetRepoRegistration(repo string) (*RepoRegistrationRecord, error) {
+func (s *dbStore) GetRepoRegistration(repo string) (*RepoRegistrationRecord, error) {
 	var rec RepoRegistrationRecord
 	var registeredAt, updatedAt string
 	err := s.db.QueryRow(
@@ -1478,7 +1585,7 @@ func (s *sqliteStore) GetRepoRegistration(repo string) (*RepoRegistrationRecord,
 }
 
 // ListRepoRegistrations returns all repo registrations ordered by repo.
-func (s *sqliteStore) ListRepoRegistrations() ([]RepoRegistrationRecord, error) {
+func (s *dbStore) ListRepoRegistrations() ([]RepoRegistrationRecord, error) {
 	rows, err := s.db.Query(
 		`SELECT repo, environment, status, config_json, registered_at, updated_at
 		 FROM repo_registrations ORDER BY repo`,
@@ -1503,7 +1610,7 @@ func (s *sqliteStore) ListRepoRegistrations() ([]RepoRegistrationRecord, error) 
 }
 
 // DeleteRepoRegistration removes the registration for the given repo.
-func (s *sqliteStore) DeleteRepoRegistration(repo string) error {
+func (s *dbStore) DeleteRepoRegistration(repo string) error {
 	_, err := s.db.Exec(`DELETE FROM repo_registrations WHERE repo = ?`, repo)
 	if err != nil {
 		return fmt.Errorf("store: delete repo registration: %w", err)
@@ -1512,7 +1619,7 @@ func (s *sqliteStore) DeleteRepoRegistration(repo string) error {
 }
 
 // FailPendingTasksForRepo marks all pending/running tasks for a repo as failed.
-func (s *sqliteStore) FailPendingTasksForRepo(repo string) error {
+func (s *dbStore) FailPendingTasksForRepo(repo string) error {
 	_, err := s.db.Exec(
 		`UPDATE task_queue
 		 SET status = ?, exit_code = 1, completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
@@ -1533,7 +1640,37 @@ func (s *sqliteStore) FailPendingTasksForRepo(repo string) error {
 // inserting the row if it does not exist. Returns the new count.
 // The upsert and read are performed in a single statement using RETURNING
 // to avoid a race where another goroutine increments between the two.
-func (s *sqliteStore) IncrementTransition(repo string, issueNum int, fromState, toState string) (int, error) {
+func (s *dbStore) IncrementTransition(repo string, issueNum int, fromState, toState string) (int, error) {
+	if s.isMySQL() {
+		// MySQL has no RETURNING. Emulate the atomic upsert-then-read in
+		// a single transaction so a concurrent goroutine cannot observe
+		// the row between our INSERT and our SELECT and double-count.
+		tx, err := s.db.Begin()
+		if err != nil {
+			return 0, fmt.Errorf("store: begin increment transition: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.Exec(
+			`INSERT INTO transition_counts (repo, issue_num, from_state, to_state, count)
+			 VALUES (?, ?, ?, ?, 1)
+			 ON CONFLICT (repo, issue_num, from_state, to_state)
+			 DO UPDATE SET count = count + 1`,
+			repo, issueNum, fromState, toState,
+		); err != nil {
+			return 0, fmt.Errorf("store: increment transition upsert: %w", err)
+		}
+		var count int
+		if err := tx.QueryRow(
+			`SELECT count FROM transition_counts WHERE repo = ? AND issue_num = ? AND from_state = ? AND to_state = ?`,
+			repo, issueNum, fromState, toState,
+		).Scan(&count); err != nil {
+			return 0, fmt.Errorf("store: read incremented transition: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return 0, fmt.Errorf("store: commit increment transition: %w", err)
+		}
+		return count, nil
+	}
 	var count int
 	err := s.db.QueryRow(
 		`INSERT INTO transition_counts (repo, issue_num, from_state, to_state, count)
@@ -1557,7 +1694,7 @@ func (s *sqliteStore) IncrementTransition(repo string, issueNum int, fromState, 
 // Used by the coordinator to cap runaway re-dispatch cycles when an agent
 // repeatedly fails (launcher crashes, infra errors, or sustained agent
 // failures) without ever landing a successful run.
-func (s *sqliteStore) CountConsecutiveAgentFailures(repo string, issueNum int, agentName string) (int, error) {
+func (s *dbStore) CountConsecutiveAgentFailures(repo string, issueNum int, agentName string) (int, error) {
 	// Order by rowid DESC for deterministic insertion-order recency. task_queue.id
 	// holds UUIDs (assigned by the router, not monotonic), so id DESC cannot be
 	// used as a tie-break within the same created_at second. SQLite's implicit
@@ -1594,7 +1731,7 @@ func (s *sqliteStore) CountConsecutiveAgentFailures(repo string, issueNum int, a
 }
 
 // QueryTransitionCounts returns all transition counts for a repo+issue.
-func (s *sqliteStore) QueryTransitionCounts(repo string, issueNum int) ([]TransitionCount, error) {
+func (s *dbStore) QueryTransitionCounts(repo string, issueNum int) ([]TransitionCount, error) {
 	rows, err := s.db.Query(
 		`SELECT repo, issue_num, from_state, to_state, count FROM transition_counts WHERE repo = ? AND issue_num = ?`,
 		repo, issueNum,
@@ -1626,7 +1763,7 @@ func (s *sqliteStore) QueryTransitionCounts(repo string, issueNum int) ([]Transi
 // subsequent operations on this issue/PR correlate under one trace.
 // Existing rows keep their previously assigned trace_id — the upsert
 // path explicitly preserves root_trace_id on conflict.
-func (s *sqliteStore) UpsertIssueCache(ic IssueCache) error {
+func (s *dbStore) UpsertIssueCache(ic IssueCache) error {
 	traceID := newRootTraceID()
 	_, err := s.db.Exec(
 		`INSERT INTO issue_cache (repo, issue_num, labels, body, state, root_trace_id, updated_at)
@@ -1643,7 +1780,7 @@ func (s *sqliteStore) UpsertIssueCache(ic IssueCache) error {
 
 // ListCachedIssueNums returns all issue numbers in the cache for a repo,
 // excluding PR entries (those with state starting with "pr:").
-func (s *sqliteStore) ListCachedIssueNums(repo string) ([]int, error) {
+func (s *dbStore) ListCachedIssueNums(repo string) ([]int, error) {
 	rows, err := s.db.Query(
 		`SELECT issue_num FROM issue_cache WHERE repo = ? AND (state IS NULL OR state NOT LIKE 'pr:%')`,
 		repo,
@@ -1665,7 +1802,7 @@ func (s *sqliteStore) ListCachedIssueNums(repo string) ([]int, error) {
 }
 
 // DeleteIssueCache removes a cached issue entry.
-func (s *sqliteStore) DeleteIssueCache(repo string, issueNum int) error {
+func (s *dbStore) DeleteIssueCache(repo string, issueNum int) error {
 	_, err := s.db.Exec(
 		`DELETE FROM issue_cache WHERE repo = ? AND issue_num = ?`,
 		repo, issueNum,
@@ -1677,7 +1814,7 @@ func (s *sqliteStore) DeleteIssueCache(repo string, issueNum int) error {
 }
 
 // QueryIssueCache returns the cached issue, or nil if not found.
-func (s *sqliteStore) QueryIssueCache(repo string, issueNum int) (*IssueCache, error) {
+func (s *dbStore) QueryIssueCache(repo string, issueNum int) (*IssueCache, error) {
 	var ic IssueCache
 	var updatedAt string
 	err := s.db.QueryRow(
@@ -1696,7 +1833,7 @@ func (s *sqliteStore) QueryIssueCache(repo string, issueNum int) (*IssueCache, e
 
 // ListIssueCaches returns all non-PR cached issues. Pass "" for repo to fan
 // out across every repo recorded in the cache.
-func (s *sqliteStore) ListIssueCaches(repo string) ([]IssueCache, error) {
+func (s *dbStore) ListIssueCaches(repo string) ([]IssueCache, error) {
 	var (
 		rows *sql.Rows
 		err  error
@@ -1747,7 +1884,7 @@ type SessionFilter struct {
 	Status    string
 }
 
-func (s *sqliteStore) CreateSession(sess SessionRecord) (int64, error) {
+func (s *dbStore) CreateSession(sess SessionRecord) (int64, error) {
 	res, err := s.db.Exec(
 		`INSERT INTO sessions (
 			session_id, task_id, repo, issue_num, agent_name, runtime, worker_id, attempt, status,
@@ -1762,7 +1899,7 @@ func (s *sqliteStore) CreateSession(sess SessionRecord) (int64, error) {
 	return res.LastInsertId()
 }
 
-func (s *sqliteStore) UpdateSession(record SessionRecord) error {
+func (s *dbStore) UpdateSession(record SessionRecord) error {
 	res, err := s.db.Exec(
 		`UPDATE sessions
 		 SET task_id = ?, runtime = ?, worker_id = ?, attempt = ?, status = ?, dir = ?,
@@ -1782,7 +1919,7 @@ func (s *sqliteStore) UpdateSession(record SessionRecord) error {
 	return nil
 }
 
-func (s *sqliteStore) GetSession(sessionID string) (*SessionRecord, error) {
+func (s *dbStore) GetSession(sessionID string) (*SessionRecord, error) {
 	if s.coordinatorMode {
 		// Phase 3 (REQ-122): coordinator's `sessions` table is dropped.
 		// Treat the missing table as "no session" so the proxy's local
@@ -1808,7 +1945,7 @@ func (s *sqliteStore) GetSession(sessionID string) (*SessionRecord, error) {
 	return record, nil
 }
 
-func (s *sqliteStore) ListSessions(f SessionFilter) ([]SessionRecord, error) {
+func (s *dbStore) ListSessions(f SessionFilter) ([]SessionRecord, error) {
 	if s.coordinatorMode {
 		// Phase 3 (REQ-122): coordinator's `sessions` table is dropped.
 		// Sessions live on each owning worker; return empty so the
@@ -1917,7 +2054,7 @@ func sessionRecordToAgent(record SessionRecord) AgentSession {
 }
 
 // InsertAgentSession records an agent session via the additive sessions table.
-func (s *sqliteStore) InsertAgentSession(sess AgentSession) (int64, error) {
+func (s *dbStore) InsertAgentSession(sess AgentSession) (int64, error) {
 	return s.CreateSession(SessionRecord{
 		SessionID: sess.SessionID,
 		TaskID:    sess.TaskID,
@@ -1931,7 +2068,7 @@ func (s *sqliteStore) InsertAgentSession(sess AgentSession) (int64, error) {
 }
 
 // QueryAgentSessions returns sessions for a repo+issue.
-func (s *sqliteStore) QueryAgentSessions(repo string, issueNum int) ([]AgentSession, error) {
+func (s *dbStore) QueryAgentSessions(repo string, issueNum int) ([]AgentSession, error) {
 	records, err := s.ListSessions(SessionFilter{Repo: repo, IssueNum: issueNum})
 	if err != nil {
 		return nil, err
@@ -1944,7 +2081,7 @@ func (s *sqliteStore) QueryAgentSessions(repo string, issueNum int) ([]AgentSess
 }
 
 // ListAgentSessions returns sessions matching the given filter.
-func (s *sqliteStore) ListAgentSessions(f SessionFilter) ([]AgentSession, error) {
+func (s *dbStore) ListAgentSessions(f SessionFilter) ([]AgentSession, error) {
 	records, err := s.ListSessions(f)
 	if err != nil {
 		return nil, err
@@ -1957,7 +2094,7 @@ func (s *sqliteStore) ListAgentSessions(f SessionFilter) ([]AgentSession, error)
 }
 
 // UpdateAgentSession updates summary and raw_path for an existing session.
-func (s *sqliteStore) UpdateAgentSession(sessionID, summary, rawPath string) error {
+func (s *dbStore) UpdateAgentSession(sessionID, summary, rawPath string) error {
 	record, err := s.GetSession(sessionID)
 	if err != nil {
 		return err
@@ -1971,7 +2108,7 @@ func (s *sqliteStore) UpdateAgentSession(sessionID, summary, rawPath string) err
 }
 
 // GetAgentSession returns a single session by session_id, or nil if not found.
-func (s *sqliteStore) GetAgentSession(sessionID string) (*AgentSession, error) {
+func (s *dbStore) GetAgentSession(sessionID string) (*AgentSession, error) {
 	record, err := s.GetSession(sessionID)
 	if err != nil || record == nil {
 		return nil, err
@@ -1997,7 +2134,7 @@ func firstNonEmpty(values ...string) string {
 // Idempotent: a re-announce for an existing session_id is a no-op (the
 // owning worker doesn't change). Worker DBs may also call this; it just
 // caches the same row a worker would have populated locally.
-func (s *sqliteStore) UpsertSessionRoute(route SessionRoute) error {
+func (s *dbStore) UpsertSessionRoute(route SessionRoute) error {
 	if strings.TrimSpace(route.SessionID) == "" {
 		return fmt.Errorf("store: upsert session route: session_id required")
 	}
@@ -2021,7 +2158,7 @@ func (s *sqliteStore) UpsertSessionRoute(route SessionRoute) error {
 // coordinator restart wipes any in-memory state. ON CONFLICT DO NOTHING
 // keeps the call cheap on the hot path (workers re-announce their open
 // sessions on every register; existing routes survive untouched).
-func (s *sqliteStore) BulkUpsertSessionRoutes(routes []SessionRoute) error {
+func (s *dbStore) BulkUpsertSessionRoutes(routes []SessionRoute) error {
 	if len(routes) == 0 {
 		return nil
 	}
@@ -2055,7 +2192,7 @@ func (s *sqliteStore) BulkUpsertSessionRoutes(routes []SessionRoute) error {
 
 // GetSessionRoute returns the route for sessionID, or (nil, nil) when none
 // exists. The resolver translates a missing row to ErrSessionNotRouted.
-func (s *sqliteStore) GetSessionRoute(sessionID string) (*SessionRoute, error) {
+func (s *dbStore) GetSessionRoute(sessionID string) (*SessionRoute, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return nil, nil
@@ -2080,7 +2217,7 @@ func (s *sqliteStore) GetSessionRoute(sessionID string) (*SessionRoute, error) {
 // Issue Dependencies
 // ---------------------------------------------------------------------------
 
-func (s *sqliteStore) ReplaceIssueDependencies(repo string, issueNum int, deps []IssueDependency) error {
+func (s *dbStore) ReplaceIssueDependencies(repo string, issueNum int, deps []IssueDependency) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("store: begin replace issue dependencies: %w", err)
@@ -2111,7 +2248,7 @@ func (s *sqliteStore) ReplaceIssueDependencies(repo string, issueNum int, deps [
 	return nil
 }
 
-func (s *sqliteStore) ListIssueDependencies(repo string, issueNum int) ([]IssueDependency, error) {
+func (s *dbStore) ListIssueDependencies(repo string, issueNum int) ([]IssueDependency, error) {
 	rows, err := s.db.Query(
 		`SELECT repo, issue_num, depends_on_repo, depends_on_issue_num, source_hash, status
 		 FROM issue_dependencies
@@ -2141,7 +2278,7 @@ func (s *sqliteStore) ListIssueDependencies(repo string, issueNum int) ([]IssueD
 // EvaluateOpenIssues (which doesn't know whether the reaction was applied yet)
 // cannot accidentally clear the reaction-state tracker. The Coordinator's
 // reaction reconciler uses MarkDependencyReactionApplied to update it.
-func (s *sqliteStore) UpsertIssueDependencyState(state IssueDependencyState) error {
+func (s *dbStore) UpsertIssueDependencyState(state IssueDependencyState) error {
 	_, err := s.db.Exec(
 		`INSERT INTO issue_dependency_state
 		 (repo, issue_num, verdict, resume_label, blocked_reason_hash, override_active, graph_version, last_reaction_blocked, last_evaluated_at)
@@ -2165,7 +2302,7 @@ func (s *sqliteStore) UpsertIssueDependencyState(state IssueDependencyState) err
 
 // MarkDependencyReactionApplied records the reaction state we just applied
 // (or removed) on GitHub, so subsequent cycles can detect a flip cheaply.
-func (s *sqliteStore) MarkDependencyReactionApplied(repo string, issueNum int, blocked bool) error {
+func (s *dbStore) MarkDependencyReactionApplied(repo string, issueNum int, blocked bool) error {
 	_, err := s.db.Exec(
 		`UPDATE issue_dependency_state
 		 SET last_reaction_blocked = ?
@@ -2178,7 +2315,7 @@ func (s *sqliteStore) MarkDependencyReactionApplied(repo string, issueNum int, b
 	return nil
 }
 
-func (s *sqliteStore) QueryIssueDependencyState(repo string, issueNum int) (*IssueDependencyState, error) {
+func (s *dbStore) QueryIssueDependencyState(repo string, issueNum int) (*IssueDependencyState, error) {
 	var state IssueDependencyState
 	var overrideActive, lastReactionBlocked int
 	var evaluatedAt string
@@ -2204,7 +2341,7 @@ func (s *sqliteStore) QueryIssueDependencyState(repo string, issueNum int) (*Iss
 }
 
 // DeleteIssueDependencyState removes the dependency verdict cache for one issue.
-func (s *sqliteStore) DeleteIssueDependencyState(repo string, issueNum int) (bool, error) {
+func (s *dbStore) DeleteIssueDependencyState(repo string, issueNum int) (bool, error) {
 	res, err := s.db.Exec(
 		`DELETE FROM issue_dependency_state WHERE repo = ? AND issue_num = ?`,
 		repo, issueNum,
@@ -2219,7 +2356,7 @@ func (s *sqliteStore) DeleteIssueDependencyState(repo string, issueNum int) (boo
 	return rows > 0, nil
 }
 
-func (s *sqliteStore) HasActiveTask(repo string, issueNum int, agentName string) (bool, error) {
+func (s *dbStore) HasActiveTask(repo string, issueNum int, agentName string) (bool, error) {
 	var count int
 	err := s.db.QueryRow(
 		`SELECT COUNT(1)
@@ -2233,7 +2370,7 @@ func (s *sqliteStore) HasActiveTask(repo string, issueNum int, agentName string)
 	return count > 0, nil
 }
 
-func (s *sqliteStore) HasAnyActiveTask(repo string, issueNum int) (bool, error) {
+func (s *dbStore) HasAnyActiveTask(repo string, issueNum int) (bool, error) {
 	var count int
 	err := s.db.QueryRow(
 		`SELECT COUNT(1)
@@ -2299,7 +2436,7 @@ func generateClaimToken() (string, error) {
 // lock, and can also return a UNIQUE-constraint error when a concurrent
 // inserter beat us between our SELECT and INSERT. Both cases are handled
 // with a bounded retry loop modelled on ClaimNextTask.
-func (s *sqliteStore) AcquireIssueClaim(repo string, issueNum int, workerID string, lease time.Duration) (AcquireIssueClaimResult, error) {
+func (s *dbStore) AcquireIssueClaim(repo string, issueNum int, workerID string, lease time.Duration) (AcquireIssueClaimResult, error) {
 	if strings.TrimSpace(workerID) == "" {
 		return AcquireIssueClaimResult{}, errors.New("store: acquire issue claim: worker_id is required")
 	}
@@ -2308,7 +2445,7 @@ func (s *sqliteStore) AcquireIssueClaim(repo string, issueNum int, workerID stri
 	}
 	for attempt := 0; attempt < 5; attempt++ {
 		res, err := s.acquireIssueClaimOnce(repo, issueNum, workerID, lease)
-		if err == nil || !isSQLiteBusyError(err) {
+		if err == nil || !s.dialect.IsBusyError(err) {
 			return res, err
 		}
 		time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
@@ -2316,7 +2453,7 @@ func (s *sqliteStore) AcquireIssueClaim(repo string, issueNum int, workerID stri
 	return s.acquireIssueClaimOnce(repo, issueNum, workerID, lease)
 }
 
-func (s *sqliteStore) acquireIssueClaimOnce(repo string, issueNum int, workerID string, lease time.Duration) (AcquireIssueClaimResult, error) {
+func (s *dbStore) acquireIssueClaimOnce(repo string, issueNum int, workerID string, lease time.Duration) (AcquireIssueClaimResult, error) {
 	now := s.now()
 	expiresAt := now.Add(lease)
 
@@ -2360,7 +2497,7 @@ func (s *sqliteStore) acquireIssueClaimOnce(repo string, issueNum int, workerID 
 		// contract says we return ErrIssueClaimHeldByOther. If the winner's
 		// lease is already expired (very short leases), fall through to the
 		// normal expired-holder path by overwriting below.
-		if !isSQLiteUniqueConstraint(insErr) {
+		if !s.dialect.IsUniqueConstraintError(insErr) {
 			return AcquireIssueClaimResult{}, fmt.Errorf("store: insert issue claim: %w", insErr)
 		}
 		if scanErr := tx.QueryRow(
@@ -2440,7 +2577,7 @@ func (s *sqliteStore) acquireIssueClaimOnce(repo string, issueNum int, workerID 
 
 // ReleaseIssueClaim removes the claim on (repo, issueNum) if it belongs to
 // workerID and claimToken. Returns true when a row was deleted.
-func (s *sqliteStore) ReleaseIssueClaim(repo string, issueNum int, workerID, claimToken string) (bool, error) {
+func (s *dbStore) ReleaseIssueClaim(repo string, issueNum int, workerID, claimToken string) (bool, error) {
 	res, err := s.db.Exec(
 		`DELETE FROM issue_claim
 		 WHERE repo = ? AND issue_num = ? AND worker_id = ? AND claim_token = ?`,
@@ -2458,7 +2595,7 @@ func (s *sqliteStore) ReleaseIssueClaim(repo string, issueNum int, workerID, cla
 
 // DeleteIssueClaim removes the claim on (repo, issueNum) regardless of owner.
 // It is intended for explicit operator/admin recovery flows.
-func (s *sqliteStore) DeleteIssueClaim(repo string, issueNum int) (bool, error) {
+func (s *dbStore) DeleteIssueClaim(repo string, issueNum int) (bool, error) {
 	res, err := s.db.Exec(
 		`DELETE FROM issue_claim
 		 WHERE repo = ? AND issue_num = ?`,
@@ -2476,7 +2613,7 @@ func (s *sqliteStore) DeleteIssueClaim(repo string, issueNum int) (bool, error) 
 
 // RefreshIssueClaim extends expires_at for the current holder. Returns true
 // when the row was updated (false when not held by workerID/claimToken or already expired).
-func (s *sqliteStore) RefreshIssueClaim(repo string, issueNum int, workerID, claimToken string, lease time.Duration) (bool, error) {
+func (s *dbStore) RefreshIssueClaim(repo string, issueNum int, workerID, claimToken string, lease time.Duration) (bool, error) {
 	if lease <= 0 {
 		lease = 30 * time.Minute
 	}
@@ -2501,7 +2638,7 @@ func (s *sqliteStore) RefreshIssueClaim(repo string, issueNum int, workerID, cla
 
 // QueryIssueClaim returns the current claim for (repo, issueNum), or nil when
 // no row exists.
-func (s *sqliteStore) QueryIssueClaim(repo string, issueNum int) (*IssueClaimRecord, error) {
+func (s *dbStore) QueryIssueClaim(repo string, issueNum int) (*IssueClaimRecord, error) {
 	var (
 		workerID, token string
 		acquiredRaw     string
@@ -2533,7 +2670,7 @@ func (s *sqliteStore) QueryIssueClaim(repo string, issueNum int) (*IssueClaimRec
 // DeleteStaleCoordinatorIssueClaims removes claims owned by a coordinator PID
 // other than currentPID. Worker-owned claims and the current coordinator's
 // own claims are left untouched.
-func (s *sqliteStore) DeleteStaleCoordinatorIssueClaims(currentPID int) ([]IssueClaimRecord, error) {
+func (s *dbStore) DeleteStaleCoordinatorIssueClaims(currentPID int) ([]IssueClaimRecord, error) {
 	rows, err := s.db.Query(
 		`SELECT repo, issue_num, worker_id, claim_token, acquired_at, expires_at
 		 FROM issue_claim`,
@@ -2592,7 +2729,7 @@ type RolloutGroupSummary struct {
 	Tasks          []TaskRecord
 }
 
-func (s *sqliteStore) LatestRolloutGroupSummaryForIssueState(repo string, issueNum int, workflow, state string) (*RolloutGroupSummary, error) {
+func (s *dbStore) LatestRolloutGroupSummaryForIssueState(repo string, issueNum int, workflow, state string) (*RolloutGroupSummary, error) {
 	var groupID string
 	err := s.db.QueryRow(`SELECT rollout_group_id
 		FROM task_queue
@@ -2608,7 +2745,7 @@ func (s *sqliteStore) LatestRolloutGroupSummaryForIssueState(repo string, issueN
 	return s.SummarizeRolloutGroup(groupID)
 }
 
-func (s *sqliteStore) ListTasksByRolloutGroup(groupID string) ([]TaskRecord, error) {
+func (s *dbStore) ListTasksByRolloutGroup(groupID string) ([]TaskRecord, error) {
 	groupID = strings.TrimSpace(groupID)
 	if groupID == "" {
 		return nil, nil
@@ -2639,7 +2776,7 @@ func (s *sqliteStore) ListTasksByRolloutGroup(groupID string) ([]TaskRecord, err
 	return out, nil
 }
 
-func (s *sqliteStore) SummarizeRolloutGroup(groupID string) (*RolloutGroupSummary, error) {
+func (s *dbStore) SummarizeRolloutGroup(groupID string) (*RolloutGroupSummary, error) {
 	tasks, err := s.ListTasksByRolloutGroup(groupID)
 	if err != nil {
 		return nil, err

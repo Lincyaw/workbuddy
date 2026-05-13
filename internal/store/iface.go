@@ -5,7 +5,7 @@
 // through this interface so callers are not coupled to a particular SQL
 // engine.
 //
-// Today the only implementation is *sqliteStore, returned by New /
+// Today the only implementation is *dbStore, returned by New /
 // NewStore / NewCoordinatorStore. A MySQL implementation is planned (see
 // docs/decisions/2026-05-13-k8s-agentm-otel.md, Block 3 § Storage, and
 // follow-up issue #316) and will plug in behind this same interface
@@ -201,4 +201,4 @@ type Store interface {
 }
 
 // compile-time assertion that the concrete type satisfies the interface.
-var _ Store = (*sqliteStore)(nil)
+var _ Store = (*dbStore)(nil)
