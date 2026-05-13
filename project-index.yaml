@@ -5162,6 +5162,51 @@ requirements:
       - deploy/helm/workbuddy/Chart.yaml
     deps: []
 
+  - id: REQ-144
+    title: Workbuddy Helm chart Ingress for webui + webhook (v0.6)
+    description: >
+      Per docs/decisions/2026-05-13-k8s-agentm-otel.md Block 3
+      § Chart layout ("Service: ClusterIP + Ingress (webui + webhook
+      entrypoint)"), the K8s topology exposes the coordinator webui,
+      JSON API, and webhook entrypoint through an Ingress. Issue #333,
+      depends on the chart skeleton from REQ-143 / #331.
+
+      Implementation:
+
+      - deploy/helm/workbuddy/templates/ingress.yaml renders a single
+        networking.k8s.io/v1 Ingress only when .Values.ingress.enabled.
+        Three Prefix routes — /webui, /api, /webhook — all backed by
+        the coordinator Service (chart skeleton uses one port for
+        both API and webui, see values.yaml service.port comment).
+        ingressClassName is rendered only when set; the tls: block is
+        gated by .Values.ingress.tls.enabled and uses an existing
+        Secret name (cert-manager / ACME wiring is intentionally out
+        of scope — users bring their own TLS Secret).
+
+      - deploy/helm/workbuddy/values.yaml adds the ingress sub-tree:
+        enabled (default false), className, host, annotations, and
+        tls.{enabled,secretName}.
+
+      - deploy/helm/workbuddy/README.md documents the install command
+        (`--set ingress.enabled=true --set ingress.host=...`) and the
+        three routes.
+    priority: P1
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-144-1: `helm template ... --set ingress.enabled=true --set ingress.host=workbuddy.example.com` renders an Ingress with the /webui, /api, /webhook routes pointing at the coordinator Service."
+      - "AC-144-2: With `ingress.enabled=false` (default), no Ingress resource is rendered."
+      - "AC-144-3: `helm lint deploy/helm/workbuddy/` passes in both ingress.enabled=true and =false modes."
+      - "AC-144-4: project-index.yaml has this REQ entry referencing issue #333 and the decision doc."
+    code:
+      - deploy/helm/workbuddy/templates/ingress.yaml
+      - deploy/helm/workbuddy/values.yaml
+      - deploy/helm/workbuddy/README.md
+    tests:
+      - deploy/helm/workbuddy/templates/ingress.yaml
+    deps:
+      - REQ-143
+
   - id: REQ-138
     title: OTel cross-span correlation using persisted root_trace_id (v0.5)
     description: >
