@@ -46,7 +46,7 @@ func TestValidateAgentCrossRefs_UnknownRuntime(t *testing.T) {
 }
 
 func TestValidateAgentCrossRefs_KnownRuntimes(t *testing.T) {
-	for _, rt := range []string{"codex", "claude-code", "claude-agent-sdk"} {
+	for _, rt := range []string{"codex", "claude-code", "claude-agent-sdk", "agentm"} {
 		agent := &agentDoc{
 			Path:    "/tmp/agents/dev-agent.md",
 			Name:    "dev-agent",

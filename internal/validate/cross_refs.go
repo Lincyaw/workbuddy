@@ -42,6 +42,7 @@ var ValidRuntimes = map[string]struct{}{
 	"codex":            {},
 	"claude-code":      {},
 	"claude-agent-sdk": {},
+	"agentm":           {},
 }
 
 // ValidRoles is the canonical 2-role catalog. The project deliberately
