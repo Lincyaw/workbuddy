@@ -435,6 +435,11 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	sessionManager := runtimepkg.NewSessionManager(opts.sessionsDir, localStore)
 	lnch.SetSessionManager(sessionManager)
 
+	// Coordinator-managed label writer for AgentM runs (REQ-146 / #332).
+	// Self-managed runtimes (claude-code, codex) are unaffected — the
+	// Registry setter only mutates the AgentM bridge runtime.
+	lnch.SetAgentMLabelWriter(launcher.NewAgentMLabelWriterAdapter(localStore))
+
 	var httpClient *http.Client
 	if opts.caCert != "" {
 		caData, err := os.ReadFile(opts.caCert)

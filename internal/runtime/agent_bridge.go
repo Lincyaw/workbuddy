@@ -16,7 +16,10 @@ import (
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
+
+	"github.com/Lincyaw/workbuddy/internal/tracing"
 )
 
 func NewBackendFromConfig(runtimeName string) (agent.Backend, error) {
@@ -45,6 +48,15 @@ type AgentBridgeRuntime struct {
 	// runtimes (claude-code, codex) remain self-managed; this hook is
 	// only consulted when the underlying session is AgentM.
 	GitOps AgentMGitOps
+	// LabelWriter, when non-nil, is invoked by the AgentM bridge after a
+	// successful run AND a successful GitOps publish to apply the
+	// `next_label` value the agent emitted on its structured Result.
+	// Coordinator-managed label writes are the v0.6 closing of the
+	// AgentM state-machine loop (REQ-146, #332). Self-managed runtimes
+	// (claude-code, codex) keep flipping labels themselves via
+	// `gh issue edit` from inside the agent subprocess and MUST NOT
+	// have this hook wired — the per-runtime gate lives in Run() below.
+	LabelWriter AgentMLabelWriter
 }
 
 // AgentMGitOps is the bridge between the runtime package and
@@ -58,6 +70,21 @@ type AgentMGitOps interface {
 	// means the agent produced no diff; the caller MUST treat that as
 	// a no-op publish, not a failure.
 	PublishArtifact(ctx context.Context, req AgentMPublishRequest) (prURL string, err error)
+}
+
+// AgentMLabelWriter is the bridge between the runtime package and
+// internal/labelwriter. Defined locally so runtime stays a leaf-of-leaves;
+// production wiring constructs an adapter that satisfies this interface
+// around a *labelwriter.Writer. v0.6 sanctioned exception to the
+// "agents own label writes" rule, per docs/decisions/
+// 2026-05-13-k8s-agentm-otel.md (Block 2 § Two execution modes) — only
+// AgentM runs use this path.
+type AgentMLabelWriter interface {
+	// ApplyNextLabel adds `label` to issue #issueNum in `repo`. An empty
+	// label MUST be a no-op (no error). The implementation is expected
+	// to consult the repo registration for host_kind so GitHub and
+	// Gitea backends route to the right wire protocol.
+	ApplyNextLabel(ctx context.Context, repo string, issueNum int, label string) error
 }
 
 // ErrNoChangesToPublish signals that an AgentMGitOps.PublishArtifact call
@@ -149,11 +176,12 @@ func (r *AgentBridgeRuntime) Start(ctx context.Context, agentCfg *config.AgentCo
 	}
 
 	return &AgentBridgeSession{
-		Session:  sess,
-		Handle:   handle,
-		AgentCfg: agentCfg,
-		Task:     task,
-		GitOps:   r.GitOps,
+		Session:     sess,
+		Handle:      handle,
+		AgentCfg:    agentCfg,
+		Task:        task,
+		GitOps:      r.GitOps,
+		LabelWriter: r.LabelWriter,
 	}, nil
 }
 
@@ -190,6 +218,11 @@ type AgentBridgeSession struct {
 	// GitOps, when non-nil and the underlying session is AgentM,
 	// publishes the artifact (commit/push/PR) after a successful run.
 	GitOps AgentMGitOps
+	// LabelWriter, when non-nil and the underlying session is AgentM,
+	// applies the agent-suggested next_label AFTER GitOps publish
+	// succeeds. Strict sequence: if the PR cannot be opened we MUST NOT
+	// advance the state machine (REQ-146 / #332).
+	LabelWriter AgentMLabelWriter
 }
 
 func (s *AgentBridgeSession) Run(ctx context.Context, events chan<- launcherevents.Event) (*Result, error) {
@@ -296,6 +329,7 @@ func (s *AgentBridgeSession) Run(ctx context.Context, events chan<- launchereven
 			// Coordinator-managed publish path (REQ-142 / #330).
 			// Only invoked when the run succeeded; failed runs already
 			// surface failure_reason for the reporter to comment on.
+			publishOK := false
 			if out.Success && s.GitOps != nil && s.Task != nil {
 				prURL, pubMeta, pubErr := s.publishAgentMArtifact(ctx, out)
 				for k, v := range pubMeta {
@@ -306,8 +340,26 @@ func (s *AgentBridgeSession) Run(ctx context.Context, events chan<- launchereven
 					// job, but the coordinator couldn't ship the diff.
 					meta[MetaInfraFailure] = "true"
 					meta[MetaInfraFailureReason] = "agentm publish: " + pubErr.Error()
-				} else if prURL != "" {
-					meta["pr_url"] = prURL
+				} else {
+					publishOK = true
+					if prURL != "" {
+						meta["pr_url"] = prURL
+					}
+				}
+			}
+			// Coordinator-managed label writer (REQ-146 / #332).
+			// Strict sequence: only fire after a successful AgentM run
+			// AND a successful gitops publish (or no-changes, which the
+			// publish adapter classifies as a non-failure no-op). If
+			// the PR could not be opened we MUST NOT advance the state
+			// machine. Self-managed runtimes (claude-code, codex) never
+			// wire LabelWriter, so this branch is AgentM-only by
+			// construction.
+			if out.Success && publishOK && s.LabelWriter != nil && s.Task != nil && strings.TrimSpace(out.NextLabel) != "" {
+				if applied, applyErr := s.applyAgentMNextLabel(ctx, out.NextLabel); applyErr != nil {
+					meta["agentm_label_apply_error"] = applyErr.Error()
+				} else if applied != "" {
+					meta["agentm_label_applied"] = applied
 				}
 			}
 		}
@@ -383,6 +435,38 @@ func (s *AgentBridgeSession) publishAgentMArtifact(ctx context.Context, out *age
 	meta["agentm_publish"] = "published"
 	meta["agentm_pr_branch"] = branch
 	return prURL, meta, nil
+}
+
+// applyAgentMNextLabel invokes the coordinator-managed label writer for
+// AgentM runs. The wrapping span carries wb.next_label.applied so the
+// dashboard can attribute state-machine advances to AgentM runs distinctly
+// from agent-driven `gh issue edit` calls. Returns the applied label on
+// success so the caller can stamp Result.Meta for downstream observability.
+func (s *AgentBridgeSession) applyAgentMNextLabel(ctx context.Context, label string) (string, error) {
+	if s.LabelWriter == nil || s.Task == nil {
+		return "", nil
+	}
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return "", nil
+	}
+	repo := s.Task.Repo
+	issueNum := s.Task.Issue.Number
+	if repo == "" || issueNum <= 0 {
+		return "", nil
+	}
+	ctx, span := tracing.Start(ctx, "runtime.agentm.apply_next_label",
+		attribute.String("workbuddy.repo", repo),
+		attribute.Int("workbuddy.issue.number", issueNum),
+		attribute.String("wb.next_label.candidate", label),
+	)
+	defer span.End()
+	if err := s.LabelWriter.ApplyNextLabel(ctx, repo, issueNum, label); err != nil {
+		span.SetAttributes(attribute.String("wb.next_label.error", err.Error()))
+		return "", err
+	}
+	span.SetAttributes(attribute.String("wb.next_label.applied", label))
+	return label, nil
 }
 
 func buildAgentMPRBody(repo string, issueNum int, out *agentm.Output) string {
