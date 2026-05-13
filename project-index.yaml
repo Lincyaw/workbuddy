@@ -5478,3 +5478,70 @@ requirements:
       - internal/launcher/gitops_bridge_test.go
     deps:
       - REQ-134
+
+  - id: REQ-145
+    title: Helm chart values surface for MySQL DSN + OTel endpoint (v0.6)
+    description: >
+      Per docs/decisions/2026-05-13-k8s-agentm-otel.md Block 3
+      § Storage and Block 4 § Collector, the workbuddy chart consumes
+      external AegisLab MySQL and the AegisLab OTel collector via
+      values. Issue #334 hardens the values surface that REQ-143's
+      skeleton stubbed out so production deployments can wire real
+      Secret references and standard OTel SDK env vars without
+      editing the chart.
+
+      Scope:
+        - values.yaml: split mysql into mysql.dsn (plaintext, dev)
+          and mysql.dsnSecretRef.{name,key} (Secret keyRef, prod).
+          Split otel into otel.endpoint, otel.protocol, and
+          otel.serviceName so the standard OTel SDK env vars
+          (OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_EXPORTER_OTLP_PROTOCOL /
+          OTEL_SERVICE_NAME) consumed by internal/tracing/tracing.go
+          can be set per release. Add giteaToken.secretKey so an
+          existing Secret with a non-"token" key still works.
+        - templates/deployment.yaml: switch to a conditional
+          WORKBUDDY_MYSQL_DSN env (Secret keyRef when dsnSecretRef.name
+          is set, plain value otherwise). Replace the
+          WORKBUDDY_OTEL_ENDPOINT / WORKBUDDY_GITEA_TOKEN placeholders
+          from the skeleton with the env vars the code actually
+          consumes: OTEL_EXPORTER_OTLP_ENDPOINT,
+          OTEL_EXPORTER_OTLP_PROTOCOL, OTEL_SERVICE_NAME (tracing.go),
+          and GH_TOKEN + GITEA_TOKEN both sourced from the same Secret
+          (gh CLI for the poller; internal/labelwriter for AgentM-mode
+          label writes).
+        - templates/secret.yaml: honor giteaToken.secretKey when
+          materializing the dev Secret so the keyRef in
+          deployment.yaml resolves.
+        - README.md: full values reference + "Env contract" table
+          listing each pod env var with the Go source that consumes
+          it, plus an "AegisLab topology" section with prerequisites
+          (Secrets/ConfigMaps created out-of-band, OTel collector DNS
+          name) and the canonical values-aegislab.yaml.
+
+      Out of scope (explicit non-goals per decision doc):
+        - Bundling MySQL or OTel collector as subcharts.
+        - agent-env values (workbuddy doesn't talk to agent-env;
+          AgentM handles its own Gateway client).
+        - Ingress (#333).
+        - Coordinator-side flag switch to consume WORKBUDDY_MYSQL_DSN
+          as the default --db source. The chart sets the env var
+          forward-compatibly; the flag switch is a separate slice.
+    priority: P1
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-145-1: `helm template ... --set mysql.dsn=mysql://test/test --set otel.endpoint=http://otel:4317 --set giteaToken.secretName=gitea-token` renders cleanly."
+      - "AC-145-2: Coordinator pod env reflects all four values — WORKBUDDY_MYSQL_DSN, OTEL_EXPORTER_OTLP_ENDPOINT (+ protocol/serviceName), GH_TOKEN/GITEA_TOKEN from secretKeyRef, and the agents ConfigMap mount."
+      - "AC-145-3: README has an `AegisLab topology` section with the canonical values-aegislab.yaml, prerequisites, and the env contract table."
+      - "AC-145-4: `helm lint deploy/helm/workbuddy/` passes (only the optional icon INFO)."
+      - "AC-145-5: `mysql.dsnSecretRef.name` renders WORKBUDDY_MYSQL_DSN as a secretKeyRef; otherwise the plaintext mysql.dsn is rendered as the value."
+      - "AC-145-6: project-index.yaml has this REQ entry referencing issue #334 and the decision doc."
+    code:
+      - deploy/helm/workbuddy/values.yaml
+      - deploy/helm/workbuddy/README.md
+      - deploy/helm/workbuddy/templates/deployment.yaml
+      - deploy/helm/workbuddy/templates/secret.yaml
+    tests:
+      - deploy/helm/workbuddy/values.yaml
+    deps:
+      - REQ-143
