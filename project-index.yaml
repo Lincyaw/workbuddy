@@ -5002,3 +5002,44 @@ requirements:
       - internal/store/root_trace_test.go
     deps:
       - REQ-135
+
+  - id: REQ-136
+    title: MySQL backend implementation behind Store interface
+    description: >
+      Second step in the v0.5 storage refactor (issue #316,
+      docs/decisions/2026-05-13-k8s-agentm-otel.md Block 3 § Storage).
+      Builds on the abstract Store interface from REQ-135 by adding a
+      MySQL backend (github.com/go-sql-driver/mysql) selected by DSN
+      scheme. The New(dsn) factory dispatches sqlite:// (or a bare
+      path) to the SQLite engine and mysql:// to the new MySQL engine.
+      A small dialect layer rewrites SQLite-flavoured SQL fragments
+      (INSERT OR IGNORE, ON CONFLICT ... DO UPDATE SET ... excluded.X,
+      datetime('now', ?), julianday(...)) for MySQL on the fly so the
+      rest of the package keeps a single source of SQL. Three
+      RETURNING call sites are emulated via upsert-then-SELECT inside
+      a transaction. Schema bootstrap is two parallel scripts (SQLite
+      DDL in dbStore.createTables, MySQL DDL in
+      internal/store/mysql/schema.sql) kept in sync by
+      TestSchemaParity. A mysql_integration build tag gates the
+      full store test suite against a real MySQL.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-136-1: mysqlStore passes the same Store-interface contract as sqliteStore when targeted at MySQL (covered by store_mysql_integration_test.go under the mysql_integration build tag)."
+      - "AC-136-2: New(\"mysql://...\") boots successfully against a clean MySQL and creates the schema (TestMySQLBootstrap)."
+      - "AC-136-3: New(\"sqlite://./local.db\") and bare-path DSNs still work unchanged (existing store tests)."
+      - "AC-136-4: SQLite and MySQL schemas are feature-parallel; CI fails on drift via TestSchemaParity in internal/store/schema_parity_test.go."
+      - "AC-136-5: go build ./..., go vet ./..., and go test ./... -count=1 all pass."
+      - "AC-136-6: This index entry references issue #316 and the decision doc, with status tested."
+    code:
+      - internal/store/store.go
+      - internal/store/dialect.go
+      - internal/store/db_adapter.go
+      - internal/store/dbstore_helpers.go
+      - internal/store/queries.go
+      - internal/store/mysql/schema.sql
+      - internal/store/mysql/README.md
+    tests:
+      - internal/store/schema_parity_test.go
+      - internal/store/store_mysql_integration_test.go

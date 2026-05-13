@@ -2,7 +2,7 @@ package store
 
 // This file contains narrow, purpose-built query methods used by higher-level
 // packages (eventlog, metrics, auditapi, audit, workflow) so those consumers
-// no longer need to reach through sqliteStore.DB() and issue raw SQL against storage
+// no longer need to reach through dbStore.DB() and issue raw SQL against storage
 // internals. See issue #145 finding #9.
 
 import (
@@ -38,7 +38,7 @@ type IssueEventMeta struct {
 // QueryEventsFiltered returns events matching the provided filter. It exists
 // so eventlog.EventLogger can run filtered queries without needing a raw
 // *sql.DB handle.
-func (s *sqliteStore) QueryEventsFiltered(filter EventQueryFilter) ([]Event, error) {
+func (s *dbStore) QueryEventsFiltered(filter EventQueryFilter) ([]Event, error) {
 	query := `SELECT id, ts, type, repo, issue_num, payload FROM events WHERE 1=1`
 	var args []interface{}
 
@@ -87,7 +87,7 @@ func (s *sqliteStore) QueryEventsFiltered(filter EventQueryFilter) ([]Event, err
 // LatestEventAt returns the timestamp of the most recent event for the given
 // repo/issue pair, or nil if there are no events. Used by audit handlers to
 // compute "last activity" surfaces.
-func (s *sqliteStore) LatestEventAt(repo string, issueNum int) (*time.Time, error) {
+func (s *dbStore) LatestEventAt(repo string, issueNum int) (*time.Time, error) {
 	var raw string
 	err := s.db.QueryRow(
 		`SELECT ts FROM events WHERE repo = ? AND issue_num = ? ORDER BY ts DESC, id DESC LIMIT 1`,
@@ -109,7 +109,7 @@ func (s *sqliteStore) LatestEventAt(repo string, issueNum int) (*time.Time, erro
 
 // LatestIssueEvent returns the type and timestamp of the most recent event for
 // the given repo/issue pair, or nil if there are no events.
-func (s *sqliteStore) LatestIssueEvent(repo string, issueNum int) (*IssueEventMeta, error) {
+func (s *dbStore) LatestIssueEvent(repo string, issueNum int) (*IssueEventMeta, error) {
 	var rawTS, eventType string
 	err := s.db.QueryRow(
 		`SELECT ts, type FROM events WHERE repo = ? AND issue_num = ? ORDER BY ts DESC, id DESC LIMIT 1`,
@@ -140,7 +140,7 @@ type IssueTransitionEvent struct {
 // LatestIssueTransition returns the most recent `transition` event for the
 // given issue, or nil if none exists. Used for last_transition_at on the
 // in-flight dashboard.
-func (s *sqliteStore) LatestIssueTransition(repo string, issueNum int) (*IssueTransitionEvent, error) {
+func (s *dbStore) LatestIssueTransition(repo string, issueNum int) (*IssueTransitionEvent, error) {
 	var rawTS, payload string
 	err := s.db.QueryRow(
 		`SELECT ts, payload FROM events
@@ -165,7 +165,7 @@ func (s *sqliteStore) LatestIssueTransition(repo string, issueNum int) (*IssueTr
 
 // QueryIssueTransitions returns every `transition` event for the issue in
 // chronological order. Used by the issue-detail endpoint.
-func (s *sqliteStore) QueryIssueTransitions(repo string, issueNum int) ([]IssueTransitionEvent, error) {
+func (s *dbStore) QueryIssueTransitions(repo string, issueNum int) ([]IssueTransitionEvent, error) {
 	rows, err := s.db.Query(
 		`SELECT ts, payload FROM events
 		 WHERE repo = ? AND issue_num = ? AND type = 'transition'
@@ -202,7 +202,7 @@ func (s *sqliteStore) QueryIssueTransitions(repo string, issueNum int) ([]IssueT
 // "no such table: sessions" into the logs on every /api/v1/status hit
 // (auditapi callers silently discard the error, but the noise still
 // reaches stderr). Same pattern as CountTerminalSessionsSince et al.
-func (s *sqliteStore) LatestSessionForIssue(repo string, issueNum int) (*SessionRecord, error) {
+func (s *dbStore) LatestSessionForIssue(repo string, issueNum int) (*SessionRecord, error) {
 	if s.coordinatorMode {
 		return nil, nil
 	}
@@ -229,7 +229,7 @@ func (s *sqliteStore) LatestSessionForIssue(repo string, issueNum int) (*Session
 // CountTerminalSessionsSince counts sessions that have transitioned into the
 // given terminal status since the cutoff time. Used for done_24h / failed_24h
 // summary fields on /api/v1/status.
-func (s *sqliteStore) CountTerminalSessionsSince(status string, since time.Time) (int, error) {
+func (s *dbStore) CountTerminalSessionsSince(status string, since time.Time) (int, error) {
 	if s.coordinatorMode {
 		// Phase 3 (REQ-122): coordinator's `sessions` table is dropped.
 		// Status counters now report 0 from the coordinator side; the
@@ -273,7 +273,7 @@ type InFlightTaskForWorker struct {
 // supervisor_agent_id (the foundational #234 slice landed before all
 // dispatch paths were wired) are omitted: the worker resume path needs the
 // agent id to call the supervisor IPC. Issue #245.
-func (s *sqliteStore) InFlightTasksForWorker(workerID string) ([]InFlightTaskForWorker, error) {
+func (s *dbStore) InFlightTasksForWorker(workerID string) ([]InFlightTaskForWorker, error) {
 	rows, err := s.db.Query(
 		`SELECT tq.id,
 		        COALESCE(tq.supervisor_agent_id, ''),
@@ -315,7 +315,7 @@ func (s *sqliteStore) InFlightTasksForWorker(workerID string) ([]InFlightTaskFor
 
 // WorkerCurrentTaskID returns the running task ID currently owned by the
 // worker, or "" when the worker has nothing in flight.
-func (s *sqliteStore) WorkerCurrentTaskID(workerID string) (string, error) {
+func (s *dbStore) WorkerCurrentTaskID(workerID string) (string, error) {
 	var taskID sql.NullString
 	err := s.db.QueryRow(
 		`SELECT id FROM task_queue WHERE worker_id = ? AND status = ? ORDER BY updated_at DESC LIMIT 1`,
@@ -404,7 +404,7 @@ type IssueActivityRow struct {
 
 // CountEventsByRepoType returns the (repo,type,count) aggregation for all
 // lifecycle events. Used by the metrics handler.
-func (s *sqliteStore) CountEventsByRepoType() ([]EventCountByRepoType, error) {
+func (s *dbStore) CountEventsByRepoType() ([]EventCountByRepoType, error) {
 	rows, err := s.db.Query(`SELECT COALESCE(repo, ''), COALESCE(type, ''), COUNT(1) FROM events GROUP BY repo, type`)
 	if err != nil {
 		return nil, fmt.Errorf("store: events by repo/type: %w", err)
@@ -423,7 +423,7 @@ func (s *sqliteStore) CountEventsByRepoType() ([]EventCountByRepoType, error) {
 
 // TokenUsageEvents returns the raw payload of every token_usage event along
 // with its repo. Parsing is left to the caller.
-func (s *sqliteStore) TokenUsageEvents(eventType string) ([]TokenUsagePayload, error) {
+func (s *dbStore) TokenUsageEvents(eventType string) ([]TokenUsagePayload, error) {
 	rows, err := s.db.Query(`SELECT COALESCE(repo, ''), COALESCE(payload, '') FROM events WHERE type = ?`, eventType)
 	if err != nil {
 		return nil, fmt.Errorf("store: token usage events: %w", err)
@@ -441,7 +441,7 @@ func (s *sqliteStore) TokenUsageEvents(eventType string) ([]TokenUsagePayload, e
 }
 
 // CountTasksByRepoStatus returns task_queue counts grouped by (repo,status).
-func (s *sqliteStore) CountTasksByRepoStatus() ([]TaskCountByRepoStatus, error) {
+func (s *dbStore) CountTasksByRepoStatus() ([]TaskCountByRepoStatus, error) {
 	rows, err := s.db.Query(`SELECT COALESCE(repo, ''), COALESCE(status, ''), COUNT(1) FROM task_queue GROUP BY repo, status`)
 	if err != nil {
 		return nil, fmt.Errorf("store: task counts: %w", err)
@@ -459,7 +459,7 @@ func (s *sqliteStore) CountTasksByRepoStatus() ([]TaskCountByRepoStatus, error) 
 }
 
 // CountWorkersByRepo returns total and online worker counts grouped by repo.
-func (s *sqliteStore) CountWorkersByRepo() ([]WorkerCountByRepo, error) {
+func (s *dbStore) CountWorkersByRepo() ([]WorkerCountByRepo, error) {
 	rows, err := s.db.Query(`
 		SELECT COALESCE(repo, ''), COUNT(1),
 		       SUM(CASE WHEN status = 'online' THEN 1 ELSE 0 END)
@@ -481,7 +481,7 @@ func (s *sqliteStore) CountWorkersByRepo() ([]WorkerCountByRepo, error) {
 }
 
 // MaxTransitionCounts returns the MAX(count) per transition.
-func (s *sqliteStore) MaxTransitionCounts() ([]TransitionMaxCount, error) {
+func (s *dbStore) MaxTransitionCounts() ([]TransitionMaxCount, error) {
 	rows, err := s.db.Query(`SELECT COALESCE(repo, ''), COALESCE(from_state, ''), COALESCE(to_state, ''), MAX(count) FROM transition_counts GROUP BY repo, from_state, to_state`)
 	if err != nil {
 		return nil, fmt.Errorf("store: transition max: %w", err)
@@ -501,7 +501,7 @@ func (s *sqliteStore) MaxTransitionCounts() ([]TransitionMaxCount, error) {
 // ListOpenIssueActivity returns, for every open issue, the activity row needed
 // to compute open/stuck issue gauges. pendingStatus and runningStatus bound
 // the "active task" count used to determine whether the issue is idle.
-func (s *sqliteStore) ListOpenIssueActivity(pendingStatus, runningStatus string) ([]IssueActivityRow, error) {
+func (s *dbStore) ListOpenIssueActivity(pendingStatus, runningStatus string) ([]IssueActivityRow, error) {
 	rows, err := s.db.Query(`
 		SELECT
 			ic.repo,
@@ -542,7 +542,7 @@ func (s *sqliteStore) ListOpenIssueActivity(pendingStatus, runningStatus string)
 
 // CountActiveSessions returns the number of sessions whose joined task status
 // (falling back to session status) is pending or running.
-func (s *sqliteStore) CountActiveSessions() (int, error) {
+func (s *dbStore) CountActiveSessions() (int, error) {
 	if s.coordinatorMode {
 		// Phase 3 (REQ-122): coordinator's `sessions` table is dropped.
 		// See CountTerminalSessionsSince for the same tradeoff. Returns
@@ -565,7 +565,7 @@ func (s *sqliteStore) CountActiveSessions() (int, error) {
 }
 
 // CountWorkers returns the total number of rows in the workers table.
-func (s *sqliteStore) CountWorkers() (int, error) {
+func (s *dbStore) CountWorkers() (int, error) {
 	var n int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM workers`).Scan(&n); err != nil {
 		return 0, fmt.Errorf("store: count workers: %w", err)
@@ -575,7 +575,7 @@ func (s *sqliteStore) CountWorkers() (int, error) {
 
 // LastEventTimestampByType returns the timestamp of the most recent event of
 // the given type, or nil if none exists.
-func (s *sqliteStore) LastEventTimestampByType(eventType string) (*time.Time, error) {
+func (s *dbStore) LastEventTimestampByType(eventType string) (*time.Time, error) {
 	var raw sql.NullString
 	err := s.db.QueryRow(
 		`SELECT ts FROM events WHERE type = ? ORDER BY id DESC LIMIT 1`,
@@ -607,7 +607,7 @@ type SessionListFilter struct {
 // ListSessionsForAPI returns session rows with joined task status, ordered
 // newest first, for the audit API. This preserves the exact JOIN semantics
 // previously inlined in auditapi.
-func (s *sqliteStore) ListSessionsForAPI(filter SessionListFilter) ([]SessionRecord, error) {
+func (s *dbStore) ListSessionsForAPI(filter SessionListFilter) ([]SessionRecord, error) {
 	if s.coordinatorMode {
 		// Phase 3 (REQ-122): coordinator's `sessions` table is dropped.
 		// The /api/v1/sessions endpoint is served by sessionproxy fan-
@@ -685,7 +685,7 @@ type SessionAggregateMetrics struct {
 
 // AggregateSessionMetrics returns the counts/averages used by the audit API's
 // /api/v1/metrics endpoint.
-func (s *sqliteStore) AggregateSessionMetrics() (SessionAggregateMetrics, error) {
+func (s *dbStore) AggregateSessionMetrics() (SessionAggregateMetrics, error) {
 	if s.coordinatorMode {
 		// Phase 3 (REQ-122): coordinator's `sessions` table is dropped.
 		// /api/v1/metrics on the coordinator now reflects only its own
@@ -730,7 +730,7 @@ type SessionCountByAgent struct {
 }
 
 // CountSessionsByAgent returns per-agent session counts ordered by agent name.
-func (s *sqliteStore) CountSessionsByAgent() ([]SessionCountByAgent, error) {
+func (s *dbStore) CountSessionsByAgent() ([]SessionCountByAgent, error) {
 	if s.coordinatorMode {
 		// Phase 3 (REQ-122): coordinator's `sessions` table is dropped.
 		// See AggregateSessionMetrics comment for the same tradeoff.
@@ -783,7 +783,7 @@ var ErrWorkflowInstanceNotFound = fmt.Errorf("workflow instance not found")
 
 // CreateWorkflowInstanceIfMissing inserts a new workflow_instances row if it
 // does not already exist.
-func (s *sqliteStore) CreateWorkflowInstanceIfMissing(id, workflowName, repo string, issueNum int, currentState string) error {
+func (s *dbStore) CreateWorkflowInstanceIfMissing(id, workflowName, repo string, issueNum int, currentState string) error {
 	_, err := s.db.Exec(
 		`INSERT INTO workflow_instances (id, workflow_name, repo, issue_num, current_state)
 		 VALUES (?, ?, ?, ?, ?) ON CONFLICT (repo, issue_num, workflow_name) DO NOTHING`,
@@ -797,7 +797,7 @@ func (s *sqliteStore) CreateWorkflowInstanceIfMissing(id, workflowName, repo str
 
 // AdvanceWorkflowInstance writes a new transition and updates CurrentState in
 // a single transaction. Returns ErrWorkflowInstanceNotFound if no row matched.
-func (s *sqliteStore) AdvanceWorkflowInstance(id, fromState, toState, triggerAgent string, at time.Time) error {
+func (s *dbStore) AdvanceWorkflowInstance(id, fromState, toState, triggerAgent string, at time.Time) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("store: begin advance workflow: %w", err)
@@ -835,7 +835,7 @@ func (s *sqliteStore) AdvanceWorkflowInstance(id, fromState, toState, triggerAge
 
 // QueryWorkflowInstancesByRepoIssue returns all workflow_instances rows for
 // one issue ordered by creation time.
-func (s *sqliteStore) QueryWorkflowInstancesByRepoIssue(repo string, issueNum int) ([]WorkflowInstanceRow, error) {
+func (s *dbStore) QueryWorkflowInstancesByRepoIssue(repo string, issueNum int) ([]WorkflowInstanceRow, error) {
 	rows, err := s.db.Query(
 		`SELECT id, workflow_name, repo, issue_num, current_state, created_at, updated_at
 		 FROM workflow_instances
@@ -860,7 +860,7 @@ func (s *sqliteStore) QueryWorkflowInstancesByRepoIssue(repo string, issueNum in
 }
 
 // GetWorkflowInstanceByID loads a single workflow_instances row.
-func (s *sqliteStore) GetWorkflowInstanceByID(id string) (*WorkflowInstanceRow, error) {
+func (s *dbStore) GetWorkflowInstanceByID(id string) (*WorkflowInstanceRow, error) {
 	row := s.db.QueryRow(
 		`SELECT id, workflow_name, repo, issue_num, current_state, created_at, updated_at
 		 FROM workflow_instances
@@ -880,7 +880,7 @@ func (s *sqliteStore) GetWorkflowInstanceByID(id string) (*WorkflowInstanceRow, 
 
 // QueryWorkflowTransitions returns the ordered transition history for an
 // instance.
-func (s *sqliteStore) QueryWorkflowTransitions(instanceID string) ([]WorkflowTransitionRow, error) {
+func (s *dbStore) QueryWorkflowTransitions(instanceID string) ([]WorkflowTransitionRow, error) {
 	rows, err := s.db.Query(
 		`SELECT from_state, to_state, trigger_agent, created_at
 		 FROM workflow_transitions
@@ -912,7 +912,10 @@ func (s *sqliteStore) QueryWorkflowTransitions(instanceID string) ([]WorkflowTra
 // IncrementDevReviewCycleCount atomically increments the per-issue
 // dev_review_cycle_count and returns the new value. The row is created on
 // first call. updated_at is bumped to CURRENT_TIMESTAMP.
-func (s *sqliteStore) IncrementDevReviewCycleCount(repo string, issueNum int) (int, error) {
+func (s *dbStore) IncrementDevReviewCycleCount(repo string, issueNum int) (int, error) {
+	if s.isMySQL() {
+		return s.mysqlIncrementCycleCount(repo, issueNum, "dev_review_cycle_count")
+	}
 	var count int
 	err := s.db.QueryRow(
 		`INSERT INTO issue_cycle_state (repo, issue_num, dev_review_cycle_count, updated_at)
@@ -929,7 +932,45 @@ func (s *sqliteStore) IncrementDevReviewCycleCount(repo string, issueNum int) (i
 	return count, nil
 }
 
-func (s *sqliteStore) IncrementSynthCycleCount(repo string, issueNum int) (int, error) {
+// mysqlIncrementCycleCount emulates SQLite `RETURNING` on MySQL: an
+// upsert-then-select wrapped in a transaction so a concurrent goroutine
+// cannot interleave between the two statements and double-count. The
+// column name is a private package literal ("dev_review_cycle_count" or
+// "synth_cycle_count") — never user input — so direct interpolation is
+// safe.
+func (s *dbStore) mysqlIncrementCycleCount(repo string, issueNum int, column string) (int, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("store: begin increment %s: %w", column, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	upsert := fmt.Sprintf(
+		`INSERT INTO issue_cycle_state (repo, issue_num, %s, updated_at)
+		 VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+		 ON CONFLICT (repo, issue_num)
+		 DO UPDATE SET %s = %s + 1, updated_at = CURRENT_TIMESTAMP`,
+		column, column, column,
+	)
+	if _, err := tx.Exec(upsert, repo, issueNum); err != nil {
+		return 0, fmt.Errorf("store: increment %s upsert: %w", column, err)
+	}
+	var count int
+	if err := tx.QueryRow(
+		fmt.Sprintf(`SELECT %s FROM issue_cycle_state WHERE repo = ? AND issue_num = ?`, column),
+		repo, issueNum,
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("store: read incremented %s: %w", column, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("store: commit increment %s: %w", column, err)
+	}
+	return count, nil
+}
+
+func (s *dbStore) IncrementSynthCycleCount(repo string, issueNum int) (int, error) {
+	if s.isMySQL() {
+		return s.mysqlIncrementCycleCount(repo, issueNum, "synth_cycle_count")
+	}
 	var count int
 	err := s.db.QueryRow(
 		`INSERT INTO issue_cycle_state (repo, issue_num, synth_cycle_count, updated_at)
@@ -950,7 +991,7 @@ func (s *sqliteStore) IncrementSynthCycleCount(repo string, issueNum int) (int, 
 // (repo, issueNum). Subsequent calls are no-ops. Used by the long-flight
 // stuck detector to measure total in-flight time independent of per-state
 // dwell time.
-func (s *sqliteStore) TouchIssueFirstDispatch(repo string, issueNum int) error {
+func (s *dbStore) TouchIssueFirstDispatch(repo string, issueNum int) error {
 	_, err := s.db.Exec(
 		`INSERT INTO issue_cycle_state (repo, issue_num, first_dispatch_at, updated_at)
 		 VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -967,7 +1008,7 @@ func (s *sqliteStore) TouchIssueFirstDispatch(repo string, issueNum int) error {
 
 // MarkIssueCycleCapHit records the moment the issue tripped the
 // max_review_cycles cap. Idempotent.
-func (s *sqliteStore) MarkIssueCycleCapHit(repo string, issueNum int) error {
+func (s *dbStore) MarkIssueCycleCapHit(repo string, issueNum int) error {
 	_, err := s.db.Exec(
 		`INSERT INTO issue_cycle_state (repo, issue_num, cap_hit_at, updated_at)
 		 VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -982,7 +1023,7 @@ func (s *sqliteStore) MarkIssueCycleCapHit(repo string, issueNum int) error {
 	return nil
 }
 
-func (s *sqliteStore) MarkIssueSynthCycleCapHit(repo string, issueNum int) error {
+func (s *dbStore) MarkIssueSynthCycleCapHit(repo string, issueNum int) error {
 	_, err := s.db.Exec(
 		`INSERT INTO issue_cycle_state (repo, issue_num, synth_cap_hit_at, updated_at)
 		 VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -999,7 +1040,7 @@ func (s *sqliteStore) MarkIssueSynthCycleCapHit(repo string, issueNum int) error
 
 // QueryIssueCycleState returns the per-issue cycle counter and timing. Returns
 // (nil, nil) when no row exists for the issue.
-func (s *sqliteStore) QueryIssueCycleState(repo string, issueNum int) (*IssueCycleState, error) {
+func (s *dbStore) QueryIssueCycleState(repo string, issueNum int) (*IssueCycleState, error) {
 	row := s.db.QueryRow(
 		`SELECT repo, issue_num, dev_review_cycle_count, synth_cycle_count,
 		        first_dispatch_at, cap_hit_at, synth_cap_hit_at, updated_at
@@ -1035,7 +1076,7 @@ func (s *sqliteStore) QueryIssueCycleState(repo string, issueNum int) (*IssueCyc
 // ResetIssueCycleState removes the per-issue cycle counter row. Used by
 // `workbuddy issue restart` so that an explicit restart clears the cycle
 // counter alongside other recovery state.
-func (s *sqliteStore) ResetIssueCycleState(repo string, issueNum int) error {
+func (s *dbStore) ResetIssueCycleState(repo string, issueNum int) error {
 	_, err := s.db.Exec(
 		`DELETE FROM issue_cycle_state WHERE repo = ? AND issue_num = ?`,
 		repo, issueNum,

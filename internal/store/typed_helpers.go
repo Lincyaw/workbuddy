@@ -8,7 +8,7 @@ import (
 // ResetTables truncates the given runtime tables in a single transaction.
 // Used by the recover command's state reset path (REQ-036). Failing a
 // single delete rolls the whole reset back.
-func (s *sqliteStore) ResetTables(tables []string) error {
+func (s *dbStore) ResetTables(tables []string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("store: begin reset tx: %w", err)
@@ -28,7 +28,7 @@ func (s *sqliteStore) ResetTables(tables []string) error {
 // CountTasksByIssue returns the number of task_queue rows for the given
 // (repo, issueNum). Used by the operator detector to gate alerts on
 // whether any task ever existed for an issue.
-func (s *sqliteStore) CountTasksByIssue(repo string, issueNum int) (int, error) {
+func (s *dbStore) CountTasksByIssue(repo string, issueNum int) (int, error) {
 	var count int
 	err := s.db.QueryRow(
 		`SELECT COUNT(1) FROM task_queue WHERE repo = ? AND issue_num = ?`,
@@ -43,7 +43,7 @@ func (s *sqliteStore) CountTasksByIssue(repo string, issueNum int) (int, error) 
 // RecentAlertPayloads returns the payload column of the most recent
 // `limit` events with the given type, newest first. Used by the
 // operator detector's duplicate-suppression window.
-func (s *sqliteStore) RecentAlertPayloads(eventType string, limit int) ([]string, error) {
+func (s *dbStore) RecentAlertPayloads(eventType string, limit int) ([]string, error) {
 	if limit <= 0 {
 		limit = 256
 	}
@@ -75,7 +75,7 @@ func (s *sqliteStore) RecentAlertPayloads(eventType string, limit int) ([]string
 // the registry to detect dead workers. Returns the first error
 // encountered; partial progress (some workers flipped) is not rolled
 // back, mirroring the previous registry behaviour.
-func (s *sqliteStore) MarkStaleWorkersOffline(threshold time.Duration) error {
+func (s *dbStore) MarkStaleWorkersOffline(threshold time.Duration) error {
 	rows, err := s.db.Query(
 		`SELECT id FROM workers WHERE status = 'online' AND last_heartbeat < datetime('now', ?)`,
 		fmt.Sprintf("-%d seconds", int(threshold.Seconds())),
