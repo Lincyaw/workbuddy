@@ -1,0 +1,44 @@
+# Fake GitHub API server for the kind smoke (REQ-147 / #335).
+# Image is built and loaded by `hack/e2e/Makefile` from
+# hack/e2e/fake-gh/. The coordinator pod talks to this via the
+# GH_HOST env (gh CLI's GitHub Enterprise override).
+apiVersion: v1
+kind: Service
+metadata:
+  name: fake-gh
+  namespace: workbuddy-e2e
+spec:
+  selector:
+    app: fake-gh
+  ports:
+    - port: 80
+      targetPort: 8080
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fake-gh
+  namespace: workbuddy-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fake-gh
+  template:
+    metadata:
+      labels:
+        app: fake-gh
+    spec:
+      containers:
+        - name: fake-gh
+          image: workbuddy-fake-gh:e2e
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /_healthz
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 2
