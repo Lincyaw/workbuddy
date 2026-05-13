@@ -1,0 +1,23 @@
+{{- /*
+Render an agent-configs ConfigMap only when the user has not pointed at an
+existing one via .Values.agents.configMapName. The chart bundles default
+agent definitions in deploy/helm/workbuddy/agents/*.md; .Files.Glob picks
+them up at render time. If no defaults are bundled the ConfigMap is created
+empty — production deployments should override `agents.configMapName` with
+their organization's ConfigMap (see README, #334 for the full surface).
+*/ -}}
+{{- if not .Values.agents.configMapName }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "workbuddy.agentsConfigMapName" . }}
+  labels:
+    {{- include "workbuddy.labels" . | nindent 4 }}
+{{- $files := .Files.Glob "agents/*.md" }}
+{{- if $files }}
+data:
+{{ ($files).AsConfig | indent 2 }}
+{{- else }}
+data: {}
+{{- end }}
+{{- end }}
