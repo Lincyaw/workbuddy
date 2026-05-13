@@ -9,10 +9,14 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/agent"
+	"github.com/Lincyaw/workbuddy/internal/agent/agentm"
 	"github.com/Lincyaw/workbuddy/internal/agent/claude"
 	"github.com/Lincyaw/workbuddy/internal/agent/codex"
 	"github.com/Lincyaw/workbuddy/internal/config"
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 func NewBackendFromConfig(runtimeName string) (agent.Backend, error) {
@@ -21,6 +25,8 @@ func NewBackendFromConfig(runtimeName string) (agent.Backend, error) {
 		return codex.NewBackend(codex.Config{})
 	case config.RuntimeClaudeCode, config.RuntimeClaudeShot:
 		return claude.NewBackend(), nil
+	case config.RuntimeAgentM:
+		return agentm.NewBackend(), nil
 	default:
 		return nil, fmt.Errorf("agent: unsupported runtime %q", runtimeName)
 	}
@@ -81,7 +87,7 @@ func (r *AgentBridgeRuntime) Start(ctx context.Context, agentCfg *config.AgentCo
 		Model:    agentCfg.Policy.Model,
 		Sandbox:  agentCfg.Policy.Sandbox,
 		Approval: agentCfg.Policy.Approval,
-		Env:      envSliceToMap(BuildScopedEnv(agentCfg, task)),
+		Env:      injectTraceContext(ctx, envSliceToMap(BuildScopedEnv(agentCfg, task)), task),
 		Tags: map[string]string{
 			"agent": agentCfg.Name,
 			"repo":  task.Repo,
@@ -212,13 +218,44 @@ func (s *AgentBridgeSession) Run(ctx context.Context, events chan<- launchereven
 	}
 	<-pumpDone
 
-	var meta map[string]string
+	meta := map[string]string{}
 	if len(agentResult.FilesChanged) > 0 {
-		meta = map[string]string{
-			"files_changed": strings.Join(agentResult.FilesChanged, ","),
-		}
+		meta["files_changed"] = strings.Join(agentResult.FilesChanged, ",")
 	}
 	sessionPath := bridgeSessionPath(s.Handle)
+
+	// AgentM exposes a structured RESULT: contract. If the underlying
+	// session is an AgentM session, surface next_label/failure_reason on
+	// the Result so reporter/audit can render it and route the state
+	// machine. A malformed/missing RESULT is an infra failure.
+	if extractor, ok := s.Session.(interface {
+		Output() (*agentm.Output, error)
+		SessionLogPath() string
+	}); ok {
+		if logPath := extractor.SessionLogPath(); logPath != "" {
+			sessionPath = logPath
+		}
+		out, perr := extractor.Output()
+		switch {
+		case perr != nil:
+			// Build a Result we can mark as infra failure; the bridge
+			// returns the wait error so the worker treats this as failed.
+			meta[MetaInfraFailure] = "true"
+			meta[MetaInfraFailureReason] = perr.Error()
+		case out != nil:
+			meta["agentm_next_label"] = out.NextLabel
+			if out.ArtifactPath != "" {
+				meta["agentm_artifact_path"] = out.ArtifactPath
+			}
+			if !out.Success {
+				meta["agentm_failure_reason"] = out.FailureReason
+			}
+		}
+	}
+
+	if len(meta) == 0 {
+		meta = nil
+	}
 	return &Result{
 		ExitCode:       agentResult.ExitCode,
 		Duration:       agentResult.Duration,
@@ -257,6 +294,32 @@ func resolvePrompt(agentCfg *config.AgentConfig, task *TaskContext) string {
 		return cmd
 	}
 	return ""
+}
+
+// injectTraceContext adds W3C TraceContext (TRACEPARENT, TRACESTATE) and
+// workbuddy run/issue identifiers to the agent env so OTel-aware runtimes
+// (today: AgentM) can continue the parent span. Idempotent: if env already
+// contains TRACEPARENT, it is preserved.
+func injectTraceContext(ctx context.Context, env map[string]string, task *TaskContext) map[string]string {
+	if env == nil {
+		env = map[string]string{}
+	}
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	for k, v := range carrier {
+		// MapCarrier keys are lowercase; uppercase them for env-var
+		// convention (TRACEPARENT, TRACESTATE, BAGGAGE).
+		upper := strings.ToUpper(k)
+		if _, exists := env[upper]; !exists {
+			env[upper] = v
+		}
+	}
+	if task != nil {
+		if _, ok := env["WORKBUDDY_RUN_ID"]; !ok && task.Session.ID != "" {
+			env["WORKBUDDY_RUN_ID"] = task.Session.ID
+		}
+	}
+	return env
 }
 
 func envSliceToMap(entries []string) map[string]string {
