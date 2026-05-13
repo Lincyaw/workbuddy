@@ -4842,3 +4842,36 @@ requirements:
       - internal/ghutil/ghutil.go
     tests: []
     deps: []
+
+  - id: REQ-133
+    title: AgentM runtime + invocation contract (v0.5)
+    description: >
+      Per docs/decisions/2026-05-13-k8s-agentm-otel.md (Block 1), AgentM
+      joins claude-code and codex as a first-class runtime. This requirement
+      tracks the v0.5 slice: runtime enum entry, structured-output JSON
+      schema, written invocation/output contract, and config-loader policy
+      matrix that accepts `runtime: agentm`. Host-exec only — actual
+      dispatch wiring (and sandbox/coordinator-managed mode) are tracked
+      separately (issue #319 / v0.6).
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-133-1: `runtime: agentm` passes config validation; integration test covers a config with this value."
+      - "AC-133-2: schemas/agentm-output.schema.json exists and describes the structured output (success, next_label, artifact_path, session_log_path, failure_reason)."
+      - "AC-133-3: docs/planned/agentm-runtime.md documents the invocation + output contract and how it differs from claude-code / codex."
+      - "AC-133-4: `go build ./... && go vet ./... && go test ./... -count=1` all pass."
+      - "AC-133-5: project-index.yaml has this REQ entry referencing issue #315."
+    code:
+      - internal/config/loader.go
+      - internal/validate/cross_refs.go
+      - internal/validate/semantics.go
+      - schemas/agent.schema.json
+      - schemas/agentm-output.schema.json
+      - docs/planned/agentm-runtime.md
+      - docs/decisions/2026-05-13-k8s-agentm-otel.md
+    tests:
+      - internal/config/loader_test.go
+      - internal/validate/cross_refs_test.go
+    deps:
+      - REQ-132

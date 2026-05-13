@@ -24,8 +24,8 @@
     },
     "runtime": {
       "type": "string",
-      "enum": ["codex", "claude-code", "claude-agent-sdk"],
-      "description": "Agent execution backend."
+      "enum": ["codex", "claude-code", "claude-agent-sdk", "agentm"],
+      "description": "Agent execution backend. `agentm` was added in v0.5 (host-exec only in v0.5; coordinator-managed sandbox in v0.6). See docs/planned/agentm-runtime.md for the invocation/output contract."
     },
     "runner": {
       "type": "string",

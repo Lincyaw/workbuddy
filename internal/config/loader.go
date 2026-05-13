@@ -31,6 +31,12 @@ const (
 	RuntimeCodex       = "codex"
 	RuntimeCodexExec   = "codex-exec"
 	RuntimeCodexServer = "codex-appserver"
+	// RuntimeAgentM names the AgentM pluggable agent SDK (../AgentM).
+	// v0.5 introduces it as a config + contract-validated runtime only;
+	// actual dispatch wiring lands in a follow-up (issue #319). See
+	// docs/decisions/2026-05-13-k8s-agentm-otel.md (Block 1) and
+	// docs/planned/agentm-runtime.md for the invocation contract.
+	RuntimeAgentM = "agentm"
 )
 
 const (
@@ -45,9 +51,10 @@ var validRuntimes = map[string]bool{
 	RuntimeCodex:       true,
 	RuntimeCodexExec:   true,
 	RuntimeCodexServer: true,
+	RuntimeAgentM:      true,
 }
 
-var publicRuntimes = []string{RuntimeClaudeCode, RuntimeCodex, RuntimeCodexServer}
+var publicRuntimes = []string{RuntimeClaudeCode, RuntimeCodex, RuntimeCodexServer, RuntimeAgentM}
 var validRunners = map[string]bool{
 	RunnerLocal:         true,
 	RunnerGitHubActions: true,
@@ -335,6 +342,21 @@ func normalizeAgentConfig(agent *AgentConfig) ([]Warning, error) {
 		default:
 			return warnings, fmt.Errorf("unsupported policy.approval %q for runtime %q", agent.Policy.Approval, agent.Runtime)
 		}
+	case RuntimeAgentM:
+		// v0.5: host-exec only. Sandbox/coordinator-managed mode is v0.6
+		// (see docs/decisions/2026-05-13-k8s-agentm-otel.md Block 2).
+		// AgentM is self-managed in host-exec, so the same sandbox/approval
+		// set as codex is allowed.
+		switch agent.Policy.Sandbox {
+		case "read-only", "workspace-write", "danger-full-access":
+		default:
+			return warnings, fmt.Errorf("unsupported policy.sandbox %q for runtime %q", agent.Policy.Sandbox, agent.Runtime)
+		}
+		switch agent.Policy.Approval {
+		case "never", "on-failure", "on-request", "via-approver":
+		default:
+			return warnings, fmt.Errorf("unsupported policy.approval %q for runtime %q", agent.Policy.Approval, agent.Runtime)
+		}
 	default:
 		return warnings, fmt.Errorf("unsupported runtime %q", agent.Runtime)
 	}
@@ -364,6 +386,8 @@ func defaultSandboxForRuntime(runtime string) string {
 		return "read-only"
 	case RuntimeCodex:
 		return "read-only"
+	case RuntimeAgentM:
+		return "read-only"
 	default:
 		return ""
 	}
@@ -371,7 +395,7 @@ func defaultSandboxForRuntime(runtime string) string {
 
 func defaultApprovalForRuntime(runtime string) string {
 	switch runtime {
-	case RuntimeClaudeCode, RuntimeClaudeShot, RuntimeCodex:
+	case RuntimeClaudeCode, RuntimeClaudeShot, RuntimeCodex, RuntimeAgentM:
 		return "never"
 	default:
 		return ""
