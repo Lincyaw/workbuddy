@@ -70,7 +70,7 @@ CREATE TABLE repo_registrations (repo, environment, status, config_json, registe
 CREATE TABLE transition_counts (repo, issue_num, from_state, to_state, count);
 CREATE TABLE workflow_instances (id, workflow_name, repo, issue_num, current_state, created_at, updated_at);
 CREATE TABLE workflow_transitions (id, workflow_instance_id, from_state, to_state, trigger_agent, created_at);
-CREATE TABLE issue_cache (repo, issue_num, labels, body, state, root_trace_id, updated_at);
+CREATE TABLE issue_cache (repo, issue_num, labels, body, state, root_trace_id, parent_issue_num, updated_at);
 CREATE TABLE agent_sessions (id, session_id, task_id, repo, issue_num, agent_name, summary, raw_path, created_at);
 CREATE TABLE sessions (id, session_id, task_id, repo, issue_num, agent_name, runtime, worker_id, attempt, status, dir, stdout_path, stderr_path, tool_calls_path, metadata_path, summary, raw_path, created_at, closed_at);
 CREATE TABLE session_routes (session_id, worker_id, repo, issue_num, created_at);

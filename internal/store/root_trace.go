@@ -67,8 +67,38 @@ func (s *dbStore) GetIssueRootTraceID(repo string, issueNum int) (string, error)
 // GetPRRootTraceID returns the persisted root_trace_id for a PR row.
 // PRs share issue_cache with issues — the "pr:" prefix on state is the
 // only discriminator — so this is the same lookup keyed by PR number.
+//
+// REQ-138 (#320): when the PR row itself has an empty trace_id (e.g.
+// the row predates the inheritance write path and was minted before the
+// parent was wired in) but its parent_issue_num points at an issue with
+// a non-empty trace_id, the parent's value is returned. This keeps the
+// PR-side spans correlated with the issue lifecycle even on legacy
+// rows.
 func (s *dbStore) GetPRRootTraceID(repo string, prNum int) (string, error) {
-	return s.getRootTraceID(repo, prNum)
+	tid, err := s.getRootTraceID(repo, prNum)
+	if err != nil {
+		return "", err
+	}
+	if tid != "" {
+		return tid, nil
+	}
+	// Fall back via parent link.
+	var parent int
+	err = s.db.QueryRow(
+		`SELECT parent_issue_num FROM issue_cache WHERE repo = ? AND issue_num = ?`,
+		repo, prNum,
+	).Scan(&parent)
+	if err == sql.ErrNoRows || err != nil {
+		return "", nil
+	}
+	if parent <= 0 {
+		return "", nil
+	}
+	parentTID, err := s.getRootTraceID(repo, parent)
+	if err != nil {
+		return "", err
+	}
+	return parentTID, nil
 }
 
 func (s *dbStore) getRootTraceID(repo string, num int) (string, error) {

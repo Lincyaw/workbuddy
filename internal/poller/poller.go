@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -425,13 +427,21 @@ func (p *Poller) planDiffPR(pr PR) (events []ChangeEvent, cacheOp func() error, 
 	}
 
 	prCopy := pr
+	// REQ-138 (#320): if the PR branch follows the workbuddy convention
+	// `workbuddy/issue-<N>` (or the equivalent agent-runtime variants
+	// `claude/issue-<N>` / `codex/issue-<N>`), the linked issue number
+	// is recovered so the PR inherits the issue's root_trace_id at
+	// UpsertIssueCache time. A non-matching branch leaves parent == 0
+	// and the PR mints its own trace_id (legacy behaviour).
+	parentIssue := parentIssueFromBranch(prCopy.Branch)
 	cacheOp = func() error {
 		if err := p.store.UpsertIssueCache(store.IssueCache{
-			Repo:     p.repo,
-			IssueNum: prCopy.Number,
-			Labels:   "",
-			Body:     "",
-			State:    stateVal,
+			Repo:           p.repo,
+			IssueNum:       prCopy.Number,
+			Labels:         "",
+			Body:           "",
+			State:          stateVal,
+			ParentIssueNum: parentIssue,
 		}); err != nil {
 			log.Printf("[poller] error upserting cache for PR %s#%d: %v", p.repo, prCopy.Number, err)
 			return err
@@ -439,6 +449,25 @@ func (p *Poller) planDiffPR(pr PR) (events []ChangeEvent, cacheOp func() error, 
 		return nil
 	}
 	return events, cacheOp, true
+}
+
+// branchIssueRe matches the workbuddy branch-naming convention and the
+// common agent-runtime variants. The capturing group yields the parent
+// issue number for REQ-138 trace-id inheritance.
+var branchIssueRe = regexp.MustCompile(`(?:^|/)issue-(\d+)(?:[/-]|$)`)
+
+// parentIssueFromBranch extracts the parent issue number from a PR head
+// branch name. Returns 0 when the branch does not encode an issue.
+func parentIssueFromBranch(branch string) int {
+	m := branchIssueRe.FindStringSubmatch(branch)
+	if len(m) < 2 {
+		return 0
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
 }
 
 // emit sends a ChangeEvent on the events channel, respecting context cancellation.

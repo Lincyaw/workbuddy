@@ -406,6 +406,7 @@ func (s *dbStore) createTables() error {
 			body TEXT NOT NULL DEFAULT '',
 			state TEXT,
 			root_trace_id TEXT NOT NULL DEFAULT '',
+			parent_issue_num INTEGER NOT NULL DEFAULT 0,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (repo, issue_num)
 		)`,
@@ -529,6 +530,14 @@ func (s *dbStore) createTables() error {
 	// Idempotent ALTER — duplicate column name on existing DBs is ignored.
 	if _, err := s.db.Exec(`ALTER TABLE issue_cache ADD COLUMN root_trace_id TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("store: alter issue_cache add root_trace_id: %w", err)
+	}
+	// REQ-138 (#320): PR rows track their parent issue so the PR's
+	// root_trace_id can be inherited from the parent issue, giving the
+	// full issue+PR lifecycle a single trace_id. 0 = no parent (issue
+	// rows, or PRs whose branch does not encode an issue number).
+	// Idempotent ALTER for legacy DBs that predate this PR.
+	if _, err := s.db.Exec(`ALTER TABLE issue_cache ADD COLUMN parent_issue_num INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("store: alter issue_cache add parent_issue_num: %w", err)
 	}
 	if _, err := s.db.Exec(`ALTER TABLE workers ADD COLUMN token_kid TEXT`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("store: alter workers add token_kid: %w", err)
@@ -1763,14 +1772,37 @@ func (s *dbStore) QueryTransitionCounts(repo string, issueNum int) ([]Transition
 // subsequent operations on this issue/PR correlate under one trace.
 // Existing rows keep their previously assigned trace_id — the upsert
 // path explicitly preserves root_trace_id on conflict.
+//
+// REQ-138 (#320): when ic.ParentIssueNum > 0 and the parent issue
+// already has a non-empty root_trace_id, the PR row inherits it instead
+// of minting a fresh one — this is what makes the full issue+PR
+// lifecycle appear as a single trace in Jaeger/Tempo. parent_issue_num
+// is also persisted so later lookups can fall back through the link
+// even if the inheritance happened before the parent was sighted.
 func (s *dbStore) UpsertIssueCache(ic IssueCache) error {
-	traceID := newRootTraceID()
+	traceID := ""
+	if ic.ParentIssueNum > 0 {
+		if parentTID, _ := s.getRootTraceID(ic.Repo, ic.ParentIssueNum); parentTID != "" {
+			traceID = parentTID
+		}
+	}
+	if traceID == "" {
+		traceID = newRootTraceID()
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO issue_cache (repo, issue_num, labels, body, state, root_trace_id, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		`INSERT INTO issue_cache (repo, issue_num, labels, body, state, root_trace_id, parent_issue_num, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		 ON CONFLICT (repo, issue_num)
-		 DO UPDATE SET labels = excluded.labels, body = excluded.body, state = excluded.state, updated_at = CURRENT_TIMESTAMP`,
-		ic.Repo, ic.IssueNum, ic.Labels, ic.Body, ic.State, traceID,
+		 DO UPDATE SET
+		   labels = excluded.labels,
+		   body = excluded.body,
+		   state = excluded.state,
+		   parent_issue_num = CASE
+		     WHEN excluded.parent_issue_num > 0 THEN excluded.parent_issue_num
+		     ELSE issue_cache.parent_issue_num
+		   END,
+		   updated_at = CURRENT_TIMESTAMP`,
+		ic.Repo, ic.IssueNum, ic.Labels, ic.Body, ic.State, traceID, ic.ParentIssueNum,
 	)
 	if err != nil {
 		return fmt.Errorf("store: upsert issue cache: %w", err)
