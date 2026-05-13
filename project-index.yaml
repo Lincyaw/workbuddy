@@ -5366,3 +5366,70 @@ requirements:
     tests:
       - internal/config/loader_test.go
       - internal/runtime/agentm_bridge_test.go
+
+  - id: REQ-142
+    title: Coordinator-side git push + PR creation for AgentM runs (v0.6)
+    description: >
+      Per docs/decisions/2026-05-13-k8s-agentm-otel.md Block 2
+      § Two execution modes, AgentM runs in coordinator-managed mode:
+      the agent does not hold GitHub credentials, returns a structured
+      Output containing an artifact path, and the coordinator commits
+      the artifact onto a fresh `workbuddy/issue-N` branch, pushes,
+      and opens a PR. Other runtimes (claude-code, codex) remain
+      self-managed and call `gh issue edit` / `git push` themselves.
+
+      Implementation:
+
+      - New `internal/gitops/` package centralizes the two write
+        operations: CommitAndPush (shells out to `git` CLI, no go-git
+        dependency, surfaces ErrNoChanges so no-op artifacts don't
+        produce empty branches) and OpenPR (shells out to `gh pr
+        create`, works against github.com and Gitea instances the
+        user has logged into). Both have a Client form for runner
+        injection in tests.
+
+      - `internal/runtime/agent_bridge.go` grows an AgentMGitOps
+        interface + AgentMPublishRequest type and an optional GitOps
+        field on AgentBridgeRuntime / AgentBridgeSession. After the
+        bridge resolves AgentM's structured Output and the run
+        succeeded, it invokes GitOps.PublishArtifact with the issue
+        repo/number, a branch name of `workbuddy/issue-N`, a bot
+        commit message, and a PR body that references the issue.
+        On AgentM failure (success=false) the bridge does NOT call
+        the adapter; failure_reason continues to flow into
+        Result.Meta so the existing reporter machinery surfaces it
+        as an issue comment.
+
+      - `internal/launcher/gitops_bridge.go` adapts gitops.Client
+        to the AgentMGitOps interface and wires it onto the AgentM
+        runtime in RegisterBuiltins. The default author is
+        `workbuddy-bot <bot@workbuddy.internal>`. Other runtimes do
+        not receive the adapter.
+
+      - Publish failure (commit/push/gh errors) is marked as infra
+        failure on the Result so the reporter renders it with the
+        distinct infra header. ErrNoChanges from a successful AgentM
+        run is surfaced as `agentm_publish=no_changes` metadata but
+        is NOT escalated to infra failure (the agent's success
+        signal is preserved).
+    priority: P1
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-1-1: After a successful AgentM run with a non-empty artifact, coordinator opens a PR on a fresh `workbuddy/issue-N` branch authored by `workbuddy-bot <bot@workbuddy.internal>` and surfaces the PR URL on Result.Meta.pr_url."
+      - "AC-1-2: PR body references the originating `{repo}#{issue_number}`."
+      - "AC-1-3: Failed AgentM runs (success=false) do NOT trigger commit/push/PR; the bridge surfaces failure_reason on Result.Meta so the existing reporter machinery posts the issue comment."
+      - "AC-1-4: `go build ./... && go vet ./... && go test ./... -count=1` all pass."
+      - "AC-1-5: project-index.yaml has this REQ entry referencing issue #330."
+      - "AC-1-6: Other runtimes (claude-code, codex) are not wired to the GitOps adapter and continue to manage their own git/gh writes from inside the agent subprocess."
+    code:
+      - internal/gitops/gitops.go
+      - internal/runtime/agent_bridge.go
+      - internal/launcher/gitops_bridge.go
+      - internal/launcher/launcher.go
+    tests:
+      - internal/gitops/gitops_test.go
+      - internal/runtime/agentm_publish_test.go
+      - internal/launcher/gitops_bridge_test.go
+    deps:
+      - REQ-134
