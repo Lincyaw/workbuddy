@@ -1,6 +1,9 @@
 # Default values for workbuddy.
-# This is a minimal skeleton; the full values surface (MySQL, OTel, AegisLab
-# topology) is hardened in issue #334. See deploy/helm/workbuddy/README.md.
+# Full v0.6 values surface for the K8s topology described in
+# docs/decisions/2026-05-13-k8s-agentm-otel.md (Block 3 § Storage,
+# Block 4 § Collector). MySQL and the OTel collector are reused from
+# AegisLab via plain values references — NEITHER is bundled here as a
+# subchart, per the decision doc.
 
 image:
   repository: ghcr.io/lincyaw/workbuddy
@@ -12,34 +15,74 @@ nameOverride: ""
 fullnameOverride: ""
 
 # Coordinator HTTP API + webui port. Verified against cmd/coordinator.go
-# (default 8080, see cmd/init.go).
+# (default 8081 in the binary; chart exposes 8080 as the service port).
 service:
   type: ClusterIP
   port: 8080
 
-# MySQL DSN — workbuddy reuses AegisLab's MySQL cluster in v0.6.
-# Format: mysql://user:pass@host:3306/dbname (REQ-135/REQ-136).
-# #334 will split this into discrete host/user/pass/db fields.
+# ----------------------------------------------------------------------
+# MySQL
+# ----------------------------------------------------------------------
+# Workbuddy reuses AegisLab's MySQL cluster (REQ-135 / REQ-136). The
+# coordinator stores the DSN in a Secret; plaintext .dsn is offered only
+# for dev/quickstart. Production deployments SHOULD use .dsnSecretRef.
+#
+# DSN format (as consumed by internal/store/store.go::New):
+#   mysql://<go-mysql-driver DSN>
+# e.g.
+#   mysql://wb:secret@tcp(mysql.aegislab.svc.cluster.local:3306)/workbuddy?parseTime=true&loc=UTC&multiStatements=true
+#
+# Env contract: the pod receives WORKBUDDY_MYSQL_DSN. Coordinator-side
+# consumption is wired by the cmd/coordinator.go --db DSN-aware switch
+# (today the flag still accepts a plain SQLite path; switching the
+# coordinator to consume WORKBUDDY_MYSQL_DSN is tracked alongside this
+# change). README.md "Env contract" documents the precedence.
 mysql:
-  dsn: ""
+  dsn: ""                 # required (or set dsnSecretRef): full mysql:// DSN
+  dsnSecretRef:           # optional: read the DSN from an existing Secret
+    name: ""              #   Secret name. Empty disables the secretKeyRef path.
+    key: dsn              #   Secret key holding the DSN string.
 
-# OpenTelemetry collector endpoint. Workbuddy reuses AegisLab's collector
-# (decision doc Block 4). Empty disables exporter.
+# ----------------------------------------------------------------------
+# OpenTelemetry
+# ----------------------------------------------------------------------
+# Workbuddy honors the standard OTel SDK env vars (see
+# internal/tracing/tracing.go). The chart maps these values onto:
+#   - OTEL_EXPORTER_OTLP_ENDPOINT  (from otel.endpoint)
+#   - OTEL_EXPORTER_OTLP_PROTOCOL  (from otel.protocol)
+#   - OTEL_SERVICE_NAME            (from otel.serviceName)
+# When endpoint is empty, tracing.Init() returns a no-op exporter —
+# tracing is effectively disabled.
 otel:
-  endpoint: ""
+  endpoint: ""            # OTLP collector endpoint; empty = disabled
+  protocol: grpc          # grpc | http/protobuf (http is accepted as alias)
+  serviceName: workbuddy  # overrides OTEL_SERVICE_NAME default
 
-# Gitea (or GitHub) API token used by the coordinator for gh issue read /
-# comment writes. Two modes:
-#   - secretName != "": chart references an existing Secret with key "token".
-#   - secretName == "" && token != "": chart creates a Secret from .token.
+# ----------------------------------------------------------------------
+# Gitea / GitHub API token
+# ----------------------------------------------------------------------
+# Used by:
+#   - The Coordinator's GitHub poller (gh CLI, reads GH_TOKEN).
+#   - internal/labelwriter for AgentM-mode label writes against a Gitea
+#     REST API (reads GITEA_TOKEN).
+# The chart mounts a single Secret value into BOTH env vars so one
+# token covers Gitea repos and GitHub repos transparently.
+#
+# Modes:
+#   - secretName != "":  reference an existing Secret (recommended).
+#   - secretName == "" && token != "":  chart materializes a Secret for
+#                                       dev/quickstart only.
 giteaToken:
-  secretName: ""
-  token: ""
+  secretName: ""          # required for coordinator-managed mode
+  secretKey: token        # key inside the Secret holding the token string
+  token: ""               # plaintext token for dev only; ignored when secretName is set
 
-# Agent config ConfigMap (.github/workbuddy/agents/*.md). Mounted at
-# /etc/workbuddy/agents in the coordinator pod.
-#   - configMapName != "": chart references an existing ConfigMap.
-#   - configMapName == "": chart creates one from chart-bundled agents/*.md.
+# ----------------------------------------------------------------------
+# Agent definitions
+# ----------------------------------------------------------------------
+# .github/workbuddy/agents/*.md mounted at /etc/workbuddy/agents.
+#   - configMapName != "":  reference an existing ConfigMap.
+#   - configMapName == "":  chart renders one from deploy/helm/workbuddy/agents/*.md.
 agents:
   configMapName: ""
 
