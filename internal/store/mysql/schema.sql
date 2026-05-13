@@ -129,6 +129,7 @@ CREATE TABLE IF NOT EXISTS issue_cache (
     body       LONGTEXT     NOT NULL,
     state      VARCHAR(64)  DEFAULT NULL,
     root_trace_id VARCHAR(32) NOT NULL DEFAULT '',
+    parent_issue_num INT NOT NULL DEFAULT 0,
     updated_at DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     PRIMARY KEY (repo, issue_num)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

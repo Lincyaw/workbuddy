@@ -27,6 +27,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/workflow"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ChangeEvent represents a state change detected by the Poller.
@@ -50,6 +51,10 @@ type DispatchRequest struct {
 	RolloutIndex   int
 	RolloutsTotal  int
 	RolloutGroupID string
+	// RootTraceID is the persisted issue/PR trace_id (REQ-138 / #320) so
+	// downstream router + worker spans correlate with the issue's long
+	// lifecycle. Empty when the row has not been sighted yet.
+	RootTraceID string
 }
 
 // EventRecorder abstracts event logging so tests can use a fake.
@@ -318,12 +323,19 @@ func (sm *StateMachine) ResetDedup() {
 
 // HandleEvent processes a single ChangeEvent from the Poller.
 func (sm *StateMachine) HandleEvent(ctx context.Context, event ChangeEvent) error {
+	// REQ-138 (#320): load the persisted root_trace_id for this issue
+	// and reparent the operation span under it so the full lifecycle
+	// appears as a single trace in Jaeger/Tempo. Empty trace_id (row
+	// not yet sighted, or pre-migration legacy) is a transparent no-op
+	// and the span starts a fresh trace as before.
+	ctx = sm.contextWithIssueTrace(ctx, event.Repo, event.IssueNum)
 	ctx, span := tracing.Start(ctx, "statemachine.handleEvent",
 		attribute.String("workbuddy.event.type", event.Type),
 		attribute.String("workbuddy.repo", event.Repo),
 		attribute.Int("workbuddy.issue", event.IssueNum),
 		attribute.String("workbuddy.event.detail", event.Detail),
 	)
+	tracing.SetIssueAttrs(span, event.Repo, event.IssueNum, 0, "", "")
 	defer span.End()
 
 	// Idempotency: build a unique key for this event.
@@ -786,8 +798,31 @@ func (sm *StateMachine) ensureWorkflowInstance(workflowName, repo string, issueN
 	return sm.workflowManager.CreateIfMissing(repo, issueNum, workflowName, currentState)
 }
 
+// contextWithIssueTrace loads root_trace_id for (repo, issueNum) and
+// installs it as the parent SpanContext on ctx. Missing rows / empty
+// trace_id / lookup errors are no-ops so call sites stay branch-free.
+func (sm *StateMachine) contextWithIssueTrace(ctx context.Context, repo string, issueNum int) context.Context {
+	if sm.store == nil || issueNum <= 0 {
+		return ctx
+	}
+	tid, err := sm.store.GetIssueRootTraceID(repo, issueNum)
+	if err != nil || tid == "" {
+		// PRs live in issue_cache too; fall through to GetPRRootTraceID
+		// so we cover the "PR row event" case (the issue accessor only
+		// returns the same row's value, so this is a single SELECT
+		// either way — keeping both calls makes the intent explicit and
+		// gives the PR-side inheritance fallback a chance).
+		if prTID, prErr := sm.store.GetPRRootTraceID(repo, issueNum); prErr == nil && prTID != "" {
+			return tracing.ContextFromTraceID(ctx, prTID)
+		}
+		return ctx
+	}
+	return tracing.ContextFromTraceID(ctx, tid)
+}
+
 // DispatchAgent sends a dispatch request for the given agent, respecting in-flight group locking.
 func (sm *StateMachine) DispatchAgent(ctx context.Context, repo string, issueNum int, agentName, workflow, state string) error {
+	ctx = sm.contextWithIssueTrace(ctx, repo, issueNum)
 	ctx, span := tracing.Start(ctx, "statemachine.dispatchAgent",
 		attribute.String("workbuddy.repo", repo),
 		attribute.Int("workbuddy.issue", issueNum),
@@ -795,6 +830,7 @@ func (sm *StateMachine) DispatchAgent(ctx context.Context, repo string, issueNum
 		attribute.String("workbuddy.workflow", workflow),
 		attribute.String("workbuddy.state", state),
 	)
+	tracing.SetIssueAttrs(span, repo, issueNum, 0, "", "")
 	defer span.End()
 	if blocked, err := sm.isBlockedByDone(repo, issueNum, agentName); err != nil {
 		span.RecordError(err)
@@ -1051,6 +1087,18 @@ func (sm *StateMachine) dispatchSingleAgent(ctx context.Context, req DispatchReq
 	state := req.State
 	issueKey := sm.issueKey(repo, issueNum)
 	slotKey := dispatchSlotKey(req)
+
+	// REQ-138 (#320): stamp the persisted root_trace_id onto the
+	// outgoing DispatchRequest so router and worker can reparent their
+	// spans even when the request crosses process boundaries
+	// (worker long-poll). We lift it from the parent SpanContext that
+	// HandleEvent already loaded — no extra DB hit on the dispatch
+	// hot path. Empty value is fine downstream.
+	if req.RootTraceID == "" {
+		if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+			req.RootTraceID = sc.TraceID().String()
+		}
+	}
 
 	sm.inflightMu.Lock()
 	if existing, ok := sm.inflight[issueKey]; ok {

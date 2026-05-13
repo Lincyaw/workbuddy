@@ -5098,3 +5098,83 @@ requirements:
     deps:
       - REQ-135
       - REQ-136
+
+  - id: REQ-138
+    title: OTel cross-span correlation using persisted root_trace_id (v0.5)
+    description: >
+      Per docs/decisions/2026-05-13-k8s-agentm-otel.md Block 4
+      § Long-lifecycle trace correlation, every operation that
+      touches an issue or PR must emit its spans under the persisted
+      root_trace_id (REQ-137 / #317) so the full lifecycle appears
+      as one trace in Jaeger/Tempo. This is the read-and-reuse half
+      of the design — schema and write path landed with #317; this
+      slice wires the read path through the coordinator, router,
+      and worker dispatch paths.
+
+      Implementation:
+
+      - internal/tracing/correlation.go adds two helpers:
+        ContextFromTraceID(ctx, traceIDHex) wraps a remote
+        SpanContext (parsed trace_id + fresh span_id) into ctx so
+        the next tracing.Start emits a child of the persisted
+        trace; SetIssueAttrs(span, repo, issueNum, prNum, role,
+        runtime) stamps the standard business attributes (repo,
+        issue.id, issue.number, pr.number, agent.role,
+        agent.runtime) and skips empties.
+
+      - statemachine.HandleEvent and DispatchAgent load the
+        persisted root_trace_id via the existing accessors and
+        reparent their spans via ContextFromTraceID. The trace_id
+        is also stamped onto the outgoing DispatchRequest so it
+        propagates through router and worker without an extra DB
+        hit on the dispatch hot path.
+
+      - router.handleDispatch reparents under the request's
+        trace_id and looks up (agent.role, agent.runtime) from the
+        local config to stamp those attrs.
+
+      - worker.executor reparents under task.RootTraceID and
+        stamps role / runtime from task.Agent — works the same
+        whether the worker runs in-process (serve) or split.
+
+      - PR<->parent-issue trace_id inheritance is wired by adding
+        parent_issue_num to issue_cache (idempotent ALTER, only
+        adds columns — safe for the future MySQL backend per #316).
+        The poller derives the parent issue number from the PR head
+        branch (workbuddy/issue-N convention, plus the agent-runtime
+        variants claude/issue-N and codex/issue-N) and passes it as
+        IssueCache.ParentIssueNum. UpsertIssueCache inherits the
+        parent's trace_id instead of minting a fresh one when the
+        link is set. GetPRRootTraceID falls back through the link
+        for legacy rows whose own trace_id is still ''.
+
+      Sandbox / cross-process TRACEPARENT injection is explicitly
+      out of scope; that's the v0.6 K8s slice.
+    priority: P1
+    version: v0.5.0
+    status: tested
+    acceptance_criteria:
+      - "AC-138-1: For a single issue ingested then dispatched twice, every captured span on the coordinator-side pipeline shares the issue's root_trace_id (in-memory OTel exporter test)."
+      - "AC-138-2: A PR upserted with ParentIssueNum pointing at an existing issue inherits that issue's root_trace_id; PR-side spans emit under the same trace_id."
+      - "AC-138-3: Every span on the affected paths carries the mandatory business attributes (repo, issue.id, issue.number, plus pr.number / agent.role / agent.runtime when applicable). Test asserts presence."
+      - "AC-138-4: Malformed or empty trace_id passed to ContextFromTraceID is a no-op; ctx is returned unchanged and no panic occurs."
+      - "AC-138-5: parent_issue_num column migration is idempotent on legacy SQLite DBs (ALTER TABLE ADD COLUMN with default 0)."
+      - "AC-138-6: `go build ./... && go vet ./... && go test ./... -count=1` all pass."
+      - "AC-138-7: project-index.yaml has this REQ entry referencing issue #320."
+    code:
+      - internal/tracing/correlation.go
+      - internal/store/store.go
+      - internal/store/root_trace.go
+      - internal/store/types.go
+      - internal/statemachine/statemachine.go
+      - internal/router/router.go
+      - internal/worker/executor.go
+      - internal/worker/task.go
+      - internal/poller/poller.go
+    tests:
+      - internal/tracing/correlation_test.go
+      - internal/statemachine/trace_correlation_test.go
+      - internal/poller/parent_issue_test.go
+      - internal/store/root_trace_test.go
+    deps:
+      - REQ-137

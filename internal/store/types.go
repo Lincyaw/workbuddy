@@ -94,6 +94,11 @@ type IssueCache struct {
 	Body      string
 	State     string
 	UpdatedAt time.Time
+	// ParentIssueNum links a PR row back to the issue that spawned it,
+	// so the PR inherits the issue's root_trace_id for cross-span
+	// correlation (REQ-138 / #320). 0 means no parent — i.e. this row
+	// is an issue, or its branch did not encode an issue number.
+	ParentIssueNum int
 }
 
 // SessionRoute is the coordinator-side index that maps a session_id to the

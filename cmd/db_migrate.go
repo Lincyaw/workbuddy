@@ -92,7 +92,7 @@ var migrationTables = []migrationTable{
 		name: "issue_cache",
 		columns: []string{
 			"repo", "issue_num", "labels", "body", "state",
-			"root_trace_id", "updated_at",
+			"root_trace_id", "parent_issue_num", "updated_at",
 		},
 	},
 	{

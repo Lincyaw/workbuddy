@@ -63,6 +63,15 @@ func (e *Executor) Execute(ctx context.Context, task Task) Execution {
 	ctx, cancelLifecycle := e.withLifecycleContext(ctx)
 	defer cancelLifecycle()
 
+	// REQ-138 (#320): reparent under the persisted issue trace_id when
+	// the dispatch carried one, so worker spans correlate with the
+	// coordinator-side issue lifecycle.
+	ctx = tracing.ContextFromTraceID(ctx, task.RootTraceID)
+	var role, runtime string
+	if task.Agent != nil {
+		role = task.Agent.Role
+		runtime = task.Agent.Runtime
+	}
 	ctx, span := tracing.Start(ctx, "worker.executeTask",
 		attribute.String("workbuddy.repo", task.Repo),
 		attribute.Int("workbuddy.issue", task.IssueNum),
@@ -71,6 +80,7 @@ func (e *Executor) Execute(ctx context.Context, task Task) Execution {
 		attribute.String("workbuddy.workflow", task.Workflow),
 		attribute.String("workbuddy.worker_id", task.WorkerID),
 	)
+	tracing.SetIssueAttrs(span, task.Repo, task.IssueNum, 0, role, runtime)
 	defer span.End()
 
 	exec := Execution{Task: task}

@@ -59,14 +59,13 @@ func TestUpsertIssueCache_MintsRootTraceID(t *testing.T) {
 	}
 }
 
-func TestUpsertIssueCache_PRGetsRootTraceID(t *testing.T) {
+func TestUpsertIssueCache_PRWithoutParentMintsOwnTraceID(t *testing.T) {
 	s := newTestStore(t)
 	const repo = "owner/repo"
 	// PR rows live in issue_cache too, discriminated by state "pr:*"
-	// and using the PR number for issue_num. The schema layer has no
-	// parent-issue linkage column yet (#320), so the PR's trace_id is
-	// freshly minted, distinct from any parent issue's. This test
-	// documents and locks in that behaviour.
+	// and using the PR number for issue_num. When ParentIssueNum is 0
+	// (the PR branch did not encode an issue number, or the parent was
+	// not sighted yet) the PR mints its own root_trace_id.
 	if err := s.UpsertIssueCache(IssueCache{
 		Repo: repo, IssueNum: 100, Labels: `["bug"]`, State: "open",
 	}); err != nil {
@@ -74,6 +73,7 @@ func TestUpsertIssueCache_PRGetsRootTraceID(t *testing.T) {
 	}
 	if err := s.UpsertIssueCache(IssueCache{
 		Repo: repo, IssueNum: 200, State: "pr:open",
+		// No ParentIssueNum — independent PR.
 	}); err != nil {
 		t.Fatalf("upsert PR: %v", err)
 	}
@@ -92,10 +92,83 @@ func TestUpsertIssueCache_PRGetsRootTraceID(t *testing.T) {
 	if !hex32.MatchString(issueTID) {
 		t.Fatalf("issue root_trace_id not 32-hex: %q", issueTID)
 	}
-	// At this schema iteration the two are not linked.
+	// Without a parent link the two must be independent.
 	if prTID == issueTID {
-		t.Fatalf("unexpected linkage: PR and parent issue share trace_id %q "+
-			"— PR inheritance is scheduled for #320, not this PR", prTID)
+		t.Fatalf("unparented PR should mint its own trace_id, got shared %q", prTID)
+	}
+}
+
+// REQ-138 (#320): when a PR is upserted with ParentIssueNum pointing at
+// an already-sighted issue, the PR row inherits the parent's
+// root_trace_id rather than minting a fresh one — this is what gives
+// the full issue+PR lifecycle a single trace_id.
+func TestUpsertIssueCache_PRInheritsParentTraceID(t *testing.T) {
+	s := newTestStore(t)
+	const repo = "owner/repo"
+
+	if err := s.UpsertIssueCache(IssueCache{
+		Repo: repo, IssueNum: 50, Labels: `["bug"]`, State: "open",
+	}); err != nil {
+		t.Fatalf("upsert parent issue: %v", err)
+	}
+	parentTID, err := s.GetIssueRootTraceID(repo, 50)
+	if err != nil || parentTID == "" {
+		t.Fatalf("parent trace_id missing: %v / %q", err, parentTID)
+	}
+
+	if err := s.UpsertIssueCache(IssueCache{
+		Repo: repo, IssueNum: 150, State: "pr:open", ParentIssueNum: 50,
+	}); err != nil {
+		t.Fatalf("upsert PR: %v", err)
+	}
+	prTID, err := s.GetPRRootTraceID(repo, 150)
+	if err != nil {
+		t.Fatalf("GetPRRootTraceID: %v", err)
+	}
+	if prTID != parentTID {
+		t.Fatalf("PR should inherit parent trace_id %q, got %q", parentTID, prTID)
+	}
+
+	// Updating the PR row must NOT rotate the trace_id.
+	if err := s.UpsertIssueCache(IssueCache{
+		Repo: repo, IssueNum: 150, State: "pr:closed", ParentIssueNum: 50,
+	}); err != nil {
+		t.Fatalf("upsert PR (update): %v", err)
+	}
+	prTID2, _ := s.GetPRRootTraceID(repo, 150)
+	if prTID2 != parentTID {
+		t.Fatalf("PR trace_id rotated on update: %q -> %q", parentTID, prTID2)
+	}
+}
+
+// Fallback path: a PR row whose own root_trace_id is empty (e.g. row
+// minted before the parent was sighted, then parent_issue_num filled in
+// later via an upsert) returns the parent's trace_id when queried.
+func TestGetPRRootTraceID_FallsBackThroughParentLink(t *testing.T) {
+	s := newTestStore(t)
+	const repo = "owner/repo"
+
+	// Hand-craft a PR row with empty trace_id but a parent link, to
+	// simulate a row inherited from a legacy migration.
+	if err := s.UpsertIssueCache(IssueCache{
+		Repo: repo, IssueNum: 9, Labels: `["bug"]`, State: "open",
+	}); err != nil {
+		t.Fatalf("upsert parent: %v", err)
+	}
+	parentTID, _ := s.GetIssueRootTraceID(repo, 9)
+	if _, err := s.Exec(
+		`INSERT INTO issue_cache (repo, issue_num, labels, body, state, root_trace_id, parent_issue_num)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		repo, 19, "", "", "pr:open", "", 9,
+	); err != nil {
+		t.Fatalf("hand-insert legacy PR row: %v", err)
+	}
+	got, err := s.GetPRRootTraceID(repo, 19)
+	if err != nil {
+		t.Fatalf("GetPRRootTraceID: %v", err)
+	}
+	if got != parentTID {
+		t.Fatalf("expected fallback to parent trace_id %q, got %q", parentTID, got)
 	}
 }
 
