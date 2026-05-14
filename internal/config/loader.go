@@ -362,13 +362,13 @@ func normalizeAgentConfig(agent *AgentConfig) ([]Warning, error) {
 	}
 
 	// dev_container_image is only meaningful for the agentm runtime, which
-	// forwards it to the AgentM subprocess as WORKBUDDY_DEV_CONTAINER_IMAGE
+	// forwards it to the AgentM subprocess as AGENTM_AGENT_ENV_IMAGE
 	// (see docs/planned/agentm-runtime.md). Setting it on claude-code /
 	// codex is a no-op today; warn (do not error) so configs that pre-stage
 	// the field for a planned runtime swap still validate.
 	if strings.TrimSpace(agent.DevContainerImage) != "" && agent.Runtime != RuntimeAgentM {
 		warnings = append(warnings, Warning{Message: fmt.Sprintf(
-			"agent %q: dev_container_image is set but runtime is %q; the field is only honored for runtime=%q (workbuddy passes WORKBUDDY_DEV_CONTAINER_IMAGE to AgentM only)",
+			"agent %q: dev_container_image is set but runtime is %q; the field is only honored for runtime=%q (workbuddy passes AGENTM_AGENT_ENV_IMAGE to AgentM only)",
 			agent.Name, agent.Runtime, RuntimeAgentM,
 		)})
 	}

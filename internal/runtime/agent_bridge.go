@@ -550,10 +550,10 @@ func injectTraceContext(ctx context.Context, env map[string]string, task *TaskCo
 // AgentM owns the actual agent-env Gateway call; workbuddy just forwards
 // the agent-config field. See docs/planned/agentm-runtime.md and
 // docs/decisions/2026-05-13-k8s-agentm-otel.md (Block 2).
-const EnvDevContainerImage = "WORKBUDDY_DEV_CONTAINER_IMAGE"
+const EnvDevContainerImage = "AGENTM_AGENT_ENV_IMAGE"
 
 // injectAgentMEnv adds AgentM-specific env vars derived from the agent
-// config. Today that's just dev_container_image → WORKBUDDY_DEV_CONTAINER_IMAGE,
+// config. Today that's just dev_container_image → AGENTM_AGENT_ENV_IMAGE,
 // injected only when runtime=agentm; other runtimes ignore the field
 // (and config validation already warned about it).
 func injectAgentMEnv(agentCfg *config.AgentConfig, env map[string]string) map[string]string {

@@ -5370,7 +5370,7 @@ requirements:
         field for a planned runtime swap without breaking validation.
 
       - internal/runtime/agent_bridge.go declares the env-var name
-        EnvDevContainerImage = "WORKBUDDY_DEV_CONTAINER_IMAGE" and
+        EnvDevContainerImage = "AGENTM_AGENT_ENV_IMAGE" and
         adds injectAgentMEnv(agentCfg, env) which only injects the
         var when runtime == agentm and dev_container_image is
         non-empty. The injection runs after injectTraceContext so
@@ -5395,7 +5395,7 @@ requirements:
     version: v0.6.0
     status: tested
     acceptance_criteria:
-      - "AC-140-1: Agent config with `dev_container_image: foo:bar` and `runtime: agentm` validates; the value reaches the AgentM subprocess env as WORKBUDDY_DEV_CONTAINER_IMAGE (asserted via env-dump fake)."
+      - "AC-140-1: Agent config with `dev_container_image: foo:bar` and `runtime: agentm` validates; the value reaches the AgentM subprocess env as AGENTM_AGENT_ENV_IMAGE (asserted via env-dump fake)."
       - "AC-140-2: Agent config with `dev_container_image` set on `runtime: claude-code` produces a config validation warning (not an error)."
       - "AC-140-3: When `dev_container_image` is unset for `runtime: agentm`, the env var is NOT injected (AgentM falls back to its own default image)."
       - "AC-140-4: docs/planned/agentm-runtime.md documents the env var."
