@@ -137,7 +137,7 @@ type AgentConfig struct {
 	// DevContainerImage names the dev container image AgentM should run
 	// inside when the runtime is `agentm`. workbuddy passes the value
 	// through to the AgentM subprocess as the env var
-	// WORKBUDDY_DEV_CONTAINER_IMAGE; AgentM is responsible for the actual
+	// AGENTM_AGENT_ENV_IMAGE; AgentM is responsible for the actual
 	// sandbox dispatch (workbuddy does not talk to agent-env directly).
 	// See docs/planned/agentm-runtime.md for the invocation contract and
 	// docs/decisions/2026-05-13-k8s-agentm-otel.md (Block 2) for design
