@@ -51,6 +51,29 @@ const DefaultKeepaliveInterval = 25 * time.Second
 // truly dead peer within one keepalive cycle.
 const DefaultKeepaliveTimeout = 20 * time.Second
 
+// DefaultReadLimit is the per-message size cap NewEndpoint applies to the
+// underlying *websocket.Conn via SetReadLimit. The upstream library
+// defaults to 32 KiB (see coder/websocket read.go defaultReadLimit),
+// which is fine for control frames but not for the JSON listing payloads
+// the sessionproxy fan-out routes through this tunnel: a production
+// worker with a few hundred sessions easily exceeds 32 KiB in a single
+// GET /api/v1/sessions response, and the upstream cap surfaces as
+// "websocket: message too big: read limited at 32769 bytes" with the
+// tunnel torn down (the #345 Wave 7 postmortem).
+//
+// 16 MiB picked deliberately:
+//   - ~10x headroom over realistic dashboard responses (410 sessions
+//     × ~1 KiB JSON ≈ 0.4 MiB observed in prod) so we don't have to
+//     revisit this knob as session counts grow another order of
+//     magnitude.
+//   - Bounded so a malicious or buggy peer can't pin gigabytes of
+//     memory per concurrent stream — Endpoint.Do buffers the response
+//     in process before returning, so the worst-case allocation per
+//     in-flight request is ~this cap.
+//   - Well under the library's own multi-GiB ceiling (it accepts up
+//     to 1<<62 via SetReadLimit), so there is no protocol risk.
+const DefaultReadLimit int64 = 16 * 1024 * 1024
+
 type Frame struct {
 	Type     string      `json:"type"`
 	StreamID string      `json:"stream_id"`
@@ -84,12 +107,35 @@ type Endpoint struct {
 }
 
 func NewEndpoint(conn *websocket.Conn) *Endpoint {
+	// Apply DefaultReadLimit symmetrically: both server-side and
+	// client-side endpoints flow through NewEndpoint, so raising the
+	// cap here covers both directions of the tunnel without per-call
+	// edits at the coordinator and worker sites. SetReadLimit is a
+	// no-op on a nil conn (Registry uses NewEndpoint(nil) for the
+	// in-memory registry semantics tests), so guard the call.
+	if conn != nil {
+		conn.SetReadLimit(DefaultReadLimit)
+	}
 	return &Endpoint{
 		conn:     conn,
 		streams:  make(map[string]chan Frame),
 		requests: make(chan Frame, 64),
 		closed:   make(chan struct{}),
 	}
+}
+
+// SetReadLimit overrides the per-message read cap applied to the
+// underlying *websocket.Conn. Intended for tests that want to assert
+// the cap matters (re-run the failing-payload test at a lower limit
+// to prove RED-then-GREEN) and for callers who need to tighten the
+// cap on a constrained link. A non-positive n is forwarded as-is to
+// the library so callers can opt into the upstream's "no limit"
+// semantics if they really mean it. Must be called before Run.
+func (e *Endpoint) SetReadLimit(n int64) {
+	if e == nil || e.conn == nil {
+		return
+	}
+	e.conn.SetReadLimit(n)
 }
 
 // SetKeepalive overrides the ping interval and per-ping timeout used by

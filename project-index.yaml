@@ -6706,3 +6706,102 @@ requirements:
     deps:
       - REQ-155
       - REQ-157
+  - id: REQ-159
+    title: wstunnel raises per-message WSS read limit so fan-out responses survive (REQ-159 / #345 Wave 7)
+    description: >
+      Wave 7 follow-up on #345. After Wave 6 (REQ-158) added structured
+      sessionproxy fan-out instrumentation, the prod v0.6.29 eventlog
+      immediately surfaced a deeper root cause: every fan-out attempt
+      to ddq-MS-7E17 emitted `sessionproxy_fanout_tunnel_error` with
+      `{"error":"worker ddq-MS-7E17: sessionproxy: worker offline"}`,
+      and the coordinator log showed
+      "worker tunnel disconnected: ddq-MS-7E17: failed to read:
+      websocket: message too big: read limited at 32769 bytes" at
+      every fan-out attempt.
+
+      Root cause: the underlying coder/websocket Conn defaults to a
+      per-message read cap of 32 KiB (`defaultReadLimit = 32768`, see
+      vendored `coder/websocket@v1.8.14/read.go:107`). `internal/wstunnel/`
+      never called `Conn.SetReadLimit(...)` on either end (verified
+      pre-fix: `grep -rn 'SetReadLimit' internal/wstunnel/` returned
+      nothing). The production worker has 410 sessions on disk, so a
+      full `GET /api/v1/sessions` JSON listing easily exceeds 32 KiB
+      in a single frame; the library closed the conn with
+      `StatusMessageTooBig` and the entire tunnel tore down — every
+      sessionproxy fan-out attempt mapped to ErrWorkerOffline at the
+      next dispatch.
+
+      Fix:
+
+        1. New exported `DefaultReadLimit = 16 * 1024 * 1024` (16 MiB)
+           in `internal/wstunnel/tunnel.go`. Chosen for ~10x headroom
+           over realistic dashboard responses (410 sessions × ~1 KiB
+           JSON ≈ 0.4 MiB observed in prod) while remaining bounded
+           per concurrent stream (Endpoint.Do buffers responses in
+           process, so worst-case memory is ~cap × in-flight).
+
+        2. `NewEndpoint` now calls `conn.SetReadLimit(DefaultReadLimit)`
+           on construction. Because both the coordinator server side
+           (`internal/app/coordinator.go::HandleWorkerTunnel`) and the
+           worker client side (`cmd/worker.go::runWorkerTunnelOnce`)
+           build their endpoint through `NewEndpoint`, the bump is
+           applied symmetrically to both reader directions — no
+           per-call-site edits needed. The call is guarded for the
+           nil-conn case used by `Registry`'s in-memory semantics.
+
+        3. New `Endpoint.SetReadLimit(n int64)` setter — used by tests
+           to tighten the cap and prove RED-state semantics, available
+           to future callers who need to constrain a particular link
+           without forking the package.
+
+      Tests (`internal/wstunnel/tunnel_test.go`):
+
+        - `TestLargePayloadSurvivesDefaultReadLimit` — round-trips a
+          100 KiB request body AND a 100 KiB response body through one
+          `Endpoint.Do` call. This exercises BOTH tunnel directions
+          inside the same test: server-side DecodeFrame on the request,
+          client-side DecodeFrame on the response. If either side were
+          missing the SetReadLimit bump the test would fail.
+
+        - `TestSmallReadLimitRejectsLargePayload` — RED-state companion:
+          tightens both endpoints back to 32 KiB via SetReadLimit, then
+          sends the same 100 KiB request and asserts Do returns an
+          error. Pins the mechanism that broke production and proves
+          the DefaultReadLimit bump is load-bearing.
+
+      RED-then-GREEN verification: with the SetReadLimit call removed
+      from NewEndpoint, TestLargePayloadSurvivesDefaultReadLimit fails
+      with the exact production error signature:
+      `Do: failed to get reader: received close frame: status =
+      StatusMessageTooBig and reason = "read limited at 32769 bytes"`.
+      With the call restored, all wstunnel tests pass under `-race`.
+
+      Constraints honoured:
+
+        - Touched only `internal/wstunnel/tunnel.go`,
+          `internal/wstunnel/tunnel_test.go`, and `project-index.yaml`.
+
+        - Single commit on `c064c58`. Imperative commit message
+          referencing #345 / REQ-159.
+
+        - `go build ./... && go vet ./... && go test ./... -count=1`
+          stays green;
+          `go test ./internal/wstunnel/... -count=1 -race -timeout 60s`
+          stays green.
+    priority: P1
+    version: v0.7.0
+    status: tested
+    acceptance_criteria:
+      - "AC-159-1: `internal/wstunnel/tunnel.go` declares `DefaultReadLimit = 16 * 1024 * 1024` (16 MiB) with a comment justifying the choice over the upstream coder/websocket 32 KiB default."
+      - "AC-159-2: `internal/wstunnel/tunnel.go::NewEndpoint` calls `conn.SetReadLimit(DefaultReadLimit)` when `conn != nil` so server-side and client-side endpoints both inherit the cap without per-call-site edits."
+      - "AC-159-3: `internal/wstunnel/tunnel.go` exposes `Endpoint.SetReadLimit(n int64)` for tests and callers that need to override the cap; the setter is a no-op on nil receivers/conns."
+      - "AC-159-4: `TestLargePayloadSurvivesDefaultReadLimit` round-trips a 100 KiB request body AND a 100 KiB response body through a single `Endpoint.Do` call, exercising both tunnel reader directions; the test passes under `-race`."
+      - "AC-159-5: `TestSmallReadLimitRejectsLargePayload` tightens both endpoints to 32 KiB via `Endpoint.SetReadLimit(32*1024)` and asserts the 100 KiB request fails, pinning the production failure mechanism."
+      - "AC-159-6: `go build ./... && go vet ./... && go test ./... -count=1` stays green; `go test ./internal/wstunnel/... -count=1 -race -timeout 60s` stays green."
+    code:
+      - internal/wstunnel/tunnel.go
+    tests:
+      - internal/wstunnel/tunnel_test.go
+    deps:
+      - REQ-157
+      - REQ-158
