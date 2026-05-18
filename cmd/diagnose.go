@@ -145,16 +145,17 @@ func runDiagnoseWithOpts(_ context.Context, opts *diagnoseOpts, stdout io.Writer
 		}
 	}
 
-	if opts.jsonOut {
+	switch {
+	case opts.jsonOut:
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(results); err != nil {
 			return err
 		}
-	} else if len(results) == 0 {
+	case len(results) == 0:
 		_, _ = fmt.Fprintln(stdout, "Pipeline healthy: no issues detected")
 		renderDiagnoseTunnelStatus(stdout, st, nowUTC)
-	} else {
+	default:
 		renderDiagnoseTable(stdout, results)
 		// When the table already carries a worker_tunnel_down finding the
 		// separate tunnel line would just restate it, so skip it. Callers

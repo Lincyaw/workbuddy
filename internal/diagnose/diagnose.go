@@ -44,7 +44,7 @@ const (
 	defaultAgentTimeout  = 60 * time.Minute
 	defaultIdleThreshold = 10 * time.Minute
 	defaultOrphanedAfter = 2 * defaultAgentTimeout
-	noChildGracePeriod = 2 * time.Minute
+	noChildGracePeriod   = 2 * time.Minute
 )
 
 // TunnelHeartbeatStaleAfter is the maximum heartbeat age before a worker
