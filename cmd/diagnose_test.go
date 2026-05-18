@@ -370,6 +370,60 @@ func TestRunDiagnoseTunnelFindings(t *testing.T) {
 			t.Fatalf("expected both issue + tunnel findings, got %+v", rows)
 		}
 	})
+
+	t.Run("online worker with fresh heartbeat reports tunnel: connected even when Tunnel column is false", func(t *testing.T) {
+		// Production regression (#345 Wave 3): on v0.6.24 the text
+		// renderer printed `tunnel: disconnected (last_handshake=unknown)`
+		// against a worker whose /api/v1/workers payload said
+		// status=online with a fresh heartbeat, because the legacy
+		// `workers.tunnel` column was never flipped on. The
+		// human-readable line must now agree with the JSON/finding
+		// path, which is heartbeat-only.
+		dbPath := filepath.Join(t.TempDir(), "tunnel-col-false.db")
+		st, err := store.NewStore(dbPath)
+		if err != nil {
+			t.Fatalf("NewStore: %v", err)
+		}
+		if err := st.UpsertRepoRegistration(store.RepoRegistrationRecord{
+			Repo:   "owner/repo",
+			Status: "active",
+		}); err != nil {
+			t.Fatalf("UpsertRepoRegistration: %v", err)
+		}
+		if err := st.InsertWorker(store.WorkerRecord{
+			ID:        "worker-prod-shape",
+			Repo:      "owner/repo",
+			ReposJSON: `["owner/repo"]`,
+			Tunnel:    false,
+			Status:    "online",
+		}); err != nil {
+			t.Fatalf("InsertWorker: %v", err)
+		}
+		freshAt := now.Add(-5 * time.Second).UTC().Format("2006-01-02 15:04:05")
+		if _, err := st.Exec(`UPDATE workers SET last_heartbeat = ? WHERE id = ?`, freshAt, "worker-prod-shape"); err != nil {
+			t.Fatalf("force fresh heartbeat: %v", err)
+		}
+		_ = st.Close()
+
+		var out bytes.Buffer
+		err = runDiagnoseWithOpts(context.Background(), &diagnoseOpts{
+			dbPath: dbPath,
+			now:    func() time.Time { return now },
+		}, &out)
+		if err != nil {
+			t.Fatalf("runDiagnoseWithOpts: %v", err)
+		}
+		body := out.String()
+		if !strings.Contains(body, "Pipeline healthy: no issues detected") {
+			t.Fatalf("expected healthy banner, got: %q", body)
+		}
+		if !strings.Contains(body, "tunnel: connected") {
+			t.Fatalf("expected 'tunnel: connected' line (Tunnel column false but heartbeat fresh), got: %q", body)
+		}
+		if strings.Contains(body, "tunnel: disconnected") {
+			t.Fatalf("did not expect 'tunnel: disconnected' line, got: %q", body)
+		}
+	})
 }
 
 func TestDiagnoseHelpTextUsesFormatJSONCanonically(t *testing.T) {

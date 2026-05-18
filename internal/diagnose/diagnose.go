@@ -30,23 +30,47 @@ const (
 	// incompleteness conditions that cause silent dispatch skips.
 	KindPipelineHazard = "pipeline_hazard"
 	// KindWorkerTunnelDown is emitted when a registered repo has no online
-	// tunneled worker with a fresh heartbeat. Without such a worker the
-	// coordinator cannot dispatch agent tasks for that repo, so the
-	// pipeline cannot make progress even though no per-issue finding
-	// fires (issue #345).
+	// worker with a fresh heartbeat. "Tunneled" here means "effectively
+	// reachable for dispatch", which we derive from `Status == "online"`
+	// plus a fresh `last_heartbeat`. We deliberately do NOT consult the
+	// legacy `workers.tunnel` column: it is only written at registration
+	// time and is not refreshed as the WSS tunnel connects/disconnects,
+	// so trusting it produced false-positive `tunnel: disconnected`
+	// reports against workers that were demonstrably online and
+	// heartbeating (#345 Wave 3 follow-up).
 	KindWorkerTunnelDown = "worker_tunnel_down"
 
 	stuckThreshold       = time.Hour
 	defaultAgentTimeout  = 60 * time.Minute
 	defaultIdleThreshold = 10 * time.Minute
 	defaultOrphanedAfter = 2 * defaultAgentTimeout
-	noChildGracePeriod   = 2 * time.Minute
-	// tunnelHeartbeatStaleAfter mirrors operator.Detector's 3×heartbeat
-	// staleness window (default 15s interval → 45s). A tunneled worker
-	// whose last_heartbeat is older than this is treated as effectively
-	// disconnected for the purposes of the diagnose verdict.
-	tunnelHeartbeatStaleAfter = 45 * time.Second
+	noChildGracePeriod = 2 * time.Minute
 )
+
+// TunnelHeartbeatStaleAfter is the maximum heartbeat age before a worker
+// is considered unreachable for dispatch. It mirrors operator.Detector's
+// 3×heartbeat staleness window (default 15s interval → 45s) and is the
+// single source of truth shared between the structured finding
+// (KindWorkerTunnelDown) and the text-mode tunnel status line so the two
+// surfaces can never disagree (#345 Wave 3-B).
+const TunnelHeartbeatStaleAfter = 45 * time.Second
+
+// IsHealthyTunneledWorker reports whether the worker is currently
+// reachable for dispatch — Status == "online" with a fresh heartbeat
+// (within TunnelHeartbeatStaleAfter). The legacy `workers.tunnel`
+// column is intentionally NOT consulted — see KindWorkerTunnelDown for
+// the rationale. Both diagnose surfaces (the structured finding and
+// the cmd text line) must answer this question identically; do not
+// duplicate the check.
+func IsHealthyTunneledWorker(now time.Time, w store.WorkerRecord) bool {
+	if w.Status != "online" {
+		return false
+	}
+	if w.LastHeartbeat.IsZero() {
+		return false
+	}
+	return now.Sub(w.LastHeartbeat) <= TunnelHeartbeatStaleAfter
+}
 
 type Finding struct {
 	Kind         string `json:"kind"`
@@ -617,21 +641,15 @@ func workerTunnelFindings(st store.Store, repo string, now time.Time) ([]Finding
 	return out, nil
 }
 
+// hasHealthyTunneledWorker returns true when at least one worker bound
+// to the repo passes IsHealthyTunneledWorker. The slice-level wrapper
+// exists only so callers don't have to write the loop; the per-worker
+// predicate is the single source of truth.
 func hasHealthyTunneledWorker(workers []store.WorkerRecord, now time.Time) bool {
 	for _, w := range workers {
-		if !w.Tunnel {
-			continue
+		if IsHealthyTunneledWorker(now, w) {
+			return true
 		}
-		if w.Status != "online" {
-			continue
-		}
-		if w.LastHeartbeat.IsZero() {
-			continue
-		}
-		if now.Sub(w.LastHeartbeat) > tunnelHeartbeatStaleAfter {
-			continue
-		}
-		return true
 	}
 	return false
 }
