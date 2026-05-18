@@ -47,6 +47,155 @@ func TestQueryEventsFiltered(t *testing.T) {
 	}
 }
 
+// TestQueryEventsFilteredTimestamp pins the regression from issue #345:
+// QueryEventsFiltered used a rigid parse layout, so ev.TS silently became
+// the zero value when the driver returned RFC3339. After the fix it must
+// round-trip through ParseTimestamp.
+func TestQueryEventsFilteredTimestamp(t *testing.T) {
+	s := newTestStore(t)
+
+	before := time.Now().UTC().Add(-1 * time.Minute)
+	mustInsertEvent(t, s, Event{Type: "poll", Repo: "org/a", IssueNum: 1, Payload: `{}`})
+
+	events, err := s.QueryEventsFiltered(EventQueryFilter{})
+	if err != nil {
+		t.Fatalf("QueryEventsFiltered: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	got := events[0].TS
+	if got.IsZero() {
+		t.Fatalf("expected non-zero TS, got zero value (parse layout mismatch?)")
+	}
+	if got.Before(before) {
+		t.Fatalf("expected TS >= %v (last minute), got %v", before, got)
+	}
+}
+
+// TestQueryEventsFilteredSinceUntil pins the second half of #345: the
+// Since/Until WHERE args were formatted with "2006-01-02 15:04:05" while
+// the underlying TEXT column holds RFC3339 ("...T...Z"). SQLite compares
+// TEXT lexicographically, and ' ' (0x20) < 'T' (0x54), so the rigid
+// layout caused Since to under-filter and Until to over-filter when the
+// boundary fell on the same date but a different time-of-day. The fix
+// formats both as time.RFC3339 to match what's actually stored.
+//
+// To get deterministic ts values we overwrite events.ts via the Store's
+// Exec passthrough after insertion — CURRENT_TIMESTAMP would set it to
+// "now" and the boundaries we want to test sit decades ago.
+func TestQueryEventsFilteredSinceUntil(t *testing.T) {
+	s := newTestStore(t)
+
+	// Insert three events, then pin their ts to known RFC3339 values
+	// on the same date with different times-of-day. This shape is what
+	// surfaced the lexicographic bug: a filter like "2020-01-01 10:00:00"
+	// sorts BEFORE "2020-01-01T01:00:00Z" because ' ' < 'T', so a
+	// Since=10:00 filter would incorrectly include the 01:00 row.
+	id1, err := s.InsertEvent(Event{Type: "poll", Repo: "org/a", IssueNum: 1, Payload: `{}`})
+	if err != nil {
+		t.Fatalf("InsertEvent 1: %v", err)
+	}
+	id2, err := s.InsertEvent(Event{Type: "poll", Repo: "org/a", IssueNum: 1, Payload: `{}`})
+	if err != nil {
+		t.Fatalf("InsertEvent 2: %v", err)
+	}
+	id3, err := s.InsertEvent(Event{Type: "poll", Repo: "org/a", IssueNum: 1, Payload: `{}`})
+	if err != nil {
+		t.Fatalf("InsertEvent 3: %v", err)
+	}
+
+	for _, row := range []struct {
+		id int64
+		ts string
+	}{
+		{id1, "2020-01-01T01:00:00Z"},
+		{id2, "2020-01-01T12:00:00Z"},
+		{id3, "2020-01-01T23:00:00Z"},
+	} {
+		if _, err := s.Exec(`UPDATE events SET ts = ? WHERE id = ?`, row.ts, row.id); err != nil {
+			t.Fatalf("backdate ts for id=%d: %v", row.id, err)
+		}
+	}
+
+	// Since boundary: 10:00 — only the 12:00 and 23:00 rows should match.
+	since := time.Date(2020, 1, 1, 10, 0, 0, 0, time.UTC)
+	got, err := s.QueryEventsFiltered(EventQueryFilter{Since: &since})
+	if err != nil {
+		t.Fatalf("QueryEventsFiltered Since: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("Since=10:00 expected 2 events (12:00 + 23:00), got %d: %+v", len(got), got)
+	}
+	if got[0].ID != id2 || got[1].ID != id3 {
+		t.Fatalf("Since=10:00 expected ids [%d %d], got [%d %d]", id2, id3, got[0].ID, got[1].ID)
+	}
+
+	// Until boundary: 10:00 — only the 01:00 row should match.
+	until := time.Date(2020, 1, 1, 10, 0, 0, 0, time.UTC)
+	got, err = s.QueryEventsFiltered(EventQueryFilter{Until: &until})
+	if err != nil {
+		t.Fatalf("QueryEventsFiltered Until: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Until=10:00 expected 1 event (01:00), got %d: %+v", len(got), got)
+	}
+	if got[0].ID != id1 {
+		t.Fatalf("Until=10:00 expected id %d, got %d", id1, got[0].ID)
+	}
+}
+
+// TestCountTerminalSessionsSinceLexicographic pins the third leg of #345:
+// sessions.closed_at is written by nullableTime as RFC3339, but the cutoff
+// arg used to be formatted "2006-01-02 15:04:05". SQLite compares TEXT
+// lexicographically and ' ' (0x20) < 'T' (0x54), so a cutoff like
+// "2020-01-01 10:00:00" sorts BEFORE every RFC3339 row on the same date,
+// over-counting the same-date / earlier-time-of-day case.
+//
+// Sessions are inserted via raw INSERTs through Store.Exec so closed_at can
+// be pinned to known values that span the boundary.
+func TestCountTerminalSessionsSinceLexicographic(t *testing.T) {
+	s := newTestStore(t)
+
+	// Three completed sessions on the same date, time-of-day 01:00 / 12:00 / 23:00.
+	for i, ts := range []string{
+		"2020-01-01T01:00:00Z",
+		"2020-01-01T12:00:00Z",
+		"2020-01-01T23:00:00Z",
+	} {
+		if _, err := s.Exec(
+			`INSERT INTO sessions (session_id, task_id, repo, issue_num, agent_name, status, closed_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			"sess-"+ts, "", "org/a", i+1, "dev", TaskStatusCompleted, ts,
+		); err != nil {
+			t.Fatalf("insert session %s: %v", ts, err)
+		}
+	}
+
+	// Cutoff: 10:00 on the same date — only the 12:00 and 23:00 rows
+	// should count. The old "2006-01-02 15:04:05" cutoff string would
+	// sort before every RFC3339 row and return 3 (over-count).
+	cutoff := time.Date(2020, 1, 1, 10, 0, 0, 0, time.UTC)
+	n, err := s.CountTerminalSessionsSince(TaskStatusCompleted, cutoff)
+	if err != nil {
+		t.Fatalf("CountTerminalSessionsSince: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("cutoff=10:00 expected 2 (12:00 + 23:00), got %d", n)
+	}
+
+	// Cutoff: 1970-01-01 — all three rows count. Sanity check that the
+	// RFC3339 layout doesn't somehow exclude valid rows.
+	allCutoff := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	n, err = s.CountTerminalSessionsSince(TaskStatusCompleted, allCutoff)
+	if err != nil {
+		t.Fatalf("CountTerminalSessionsSince all: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("cutoff=1970 expected 3, got %d", n)
+	}
+}
+
 // TestLatestEventAt exercises the helper used by audit.HTTPHandler.
 func TestLatestEventAt(t *testing.T) {
 	s := newTestStore(t)

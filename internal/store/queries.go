@@ -55,12 +55,14 @@ func (s *dbStore) QueryEventsFiltered(filter EventQueryFilter) ([]Event, error) 
 		args = append(args, filter.IssueNum)
 	}
 	if filter.Since != nil {
+		// events.ts is RFC3339 (TEXT, lexicographic compare); the cutoff
+		// must use the same layout or the boundary mis-orders against 'T'.
 		query += ` AND ts >= ?`
-		args = append(args, filter.Since.UTC().Format("2006-01-02 15:04:05"))
+		args = append(args, filter.Since.UTC().Format(time.RFC3339))
 	}
 	if filter.Until != nil {
 		query += ` AND ts <= ?`
-		args = append(args, filter.Until.UTC().Format("2006-01-02 15:04:05"))
+		args = append(args, filter.Until.UTC().Format(time.RFC3339))
 	}
 
 	query += ` ORDER BY id`
@@ -78,7 +80,7 @@ func (s *dbStore) QueryEventsFiltered(filter EventQueryFilter) ([]Event, error) 
 		if err := rows.Scan(&ev.ID, &ts, &ev.Type, &ev.Repo, &ev.IssueNum, &ev.Payload); err != nil {
 			return nil, fmt.Errorf("store: scan event: %w", err)
 		}
-		ev.TS, _ = time.Parse("2006-01-02 15:04:05", ts)
+		ev.TS, _ = ParseTimestamp(ts, "event.ts")
 		out = append(out, ev)
 	}
 	return out, rows.Err()
@@ -245,7 +247,12 @@ func (s *dbStore) CountTerminalSessionsSince(status string, since time.Time) (in
 		 WHERE COALESCE(t.status, s.status) = ?
 		   AND s.closed_at IS NOT NULL
 		   AND s.closed_at >= ?`,
-		status, since.UTC().Format("2006-01-02 15:04:05"),
+		// sessions.closed_at is written by nullableTime (store.go) as
+		// RFC3339, and SQLite compares TEXT lexicographically — the
+		// cutoff must use the same layout or the same-date / different
+		// time-of-day boundary mis-counts. Mirrors the fix in
+		// QueryEventsFiltered above.
+		status, since.UTC().Format(time.RFC3339),
 	).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("store: count terminal sessions: %w", err)

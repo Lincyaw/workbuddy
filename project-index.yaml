@@ -1232,9 +1232,11 @@ requirements:
       - cmd/status.go
       - cmd/coordinator.go
       - internal/audit/http.go
+      - internal/store/queries.go
     tests:
       - cmd/coordinator_audit_test.go
       - cmd/status_test.go
+      - internal/store/queries_test.go
     deps: [REQ-019, REQ-009]
 
   - id: REQ-036
