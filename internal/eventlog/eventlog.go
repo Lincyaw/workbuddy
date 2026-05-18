@@ -125,6 +125,28 @@ const (
 	// machine re-dispatches. Payload: {repos_swept, issues_redispatched}.
 	// See REQ-152.
 	TypePeriodicRecoveryTick = "periodic_recovery_tick"
+	// Sessionproxy fan-out instrumentation (REQ-158 / #345 Wave 6). These
+	// events give ops visibility into the per-worker dispatch outcome of
+	// every `/api/v1/sessions` fan-out call: which transport was chosen
+	// (WSS tunnel via the live registry, vs. direct HTTP to the
+	// worker-advertised audit URL), whether the call succeeded, and the
+	// specific reason a worker dropped to the offline sidecar list. Pre-
+	// Wave-6 the offline-but-no-error case was silent: the SPA rendered
+	// "N workers offline" with no log line on the coordinator. These
+	// events close that gap. Each fan-out attempt emits AT MOST one of
+	// the events below per candidate worker.
+	//
+	// Payload schemas:
+	//   tunnel_ok:    {worker_id, repo, rows}
+	//   tunnel_error: {worker_id, repo, error}
+	//   audit_ok:     {worker_id, repo, audit_url, rows}
+	//   audit_error:  {worker_id, repo, audit_url, error}
+	//   offline_no_audit: {worker_id, repo}
+	TypeSessionproxyFanoutTunnelOK       = "sessionproxy_fanout_tunnel_ok"
+	TypeSessionproxyFanoutTunnelError    = "sessionproxy_fanout_tunnel_error"
+	TypeSessionproxyFanoutAuditOK        = "sessionproxy_fanout_audit_ok"
+	TypeSessionproxyFanoutAuditError     = "sessionproxy_fanout_audit_error"
+	TypeSessionproxyFanoutOfflineNoAudit = "sessionproxy_fanout_offline_no_audit"
 )
 
 // AllEventTypes lists every recognised event type.
@@ -182,6 +204,11 @@ var AllEventTypes = []string{
 	TypeTaskReaped,
 	TypeIssueResynced,
 	TypePeriodicRecoveryTick,
+	TypeSessionproxyFanoutTunnelOK,
+	TypeSessionproxyFanoutTunnelError,
+	TypeSessionproxyFanoutAuditOK,
+	TypeSessionproxyFanoutAuditError,
+	TypeSessionproxyFanoutOfflineNoAudit,
 }
 
 // EventFilter specifies optional criteria for querying events.

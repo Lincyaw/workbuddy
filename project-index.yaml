@@ -6589,3 +6589,120 @@ requirements:
       - internal/wstunnel/tunnel_test.go
     deps:
       - REQ-155
+  - id: REQ-158
+    title: sessionproxy fan-out forwards bearer over tunnel + structured instrumentation (REQ-158 / #345 Wave 6)
+    description: >
+      Wave 6 follow-up on #345. After Wave 5 (REQ-157) stabilised the
+      WSS tunnel (zero EOF disconnects in 1.5h prod), production GET
+      /api/v1/sessions?repo=Lincyaw/AgentM on the public coordinator
+      kept returning 200 with an empty body and
+      X-Workbuddy-Worker-Offline:ddq-MS-7E17 even though the worker was
+      heart-beating fine, the tunnel was stable, and diagnose reported
+      no worker_tunnel_down. Coordinator logs were silent: the
+      sessionproxy fan-out had no structured events to emit when a
+      per-worker dispatch failed, so the operator only saw the offline
+      header and could not tell whether the tunnel was being chosen,
+      the audit_url path was taken, or no audit_url was advertised
+      at all.
+
+      Root cause (hypothesis ranked highest; pinned by
+      TestFanoutTunnelListingForwardsBearer): the tunnel-routed fan-out
+      path in `handler.fetchTunnelListing` built its http.Request
+      without an Authorization header, while the direct-HTTP audit-URL
+      path (`handler.fetchWorkerListing`) had always forwarded
+      `Bearer <h.authToken>`. The worker mgmt mux registers
+      `/api/v1/sessions` behind `wrapBearerAuth(mgmtAuthToken, …)`, and
+      in the canonical split-host deployment the mgmt token defaults
+      to `WORKBUDDY_AUTH_TOKEN` — i.e. the same value the coordinator
+      already holds in `api.AuthToken`. So the tunnel listing
+      consistently hit 401 at the worker, sessionproxy mapped that to
+      `ErrWorkerOffline`, and the silent offline-sidecar header was
+      the only visible signal. The audit-URL path never tripped this
+      because the prod worker advertised no audit_url
+      (audit_url: (missing) in the DB row), so before connectivity
+      gating arrived in REQ-155 the request would have been routed
+      via that branch with the bearer attached — REQ-155's
+      single-source-of-truth tunnel routing surfaced the gap that
+      REQ-158 closes.
+
+      Fix:
+
+        1. `handler.fetchTunnelListing` now sets
+           `Authorization: Bearer <h.authToken>` on the upstream
+           request, matching `fetchWorkerListing`. Single-line change;
+           the rest of the function is unchanged.
+
+        2. `handler.fanOutListing` emits exactly one structured event
+           per candidate worker per call via a new injectable
+           `EventEmitter func(eventType, repo string, issueNum int,
+           payload interface{})`. The five event types
+           (`sessionproxy_fanout_tunnel_ok`,
+           `sessionproxy_fanout_tunnel_error`,
+           `sessionproxy_fanout_audit_ok`,
+           `sessionproxy_fanout_audit_error`,
+           `sessionproxy_fanout_offline_no_audit`) are registered in
+           `internal/eventlog/eventlog.go::AllEventTypes`. Each event
+           carries `{worker_id, repo}` plus path-specific metadata
+           (`rows` count on the ok variants; `error` string on the
+           error variants; `audit_url` on the audit variants). The
+           emitter is nil-safe so tests that don't care about
+           observability keep their existing wiring.
+
+        3. `cmd/coordinator.go::buildCoordinatorMux` wires
+           `EventEmit: evlog.Log` into the sessionproxy.HandlerConfig
+           so the events land in the same SQLite-backed eventlog
+           store ops queries with `workbuddy status --events`.
+
+      Tests (`internal/sessionproxy/fanout_emit_test.go`):
+
+        - `TestFanoutEmitTunnelOK` — Connected=true + tunnel returns
+          200 ⇒ one `sessionproxy_fanout_tunnel_ok` event.
+
+        - `TestFanoutEmitTunnelError` — Connected=true + tunnel.Do
+          returns an error ⇒ one `sessionproxy_fanout_tunnel_error`
+          event AND the worker appears on the offline sidecar list
+          (pins the pre-fix silent failure shape).
+
+        - `TestFanoutEmitAuditOK` — Connected=false + AuditURL
+          reachable ⇒ one `sessionproxy_fanout_audit_ok` event with
+          the audit_url payload.
+
+        - `TestFanoutEmitOfflineNoAudit` — Connected=false +
+          AuditURL empty ⇒ one `sessionproxy_fanout_offline_no_audit`
+          event (matches the production worker config where
+          audit_url:(missing) is the observable steady state).
+
+        - `TestFanoutTunnelListingForwardsBearer` — pins the actual
+          regression: a tunnel-dispatched fan-out call must present
+          `Authorization: Bearer <token>` on the upstream request so
+          the worker mgmt mux's `wrapBearerAuth` lets it through.
+
+      Constraints honoured:
+
+        - Touched `internal/sessionproxy/`, `internal/eventlog/`,
+          `cmd/coordinator.go` (single new field), the new test file,
+          and `project-index.yaml`. No other packages changed.
+
+        - Single commit on `6ddab7a`. Imperative commit message
+          referencing #345 / REQ-158.
+
+        - `go build ./... && go vet ./... && go test ./... -count=1`
+          stays green.
+    priority: P1
+    version: v0.7.0
+    status: tested
+    acceptance_criteria:
+      - "AC-158-1: `internal/sessionproxy/handler.go::fetchTunnelListing` sets `Authorization: Bearer <h.authToken>` on the upstream request before calling `h.tunnels.Do`, matching the audit-URL path; `TestFanoutTunnelListingForwardsBearer` asserts the header value end-to-end."
+      - "AC-158-2: `internal/sessionproxy/handler.go` declares the `EventEmitter` interface and `HandlerConfig.EventEmit` field; production wiring in `cmd/coordinator.go` passes `evlog.Log` so the events persist alongside every other operator-visible event."
+      - "AC-158-3: `internal/eventlog/eventlog.go` declares `TypeSessionproxyFanoutTunnelOK`, `TypeSessionproxyFanoutTunnelError`, `TypeSessionproxyFanoutAuditOK`, `TypeSessionproxyFanoutAuditError`, `TypeSessionproxyFanoutOfflineNoAudit` and lists them in `AllEventTypes`."
+      - "AC-158-4: Each fan-out attempt emits AT MOST one event per candidate worker (`TestFanoutEmitTunnelOK`, `TestFanoutEmitTunnelError`, `TestFanoutEmitAuditOK`, `TestFanoutEmitOfflineNoAudit` each call `findEventByWorker` which fails if zero or more than one event is observed for the worker under test)."
+      - "AC-158-5: `go build ./... && go vet ./... && go test ./... -count=1` stays green, including `go test ./internal/sessionproxy/... ./internal/eventlog/... ./cmd/... -count=1 -run 'SessionProxy|Sessions|Tunnel|Fanout'`."
+    code:
+      - internal/sessionproxy/handler.go
+      - internal/eventlog/eventlog.go
+      - cmd/coordinator.go
+    tests:
+      - internal/sessionproxy/fanout_emit_test.go
+    deps:
+      - REQ-155
+      - REQ-157
