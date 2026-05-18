@@ -374,3 +374,109 @@ func mustInsertEvent(t *testing.T, s Store, e Event) {
 		t.Fatalf("InsertEvent: %v", err)
 	}
 }
+
+// TestReapStaleRunningTasks pins the contract of the periodic TaskReaper
+// (REQ-151, issue #345 Wave 2): rows in status=running whose worker stopped
+// heart-beating get converted to status=failed with exit_code=-2 so the
+// recovery sweep can re-dispatch. Rows with a fresh heartbeat must NOT be
+// touched.
+func TestReapStaleRunningTasks(t *testing.T) {
+	s := newTestStore(t)
+
+	// Seed three running tasks. We directly Exec the desired status /
+	// heartbeat_at / created_at because the public path goes Insert →
+	// Claim → Ack → Heartbeat and that gives us only a "fresh" row. The
+	// reaper's contract is a SQL-level invariant; setting the columns
+	// directly keeps the test focused on it.
+	for _, id := range []string{"stale-hb", "fresh-hb", "no-hb"} {
+		if err := s.InsertTask(TaskRecord{ID: id, Repo: "org/r", IssueNum: 1, AgentName: "dev", Status: TaskStatusPending}); err != nil {
+			t.Fatalf("InsertTask(%s): %v", id, err)
+		}
+	}
+	// stale-hb: status=running, heartbeat_at one hour ago.
+	if _, err := s.Exec(
+		`UPDATE task_queue SET status = ?, worker_id = 'worker-A', claim_token = 'tok-A',
+			heartbeat_at = datetime('now', '-3600 seconds') WHERE id = 'stale-hb'`,
+		TaskStatusRunning,
+	); err != nil {
+		t.Fatalf("seed stale-hb: %v", err)
+	}
+	// fresh-hb: status=running, heartbeat_at just now.
+	if _, err := s.Exec(
+		`UPDATE task_queue SET status = ?, worker_id = 'worker-B', claim_token = 'tok-B',
+			heartbeat_at = CURRENT_TIMESTAMP WHERE id = 'fresh-hb'`,
+		TaskStatusRunning,
+	); err != nil {
+		t.Fatalf("seed fresh-hb: %v", err)
+	}
+	// no-hb: status=running, heartbeat_at NULL, created_at one hour ago
+	// (worker accepted the task but died before its first heartbeat).
+	if _, err := s.Exec(
+		`UPDATE task_queue SET status = ?, worker_id = 'worker-C', claim_token = 'tok-C',
+			heartbeat_at = NULL, created_at = datetime('now', '-3600 seconds') WHERE id = 'no-hb'`,
+		TaskStatusRunning,
+	); err != nil {
+		t.Fatalf("seed no-hb: %v", err)
+	}
+
+	reaped, err := s.ReapStaleRunningTasks(5 * time.Minute)
+	if err != nil {
+		t.Fatalf("ReapStaleRunningTasks: %v", err)
+	}
+	gotIDs := make(map[string]bool)
+	for _, t := range reaped {
+		gotIDs[t.ID] = true
+	}
+	if !gotIDs["stale-hb"] || !gotIDs["no-hb"] || gotIDs["fresh-hb"] {
+		t.Fatalf("unexpected reap set: %v", gotIDs)
+	}
+	if len(reaped) != 2 {
+		t.Fatalf("expected 2 reaped rows, got %d (%v)", len(reaped), gotIDs)
+	}
+
+	// Stale rows must now be status=failed, exit_code=-2, claim/worker
+	// cleared.
+	for _, id := range []string{"stale-hb", "no-hb"} {
+		got, err := s.GetTask(id)
+		if err != nil {
+			t.Fatalf("GetTask(%s): %v", id, err)
+		}
+		if got.Status != TaskStatusFailed {
+			t.Fatalf("task %s: expected status=failed, got %q", id, got.Status)
+		}
+		if got.ExitCode != TaskReapedExitCode {
+			t.Fatalf("task %s: expected exit_code=%d, got %d", id, TaskReapedExitCode, got.ExitCode)
+		}
+		if got.WorkerID != "" {
+			t.Fatalf("task %s: expected worker_id cleared, got %q", id, got.WorkerID)
+		}
+		if got.ClaimToken != "" {
+			t.Fatalf("task %s: expected claim_token cleared, got %q", id, got.ClaimToken)
+		}
+	}
+
+	// Fresh row must be untouched.
+	fresh, err := s.GetTask("fresh-hb")
+	if err != nil {
+		t.Fatalf("GetTask(fresh-hb): %v", err)
+	}
+	if fresh.Status != TaskStatusRunning {
+		t.Fatalf("fresh-hb: expected status=running, got %q", fresh.Status)
+	}
+	if fresh.WorkerID != "worker-B" {
+		t.Fatalf("fresh-hb: expected worker_id preserved, got %q", fresh.WorkerID)
+	}
+}
+
+// TestReapStaleRunningTasksRejectsZeroGrace pins the safety check: a
+// zero/negative grace would race with Ack and flip rows that just
+// transitioned to running. The store must refuse.
+func TestReapStaleRunningTasksRejectsZeroGrace(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.ReapStaleRunningTasks(0); err == nil {
+		t.Fatal("expected error on graceTimeout=0, got nil")
+	}
+	if _, err := s.ReapStaleRunningTasks(-1 * time.Second); err == nil {
+		t.Fatal("expected error on negative graceTimeout, got nil")
+	}
+}

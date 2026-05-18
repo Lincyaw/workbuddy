@@ -1097,3 +1097,133 @@ func (s *dbStore) ResetIssueCycleState(repo string, issueNum int) error {
 	}
 	return nil
 }
+
+// ---------------------------------------------------------------------------
+// Stale running-task reaper (REQ-151, issue #345 Wave 2)
+// ---------------------------------------------------------------------------
+
+// TaskReapedExitCode is the sentinel exit_code stamped on task_queue rows that
+// the periodic reaper converts from `running` → `failed` because the worker
+// stopped heart-beating. -2 is reserved for this reason: -1 is already used
+// in tests as a generic "ungraceful" marker, and 0/positive values come from
+// real subprocess exits. The reason ("no_heartbeat") is also recorded on the
+// `task_reaped` event payload so operators don't have to memorise the number.
+const TaskReapedExitCode = -2
+
+// ReapStaleRunningTasks finds task_queue rows in status=`running` whose worker
+// has not heart-beat within `graceTimeout` (or never heart-beat at all and the
+// row is older than `graceTimeout`) and converts them to `failed`. This is
+// root-cause #2 of the silent-stall bug tracked in #345: when a worker dies
+// mid-task, the row sits in `running` with a stale `heartbeat_at` forever and
+// `HasAnyActiveTask` keeps returning true, so the recovery sweep never
+// re-dispatches the issue.
+//
+// The reaper:
+//   - selects candidates whose `heartbeat_at` is stale, or whose `created_at`
+//     is stale when `heartbeat_at` is NULL (worker never heart-beat at all);
+//   - flips each row to `status='failed'`, `exit_code=TaskReapedExitCode`,
+//     `completed_at=CURRENT_TIMESTAMP`, and releases the claim/worker_id
+//     so a fresh dispatch can take the issue.
+//
+// Returns the pre-update snapshot of each reaped row so the caller can log
+// `task_reaped` events with the original worker_id / claim_token / heartbeat
+// for forensic analysis.
+//
+// The UPDATE is wrapped in a small SQLITE_BUSY retry loop using the same
+// pattern as InsertEvent (store.go:683): the reaper runs from a background
+// goroutine concurrently with dispatch/heartbeat writers, so transient
+// contention is expected.
+func (s *dbStore) ReapStaleRunningTasks(graceTimeout time.Duration) ([]TaskRecord, error) {
+	if graceTimeout <= 0 {
+		// A zero/negative grace would reap rows that just transitioned to
+		// running, racing with Ack. Refuse rather than corrupt state.
+		return nil, fmt.Errorf("store: ReapStaleRunningTasks: graceTimeout must be positive, got %v", graceTimeout)
+	}
+	// Build a negative SQLite datetime modifier directly: `-<N> seconds`.
+	// `taskLeaseOffset` rounds non-positive seconds up to "+1 seconds"
+	// (correct for lease extensions, wrong for an "in the past" cutoff),
+	// so we can't reuse it here. The dialect rewriter for MySQL strips the
+	// sign onto the INTERVAL value, so this form works on both engines.
+	seconds := int(graceTimeout.Seconds())
+	if seconds < 1 {
+		seconds = 1
+	}
+	offset := fmt.Sprintf("-%d seconds", seconds)
+
+	// Step 1: find candidates. Same dialect-aware `datetime('now', ?)`
+	// translation used elsewhere (lease/heartbeat call sites).
+	rows, err := s.db.Query(
+		`SELECT
+			tq.id, tq.repo, tq.issue_num, tq.agent_name, ic.labels, tq.role, tq.runtime, tq.workflow, tq.state,
+			tq.worker_id, tq.claim_token, tq.status, tq.lease_expires_at, tq.acked_at, tq.heartbeat_at,
+			tq.completed_at, tq.exit_code, tq.session_refs, tq.rollout_index, tq.rollouts_total, tq.rollout_group_id, tq.supervisor_agent_id, tq.created_at, tq.updated_at
+		 FROM task_queue tq
+		 LEFT JOIN issue_cache ic
+		   ON ic.repo = tq.repo AND ic.issue_num = tq.issue_num
+		 WHERE tq.status = ?
+		   AND (
+		         (tq.heartbeat_at IS NOT NULL AND tq.heartbeat_at < datetime('now', ?))
+		         OR
+		         (tq.heartbeat_at IS NULL AND tq.created_at < datetime('now', ?))
+		       )`,
+		TaskStatusRunning, offset, offset,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: reap query stale tasks: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var candidates []TaskRecord
+	for rows.Next() {
+		t, err := scanTaskRecord(rows.Scan)
+		if err != nil {
+			return nil, fmt.Errorf("store: reap scan task: %w", err)
+		}
+		candidates = append(candidates, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: reap iterate stale tasks: %w", err)
+	}
+
+	// Step 2: flip each candidate. The WHERE clause re-checks status=running
+	// so a worker that managed to complete the task between our SELECT and
+	// our UPDATE doesn't get its terminal status clobbered.
+	reaped := make([]TaskRecord, 0, len(candidates))
+	for _, t := range candidates {
+		var lastErr error
+		var updated bool
+		for _, delay := range []time.Duration{0, 5 * time.Millisecond, 25 * time.Millisecond, 125 * time.Millisecond} {
+			if delay > 0 {
+				time.Sleep(delay)
+			}
+			res, err := s.db.Exec(
+				`UPDATE task_queue
+				 SET status = ?,
+				     exit_code = ?,
+				     completed_at = CURRENT_TIMESTAMP,
+				     lease_expires_at = NULL,
+				     worker_id = NULL,
+				     claim_token = NULL,
+				     updated_at = CURRENT_TIMESTAMP
+				 WHERE id = ? AND status = ?`,
+				TaskStatusFailed, TaskReapedExitCode, t.ID, TaskStatusRunning,
+			)
+			if err == nil {
+				n, _ := res.RowsAffected()
+				updated = n > 0
+				break
+			}
+			lastErr = err
+			if !s.dialect.IsBusyError(err) {
+				break
+			}
+		}
+		if lastErr != nil {
+			return reaped, fmt.Errorf("store: reap update task %s: %w", t.ID, lastErr)
+		}
+		if updated {
+			reaped = append(reaped, t)
+		}
+	}
+	return reaped, nil
+}

@@ -99,6 +99,12 @@ const (
 	TypeDispatchSkippedAgentNotFound = "dispatch_skipped_agent_not_found"
 	// TypeTransitionSkipped fires when a label-driven transition is mapped but cannot be taken (REQ-149 / #345).
 	TypeTransitionSkipped = "transition_skipped"
+	// TypeTaskReaped fires when the periodic TaskReaper converts a stale
+	// status=running task_queue row to failed because its worker stopped
+	// heart-beating. Closes silent-stall root cause #2 in #345. Payload:
+	// {task_id, repo, issue_num, agent, worker_id, last_heartbeat_at, reason}
+	// where reason is currently always "no_heartbeat". See REQ-151.
+	TypeTaskReaped = "task_reaped"
 )
 
 // AllEventTypes lists every recognised event type.
@@ -153,6 +159,7 @@ var AllEventTypes = []string{
 	TypeHooksReloaded,
 	TypeDispatchSkippedAgentNotFound,
 	TypeTransitionSkipped,
+	TypeTaskReaped,
 }
 
 // EventFilter specifies optional criteria for querying events.

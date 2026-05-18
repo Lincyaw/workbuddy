@@ -5826,3 +5826,66 @@ requirements:
       - internal/dependency/gate_test.go
     deps:
       - REQ-022
+
+  - id: REQ-151
+    title: Periodic stale running-task reaper (REQ-151 / #345 Wave 2)
+    description: >
+      Root cause #2 of the silent-stall bug tracked in #345: when a worker
+      dies mid-task, the `task_queue` row sits in status=`running` with a
+      stale `heartbeat_at` forever. `internal/app/repo_runtime.go`'s
+      `HasAnyActiveTask` returns true and the recovery sweep skips the
+      issue, leaving it stuck with no audit signal that anything is wrong.
+
+      This REQ adds a periodic reaper that converts stale `running` rows
+      to `failed` so the recovery sweep can pick the issue up:
+
+        1. `store.ReapStaleRunningTasks(graceTimeout)` (queries.go) finds
+           rows where `status='running'` AND either
+             - `heartbeat_at IS NOT NULL AND heartbeat_at < (now - grace)`, or
+             - `heartbeat_at IS NULL AND created_at < (now - grace)` (the
+               worker accepted the task but never heart-beat).
+           Each selected row is flipped to `status='failed'`,
+           `exit_code=TaskReapedExitCode (-2)`,
+           `completed_at=CURRENT_TIMESTAMP`, and `worker_id` /
+           `claim_token` are nulled. The UPDATE uses the same
+           SQLITE_BUSY retry pattern as InsertEvent.
+
+        2. `internal/app/task_reaper.go` runs the reaper as a goroutine
+           on a 60-second tick (default grace 5 minutes ≈ 5× the worker
+           heartbeat interval). Eventlog wiring is nil-safe so test
+           harnesses can construct the reaper without a logger.
+
+        3. `cmd/coordinator.go` starts the reaper from
+           `startCoordinatorTaskReaper` alongside the operator detector;
+           `cmd/serve.go` picks it up transparently because it reuses
+           `runCoordinatorWithOpts`.
+
+        4. `internal/eventlog/eventlog.go` registers `TypeTaskReaped`
+           (`task_reaped`); each reaped row produces one event with
+           {task_id, repo, issue_num, agent, worker_id,
+           last_heartbeat_at, reason="no_heartbeat"}.
+
+      This is the storage half of the silent-stall fix. The matching
+      periodic-recovery wiring lands in W2-C.
+    priority: P1
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-151-1: store.ReapStaleRunningTasks selects status=running rows with stale heartbeat_at or NULL heartbeat_at + stale created_at, and UPDATEs each to status=failed/exit_code=-2/completed_at=CURRENT_TIMESTAMP with worker_id/claim_token cleared."
+      - "AC-151-2: ReapStaleRunningTasks returns the pre-update TaskRecord snapshots so the caller can emit task_reaped events with the original worker_id and heartbeat."
+      - "AC-151-3: ReapStaleRunningTasks rejects graceTimeout <= 0 with an error to avoid racing with Ack."
+      - "AC-151-4: app.TaskReaper.Run runs an immediate pass on entry, then ticks on the configured interval, returning on ctx.Done(); nil-evlog construction is supported and never panics."
+      - "AC-151-5: cmd/coordinator.go startCoordinatorTaskReaper launches the reaper goroutine with DefaultTaskReaperInterval (60s) and DefaultTaskReaperGrace (5m). serve.go inherits the wire-up through runCoordinatorWithOpts."
+      - "AC-151-6: eventlog.TypeTaskReaped (`task_reaped`) is registered in AllEventTypes; the reaper emits one event per reaped row with task_id/repo/issue_num/agent/worker_id/last_heartbeat_at/reason payload."
+      - "AC-151-7: Unit tests cover the store reaper (TestReapStaleRunningTasks with stale-hb, fresh-hb, no-hb cases + TestReapStaleRunningTasksRejectsZeroGrace) and the goroutine (TestTaskReaperEmitsEvent + TestTaskReaperNilEventlogIsSafe)."
+    code:
+      - internal/store/queries.go
+      - internal/store/iface.go
+      - internal/app/task_reaper.go
+      - internal/eventlog/eventlog.go
+      - cmd/coordinator.go
+    tests:
+      - internal/store/queries_test.go
+      - internal/app/task_reaper_test.go
+    deps:
+      - REQ-022

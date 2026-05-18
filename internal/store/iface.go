@@ -70,6 +70,10 @@ type Store interface {
 	HasActiveTask(repo string, issueNum int, agentName string) (bool, error)
 	HasAnyActiveTask(repo string, issueNum int) (bool, error)
 	FailPendingTasksForRepo(repo string) error
+	// ReapStaleRunningTasks converts task_queue rows in status=running with
+	// stale heartbeats to status=failed. See queries.go for the full
+	// contract; called by the periodic TaskReaper goroutine (REQ-151).
+	ReapStaleRunningTasks(graceTimeout time.Duration) ([]TaskRecord, error)
 	InFlightTasksForWorker(workerID string) ([]InFlightTaskForWorker, error)
 	WorkerCurrentTaskID(workerID string) (string, error)
 	WorkerHasRunningTask(workerID string) (bool, error)

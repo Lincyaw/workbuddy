@@ -496,6 +496,7 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	}
 
 	startCoordinatorOperatorDetector(ctx, st, alertBus, bootstrapCfg, pollInterval)
+	startCoordinatorTaskReaper(ctx, st, evlog)
 
 	if bootstrapCfg != nil && strings.TrimSpace(bootstrapCfg.Global.Repo) != "" {
 		go app.RunRateLimitBudgetCheck(ctx, "coordinator", bootstrapCfg.Global.Repo)
@@ -629,6 +630,21 @@ func startCoordinatorOperatorDetector(ctx context.Context, st store.Store, alert
 	go func() {
 		if err := detector.Run(ctx); err != nil {
 			log.Printf("[coordinator] operator detector error: %v", err)
+		}
+	}()
+}
+
+// startCoordinatorTaskReaper launches the periodic reaper that converts
+// stale status=running task_queue rows to failed so HasAnyActiveTask stops
+// returning true and the recovery sweep can re-dispatch (REQ-151).
+// Defaults are picked up from app.NewTaskReaper; the wire-up is intentionally
+// minimal — periodic-recovery wiring (W2-C) runs after this in time so by
+// the time it polls the rows are already cleared.
+func startCoordinatorTaskReaper(ctx context.Context, st store.Store, evlog *eventlog.EventLogger) {
+	reaper := app.NewTaskReaper(st, evlog, app.DefaultTaskReaperInterval, app.DefaultTaskReaperGrace)
+	go func() {
+		if err := reaper.Run(ctx); err != nil {
+			log.Printf("[coordinator] task reaper error: %v", err)
 		}
 	}()
 }
