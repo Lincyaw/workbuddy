@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/failpoints"
 	"github.com/coder/websocket"
 )
 
@@ -142,6 +143,19 @@ func (e *Endpoint) send(ctx context.Context, frame Frame) error {
 	case <-e.closed:
 		return e.closeErr
 	default:
+	}
+	// Failpoint: simulate a dropped outbound tunnel frame. Endpoint.send
+	// carries every frame type (FrameRequest, FrameClose, FrameResponse,
+	// and any heartbeat frames layered on top), so the hook is named for
+	// the generic send path rather than a specific frame type. The "drop"
+	// effect kind silently no-ops the write and returns nil so the caller
+	// sees a successful send while the wire never sees the bytes — exactly
+	// the failure mode the #345 silent-stall postmortem flagged.
+	if err := failpoints.Hit("wstunnel.send.drop"); err != nil {
+		if errors.Is(err, failpoints.ErrFailpointDrop) {
+			return nil
+		}
+		return err
 	}
 	data, err := EncodeFrame(frame)
 	if err != nil {

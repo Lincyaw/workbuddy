@@ -14,6 +14,7 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/failpoints"
 	"github.com/Lincyaw/workbuddy/internal/ghadapter"
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/router"
@@ -888,6 +889,9 @@ func (s *FullCoordinatorServer) claimNextTask(worker *store.WorkerRecord) (*Task
 	var repos []string
 	if err := json.Unmarshal([]byte(worker.ReposJSON), &repos); err != nil || len(repos) == 0 {
 		repos = []string{worker.Repo}
+	}
+	if err := failpoints.Hit("worker.claim_task.before"); err != nil {
+		return nil, err
 	}
 	task, err := s.Store.ClaimNextTask(worker.ID, roles, repos, worker.Runtime, "", DefaultLongPollTimeout)
 	if err != nil || task == nil {

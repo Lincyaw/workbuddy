@@ -63,6 +63,8 @@ func Trip(name string, opts ...MatchOpt) *Effect {
 //   - delay: sleeps eff.Delay and returns nil
 //   - panic: panics with eff.Err
 //   - return: returns ErrFailpointReturn
+//   - drop: returns ErrFailpointDrop (caller is expected to silently
+//     skip the side-effect — see ErrFailpointDrop doc)
 //
 // Returns nil when no effect is armed (or the match predicates filter the
 // caller out).
@@ -91,6 +93,8 @@ func Hit(name string, opts ...MatchOpt) error {
 		panic(msg)
 	case "return":
 		return ErrFailpointReturn
+	case "drop":
+		return ErrFailpointDrop
 	default:
 		// Unknown kind: surface as a plain error so callers notice during
 		// fault-injection runs but production cannot end up here (this
@@ -208,6 +212,8 @@ func parseEntry(s string) (string, Effect, error) {
 			eff.Err = positional[0]
 		}
 	case "return":
+		// no positional args expected; ignore extras silently
+	case "drop":
 		// no positional args expected; ignore extras silently
 	default:
 		return "", Effect{}, fmt.Errorf("unknown kind %q", kind)

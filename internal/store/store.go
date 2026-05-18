@@ -22,6 +22,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/failpoints"
+
 	_ "github.com/go-sql-driver/mysql" // mysql driver
 	_ "modernc.org/sqlite"             // sqlite driver
 )
@@ -691,6 +693,21 @@ func (s *dbStore) InsertEvent(e Event) (int64, error) {
 	for _, delay := range []time.Duration{0, 5 * time.Millisecond, 25 * time.Millisecond, 125 * time.Millisecond} {
 		if delay > 0 {
 			time.Sleep(delay)
+		}
+		// Failpoint: exercise the SQLITE_BUSY retry loop. The Hit lives
+		// inside the loop body so the retry logic actually observes the
+		// injected error. Arm with kind=error and a message that
+		// IsBusyError recognises (e.g. "SQLITE_BUSY") to make each
+		// iteration fail busy; combine with `once` to fail the first
+		// attempt and succeed on the second. If the injected error is
+		// not a busy error, the loop breaks early (same semantics as a
+		// real non-transient driver error).
+		if err := failpoints.Hit("store.insert_event.busy", failpoints.WithRepo(e.Repo), failpoints.WithIssue(e.IssueNum)); err != nil {
+			lastErr = err
+			if !s.dialect.IsBusyError(err) {
+				break
+			}
+			continue
 		}
 		res, err := s.db.Exec(
 			`INSERT INTO events (type, repo, issue_num, payload) VALUES (?, ?, ?, ?)`,

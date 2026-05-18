@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/failpoints"
 	"github.com/Lincyaw/workbuddy/internal/ghutil"
 	"github.com/Lincyaw/workbuddy/internal/store"
 	"github.com/Lincyaw/workbuddy/internal/tracing"
@@ -256,7 +257,18 @@ func (p *Poller) poll(ctx context.Context) {
 	var cacheOps []func() error
 
 	// Issues.
+	if err := failpoints.Hit("poller.list_issues.before", failpoints.WithRepo(p.repo)); err != nil {
+		log.Printf("[poller] failpoint poller.list_issues.before tripped for %s: %v", p.repo, err)
+		return
+	}
 	issues, err := p.gh.ListIssues(p.repo)
+	// Failpoint: `poller.list_issues.after` is delay-only by design. The
+	// only effect kind that has observable behaviour here is `delay`,
+	// which models a slow `gh` response. Error/panic/return effects are
+	// intentionally discarded — failing after the GH read would lose the
+	// fetched issues and serves no scenario this hook was added for. See
+	// `internal/failpoints/README.md` for the operator-facing contract.
+	_ = failpoints.Hit("poller.list_issues.after", failpoints.WithRepo(p.repo))
 	if err != nil {
 		if ghutil.IsRateLimit(err) {
 			p.logRateLimitEvent("issues", err)
