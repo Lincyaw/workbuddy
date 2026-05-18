@@ -5819,8 +5819,10 @@ requirements:
       - internal/router/router.go
       - internal/statemachine/statemachine.go
       - internal/app/repo_runtime.go
+      - internal/dependency/gate.go
     tests:
       - internal/router/router_test.go
       - internal/statemachine/statemachine_test.go
+      - internal/dependency/gate_test.go
     deps:
       - REQ-022

@@ -210,30 +210,6 @@ func (r *Router) lookupAgentMeta(name string) (string, string) {
 	return a.Role, a.Runtime
 }
 
-// checkDependencyBlocked queries the recorded dependency verdict and applies
-// the same gating policy as dependency.IsBlocked, but also returns the
-// observed verdict string so the caller can stamp it on the
-// TypeDispatchBlockedByDependency payload (REQ-149 / #345). When the
-// gateStore is nil or has no recorded state, returns (false, "", nil).
-func (r *Router) checkDependencyBlocked(repo string, issueNum int) (bool, string, error) {
-	if r.gateStore == nil {
-		return false, "", nil
-	}
-	depState, err := r.gateStore.QueryIssueDependencyState(repo, issueNum)
-	if err != nil {
-		return false, "", err
-	}
-	if depState == nil {
-		return false, "", nil
-	}
-	switch depState.Verdict {
-	case store.DependencyVerdictBlocked, store.DependencyVerdictNeedsHuman:
-		return true, depState.Verdict, nil
-	default:
-		return false, depState.Verdict, nil
-	}
-}
-
 // decide is the pure scheduling core: no side effects other than logging.
 // Returns (decision, true) if the dispatch should proceed.
 func (r *Router) decide(req statemachine.DispatchRequest) (Decision, bool) {
@@ -247,7 +223,10 @@ func (r *Router) decide(req statemachine.DispatchRequest) (Decision, bool) {
 		})
 		return Decision{}, false
 	}
-	blocked, verdict, err := r.checkDependencyBlocked(req.Repo, req.IssueNum)
+	// Single source of truth for the dispatch-gate policy: dependency.IsBlocked
+	// owns the verdict→gated mapping. The router only consumes the (blocked,
+	// verdict) tuple for telemetry (REQ-149 / #345 W2 cleanup).
+	blocked, verdict, err := dependency.IsBlocked(r.gateStore, req.Repo, req.IssueNum)
 	if err != nil {
 		log.Printf("[router] failed to query dependency state for %s#%d: %v", req.Repo, req.IssueNum, err)
 		// Error branch omits verdict (we never observed one) and adds error

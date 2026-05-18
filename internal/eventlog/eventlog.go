@@ -35,6 +35,14 @@ const (
 	TypeDependencyVerdictChanged    = "dependency_verdict_changed"
 	TypeDependencyCycleDetected     = "dependency_cycle_detected"
 	TypeDependencyOverrideActivated = "dependency_override_activated"
+	// TypeDispatchBlockedByDependency fires when a scheduling attempt is
+	// refused because the issue's dependency gate did not pass. Emitted from
+	// both the state machine (pre-router gate) and the router (re-check on
+	// dispatch). Payload schema (all emitters):
+	//   { agent, workflow, state, source: "statemachine"|"router",
+	//     verdict?: string, error?: string }
+	// verdict is present when a gate verdict was observed; error is present
+	// only when the underlying gate-store query errored. See REQ-149 / #345.
 	TypeDispatchBlockedByDependency = "dispatch_blocked_by_dependency"
 	TypeNotificationFailed          = "notification_failed"
 	TypeOperatorInvoked             = "operator_invoked"
