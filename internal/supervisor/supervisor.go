@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/failpoints"
 	"github.com/google/uuid"
 )
 
@@ -342,9 +343,29 @@ func (s *Supervisor) StartAgent(req StartAgentRequest) (*Agent, error) {
 	go func() {
 		err := cmd.Wait()
 		// Close the file handles after Wait so the kernel-side fd refs
-		// drop; the file itself stays on disk for tail/SSE replay.
+		// drop; the file itself stays on disk for tail/SSE replay. These
+		// closes intentionally happen BEFORE the bookkeeping failpoint
+		// because we never want to leak file descriptors even when
+		// simulating a supervisor crash — the OS would reclaim them at
+		// real-process death anyway. Skipping fd close here would only
+		// flake the test harness.
 		_ = stdoutF.Close()
 		_ = stderrF.Close()
+		// Failpoint: simulate the supervisor crashing AFTER the child
+		// process exits but BEFORE the exit bookkeeping runs (host died,
+		// OOM-killer reaped the worker, supervisor panicked mid-update,
+		// etc.). When armed we return from the wait goroutine without
+		// calling updateAgentExit or markExited, so:
+		//   * the agents row stays status=running with no exit_code
+		//   * task_queue rows tied to this agent never see a final
+		//     status flip
+		// This is the precise silent-stall pattern Wave 2 (REQ-150~152)
+		// was built to recover from: the TaskReaper trips on the stale
+		// heartbeat, the periodic recovery sweep notices the orphan,
+		// and the issue is re-dispatched. See #345 / REQ-153.
+		if fpErr := failpoints.Hit("worker.agent_exec.die_mid", failpoints.WithRepo(req.Workdir)); fpErr != nil {
+			return
+		}
 		exitCode := 0
 		if err != nil {
 			var ee *exec.ExitError

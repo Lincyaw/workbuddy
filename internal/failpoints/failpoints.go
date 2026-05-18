@@ -22,9 +22,17 @@ import (
 // surfacing a real error message can check for this with errors.Is.
 var ErrFailpointReturn = errors.New("failpoint: return")
 
+// ErrFailpointDrop is the sentinel error returned by Hit when an armed
+// effect of Kind=="drop" trips. Drop semantics differ from "return": the
+// caller is expected to silently skip the side-effect (e.g. omit a heartbeat
+// frame) and continue without surfacing an error to its own caller. It is a
+// sentinel rather than nil so the hot-path call site stays a single-line
+// branch — `if errors.Is(err, failpoints.ErrFailpointDrop) { return nil }`.
+var ErrFailpointDrop = errors.New("failpoint: drop")
+
 // Effect describes what an armed failpoint should do at trip time.
 type Effect struct {
-	// Kind is one of "error", "delay", "panic", "return".
+	// Kind is one of "error", "delay", "panic", "return", "drop".
 	Kind string
 	// Err is the human-readable error message for Kind=="error" and the
 	// panic message for Kind=="panic".

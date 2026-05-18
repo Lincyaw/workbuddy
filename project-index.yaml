@@ -6026,3 +6026,130 @@ requirements:
       - internal/app/repo_runtime_test.go
     deps:
       - REQ-151
+
+  - id: REQ-153
+    title: Failpoint instrumentation + #345 silent-stall regression test (REQ-153 / #345 Wave 2 final)
+    description: >
+      Wave 2 closeout for issue #345. Wave 1 landed the failpoint scaffold
+      (REQ-148) and Wave 2 landed the three recovery components (REQ-150
+      poller resync, REQ-151 task reaper, REQ-152 periodic orphan-state
+      recovery). This REQ delivers the two artifacts that turn the
+      scaffold and the recovery components into a closed loop:
+
+        1. Six one-line `failpoints.Hit(...)` instrumentation points at the
+           postmortem-critical decision sites the original #345 analysis
+           identified:
+
+             - `poller.list_issues.before` / `poller.list_issues.after`
+               in `internal/poller/poller.go` — simulate `gh` outage /
+               slow response.
+             - `wstunnel.send.drop` in
+               `internal/wstunnel/tunnel.go` — silently no-op an outbound
+               frame (any frame type sent through `Endpoint.send`) to
+               model a tunnel that swallows heartbeats. (Renamed from
+               `wstunnel.heartbeat.drop` in the W2-D follow-up because
+               the hook site is the shared send path, not a
+               heartbeat-specific one.)
+             - `worker.claim_task.before` in
+               `internal/app/coordinator.go` — simulate a transient claim
+               conflict on the long-poll endpoint.
+             - `worker.agent_exec.die_mid` in
+               `internal/supervisor/supervisor.go` — simulate the
+               supervisor crashing AFTER `cmd.Wait` returns but BEFORE
+               the exit bookkeeping (`updateAgentExit` / `markExited`)
+               runs. When tripped the wait goroutine returns early and
+               the agents row stays `status=running` with no exit code
+               — the exact silent-stall pattern Wave 2 was built to
+               recover from. (W2-D follow-up moved the Hit INTO the
+               bookkeeping path; pre-W2-D it ran after the writes and
+               only forced a synthetic exit code, which did not
+               actually model the failure mode.)
+             - `store.insert_event.busy` in `internal/store/store.go` —
+               drive the SQLITE_BUSY retry loop deterministically. The
+               Hit lives INSIDE the retry loop body (W2-D follow-up
+               fix; pre-W2-D it sat above the loop and short-circuited
+               on the first injection, so the retry path was never
+               exercised).
+
+           Each call site is a single line that compiles to nothing in
+           the default build (the no-op `Hit` returns nil unconditionally
+           and the inliner folds it away). They activate only under
+           `-tags faultinject` and only when an `Arm` call or the
+           WORKBUDDY_FAILPOINTS env var has armed the named site.
+
+        2. A regression test (`internal/app/silent_stall_regression_test.go`,
+           build tag `faultinject`) that reproduces the #345 silent-stall
+           pattern end-to-end: a status:reviewing issue with a stale
+           running task_queue row whose worker stopped heart-beating.
+           The test arms the agent_exec.die_mid hook, ages the task row's
+           heartbeat by 3600s, and asserts:
+
+             a. The TaskReaper (REQ-151) flips the row to status=failed
+                with exit_code=-2 within 2s.
+             b. A `task_reaped` eventlog entry is emitted with the
+                expected task_id / worker_id payload (audit trail).
+             c. The periodic recovery sweep (REQ-152) re-dispatches the
+                orphaned active state on the state machine's dispatch
+                channel within 2s.
+             d. A `periodic_recovery_tick` event with
+                issues_redispatched >= 1 is emitted.
+
+           A sibling test (`TestSilentStallRedWithoutReaper`) pins the
+           opposite contract: with the reaper goroutine omitted, the
+           stale row never transitions to failed and no recovery
+           dispatch fires. This proves the GREEN test is sensitive to
+           the W2-B component.
+
+      Failpoint package extensions:
+
+        - `Kind="drop"` and `ErrFailpointDrop` sentinel error added to
+          support silent-no-op semantics needed by
+          `wstunnel.send.drop`. The env-var parser and Hit
+          dispatch table accept it identically to the existing kinds.
+
+      Constraints honoured:
+
+        - Default `go test ./...` is untouched (failpoint hooks are
+          zero-cost no-ops without the build tag; the new regression
+          test file carries `//go:build faultinject`).
+        - `go test -tags faultinject ./...` passes including the new
+          file. No Wave 1/Wave 2 public API was changed beyond adding
+          hooks.
+
+      RED-then-GREEN verification: the regression test was run twice
+      under `-tags faultinject` with the reaper goroutine then the
+      recovery goroutine flipped off in turn. Both runs failed at the
+      expected assertion site (reaper-off: stale row never flips;
+      recovery-off: no dispatch arrives). Reverting either flag back to
+      true restores the GREEN result. The RED proof is captured in the
+      PR description rather than as a permanent test, but the
+      sibling `TestSilentStallRedWithoutReaper` provides a permanent
+      regression guard for the reaper path.
+    priority: P1
+    version: v0.7.0
+    status: tested
+    acceptance_criteria:
+      - "AC-153-1: Six failpoints.Hit call sites land at the spec'd locations: poller.list_issues.before/after (internal/poller/poller.go), wstunnel.send.drop (internal/wstunnel/tunnel.go; renamed from wstunnel.heartbeat.drop), worker.claim_task.before (internal/app/coordinator.go), worker.agent_exec.die_mid (internal/supervisor/supervisor.go), store.insert_event.busy (internal/store/store.go)."
+      - "AC-153-2: All hook call sites are single-line and observable as no-ops in the default build — go build ./... && go vet ./... && go test ./... -count=1 stay green with no behavioural difference from main."
+      - "AC-153-3: go build -tags faultinject ./... && go vet -tags faultinject ./... && go test -tags faultinject ./... -count=1 also stay green, including the new regression test."
+      - "AC-153-4: internal/failpoints package gains Kind=\"drop\" with ErrFailpointDrop sentinel; env-var parser accepts `drop` identically to other kinds; README documents it."
+      - "AC-153-5: internal/app/silent_stall_regression_test.go (build tag faultinject) ships TestSilentStallRecoversAfterAgentDieMid which arms worker.agent_exec.die_mid, seeds a stale running task with a 3600s-old heartbeat, and asserts (a) the row flips to failed/exit_code=-2 via TaskReaper, (b) task_reaped event emitted, (c) a DispatchRequest arrives on the dispatch channel, (d) periodic_recovery_tick event with issues_redispatched >= 1 emitted."
+      - "AC-153-6: Sibling tests TestSilentStallRedWithoutReaper and TestSilentStallRedWithoutRecovery pin the RED arms: with enableReaper=false the stale row stays running and no dispatch fires within a 400ms window covering 8 recovery ticks; with enableRecovery=false the reaper still flips the row to failed but no re-dispatch fires within the same window."
+      - "AC-153-7: internal/failpoints/README.md documents the six instrumented hook points, the Kind=drop / ErrFailpointDrop semantics, and points readers at the silent_stall_regression_test as the canonical usage example."
+    code:
+      - internal/failpoints/failpoints.go
+      - internal/failpoints/failpoints_inject.go
+      - internal/failpoints/README.md
+      - internal/poller/poller.go
+      - internal/wstunnel/tunnel.go
+      - internal/app/coordinator.go
+      - internal/supervisor/supervisor.go
+      - internal/store/store.go
+    tests:
+      - internal/app/silent_stall_regression_test.go
+      - internal/store/insert_event_busy_test.go
+    deps:
+      - REQ-148
+      - REQ-150
+      - REQ-151
+      - REQ-152
