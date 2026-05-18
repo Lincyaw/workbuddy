@@ -780,6 +780,12 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st store.Store, evlog *
 		AuthToken:    api.AuthToken,
 		Tunnels:      api.Tunnels,
 		Connectivity: tunnelConn,
+		// REQ-158 / #345 Wave 6: emit one structured event per
+		// candidate worker per fan-out call so the silent
+		// X-Workbuddy-Worker-Offline failure mode becomes
+		// observable. Ops queries: `workbuddy status --events
+		// --type sessionproxy_fanout_tunnel_error` etc.
+		EventEmit: evlog.Log,
 	})
 	// Phase 3 (REQ-122): the coordinator's issue-detail endpoint used to
 	// read sessions from the local store. Now that the coordinator drops

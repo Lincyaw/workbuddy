@@ -28,6 +28,21 @@ type TunnelRoundTripper interface {
 	Do(context.Context, string, *http.Request) (*http.Response, error)
 }
 
+// EventEmitter is the minimal eventlog surface sessionproxy uses for
+// per-worker fan-out instrumentation. Matches *eventlog.EventLogger.Log
+// so the coordinator can pass evlog.Log directly without an adapter.
+// Nil-safe: a Handler constructed without one simply skips emits.
+//
+// The event types emitted are documented in internal/eventlog/eventlog.go
+// (TypeSessionproxyFanout* constants). Each fan-out attempt produces at
+// most one event per candidate worker; the events close the silent
+// "X-Workbuddy-Worker-Offline" failure mode reported in #345 Wave 6,
+// where the coordinator returned an empty body and an offline header
+// with no corresponding log line, leaving operators blind to root cause
+// (tunnel-routed call failing auth, audit-url unreachable, no audit_url
+// advertised at all, etc.).
+type EventEmitter func(eventType, repo string, issueNum int, payload interface{})
+
 // Handler is the http.Handler that owns /api/v1/sessions and
 // /api/v1/sessions/{id}[/events|/stream] on the coordinator.
 type Handler struct {
@@ -61,6 +76,12 @@ type Handler struct {
 	// reached a worker (used to assert cache behaviour). Phase 3 may
 	// remove this; it has no production caller.
 	dispatchHook func(workerID string)
+
+	// emit is the structured-event sink for per-worker fan-out
+	// instrumentation (REQ-158 / #345 Wave 6). Nil disables emission.
+	// Production passes *eventlog.EventLogger.Log; tests pass a
+	// recording stub. See EventEmitter for the event-type contract.
+	emit EventEmitter
 }
 
 // HandlerConfig bundles handler dependencies.
@@ -95,6 +116,11 @@ type HandlerConfig struct {
 	// usually pass a stub that implements both Tunnels.Do and
 	// Connectivity.Connected. Nil disables tunnel routing in fan-out.
 	Connectivity TunnelConnectivity
+	// EventEmit receives one structured event per candidate worker per
+	// fan-out call (REQ-158 / #345 Wave 6). Nil disables emission. In
+	// production this is *eventlog.EventLogger.Log; tests inject a
+	// recording stub to assert dispatch outcomes.
+	EventEmit EventEmitter
 }
 
 // NewHandler constructs the proxy handler.
@@ -112,6 +138,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		perWorkerTimeout: cfg.PerWorkerTimeout,
 		overallTimeout:   cfg.OverallTimeout,
 		now:              cfg.Now,
+		emit:             cfg.EventEmit,
 	}
 	// Convenience fallback: when only Tunnels is provided and it also
 	// satisfies TunnelConnectivity, reuse it. This keeps the production
@@ -622,6 +649,7 @@ func (h *Handler) fanOutListing(parent context.Context, q map[string][]string) (
 				if h.dispatchHook != nil {
 					h.dispatchHook(workerID)
 				}
+				h.emitTunnelFanout(workerID, repo, rows, ferr)
 				results <- workerResult{workerID: workerID, rows: rows, err: ferr}
 			}(worker.ID)
 			continue
@@ -629,6 +657,7 @@ func (h *Handler) fanOutListing(parent context.Context, q map[string][]string) (
 		auditURL := strings.TrimRight(strings.TrimSpace(worker.AuditURL), "/")
 		if auditURL == "" {
 			emptyAuditWorkers = append(emptyAuditWorkers, worker.ID)
+			h.emitOfflineNoAudit(worker.ID, repo)
 			continue
 		}
 		wg.Add(1)
@@ -638,6 +667,7 @@ func (h *Handler) fanOutListing(parent context.Context, q map[string][]string) (
 			if h.dispatchHook != nil {
 				h.dispatchHook(workerID)
 			}
+			h.emitAuditFanout(workerID, repo, base, rows, ferr)
 			results <- workerResult{workerID: workerID, rows: rows, err: ferr}
 		}(worker.ID, auditURL)
 	}
@@ -826,6 +856,18 @@ func (h *Handler) fetchTunnelListing(ctx context.Context, workerID string, query
 	if err != nil {
 		return nil, fmt.Errorf("worker %s: build request: %w", workerID, err)
 	}
+	// Forward the coordinator's shared bearer to the worker mgmt mux,
+	// which protects /api/v1/sessions with wrapBearerAuth (see
+	// cmd/worker_repos.go). Pre-#345 Wave-6 the tunnel listing path
+	// dispatched with no Authorization header, so a worker that had
+	// inherited the default WORKBUDDY_AUTH_TOKEN mgmt token replied 401
+	// and the coordinator silently appended the worker to
+	// X-Workbuddy-Worker-Offline with no log line. The direct-HTTP
+	// audit-URL path (fetchWorkerListing) has always forwarded this
+	// header; the tunnel path was the silent gap.
+	if h.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+h.authToken)
+	}
 	resp, err := h.tunnels.Do(cctx, workerID, req)
 	if err != nil {
 		return nil, fmt.Errorf("worker %s: %w", workerID, ErrWorkerOffline)
@@ -879,6 +921,81 @@ func (h *Handler) fetchLocalListing(ctx context.Context, query map[string][]stri
 	}
 	return rows, nil
 }
+
+// emitTunnelFanout emits a single structured event per
+// tunnel-dispatched worker in the fan-out loop (REQ-158 / #345 Wave 6).
+// Nil-safe: no-op when the handler was constructed without an emitter.
+func (h *Handler) emitTunnelFanout(workerID, repo string, rows []map[string]any, err error) {
+	if h.emit == nil {
+		return
+	}
+	if err != nil {
+		h.emit(eventlogTypeSessionproxyFanoutTunnelError, repo, 0, map[string]any{
+			"worker_id": workerID,
+			"repo":      repo,
+			"error":     err.Error(),
+		})
+		return
+	}
+	h.emit(eventlogTypeSessionproxyFanoutTunnelOK, repo, 0, map[string]any{
+		"worker_id": workerID,
+		"repo":      repo,
+		"rows":      len(rows),
+	})
+}
+
+// emitAuditFanout emits a single structured event per direct-HTTP
+// audit-URL dispatch in the fan-out loop (REQ-158 / #345 Wave 6).
+// Nil-safe: no-op when the handler was constructed without an emitter.
+func (h *Handler) emitAuditFanout(workerID, repo, auditURL string, rows []map[string]any, err error) {
+	if h.emit == nil {
+		return
+	}
+	if err != nil {
+		h.emit(eventlogTypeSessionproxyFanoutAuditError, repo, 0, map[string]any{
+			"worker_id": workerID,
+			"repo":      repo,
+			"audit_url": auditURL,
+			"error":     err.Error(),
+		})
+		return
+	}
+	h.emit(eventlogTypeSessionproxyFanoutAuditOK, repo, 0, map[string]any{
+		"worker_id": workerID,
+		"repo":      repo,
+		"audit_url": auditURL,
+		"rows":      len(rows),
+	})
+}
+
+// emitOfflineNoAudit emits the structured event for workers that have
+// no live tunnel AND no advertised audit_url (REQ-158 / #345 Wave 6).
+// This is the silent case Wave 6 surfaced: pre-fix the coordinator
+// returned X-Workbuddy-Worker-Offline with no corresponding log entry.
+// Nil-safe.
+func (h *Handler) emitOfflineNoAudit(workerID, repo string) {
+	if h.emit == nil {
+		return
+	}
+	h.emit(eventlogTypeSessionproxyFanoutOfflineNoAudit, repo, 0, map[string]any{
+		"worker_id": workerID,
+		"repo":      repo,
+	})
+}
+
+// Event-type string constants. Duplicated here as package-local
+// constants so the sessionproxy package does not depend on the
+// internal/eventlog package import path at the type-system level — the
+// EventEmitter interface keeps the dependency injection one-way and
+// makes the emit call sites unit-testable without an eventlog instance.
+// Kept in sync with internal/eventlog/eventlog.go by REQ-158.
+const (
+	eventlogTypeSessionproxyFanoutTunnelOK       = "sessionproxy_fanout_tunnel_ok"
+	eventlogTypeSessionproxyFanoutTunnelError    = "sessionproxy_fanout_tunnel_error"
+	eventlogTypeSessionproxyFanoutAuditOK        = "sessionproxy_fanout_audit_ok"
+	eventlogTypeSessionproxyFanoutAuditError     = "sessionproxy_fanout_audit_error"
+	eventlogTypeSessionproxyFanoutOfflineNoAudit = "sessionproxy_fanout_offline_no_audit"
+)
 
 func (h *Handler) cacheGet(key string) (listingCacheEntry, bool) {
 	h.cacheMu.Lock()
