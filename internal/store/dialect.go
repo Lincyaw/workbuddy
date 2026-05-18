@@ -218,6 +218,31 @@ func rewriteForMySQL(sql string) string {
 	return out
 }
 
+// DatetimeNormalize wraps a DATETIME-bearing SQL expression in a form that
+// compares layout-independently against another datetime value. It exists to
+// neutralise a specific SQLite hazard: TEXT-typed DATETIME columns store the
+// raw bytes the writer hands them (modernc.org/sqlite does no on-insert
+// normalisation), and `WHERE col > ?` is a lexicographic byte compare, so a
+// column whose rows are a mix of space-form ("2026-04-18 11:30:00") and
+// RFC3339 ("2026-04-18T11:30:00Z") will mis-sort against a same-day cutoff
+// because 'T' (0x54) > ' ' (0x20). Wrapping both sides in SQLite's
+// `datetime(...)` parses either layout and normalises to a single comparable
+// form before the compare, so an upgrade-in-place where pre-W2 (space) rows
+// coexist with post-W2 (RFC3339) rows still classifies correctly without a
+// data migration.
+//
+// On MySQL the columns are typed DATETIME(6); the driver+server parse the
+// bound string into a DATETIME, the compare is typed, and there is no
+// layout-text-compare hazard, so the wrapper is the identity. Keep MySQL on
+// the identity path to avoid pinning the SQL on a function that has different
+// semantics across engines.
+func (d dialect) DatetimeNormalize(expr string) string {
+	if d.kind == dialectSQLite {
+		return "datetime(" + expr + ")"
+	}
+	return expr
+}
+
 // RewriteDatetimeOffsetArg converts a SQLite-style "+N seconds" / "-N seconds"
 // modifier (used with datetime('now', ?)) into the bare integer N that
 // MySQL's `INTERVAL ? SECOND` expects. Identity on SQLite. Returns the input

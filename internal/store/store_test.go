@@ -1388,6 +1388,103 @@ func TestRefreshIssueClaim(t *testing.T) {
 	}
 }
 
+// TestRefreshIssueClaimLayoutTolerantWHERE pins the layout-tolerance contract
+// of the RefreshIssueClaim WHERE-cutoff against `issue_claim.expires_at`.
+//
+// Context (not a regression for a shipped bug): pre-W2 the writer and cutoff
+// in this function were paired on the space-form layout; W2 paired them on
+// RFC3339. Both internally-consistent pairings work in a fresh deployment.
+// The hazard is an upgrade-in-place where rows written by pre-W2 binaries
+// (space-form) coexist with rows written by post-W2 binaries (RFC3339) in
+// the same SQLite TEXT column — modernc.org/sqlite stores the literal bytes
+// the Go side writes, and `WHERE expires_at > ?` is a lexicographic byte
+// compare, so a same-day RFC3339 cutoff sorts ABOVE space-form rows because
+// 'T' (0x54) > ' ' (0x20). A still-valid space-form lease would be silently
+// misclassified as expired and the worker would forfeit its claim mid-flight.
+//
+// W2-F neutralises this by wrapping both sides of the compare in SQLite's
+// `datetime(...)` (via dialect.DatetimeNormalize), which parses both layouts
+// and normalises before the compare. This test seeds a mixed-layout pair of
+// rows — one space-form, one RFC3339 — and asserts both are classified
+// correctly against the same RFC3339 cutoff. It also doubles as a forward
+// guard: if a future patch drifts writer and cutoff layouts apart again, the
+// dialect wrapper still keeps the WHERE sound, so the test exercises the
+// post-fix contract rather than a pre-fix regression.
+func TestRefreshIssueClaimLayoutTolerantWHERE(t *testing.T) {
+	s := newTestStore(t)
+	clock := newFakeClock(time.Date(2026, time.April, 18, 12, 0, 0, 0, time.UTC))
+	s.SetNowFunc(clock.Now)
+
+	// Four rows, hand-pinned with raw TEXT so we control the storage byte
+	// form exactly. We bypass AcquireIssueClaim because it always writes
+	// RFC3339; here we need to simulate a pre-W2 upgrade-in-place row.
+	//
+	//   A: space-form,   not-yet-expired (90min ahead of clock) — must refresh
+	//   B: RFC3339,      not-yet-expired (90min ahead of clock) — must refresh
+	//   C: space-form,   already-expired (30min before clock)   — must NOT refresh
+	//   D: RFC3339,      already-expired (30min before clock)   — must NOT refresh
+	//
+	// Pre-W2F (only `WHERE expires_at > ?` with an RFC3339 cutoff), row A
+	// would be MIS-classified: lexicographically '2026-04-18 13:30:00' <
+	// '2026-04-18T12:00:00Z' (space 0x20 < 'T' 0x54), so the still-valid
+	// space-form lease would fail the WHERE and Refresh would return false.
+	// Post-W2F the `datetime(...)` wrapper normalises both sides and the
+	// classification matches wall-clock ordering.
+	rows := []struct {
+		issue       int
+		token       string
+		acquiredRaw string
+		expiresRaw  string
+		wantRefresh bool
+		label       string
+	}{
+		{4101, "tok-a", "2026-04-18 11:00:00", "2026-04-18 13:30:00", true, "space-form / valid"},
+		{4102, "tok-b", "2026-04-18T11:00:00Z", "2026-04-18T13:30:00Z", true, "rfc3339   / valid"},
+		{4103, "tok-c", "2026-04-18 11:00:00", "2026-04-18 11:30:00", false, "space-form / expired"},
+		{4104, "tok-d", "2026-04-18T11:00:00Z", "2026-04-18T11:30:00Z", false, "rfc3339   / expired"},
+	}
+	for _, r := range rows {
+		if _, err := s.Exec(
+			`INSERT INTO issue_claim (repo, issue_num, worker_id, claim_token, acquired_at, expires_at)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			"org/repo", r.issue, "worker-a", r.token, r.acquiredRaw, r.expiresRaw,
+		); err != nil {
+			t.Fatalf("seed issue_claim %s (#%d): %v", r.label, r.issue, err)
+		}
+	}
+
+	for _, r := range rows {
+		got, err := s.RefreshIssueClaim("org/repo", r.issue, "worker-a", r.token, 10*time.Minute)
+		if err != nil {
+			t.Fatalf("RefreshIssueClaim %s (#%d): %v", r.label, r.issue, err)
+		}
+		if got != r.wantRefresh {
+			t.Fatalf("RefreshIssueClaim %s (#%d): got=%v want=%v — WHERE cutoff misclassified mixed-layout row", r.label, r.issue, got, r.wantRefresh)
+		}
+	}
+
+	// Cross-check the side effect: refreshed rows have their expires_at
+	// advanced past the clock; rejected rows still hold the original bytes.
+	for _, r := range rows {
+		rec, err := s.QueryIssueClaim("org/repo", r.issue)
+		if err != nil {
+			t.Fatalf("QueryIssueClaim %s (#%d): %v", r.label, r.issue, err)
+		}
+		if rec == nil {
+			t.Fatalf("row %s (#%d) vanished after refresh", r.label, r.issue)
+		}
+		if r.wantRefresh {
+			if !rec.ExpiresAt.After(clock.Now()) {
+				t.Fatalf("row %s (#%d) was refreshed but expires_at=%v is not after clock %v", r.label, r.issue, rec.ExpiresAt, clock.Now())
+			}
+		} else {
+			if rec.ExpiresAt.After(clock.Now()) {
+				t.Fatalf("row %s (#%d) was supposed to be rejected but expires_at=%v is after clock %v", r.label, r.issue, rec.ExpiresAt, clock.Now())
+			}
+		}
+	}
+}
+
 // TestAcquireIssueClaimConcurrent exercises the primary-key conflict path
 // in AcquireIssueClaim: N goroutines racing on the same (repo, issueNum)
 // with distinct worker IDs must produce exactly one ClaimToken winner and
