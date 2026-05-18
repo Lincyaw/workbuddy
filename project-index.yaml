@@ -5697,3 +5697,57 @@ requirements:
       - REQ-143
       - REQ-144
       - REQ-145
+
+  - id: REQ-148
+    title: Fault-injection scaffold (internal/failpoints, REQ-148 / #345)
+    description: >
+      Foundation for the workbuddy fault-injection mechanism tracked by
+      issue #345. A tiny in-repo package, stdlib-only, opt-in via the
+      `faultinject` build tag, with zero cost in the default build. No
+      external dependency (pingcap/failpoint is intentionally rejected
+      per project conventions).
+
+      Public surface (always compiled): the Effect struct, MatchOpt
+      (WithRepo, WithIssue), and the ErrFailpointReturn sentinel.
+
+      Default build (`!faultinject`): Trip and Hit return nil; Arm
+      returns false; Disarm/Reset are no-ops; Enabled() reports false.
+      The inliner folds the calls away on the hot path.
+
+      Inject build (`-tags faultinject`): a RWMutex-guarded map keyed by
+      hook name stores armed Effects. Trip respects MatchRepo /
+      MatchIssue narrowing and one-shot semantics (Once). Hit applies
+      the effect — error returns errors.New(msg), delay sleeps, panic
+      panics, return surfaces ErrFailpointReturn.
+
+      Env-var arming: WORKBUDDY_FAILPOINTS is parsed at package init
+      using the grammar `name=kind(arg[,suffix...]);...`. Suffixes:
+      `once`, `repo=owner/name`, `issue=N`. Malformed entries are
+      reported to stderr and skipped — init never panics.
+
+      Scope of this REQ: package + tests + README + a Makefile target
+      `build-faultinject`. Instrumentation of other packages (poller,
+      dispatcher, reporter, ...) is deliberately out of scope and
+      tracked separately under #345.
+    priority: P2
+    version: v0.7.0
+    status: tested
+    acceptance_criteria:
+      - "AC-148-1: `internal/failpoints/failpoints.go` declares Effect, MatchOpt, WithRepo, WithIssue, and ErrFailpointReturn and compiles in both builds."
+      - "AC-148-2: `internal/failpoints/failpoints_noop.go` (`//go:build !faultinject`) makes Trip/Hit return nil, Arm return false, Disarm/Reset no-op, Enabled() return false."
+      - "AC-148-3: `internal/failpoints/failpoints_inject.go` (`//go:build faultinject`) implements arm/trip/hit/disarm/reset with Once one-shot semantics and MatchRepo/MatchIssue narrowing; Enabled() returns true."
+      - "AC-148-4: Inject build parses WORKBUDDY_FAILPOINTS at init with grammar `name=kind(arg,suffix...);...`; supports kinds error/delay/panic/return and suffixes once/repo=.../issue=N; malformed entries are logged to stderr and skipped without crashing."
+      - "AC-148-5: `go build ./... && go vet ./...` (default) and `go build -tags faultinject ./... && go vet -tags faultinject ./...` are both clean."
+      - "AC-148-6: `go test ./internal/failpoints/... -count=1` and `go test -tags faultinject ./internal/failpoints/... -count=1` both pass."
+      - "AC-148-7: Makefile exposes a `build-faultinject` target that wires `-tags faultinject`."
+      - "AC-148-8: `internal/failpoints/README.md` documents the build tag, env-var grammar with examples, and the hook naming convention `package.function.point`, plus a warning that production binaries must not be built with the tag."
+    code:
+      - internal/failpoints/failpoints.go
+      - internal/failpoints/failpoints_noop.go
+      - internal/failpoints/failpoints_inject.go
+      - internal/failpoints/README.md
+      - Makefile
+    tests:
+      - internal/failpoints/failpoints_noop_test.go
+      - internal/failpoints/failpoints_inject_test.go
+    deps: []
