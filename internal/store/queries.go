@@ -55,14 +55,18 @@ func (s *dbStore) QueryEventsFiltered(filter EventQueryFilter) ([]Event, error) 
 		args = append(args, filter.IssueNum)
 	}
 	if filter.Since != nil {
-		// events.ts is RFC3339 (TEXT, lexicographic compare); the cutoff
-		// must use the same layout or the boundary mis-orders against 'T'.
+		// events.ts is written by SQLite CURRENT_TIMESTAMP as the space-
+		// separated form 'YYYY-MM-DD HH:MM:SS' (TEXT, lexicographic compare);
+		// the cutoff must use the same layout so same-day comparisons land on
+		// the right side of ' ' (0x20) vs the RFC3339 'T' (0x54). The SELECT
+		// path may re-render to RFC3339 via the driver, but WHERE compares
+		// the raw stored TEXT — keep these in sync with the storage form.
 		query += ` AND ts >= ?`
-		args = append(args, filter.Since.UTC().Format(time.RFC3339))
+		args = append(args, filter.Since.UTC().Format("2006-01-02 15:04:05"))
 	}
 	if filter.Until != nil {
 		query += ` AND ts <= ?`
-		args = append(args, filter.Until.UTC().Format(time.RFC3339))
+		args = append(args, filter.Until.UTC().Format("2006-01-02 15:04:05"))
 	}
 
 	query += ` ORDER BY id`
