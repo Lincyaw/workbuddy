@@ -176,6 +176,55 @@ sqlite3 .workbuddy/workbuddy.db \
 ls .workbuddy/worktrees/
 ```
 
+## Pitfall 16: Silent stall after coordinator restart (FIXED in v0.6.24)
+
+**Symptom (pre-v0.6.24)**: coordinator restarted; eligible issues sit on
+their `status:reviewing` / `status:developing` labels indefinitely. CLI
+gates are all clear:
+```
+$ workbuddy issue restart --force --issue N
+cache=false dependency_state=false claim=false cycle_state=false inflight=false
+```
+yet `workbuddy status --events --since 30m` shows only `poll_cycle_done`
+— no `task_enqueued`, no `dispatch_blocked_*`, no error. The dispatcher
+silently dropped the issue.
+
+**Cause**: the poller emits events only when labels DIFFER from the
+cache. After a clean restart the cache is already in sync with GitHub,
+so no `EventLabelAdded` / `EventIssueCreated` ever fires and the state
+machine is never invoked. Compounded by stale `task_queue.status='running'`
+rows from a worker that died mid-flight — `HasAnyActiveTask` returned
+true so the one-shot recovery sweep at `Register` time skipped the
+issue.
+
+**Status**: fixed across REQ-150 (poller snapshot resync), REQ-151
+(task_queue reaper), REQ-152 (periodic recovery sweep). The three loops
+together close every variation of the silent-stall failure mode.
+
+**Diagnose (post-fix)**:
+```bash
+workbuddy status --events --since 10m \
+  --type periodic_recovery_tick \
+  --type task_reaped \
+  --type dispatch_skipped_inflight
+```
+Healthy steady state shows:
+- `periodic_recovery_tick` every 60s with `{repos_swept: N, issues_redispatched: 0}`
+- `dispatch_skipped_inflight` with `source="resync"` every 5min for each
+  eligible labeled issue
+- `task_reaped` only when a worker actually died
+
+If you upgrade an existing deployment and have legacy stale running rows,
+the reaper will surface a burst of `task_reaped` events on first tick —
+expected, one-time cleanup.
+
+**Reproduce / regress** (developer flow, requires `-tags faultinject`):
+- `TestSilentStallRecoversAfterAgentDieMid` (GREEN, exercises full Wave 2 loop)
+- `TestSilentStallRedWithoutReaper` (permanent guard, asserts the bug
+  recurs if reaper is disabled)
+- `TestSilentStallRedWithoutRecovery` (permanent guard for the recovery
+  side)
+
 ## Pitfall 15: Commit message `Fixes #N` auto-closes issues on push to main
 
 **Symptom**: Issue is suddenly closed even though the review-agent hasn't run yet. Labels still show `status:developing` or `status:reviewing`.

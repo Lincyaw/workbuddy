@@ -1,7 +1,6 @@
 ---
 name: workbuddy-guide
 description: "Explain and operate workbuddy: what it is, which command to reach for, and where to find deeper references. **Trigger whenever the user mentions 'workbuddy' in any context** — including operational requests (register/onboard a repo, add/bind a worker, 注册仓库, 加仓库, 接入新仓库, onboard repo, set up worker), explanatory questions (how to use workbuddy, workbuddy guide, teach me workbuddy, 怎么用workbuddy, 使用指南), deployment/running/operating/debugging workbuddy, and questions about how issues/tasks are scheduled or how dependencies between issues work (depends_on, blocked, dependency gate, 依赖, 调度, 排队, '为什么没派发'), and questions about parallel-development workflows (rollouts:N fan-out, synthesize/synthesis reduce step, cherry-pick, '并行开发', '多个方案', 'rollout'). Invoke this skill before running workbuddy CLI commands so the documented onboarding flow (coordinator register + worker repos add) and the dependency/scheduling model aren't re-derived from scratch."
-user_invocable: true
 ---
 
 # Workbuddy Guide
@@ -68,8 +67,16 @@ Run `workbuddy --help` for the full list. Grouped by intent:
 
 **Observe**
 - `workbuddy status` — issues, tasks, events, stuck issues, or `--watch` until done
+- `workbuddy status --events --since 10m` — audit trail with real RFC3339 timestamps
+  (v0.6.24+ fix); useful event types include the recovery-loop signals
+  `periodic_recovery_tick`, `task_reaped`, `dispatch_skipped_inflight`
+  (with `source` discriminator: `statemachine` / `router` / `resync`),
+  plus the original `state_entry`, `dispatch`, `completed`,
+  `dispatch_blocked_by_dependency`
 - `workbuddy logs <issue>` — per-attempt session logs (stdout/stderr/tool calls)
-- `workbuddy diagnose` — surfaces stuck issues, 3-retry caps, stale claims; `--fix` for safe auto-remediation
+- `workbuddy diagnose` — surfaces stuck issues, 3-retry caps, stale claims,
+  and (v0.6.24+) `worker_tunnel_down` findings per registered repo; `--fix`
+  for safe auto-remediation
 - `workbuddy hooks list|status|test|reload` — operator-owned event hooks (Slack/Feishu/etc.)
 
 **Recover**
@@ -98,6 +105,24 @@ read the relevant decision docs for depth; the short version:
 - **Worktree isolation (REQ-058)**: every task runs in its own
   `.workbuddy/worktrees/issue-N/`. If worktree setup fails, the worker
   reports loudly instead of falling back to CWD.
+- **Snapshot resync (REQ-150, v0.6.24)**: every 5 minutes the poller
+  re-emits `EventIssueResynced` for every cached open issue carrying a
+  workflow trigger label. The state machine consults `IsInflight` +
+  `HasAnyActiveTask`; if both guards pass, the issue is re-dispatched.
+  Closes the post-restart silent-stall pattern.
+- **`task_queue` reaper (REQ-151, v0.6.24)**: every 60 seconds the
+  coordinator flips `status='running'` rows with stale heartbeat
+  (default 5 min grace) to `failed`/`exit_code=-2`, emitting
+  `task_reaped`. Unblocks `HasAnyActiveTask` after worker host death.
+- **Periodic recovery sweep (REQ-152, v0.6.24)**: every 60 seconds
+  `PollerManager.recoverAllPeriodically` walks every active repo,
+  re-enters `recoverOrphanedActiveStates`, and emits a
+  `periodic_recovery_tick` event with `{repos_swept, issues_redispatched}`.
+- **Fault-injection hooks (REQ-148/153, build tag `faultinject`)**:
+  six named failpoints (`poller.list_issues.before/after`,
+  `wstunnel.send.drop`, `worker.claim_task.before`,
+  `worker.agent_exec.die_mid`, `store.insert_event.busy`) for
+  reproducing silent-stall scenarios. Zero-cost in production builds.
 
 Impact for operators: if `diagnose` says "failed 3 times in a row", check
 the issue's comments — if they're "Infra Error", the bug is infrastructure

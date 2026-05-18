@@ -115,6 +115,47 @@ Useful event types: `state_entry`, `dispatch`, `completed`,
 `worker_registered`, `dispatch_blocked_by_dependency`, `claim_expired`,
 `poll_cycle_done`, `token_usage`.
 
+Since v0.6.24 the audit trail also carries the **self-healing** signals
+described below: `dispatch_skipped_inflight` (with `source` of
+`statemachine`, `router`, or `resync`), `dispatch_skipped_agent_not_found`,
+`transition_skipped`, `task_reaped`, `periodic_recovery_tick`,
+`issue_resynced`, and `worker_tunnel_down` findings from `diagnose`.
+
+## Self-healing signals (since v0.6.24)
+
+The coordinator runs three background loops that recover the pipeline
+without operator intervention. Recognising their event signatures saves
+chasing ghosts.
+
+- **5-minute snapshot resync** (`internal/poller`): for every cached
+  open issue carrying a workflow trigger label, the poller re-emits an
+  `EventIssueResynced` state-entry. The state machine consults
+  `IsInflight` + `HasAnyActiveTask`; if either gates, you see
+  `dispatch_skipped_inflight` with `source="resync"` and `trigger="issue_resynced"`.
+  An `issue_resynced` audit row appears **only** when both guards pass
+  and the issue actually gets re-dispatched.
+  Healthy steady-state: many `dispatch_skipped_inflight` (one per
+  labeled issue per 5min), zero `issue_resynced`.
+- **60-second `task_queue` reaper** (`internal/app/task_reaper`): any
+  row with `status='running'` and a heartbeat older than 5 minutes (or
+  `NULL` heartbeat older than 5 min from `created_at`) is flipped to
+  `failed`, `exit_code=-2`, and a `task_reaped` event with
+  `{task_id, repo, issue_num, agent, worker_id, last_heartbeat_at, reason:"no_heartbeat"}`
+  is emitted. Watch this when a worker host dies or OOM-killer reaps
+  a supervisor.
+- **60-second periodic recovery sweep** (`PollerManager.recoverAllPeriodically`):
+  walks every active repo, calls `recoverOrphanedActiveStates`, and
+  emits `periodic_recovery_tick` with `{repos_swept, issues_redispatched}`.
+  After the reaper unblocks `HasAnyActiveTask`, this re-issues
+  `EventIssueCreated` so the issue gets re-dispatched.
+
+These three together close the silent-stall pattern from issue #345
+(coordinator restart with cache already in sync → no events → nothing
+dispatches). If you see an issue stuck `developing` with the worker
+alive, **first check whether the recovery loop is firing** — a
+zero-count `periodic_recovery_tick` every 60 seconds confirms the
+loop is healthy and the issue truly is in-flight, not silently dropped.
+
 ## Common failure modes & fixes
 
 ### A. Issue not dispatched — missing `workbuddy` label
@@ -127,9 +168,20 @@ gh issue edit N -R Owner/Repo --add-label workbuddy
 Symptom: `task_queue.status=running`, `lease_expires_at` in the past,
 no codex/claude process for it.
 
-In **bundle** mode this is rare — the supervisor reconciles surviving
-agents back to the worker on reattach. The right fix is to let the
-coordinator's stale-claim sweep run, or force it:
+Since v0.6.24 the `task_queue` reaper handles this automatically —
+within ~60s of the heartbeat aging past 5min, the row flips to
+`failed/exit_code=-2` and a `task_reaped` event fires. The next
+`periodic_recovery_tick` (also ~60s) re-issues `EventIssueCreated`
+and the state machine re-dispatches. Verify via:
+
+```bash
+workbuddy status --events --since 5m --type task_reaped
+workbuddy status --events --since 5m --type periodic_recovery_tick
+```
+
+In **bundle** mode this is otherwise rare — the supervisor reconciles
+surviving agents back to the worker on reattach. If the reaper hasn't
+fired yet and you don't want to wait, force it manually:
 
 ```bash
 workbuddy issue restart --repo Owner/Repo --issue N \
@@ -138,10 +190,11 @@ workbuddy issue restart --repo Owner/Repo --issue N \
 workbuddy cache invalidate --repo Owner/Repo --issue N
 ```
 
-In **serve** mode (no supervisor), if the worker died mid-run there is no
-one to reconcile. Prefer `workbuddy recover --kill-zombies --prune-worktrees`
-followed by `issue restart`, rather than hand-editing `task_queue` rows
-(claim tokens / heartbeats interact in non-obvious ways).
+In **serve** mode (no supervisor), the reaper still runs as part of the
+coordinator loop. Use `workbuddy recover --kill-zombies --prune-worktrees`
+only when you need to clean up host-side worktrees / pids;
+hand-editing `task_queue` rows remains discouraged (claim tokens /
+heartbeats interact in non-obvious ways).
 
 ### C. Worker not picking up a `pending` task
 Symptom: a `pending` task exists, but the worker is idle. Often an older
@@ -203,9 +256,42 @@ Symptom: no dispatch even after `cache invalidate`; `diagnose` shows a
 claim still held by a dead coordinator/worker.
 - Self-heal: claims have a TTL — wait for expiry, the next poll emits
   `claim_expired` and overwrites.
+- Self-heal (v0.6.24+): the periodic-recovery sweep + reaper combo
+  picks up stale running rows within ~2 minutes total. Watch for
+  `task_reaped` followed by `periodic_recovery_tick` with
+  `issues_redispatched >= 1` and a fresh `dispatch` event for the issue.
 - Force: `workbuddy recover` clears local runtime state; for a remote
   coordinator's in-memory inflight tracker, use
   `workbuddy issue restart --coordinator <url>`.
+
+### N. Coordinator restart with cache already in sync (silent-stall, REQ-150/151/152, fixes #345)
+Symptom: coordinator was restarted; eligible issues sit at their
+existing `status:reviewing` / `status:developing` labels with no
+`task_enqueued`, no `dispatch`, no error — only `poll_cycle_done`
+events appear.
+
+This is the pre-v0.6.24 silent-stall. The poller diffs labels against
+its cache; when the cache is already in sync after restart, no event
+fires and the state machine is never invoked.
+
+Self-heal (no manual action needed since v0.6.24):
+- Within 60s the periodic-recovery sweep enumerates cached open issues
+  carrying a workflow trigger label and re-emits `EventIssueCreated`
+  via `recoverOrphanedActiveStates`.
+- Within 5min the snapshot resync emits `EventIssueResynced` on every
+  poll cycle, redundant defense in case the recovery sweep is gated by
+  a stale `running` task row (which the reaper handles, see fix B).
+- Confirm by watching:
+  ```bash
+  workbuddy status --events --since 10m \
+    --type periodic_recovery_tick \
+    --type issue_resynced \
+    --type dispatch_skipped_inflight
+  ```
+  Healthy cadence: 10 `periodic_recovery_tick` events + 2
+  `dispatch_skipped_inflight` (source=resync) per labeled issue in
+  10 minutes. Zero `issue_resynced` rows is **also healthy** — that
+  audit fires only when a resync actually re-dispatches.
 
 ### J. Consecutive-failure cap reached (REQ-055)
 Symptom: `diagnose` reports "dev-agent has failed 3 times in a row",
