@@ -29,6 +29,28 @@ const (
 
 var ErrClosed = errors.New("wstunnel: closed")
 
+// DefaultKeepaliveInterval is how often Endpoint.Run sends a WSS ping to the
+// peer when keepalive is enabled and the caller has not overridden the
+// interval. 25s is short enough to defeat the common 30-60s middlebox idle
+// timeouts (cheap VPS NATs, cloud load balancers, conntrack on long-lived
+// WAN paths) and long enough that the per-tick CPU cost is negligible.
+//
+// Picked over the library's TCP-keepalive suggestion because the default
+// Linux TCP keepalive (`tcp_keepalive_time=7200s`) is two hours: far longer
+// than any reasonable middlebox idle window. The #345 Wave 5 postmortem
+// observed coordinator↔worker tunnel disconnect/reconnect at ~minute
+// cadence with "failed to read frame header: EOF" — the exact signature
+// of a peer/middlebox closing an idle WSS connection without a close frame.
+const DefaultKeepaliveInterval = 25 * time.Second
+
+// DefaultKeepaliveTimeout is the per-ping deadline: how long Run will wait
+// for the matching Pong before declaring the connection dead and tearing
+// it down so the caller's reconnect loop runs. 20s gives a generous margin
+// over realistic RTT (single-digit-ms LAN, ~100ms transcontinental WAN) so
+// transient jitter does not flap healthy tunnels, while still surfacing a
+// truly dead peer within one keepalive cycle.
+const DefaultKeepaliveTimeout = 20 * time.Second
+
 type Frame struct {
 	Type     string      `json:"type"`
 	StreamID string      `json:"stream_id"`
@@ -50,6 +72,15 @@ type Endpoint struct {
 	closed   chan struct{}
 	closeErr error
 	next     atomic.Uint64
+
+	// keepaliveInterval and keepaliveTimeout control the periodic WSS
+	// ping that Run sends to keep middleboxes from idle-closing the
+	// connection. Zero values mean "use the package defaults"; a
+	// negative value disables the ping goroutine entirely (used by a
+	// handful of tests that need to observe the bare read-loop
+	// behaviour). Mutated only by SetKeepalive before Run starts.
+	keepaliveInterval time.Duration
+	keepaliveTimeout  time.Duration
 }
 
 func NewEndpoint(conn *websocket.Conn) *Endpoint {
@@ -61,7 +92,20 @@ func NewEndpoint(conn *websocket.Conn) *Endpoint {
 	}
 }
 
+// SetKeepalive overrides the ping interval and per-ping timeout used by
+// Run's keepalive goroutine. interval <= 0 disables keepalive (Run reverts
+// to a pure read-loop, matching pre-#345-Wave-5 behaviour). interval > 0
+// with timeout <= 0 falls back to DefaultKeepaliveTimeout. Must be called
+// before Run; safe to call once at endpoint construction.
+func (e *Endpoint) SetKeepalive(interval, timeout time.Duration) {
+	e.keepaliveInterval = interval
+	e.keepaliveTimeout = timeout
+}
+
 func (e *Endpoint) Run(ctx context.Context) error {
+	if stop := e.startKeepalive(ctx); stop != nil {
+		defer stop()
+	}
 	for {
 		_, data, err := e.conn.Read(ctx)
 		if err != nil {
@@ -136,6 +180,68 @@ func (e *Endpoint) fail(err error) {
 	close(e.requests)
 	close(e.closed)
 	e.mu.Unlock()
+}
+
+// startKeepalive launches the periodic WSS ping goroutine and returns a
+// stop function that the Run caller defers. Returns nil (and the caller
+// defers nothing) when keepalive is disabled or the endpoint has no
+// connection (test endpoints used for registry semantics use NewEndpoint
+// with a nil conn).
+//
+// On ping failure (timeout, write error, or peer close) the goroutine
+// calls e.fail(err) and closes the underlying conn so the outer Read in
+// Run unblocks promptly and the caller's reconnect loop runs. This makes
+// dead-peer detection bounded by keepaliveInterval+keepaliveTimeout
+// rather than waiting for the next outbound frame attempt or a TCP RST.
+func (e *Endpoint) startKeepalive(ctx context.Context) func() {
+	if e.conn == nil {
+		return nil
+	}
+	interval := e.keepaliveInterval
+	if interval == 0 {
+		interval = DefaultKeepaliveInterval
+	}
+	if interval < 0 {
+		return nil
+	}
+	timeout := e.keepaliveTimeout
+	if timeout <= 0 {
+		timeout = DefaultKeepaliveTimeout
+	}
+	stopCh := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ctx.Done():
+				return
+			case <-e.closed:
+				return
+			case <-ticker.C:
+				pingCtx, cancel := context.WithTimeout(ctx, timeout)
+				err := e.conn.Ping(pingCtx)
+				cancel()
+				if err != nil {
+					// Mark the endpoint failed first so the
+					// Run reader sees closeErr instead of a
+					// bare io.EOF, then close the conn so
+					// the blocking Read returns immediately.
+					e.fail(fmt.Errorf("wstunnel: keepalive ping failed: %w", err))
+					_ = e.conn.Close(websocket.StatusPolicyViolation, "keepalive ping failed")
+					return
+				}
+			}
+		}
+	}()
+	return func() {
+		close(stopCh)
+		<-done
+	}
 }
 
 func (e *Endpoint) send(ctx context.Context, frame Frame) error {
