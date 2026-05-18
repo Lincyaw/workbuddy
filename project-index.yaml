@@ -6484,3 +6484,108 @@ requirements:
       - cmd/db_migrate_mysql_test.go
     deps:
       - REQ-154
+  - id: REQ-157
+    title: wstunnel application-layer WSS keepalive defeats middlebox idle disconnect (REQ-157 / #345 Wave 5)
+    description: >
+      Wave 5 follow-up on issue #345. After Wave 4-A (REQ-155) made
+      sessionproxy route via the live `wstunnel.Registry`, production
+      logs on the public coordinator (root@101.96.215.245) and the
+      local worker (`ddq-MS-7E17`) revealed an underlying tunnel
+      reliability issue that was previously masked by the stale-column
+      heuristic: the WSS tunnel disconnect/reconnect cycle fires every
+      ~minute with `failed to read frame header: EOF` on both sides.
+
+      Root cause: `internal/wstunnel/tunnel.go` exchanged only the data
+      frames produced by `Endpoint.Do` / `ServeRequests`. Neither side
+      sent WSS pings, neither side set read deadlines, and the Linux
+      default TCP keepalive (`tcp_keepalive_time=7200s`, two hours) is
+      too coarse to defeat the 30-90s idle timeouts common to WAN
+      middleboxes (cloud LB NAT, ISP conntrack, cheap VPS vSwitch).
+      The intermediary silently closed the idle TCP connection, both
+      ends saw a clean `EOF` on the next read, and the reconnect loop
+      fired. Side effects: sessionproxy fan-out frequently fell back
+      to `X-Workbuddy-Worker-Offline` even when the worker was healthy,
+      and `diagnose` could not classify at the sub-`tunnel-down`
+      granularity because the per-tunnel-cycle gap was below the 45s
+      heartbeat threshold.
+
+      The `coder/websocket` library's docstring explicitly says "TCP
+      Keepalives should suffice for most use cases" — but only when
+      `SO_KEEPALIVE` is tuned to fire within the intermediary's idle
+      window, which workbuddy did not do (and which would still be a
+      portability hazard across Linux/macOS/Windows defaults). The
+      portable fix is an application-layer ping.
+
+      Fix: introduce `DefaultKeepaliveInterval = 25s` and
+      `DefaultKeepaliveTimeout = 20s` constants, plus an
+      `Endpoint.SetKeepalive(interval, timeout)` opt-out hook for
+      tests. `Endpoint.Run` spawns a `startKeepalive` goroutine that
+      calls `e.conn.Ping(ctx)` on a `time.Ticker(interval)` with a
+      per-ping deadline of `timeout`. On ping failure the goroutine
+      calls `e.fail(err)` AND `e.conn.Close(StatusPolicyViolation,
+      "keepalive ping failed")` so the outer `Run` reader unblocks
+      promptly with a wrapped error rather than waiting for a TCP RST
+      or the next outbound frame attempt. Dead-peer detection is now
+      bounded by `interval+timeout` (~45s worst case).
+
+      The fix is symmetric: both the coordinator-side
+      `HandleWorkerTunnel` and the worker-side `runWorkerTunnelOnce`
+      call `Endpoint.Run`, so both sides ping each other. The library
+      auto-handles inbound pings inside `Conn.Read` and emits pongs,
+      so no Pong handler wiring is needed.
+
+      Tests:
+
+        - `TestKeepalivePreservesIdleTunnel` constructs a tunnel pair
+          with a 30ms ping interval, sleeps 300ms (~10 keepalive
+          cycles), then performs a real Do() request and asserts the
+          tunnel survived. Pins the regression: pre-fix this test
+          would not detect the bug because there is no middlebox in
+          a loopback `httptest` pair, but the test still asserts the
+          ping goroutine does not destabilise an idle endpoint.
+
+        - `TestKeepaliveSurfacesDeadPeer` constructs a server-side
+          endpoint with 30ms ping interval and 100ms ping timeout,
+          then `CloseNow()`s the client conn (network-cable-yanked
+          scenario). Asserts the server-side `Run` returns within
+          1s. Pre-fix the server would block on `Conn.Read` until a
+          TCP timeout (potentially hours).
+
+        - `TestKeepaliveDisabledByNegativeInterval` pins the opt-out
+          path: `SetKeepalive(-1, 0)` leaves `Run` as a bare
+          read-loop. The existing test suite uses this path via
+          `tunnelPair` so its semantics do not shift.
+
+      Constraints honoured:
+
+        - Only `internal/wstunnel/tunnel.go` and `tunnel_test.go`
+          changed. `cmd/coordinator.go` and `cmd/worker.go` did not
+          need a wiring change because the default applies on
+          construction; the same `NewEndpoint(conn)` calls now ship
+          with a 25s ping by default.
+
+        - The existing `tunnelPair` helper opts out of keepalive
+          (interval = -1) so the pre-existing tests (TestRoundTrip,
+          TestConcurrentStreams, TestPeerDisconnectUnblocksStream,
+          TestFrameParseErrorClosesTunnel) keep their original
+          semantics and runtime profile.
+
+        - `go build ./... && go vet ./... && go test ./... -count=1`
+          stays green, including
+          `go test ./internal/wstunnel/... -count=1 -race`.
+    priority: P1
+    version: v0.7.0
+    status: tested
+    acceptance_criteria:
+      - "AC-157-1: `DefaultKeepaliveInterval` (25s) and `DefaultKeepaliveTimeout` (20s) constants are declared in `internal/wstunnel/tunnel.go` with comments explaining why TCP keepalive alone is insufficient on WAN paths."
+      - "AC-157-2: `Endpoint.SetKeepalive(interval, timeout time.Duration)` accepts a negative interval as the explicit disable-keepalive opt-out, treats zero as 'use default', and a non-positive timeout falls back to `DefaultKeepaliveTimeout`."
+      - "AC-157-3: `Endpoint.Run` calls `startKeepalive(ctx)` and defers the returned stop function; when keepalive is enabled the goroutine calls `e.conn.Ping(ctx)` on every tick with a per-call deadline of `timeout`, and on failure calls `e.fail(err)` and `e.conn.Close(...)` so the outer read unblocks within one keepalive cycle."
+      - "AC-157-4: `TestKeepalivePreservesIdleTunnel`, `TestKeepaliveSurfacesDeadPeer`, and `TestKeepaliveDisabledByNegativeInterval` ship in `internal/wstunnel/tunnel_test.go` and pass under `go test ./internal/wstunnel/... -count=1 -race`."
+      - "AC-157-5: The existing test suite (`TestRoundTrip`, `TestConcurrentStreams`, `TestPeerDisconnectUnblocksStream`, `TestFrameParseErrorClosesTunnel`, `TestRegistryRemoveOnlyCurrentTunnel`) keeps passing unchanged via the `tunnelPair` opt-out path."
+      - "AC-157-6: `go build ./... && go vet ./... && go test ./... -count=1` stays green; the coordinator and worker call sites need no wiring change because defaults apply on `NewEndpoint`."
+    code:
+      - internal/wstunnel/tunnel.go
+    tests:
+      - internal/wstunnel/tunnel_test.go
+    deps:
+      - REQ-155

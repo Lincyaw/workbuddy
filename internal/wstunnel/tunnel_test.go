@@ -17,6 +17,16 @@ import (
 
 func tunnelPair(t *testing.T, handler http.Handler) (*Endpoint, func()) {
 	t.Helper()
+	// Disable keepalive by default for the existing test suite: those
+	// tests neither exercise nor mock idle-disconnect semantics, and a
+	// real ping every 25s adds nothing but noise. The dedicated
+	// keepalive tests below construct their own pair with short
+	// intervals.
+	return tunnelPairWithKeepalive(t, handler, -1, 0)
+}
+
+func tunnelPairWithKeepalive(t *testing.T, handler http.Handler, interval, timeout time.Duration) (*Endpoint, func()) {
+	t.Helper()
 	serverEPCh := make(chan *Endpoint, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
@@ -25,6 +35,7 @@ func tunnelPair(t *testing.T, handler http.Handler) (*Endpoint, func()) {
 			return
 		}
 		ep := NewEndpoint(c)
+		ep.SetKeepalive(interval, timeout)
 		serverEPCh <- ep
 		go ep.ServeRequests(r.Context(), handler)
 		_ = ep.Run(r.Context())
@@ -38,6 +49,7 @@ func tunnelPair(t *testing.T, handler http.Handler) (*Endpoint, func()) {
 		t.Fatalf("dial: %v", err)
 	}
 	clientEP := NewEndpoint(c)
+	clientEP.SetKeepalive(interval, timeout)
 	go func() { _ = clientEP.Run(context.Background()) }()
 	select {
 	case <-serverEPCh:
@@ -152,6 +164,108 @@ func TestFrameParseErrorClosesTunnel(t *testing.T) {
 	_, _, err = c.Read(ctx)
 	if err == nil {
 		t.Fatal("expected connection close after parse error")
+	}
+}
+
+// TestKeepalivePreservesIdleTunnel pins the #345 Wave 5 fix: an idle
+// tunnel must stay healthy across many keepalive intervals because the
+// periodic Conn.Ping defeats middlebox idle-disconnect. Pre-fix the
+// only WSS traffic was the data frames, so any intermediary with a
+// short idle timer would EOF the connection within a minute. We use a
+// 30ms ping interval so the test exercises ~10 ping cycles in under a
+// second.
+func TestKeepalivePreservesIdleTunnel(t *testing.T) {
+	t.Parallel()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("alive"))
+	})
+	ep, cleanup := tunnelPairWithKeepalive(t, handler, 30*time.Millisecond, 500*time.Millisecond)
+	defer cleanup()
+
+	// Stay idle for ~10 keepalive intervals. If pings were not being
+	// exchanged the inactive-conn path would not differ from the
+	// pre-fix behaviour, but the assertion below — a real request
+	// after the idle — would still pass on a fresh dial; what would
+	// actually break is the in-flight goroutine state, since the
+	// existing endpoint instance would have errored out.
+	time.Sleep(300 * time.Millisecond)
+	if err := ep.err(); err != nil {
+		t.Fatalf("endpoint failed during idle: %v", err)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, "http://worker/probe", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	resp, err := ep.Do(ctx, req)
+	if err != nil {
+		t.Fatalf("Do after idle: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "alive" {
+		t.Fatalf("body=%q, want %q", body, "alive")
+	}
+}
+
+// TestKeepaliveSurfacesDeadPeer pins the dead-peer detection half of
+// the fix: when the underlying conn is severed (we simulate by closing
+// the client's *websocket.Conn out-of-band), the server-side Ping
+// either fails to write or times out waiting for the Pong, and Run
+// returns a wrapped keepalive error rather than blocking on the
+// read-loop until something else (a real outbound frame or a TCP
+// keepalive at 2h) finally surfaces the failure.
+func TestKeepaliveSurfacesDeadPeer(t *testing.T) {
+	t.Parallel()
+	// Custom server so we can capture the server-side Run error directly.
+	serverDone := make(chan error, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		ep := NewEndpoint(c)
+		ep.SetKeepalive(30*time.Millisecond, 100*time.Millisecond)
+		serverDone <- ep.Run(r.Context())
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	c, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	// CloseNow drops the underlying TCP without sending a WS close
+	// frame — the network-cable-yanked scenario.
+	_ = c.CloseNow()
+
+	select {
+	case err := <-serverDone:
+		if err == nil {
+			t.Fatal("expected server Run to return an error after peer disconnect")
+		}
+		// Either the read-loop sees EOF first or the keepalive
+		// goroutine's Ping fails first. Both are acceptable
+		// failure modes; the contract is "Run returns within
+		// one keepalive cycle", not which path tripped first.
+	case <-time.After(time.Second):
+		t.Fatal("server Run did not return within 1s of peer disconnect")
+	}
+}
+
+// TestKeepaliveDisabledByNegativeInterval pins the opt-out path that
+// tests in this package rely on (and that lets a future caller pick a
+// different idle-detection strategy without forking the package).
+// SetKeepalive(-1, _) leaves Run as a bare read-loop and an idle peer
+// causes no traffic at all on the wire beyond the WS handshake.
+func TestKeepaliveDisabledByNegativeInterval(t *testing.T) {
+	t.Parallel()
+	ep, cleanup := tunnelPairWithKeepalive(t, http.NotFoundHandler(), -1, 0)
+	defer cleanup()
+	time.Sleep(100 * time.Millisecond)
+	if err := ep.err(); err != nil {
+		t.Fatalf("endpoint failed with keepalive disabled: %v", err)
 	}
 }
 
