@@ -6153,3 +6153,124 @@ requirements:
       - REQ-150
       - REQ-151
       - REQ-152
+
+  - id: REQ-154
+    title: Dialect-routed timestamp formatter for MySQL strict sql_mode compatibility (REQ-154 / #345 Wave 3)
+    description: >
+      Wave 3 follow-up on issue #345. The W2-F reviewer flagged an inherited
+      MySQL compatibility issue that did not block the Wave 2 merge but
+      needed a separate fix: the store package wrote
+      `time.Format(time.RFC3339)` (producing strings like
+      `'2026-04-18T11:30:45Z'`) directly into MySQL `DATETIME(6)` columns at
+      eight logical sites. The trailing `Z` and the `T` separator are not
+      part of the MySQL DATETIME literal grammar; under MySQL 8's default
+      `STRICT_TRANS_TABLES` sql_mode the INSERT is rejected with "Incorrect
+      datetime value", and under non-strict mode the `Z` is silently dropped
+      with a warning. SQLite was unaffected because it stores TEXT verbatim.
+
+      Fix: add a dialect-specific write-time formatter
+      `dialect.FormatTimestamp(t time.Time) string`:
+
+        - SQLite branch returns `t.UTC().Format(time.RFC3339)` —
+          unchanged from the prior write layout and matches the
+          codebase-wide `nullableTime` convention.
+        - MySQL branch returns `t.UTC().Format("2006-01-02 15:04:05.000000")`
+          — the MySQL-native DATETIME(6) literal grammar, accepted
+          unconditionally regardless of sql_mode.
+
+      All nine `Format(time.RFC3339)` write-side calls in the eight logical
+      sites identified by the W2-F audit are routed through the new helper:
+
+        - `internal/store/store.go` `acquireIssueClaimOnce` — fresh INSERT
+          path (acquired_at + expires_at), self-extend UPDATE path
+          (expires_at), overwrite-expired UPDATE path (acquired_at +
+          expires_at).
+        - `internal/store/store.go` `RefreshIssueClaim` — SET expires_at
+          value and the WHERE cutoff bound to `DatetimeNormalize("?")`.
+        - `internal/store/pipeline_hazards.go` `UpsertIssuePipelineHazard`
+          — issue_pipeline_hazards.detected_at.
+        - `internal/store/queries.go` `AdvanceWorkflowInstance` — the
+          shared `ts` variable feeds two column writes inside a single
+          transaction: workflow_transitions.created_at and
+          workflow_instances.updated_at.
+
+      Out of scope (intentionally untouched, called out in the call-site
+      comments):
+
+        - `nullableTime` in `internal/store/store.go` — returns
+          `sql.NullString`-typed values for SQLite-only paths
+          (sessions.closed_at and friends) that the coordinator MySQL
+          path does not have.
+        - The `queries.go` events.ts / sessions.closed_at read-side
+          cutoffs — they intentionally pair against SQLite's
+          CURRENT_TIMESTAMP storage form and do not run against MySQL.
+        - `ParseTimestamp` — already accepts both layouts (space-form
+          and RFC3339), so reads work either way.
+        - `DatetimeNormalize` — semantics unchanged; the new
+          FormatTimestamp is independent.
+
+      Tests:
+
+        - `TestFormatTimestamp_SQLite` /
+          `TestFormatTimestamp_SQLite_NonUTC` pin the SQLite layout
+          (RFC3339, forced UTC).
+        - `TestFormatTimestamp_MySQL` /
+          `TestFormatTimestamp_MySQL_NonUTC` pin the MySQL layout
+          (`YYYY-MM-DD HH:MM:SS.ffffff`, no `T`, no `Z`, six fractional
+          digits) — the second test defensively asserts the forbidden
+          `T`/`Z` characters are absent so a future
+          `time.RFC3339Nano`-style refactor cannot silently ship the
+          original bug.
+        - `TestFormatTimestamp_RoundTrip` (table-driven SQLite + MySQL)
+          asserts `ParseTimestamp` consumes whatever `FormatTimestamp`
+          emits, pinning the read-side contract.
+        - `TestIssueClaimRoundTripPersists` exercises the full
+          AcquireIssueClaim → QueryIssueClaim → RefreshIssueClaim →
+          QueryIssueClaim path against a real SQLite store to catch
+          end-to-end regressions in the formatter swap.
+        - `TestMySQLIssueClaimStrictSqlMode` (build tag
+          `mysql_integration`, requires `WORKBUDDY_MYSQL_TEST_DSN`)
+          re-opens the store with `sql_mode=STRICT_TRANS_TABLES,...`
+          appended to the DSN (the go-sql-driver/mysql `sql_mode`
+          parameter is applied on every connection the pool opens) and
+          exercises AcquireIssueClaim (fresh), AcquireIssueClaim
+          (self-extend), and RefreshIssueClaim against the strict
+          connection. Pre-fix the INSERT would be rejected with
+          "Incorrect datetime value"; post-fix the round-trip succeeds.
+
+      Constraints honoured:
+
+        - Default `go test ./...` is untouched; no new test infra is
+          required for the default build.
+        - The MySQL integration test is opt-in via build tag and
+          DSN env var (the existing convention for
+          `store_mysql_integration_test.go`).
+        - The new `Dialect` method is backward-compatible — `dialect`
+          is a struct (single concrete implementation), so adding the
+          method satisfies every existing caller automatically.
+        - Read path (`ParseTimestamp`, `nullableTime` read scans)
+          unchanged.
+    priority: P1
+    version: v0.7.0
+    status: tested
+    acceptance_criteria:
+      - "AC-154-1: `dialect.FormatTimestamp(t time.Time) string` lands in `internal/store/dialect.go` returning `t.UTC().Format(time.RFC3339)` for SQLite and `t.UTC().Format(\"2006-01-02 15:04:05.000000\")` for MySQL, with doc-comment explaining the strict sql_mode hazard."
+      - "AC-154-2: Every `time.Format(time.RFC3339)` write-side call in `internal/store/{store.go,pipeline_hazards.go,queries.go}` covering issue_claim acquire/extend/refresh/overwrite, issue_pipeline_hazards.detected_at, and workflow_transitions/instances created_at-updated_at is replaced with `s.dialect.FormatTimestamp(...)`. The three remaining `Format(time.RFC3339)` references in the package are intentional and called out in the call-site comments: `nullableTime` (SQLite-only sessions table writer), the dialect's own SQLite branch, and the SQLite-only `sessions.closed_at` read cutoff."
+      - "AC-154-3: `nullableTime`, `ParseTimestamp`, and `DatetimeNormalize` are unchanged; the read path is unaffected."
+      - "AC-154-4: `TestFormatTimestamp_SQLite`, `TestFormatTimestamp_SQLite_NonUTC`, `TestFormatTimestamp_MySQL`, `TestFormatTimestamp_MySQL_NonUTC`, `TestFormatTimestamp_RoundTrip`, and `TestIssueClaimRoundTripPersists` ship in `internal/store/dialect_format_timestamp_test.go` and pass under `go test ./internal/store/... -count=1`."
+      - "AC-154-5: `TestMySQLIssueClaimStrictSqlMode` ships in `internal/store/store_mysql_integration_test.go` under build tag `mysql_integration`; when `WORKBUDDY_MYSQL_TEST_DSN` is set, it opens a strict-mode-pinned Store via the driver's `sql_mode` DSN parameter and exercises the fresh-acquire, self-extend, and refresh paths end-to-end, with timestamp round-trip assertions."
+      - "AC-154-6: `go build ./... && go vet ./... && go test ./... -count=1` and `go build -tags mysql_integration ./... && go vet -tags mysql_integration ./... ` all stay green."
+    code:
+      - internal/store/dialect.go
+      - internal/store/store.go
+      - internal/store/pipeline_hazards.go
+      - internal/store/queries.go
+    tests:
+      - internal/store/dialect_format_timestamp_test.go
+      - internal/store/store_mysql_integration_test.go
+    deps:
+      - REQ-148
+      - REQ-150
+      - REQ-151
+      - REQ-152
+      - REQ-153

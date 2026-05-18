@@ -2531,15 +2531,16 @@ func (s *dbStore) acquireIssueClaimOnce(repo string, issueNum int, workerID stri
 			return AcquireIssueClaimResult{}, tokErr
 		}
 		// issue_claim.acquired_at / expires_at have no SQLite DEFAULT — they are
-		// written exclusively by Go code, so we use RFC3339 to match the
-		// codebase-wide nullableTime convention. The WHERE expires_at > ? cutoff
-		// in RefreshIssueClaim must keep the same layout, otherwise lexicographic
-		// TEXT compare ('T' (0x54) vs ' ' (0x20)) silently mis-sorts on the
-		// same-day boundary.
+		// written exclusively by Go code. The dialect's FormatTimestamp picks
+		// the right layout per backend: RFC3339 on SQLite (matches the
+		// codebase-wide nullableTime convention), MySQL-native space form on
+		// MySQL (RFC3339's trailing 'Z' is rejected under strict sql_mode).
+		// The WHERE expires_at > ? cutoff in RefreshIssueClaim uses the same
+		// helper so writer and comparator stay aligned on each backend.
 		_, insErr := tx.Exec(
 			`INSERT INTO issue_claim (repo, issue_num, worker_id, claim_token, acquired_at, expires_at)
 			 VALUES (?, ?, ?, ?, ?, ?)`,
-			repo, issueNum, workerID, token, now.UTC().Format(time.RFC3339), expiresAt.UTC().Format(time.RFC3339),
+			repo, issueNum, workerID, token, s.dialect.FormatTimestamp(now), s.dialect.FormatTimestamp(expiresAt),
 		)
 		if insErr == nil {
 			if commitErr := tx.Commit(); commitErr != nil {
@@ -2584,13 +2585,14 @@ func (s *dbStore) acquireIssueClaimOnce(repo string, issueNum int, workerID stri
 
 	if holderWorker == workerID && !expired {
 		// Self-held: extend in place, keeping the same token for idempotency.
-		// RFC3339 layout: see acquire-path comment above; must match the storage
-		// form written by the INSERT path so future WHERE comparisons remain sound.
+		// Layout via dialect.FormatTimestamp: see acquire-path comment above;
+		// must match the storage form written by the INSERT path so future
+		// WHERE comparisons remain sound on each backend.
 		if _, updErr := tx.Exec(
 			`UPDATE issue_claim
 			 SET expires_at = ?
 			 WHERE repo = ? AND issue_num = ? AND worker_id = ? AND claim_token = ?`,
-			expiresAt.UTC().Format(time.RFC3339), repo, issueNum, workerID, holderToken,
+			s.dialect.FormatTimestamp(expiresAt), repo, issueNum, workerID, holderToken,
 		); updErr != nil {
 			return AcquireIssueClaimResult{}, fmt.Errorf("store: extend issue claim: %w", updErr)
 		}
@@ -2613,12 +2615,12 @@ func (s *dbStore) acquireIssueClaimOnce(repo string, issueNum int, workerID stri
 	if tokErr != nil {
 		return AcquireIssueClaimResult{}, tokErr
 	}
-	// RFC3339 layout: see acquire-path comment above.
+	// Layout via dialect.FormatTimestamp: see acquire-path comment above.
 	if _, updErr := tx.Exec(
 		`UPDATE issue_claim
 		 SET worker_id = ?, claim_token = ?, acquired_at = ?, expires_at = ?
 		 WHERE repo = ? AND issue_num = ?`,
-		workerID, token, now.UTC().Format(time.RFC3339), expiresAt.UTC().Format(time.RFC3339),
+		workerID, token, s.dialect.FormatTimestamp(now), s.dialect.FormatTimestamp(expiresAt),
 		repo, issueNum,
 	); updErr != nil {
 		return AcquireIssueClaimResult{}, fmt.Errorf("store: overwrite expired issue claim: %w", updErr)
@@ -2677,20 +2679,22 @@ func (s *dbStore) RefreshIssueClaim(repo string, issueNum int, workerID, claimTo
 	}
 	now := s.now()
 	// issue_claim.expires_at is Go-written TEXT (no CURRENT_TIMESTAMP default).
-	// Writers in acquireIssueClaimOnce / this function use RFC3339; pre-W2
-	// rollouts wrote the space form. We can't migrate the data without a
-	// schema-touching one-shot, so we make the comparison layout-tolerant by
+	// Writers in acquireIssueClaimOnce / this function use the dialect's
+	// FormatTimestamp (RFC3339 on SQLite, MySQL-native space form on MySQL —
+	// the latter avoids strict sql_mode rejecting the 'Z' suffix). Pre-W2
+	// rollouts wrote the SQLite space form; we can't migrate the data without
+	// a schema-touching one-shot, so we make the comparison layout-tolerant by
 	// wrapping both column and cutoff in `datetime(...)` — SQLite's datetime()
 	// parses both YYYY-MM-DD HH:MM:SS and YYYY-MM-DDTHH:MM:SSZ and normalises
 	// before the compare. On MySQL the column is typed DATETIME(6) and the
 	// dialect wrapper is the identity (typed compare, no text-byte hazard).
-	expiresAt := now.Add(lease).UTC().Format(time.RFC3339)
+	expiresAt := s.dialect.FormatTimestamp(now.Add(lease))
 	res, err := s.db.Exec(
 		`UPDATE issue_claim
 		 SET expires_at = ?
 		 WHERE repo = ? AND issue_num = ? AND worker_id = ? AND claim_token = ?
 		   AND `+s.dialect.DatetimeNormalize("expires_at")+` > `+s.dialect.DatetimeNormalize("?"),
-		expiresAt, repo, issueNum, workerID, claimToken, now.UTC().Format(time.RFC3339),
+		expiresAt, repo, issueNum, workerID, claimToken, s.dialect.FormatTimestamp(now),
 	)
 	if err != nil {
 		return false, fmt.Errorf("store: refresh issue claim: %w", err)

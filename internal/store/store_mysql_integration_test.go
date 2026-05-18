@@ -227,6 +227,113 @@ func TestMySQLIssueClaimRoundtrip(t *testing.T) {
 	}
 }
 
+// TestMySQLIssueClaimStrictSqlMode pins the REQ-154 contract under strict
+// sql_mode: AcquireIssueClaim (fresh + self-extend + overwrite-expired) and
+// RefreshIssueClaim must succeed against MySQL when the connection's
+// sql_mode includes STRICT_TRANS_TABLES — the default on MySQL 8 production
+// servers. The original bug class wrote RFC3339 ("2026-04-18T11:30:00Z")
+// into DATETIME(6) columns; strict mode rejects the literal with "Incorrect
+// datetime value" so the INSERT fails. The dialect-routed FormatTimestamp
+// helper emits the MySQL-native space form, which is accepted unconditionally.
+//
+// The test sets sql_mode at the session level. Some managed MySQL offerings
+// override sql_mode at the server level and ignore session settings; in
+// those environments the SET succeeds but the actual mode on the connection
+// may differ. We read the effective sql_mode back and skip with a clear
+// message if STRICT_TRANS_TABLES cannot be enabled, so the test is a strict
+// upper bound: a passing run guarantees strict-mode correctness; a skip is
+// an environmental limitation, not a silent FALSE PASS.
+func TestMySQLIssueClaimStrictSqlMode(t *testing.T) {
+	// Pin sql_mode at the DSN level: the go-sql-driver/mysql `sql_mode`
+	// parameter is applied on every connection the pool opens, so we
+	// exercise the same surface a production strict-mode deployment hits
+	// regardless of which pool entry a given query lands on. Strict mode
+	// rejects DATETIME(6) literals containing `T`/`Z`; the dialect-routed
+	// FormatTimestamp helper emits the MySQL-native space form, which is
+	// accepted unconditionally.
+	dsn := os.Getenv(mysqlDSNEnv)
+	if dsn == "" {
+		t.Skipf("%s not set — skipping strict-mode integration test", mysqlDSNEnv)
+	}
+	if !strings.HasPrefix(dsn, "mysql://") {
+		dsn = "mysql://" + dsn
+	}
+	driverDSN := strings.TrimPrefix(dsn, "mysql://")
+	sep := "?"
+	if strings.Contains(driverDSN, "?") {
+		sep = "&"
+	}
+	strictDSN := "mysql://" + driverDSN + sep + "sql_mode=%27STRICT_TRANS_TABLES%2CNO_ZERO_IN_DATE%2CNO_ZERO_DATE%27"
+
+	strictStore, err := New(strictDSN)
+	if err != nil {
+		t.Fatalf("open strict-mode store: %v", err)
+	}
+	t.Cleanup(func() { _ = strictStore.Close() })
+
+	// Assert strict mode is actually in force on the connection we're
+	// about to write through. Managed MySQL offerings sometimes override
+	// sql_mode at the server level and ignore the DSN-level pin; in that
+	// case skip with a clear message rather than producing a false PASS
+	// when the writes happen to succeed for unrelated reasons.
+	var mode string
+	if err := strictStore.QueryRow("SELECT @@sql_mode").Scan(&mode); err != nil {
+		t.Fatalf("read sql_mode: %v", err)
+	}
+	if !strings.Contains(mode, "STRICT_TRANS_TABLES") {
+		t.Skipf("server effective sql_mode=%q does not include STRICT_TRANS_TABLES; managed MySQL may override the DSN pin", mode)
+	}
+	t.Logf("confirmed strict mode active: sql_mode=%q", mode)
+
+	// Fresh acquire (INSERT path).
+	res, err := strictStore.AcquireIssueClaim("owner/repo", 100, "worker-strict", 1*time.Minute)
+	if err != nil {
+		t.Fatalf("AcquireIssueClaim under strict sql_mode: %v", err)
+	}
+	if res.ClaimToken == "" {
+		t.Fatalf("expected non-empty token")
+	}
+
+	// Self-extend (UPDATE-in-place path).
+	res2, err := strictStore.AcquireIssueClaim("owner/repo", 100, "worker-strict", 2*time.Minute)
+	if err != nil {
+		t.Fatalf("AcquireIssueClaim self-extend under strict sql_mode: %v", err)
+	}
+	if !res2.Extended {
+		t.Fatalf("expected Extended=true on self-extend, got %+v", res2)
+	}
+	if res2.ClaimToken != res.ClaimToken {
+		t.Fatalf("self-extend changed the token: prior=%q now=%q", res.ClaimToken, res2.ClaimToken)
+	}
+
+	// Refresh (RefreshIssueClaim path — independent UPDATE with the
+	// dialect-normalised WHERE cutoff).
+	ok, err := strictStore.RefreshIssueClaim("owner/repo", 100, "worker-strict", res.ClaimToken, 3*time.Minute)
+	if err != nil {
+		t.Fatalf("RefreshIssueClaim under strict sql_mode: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected RefreshIssueClaim to update the row")
+	}
+
+	// Read-back must still parse cleanly.
+	rec, err := strictStore.QueryIssueClaim("owner/repo", 100)
+	if err != nil {
+		t.Fatalf("QueryIssueClaim under strict sql_mode: %v", err)
+	}
+	if rec == nil || rec.WorkerID != "worker-strict" {
+		t.Fatalf("unexpected record: %+v", rec)
+	}
+	if rec.AcquiredAt.IsZero() || rec.ExpiresAt.IsZero() {
+		t.Fatalf("expected non-zero timestamps, got acquired_at=%v expires_at=%v",
+			rec.AcquiredAt, rec.ExpiresAt)
+	}
+	if !rec.ExpiresAt.After(rec.AcquiredAt) {
+		t.Fatalf("expires_at %v must be after acquired_at %v",
+			rec.ExpiresAt, rec.AcquiredAt)
+	}
+}
+
 // TestMySQLIssueCacheUpsert exercises the second high-volume upsert path
 // (INSERT … ON CONFLICT (repo, issue_num) DO UPDATE SET …).
 func TestMySQLIssueCacheUpsert(t *testing.T) {

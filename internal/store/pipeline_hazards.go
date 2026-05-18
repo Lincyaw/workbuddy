@@ -44,11 +44,13 @@ func (s *dbStore) UpsertIssuePipelineHazard(h PipelineHazard) (changed bool, err
 		return false, err
 	}
 	// issue_pipeline_hazards.detected_at has no SQLite DEFAULT — it is written
-	// exclusively here, so we use RFC3339 to match the codebase-wide
-	// nullableTime convention. There is currently no WHERE cutoff against this
-	// column, but keeping all Go-written timestamps on the same layout means a
-	// future cutoff cannot drift into the silent-mismatch hazard fixed in W1.
-	now := s.now().UTC().Format(time.RFC3339)
+	// exclusively here, so we route through dialect.FormatTimestamp: RFC3339
+	// on SQLite (matches the codebase-wide nullableTime convention), MySQL
+	// space form on MySQL (strict sql_mode rejects RFC3339's trailing 'Z').
+	// There is currently no WHERE cutoff against this column, but keeping all
+	// Go-written timestamps on the same per-backend layout means a future
+	// cutoff cannot drift into the silent-mismatch hazard fixed in W1.
+	now := s.dialect.FormatTimestamp(s.now())
 	_, err = s.db.Exec(
 		`INSERT INTO issue_pipeline_hazards
 			(repo, issue_num, kind, fingerprint, detected_at)

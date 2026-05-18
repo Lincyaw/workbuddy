@@ -28,6 +28,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // dialectKind names the concrete backend. It controls SQL rewriting,
@@ -216,6 +217,25 @@ func rewriteForMySQL(sql string) string {
 	out = reDatetimeNow.ReplaceAllString(out, "DATE_ADD(NOW(6), INTERVAL ? SECOND)")
 
 	return out
+}
+
+// FormatTimestamp returns a TEXT representation of t suitable for the
+// dialect's DATETIME-style columns at write time. SQLite stores TEXT
+// verbatim, so any ISO format works; we use RFC3339 to match the
+// package-wide convention established by nullableTime. MySQL's
+// DATETIME(6) does NOT accept the trailing 'Z' or the 'T' separator
+// under strict sql_mode (the default `STRICT_TRANS_TABLES` rejects
+// such literals with "Incorrect datetime value"); the MySQL dialect
+// therefore returns the space-separated form
+// 'YYYY-MM-DD HH:MM:SS.ffffff' that MySQL's DATETIME parser accepts
+// natively across all sql_mode settings. The read path is unaffected:
+// ParseTimestamp already handles both layouts.
+func (d dialect) FormatTimestamp(t time.Time) string {
+	u := t.UTC()
+	if d.kind == dialectMySQL {
+		return u.Format("2006-01-02 15:04:05.000000")
+	}
+	return u.Format(time.RFC3339)
 }
 
 // DatetimeNormalize wraps a DATETIME-bearing SQL expression in a form that

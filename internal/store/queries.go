@@ -815,7 +815,11 @@ func (s *dbStore) AdvanceWorkflowInstance(id, fromState, toState, triggerAgent s
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	ts := at.UTC().Format(time.RFC3339)
+	// workflow_transitions.created_at / workflow_instances.updated_at are
+	// Go-written TEXT/DATETIME columns. Route through dialect.FormatTimestamp
+	// so MySQL gets the space form its strict sql_mode requires while SQLite
+	// keeps the RFC3339 layout used by nullableTime.
+	ts := s.dialect.FormatTimestamp(at)
 	if _, err := tx.Exec(
 		`INSERT INTO workflow_transitions (workflow_instance_id, from_state, to_state, trigger_agent, created_at)
 		 VALUES (?, ?, ?, ?, ?)`,
