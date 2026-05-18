@@ -240,6 +240,26 @@ func TestRunStatusWithOpts_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("events table renders stored timestamps", func(t *testing.T) {
+		var out bytes.Buffer
+		err := runStatusWithOpts(context.Background(), &statusOpts{
+			repo:    "owner/repo",
+			events:  true,
+			baseURL: srv.URL,
+			now:     func() time.Time { return time.Now().UTC() },
+		}, client, &out)
+		if err != nil {
+			t.Fatalf("runStatusWithOpts: %v", err)
+		}
+		got := out.String()
+		if strings.Contains(got, "0001-01-01T00:00:00Z") {
+			t.Fatalf("events table rendered zero timestamp: %q", got)
+		}
+		if !strings.Contains(got, "dispatch_skipped_claim") {
+			t.Fatalf("events table missing recent fixture event: %q", got)
+		}
+	})
+
 	t.Run("events json and since filter", func(t *testing.T) {
 		now := time.Now().UTC()
 		var out bytes.Buffer

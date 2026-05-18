@@ -5817,6 +5817,7 @@ requirements:
       - "AC-149-4: SetEventRecorder is nil-safe; routers built without telemetry (existing tests, ad-hoc callers) hit no panic on any skip branch."
       - "AC-149-5: internal/app/repo_runtime.go wires `pm.eventlog` into the router via SetEventRecorder so coordinator-side events flow into `workbuddy status --events`."
       - "AC-149-6: Unit tests cover all three emits (TestRouter_EmitsEventOnAgentNotFound, TestRouter_EmitsEventOnDependencyBlock, TestTransitionSkipped_TargetUnknown, TestTransitionSkipped_NotAllowed) plus a nil-recorder safety test (TestRouter_NilEventRecorderIsSafe)."
+      - "AC-149-7: Router emits TypeDispatchNoEligibleWorker when a dispatchable issue has no online worker for the repo/role or only workers whose runtime cannot claim the task; tests verify the event is observability-only and the task preparation path still runs."
     code:
       - internal/eventlog/eventlog.go
       - internal/router/router.go

@@ -15,6 +15,7 @@ package router
 import (
 	"context"
 	"log"
+	"strings"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/dependency"
@@ -189,11 +190,69 @@ func (r *Router) handleDispatch(ctx context.Context, req statemachine.DispatchRe
 		span.SetAttributes(attribute.Bool("workbuddy.dispatch.skipped", true))
 		return
 	}
+	r.logWorkerEligibility(req, decision.Agent)
 	if err := r.preparer.Prepare(ctx, decision); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		log.Printf("[router] prepare failed for %s#%d: %v", req.Repo, req.IssueNum, err)
 	}
+}
+
+func (r *Router) logWorkerEligibility(req statemachine.DispatchRequest, agent *config.AgentConfig) {
+	if r == nil || r.registry == nil || agent == nil {
+		return
+	}
+	role := strings.TrimSpace(agent.Role)
+	workers, err := r.registry.FindWorkers(req.Repo, role)
+	if err != nil {
+		r.logEvent(eventlog.TypeDispatchNoEligibleWorker, req.Repo, req.IssueNum, map[string]any{
+			"agent":    req.AgentName,
+			"role":     role,
+			"runtime":  strings.TrimSpace(agent.Runtime),
+			"workflow": req.Workflow,
+			"state":    req.State,
+			"reason":   "worker_lookup_error",
+			"error":    err.Error(),
+		})
+		return
+	}
+	eligible := workersEligibleForRuntime(workers, agent.Runtime)
+	if len(eligible) > 0 {
+		return
+	}
+	reason := "no_online_worker_for_repo_role"
+	if len(workers) > 0 {
+		reason = "runtime_mismatch"
+	}
+	r.logEvent(eventlog.TypeDispatchNoEligibleWorker, req.Repo, req.IssueNum, map[string]any{
+		"agent":             req.AgentName,
+		"role":              role,
+		"runtime":           strings.TrimSpace(agent.Runtime),
+		"workflow":          req.Workflow,
+		"state":             req.State,
+		"reason":            reason,
+		"candidate_workers": workerIDs(workers),
+	})
+}
+
+func workersEligibleForRuntime(workers []store.WorkerRecord, runtime string) []store.WorkerRecord {
+	runtime = strings.TrimSpace(runtime)
+	eligible := make([]store.WorkerRecord, 0, len(workers))
+	for _, worker := range workers {
+		workerRuntime := strings.TrimSpace(worker.Runtime)
+		if runtime == "" || workerRuntime == runtime {
+			eligible = append(eligible, worker)
+		}
+	}
+	return eligible
+}
+
+func workerIDs(workers []store.WorkerRecord) []string {
+	ids := make([]string, 0, len(workers))
+	for _, worker := range workers {
+		ids = append(ids, worker.ID)
+	}
+	return ids
 }
 
 // lookupAgentMeta returns the (role, runtime) tuple for an agent, or

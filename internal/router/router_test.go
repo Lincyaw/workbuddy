@@ -289,6 +289,119 @@ func TestRouter_RunConsumesDispatchChannel(t *testing.T) {
 	}
 }
 
+func TestRouter_EmitsEventWhenNoEligibleWorkerCanClaim(t *testing.T) {
+	agents := map[string]*config.AgentConfig{
+		"dev-agent": {Name: "dev-agent", Role: "dev", Runtime: "codex", Command: "echo"},
+	}
+	r, fp, _ := newSchedulingRouter(t, agents)
+	rec := &fakeEventRecorder{}
+	r.SetEventRecorder(rec)
+
+	r.handleDispatch(context.Background(), statemachine.DispatchRequest{
+		Repo:      "test/repo",
+		IssueNum:  345,
+		AgentName: "dev-agent",
+		Workflow:  "default",
+		State:     "developing",
+	})
+
+	if len(fp.got) != 1 {
+		t.Fatalf("preparer invocations = %d, want 1 because the task is still enqueued", len(fp.got))
+	}
+	got := rec.find(eventlog.TypeDispatchNoEligibleWorker)
+	if len(got) != 1 {
+		t.Fatalf("expected exactly one %s event, got %d (all events=%v)", eventlog.TypeDispatchNoEligibleWorker, len(got), rec.events)
+	}
+	payload, ok := got[0].Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", got[0].Payload)
+	}
+	if payload["reason"] != "no_online_worker_for_repo_role" {
+		t.Fatalf("payload.reason = %v, want no_online_worker_for_repo_role", payload["reason"])
+	}
+	if payload["role"] != "dev" || payload["runtime"] != "codex" {
+		t.Fatalf("payload role/runtime = %v/%v, want dev/codex", payload["role"], payload["runtime"])
+	}
+}
+
+func TestRouter_EmitsRuntimeMismatchWhenWorkersCannotClaim(t *testing.T) {
+	agents := map[string]*config.AgentConfig{
+		"dev-agent": {Name: "dev-agent", Role: "dev", Runtime: "codex", Command: "echo"},
+	}
+	r, fp, st := newSchedulingRouter(t, agents)
+	rec := &fakeEventRecorder{}
+	r.SetEventRecorder(rec)
+	if err := st.InsertWorker(store.WorkerRecord{
+		ID:        "worker-claude",
+		Repo:      "test/repo",
+		ReposJSON: `["test/repo"]`,
+		Roles:     `["dev"]`,
+		Runtime:   "claude-code",
+		Hostname:  "host",
+		Status:    "online",
+	}); err != nil {
+		t.Fatalf("InsertWorker: %v", err)
+	}
+
+	r.handleDispatch(context.Background(), statemachine.DispatchRequest{
+		Repo:      "test/repo",
+		IssueNum:  346,
+		AgentName: "dev-agent",
+		Workflow:  "default",
+		State:     "developing",
+	})
+
+	if len(fp.got) != 1 {
+		t.Fatalf("preparer invocations = %d, want 1 because runtime mismatch is observability-only", len(fp.got))
+	}
+	got := rec.find(eventlog.TypeDispatchNoEligibleWorker)
+	if len(got) != 1 {
+		t.Fatalf("expected exactly one %s event, got %d", eventlog.TypeDispatchNoEligibleWorker, len(got))
+	}
+	payload, ok := got[0].Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", got[0].Payload)
+	}
+	if payload["reason"] != "runtime_mismatch" {
+		t.Fatalf("payload.reason = %v, want runtime_mismatch", payload["reason"])
+	}
+}
+
+func TestRouter_DoesNotEmitNoEligibleWorkerWhenWorkerCanClaim(t *testing.T) {
+	agents := map[string]*config.AgentConfig{
+		"dev-agent": {Name: "dev-agent", Role: "dev", Runtime: "", Command: "echo"},
+	}
+	r, fp, st := newSchedulingRouter(t, agents)
+	rec := &fakeEventRecorder{}
+	r.SetEventRecorder(rec)
+	if err := st.InsertWorker(store.WorkerRecord{
+		ID:        "worker-codex",
+		Repo:      "test/repo",
+		ReposJSON: `["test/repo"]`,
+		Roles:     `["dev"]`,
+		Runtime:   "codex",
+		Hostname:  "host",
+		Status:    "online",
+	}); err != nil {
+		t.Fatalf("InsertWorker: %v", err)
+	}
+
+	r.handleDispatch(context.Background(), statemachine.DispatchRequest{
+		Repo:      "test/repo",
+		IssueNum:  347,
+		AgentName: "dev-agent",
+		Workflow:  "default",
+		State:     "developing",
+	})
+
+	if len(fp.got) != 1 {
+		t.Fatalf("preparer invocations = %d, want 1", len(fp.got))
+	}
+	if got := rec.find(eventlog.TypeDispatchNoEligibleWorker); len(got) != 0 {
+		t.Fatalf("unexpected %s events: %+v", eventlog.TypeDispatchNoEligibleWorker, got)
+	}
+}
+
 // TestRouter_EmitsEventOnAgentNotFound closes one of the three silent-skip
 // gaps surfaced in issue #345: when a workflow names an agent the catalog
 // doesn't know about, the router previously logged to stderr only. It must

@@ -97,6 +97,11 @@ const (
 	TypeHooksReloaded = "hooks_reloaded"
 	// TypeDispatchSkippedAgentNotFound fires when the router gets a request for an unknown agent (REQ-149 / #345).
 	TypeDispatchSkippedAgentNotFound = "dispatch_skipped_agent_not_found"
+	// TypeDispatchNoEligibleWorker fires when a dispatchable issue reaches the
+	// router but no currently-registered worker can claim the resulting task.
+	// The task is still enqueued so a later worker/recovery tick can pick it up;
+	// this event is an operator-visible warning with reason details.
+	TypeDispatchNoEligibleWorker = "dispatch_no_eligible_worker"
 	// TypeTransitionSkipped fires when a label-driven transition is mapped but cannot be taken (REQ-149 / #345).
 	TypeTransitionSkipped = "transition_skipped"
 	// TypeTaskReaped fires when the periodic TaskReaper converts a stale
@@ -178,6 +183,7 @@ var AllEventTypes = []string{
 	TypeCoordinatorStopping,
 	TypeHooksReloaded,
 	TypeDispatchSkippedAgentNotFound,
+	TypeDispatchNoEligibleWorker,
 	TypeTransitionSkipped,
 	TypeTaskReaped,
 	TypeIssueResynced,
