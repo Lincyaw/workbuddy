@@ -18,6 +18,7 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/dependency"
+	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
@@ -63,12 +64,21 @@ type readerAwarePreparer interface {
 // potential future when scheduling actually selects among multiple workers;
 // today the preparer persists the task for a worker to claim, whether that
 // worker was launched by `serve` or by a standalone `workbuddy worker`.
+// EventRecorder is the narrow event-log interface the router uses to publish
+// "considered but did not enqueue" decisions (REQ #345). Kept here rather
+// than importing the concrete *eventlog.EventLogger so test fakes — and
+// any future telemetry sink — can swap in without circular imports.
+type EventRecorder interface {
+	Log(eventType, repo string, issueNum int, payload interface{})
+}
+
 type Router struct {
 	agents    map[string]*config.AgentConfig
 	workflows map[string]*config.WorkflowConfig
 	registry  *registry.Registry
 	gateStore dependency.GateStore
 	preparer  Preparer
+	events    EventRecorder
 }
 
 // NewRouter creates a Router wired for the task-queue based worker handoff.
@@ -113,6 +123,25 @@ func (r *Router) SetPreparer(p Preparer) {
 	if p != nil {
 		r.preparer = p
 	}
+}
+
+// SetEventRecorder attaches (or detaches with nil) an event sink for the
+// router's "considered but skipped" decisions. The recorder is best-effort
+// telemetry: nil is permitted and short-circuits cheaply at the emit site,
+// so existing call sites that construct a Router without telemetry are
+// unaffected.
+func (r *Router) SetEventRecorder(rec EventRecorder) {
+	r.events = rec
+}
+
+// logEvent records a router-level event when an event recorder is wired.
+// nil-safe so existing tests and callers that do not attach telemetry keep
+// working.
+func (r *Router) logEvent(eventType, repo string, issueNum int, payload interface{}) {
+	if r == nil || r.events == nil {
+		return
+	}
+	r.events.Log(eventType, repo, issueNum, payload)
 }
 
 // SetWorkflows wires workflow definitions into the router so it can attach
@@ -181,21 +210,66 @@ func (r *Router) lookupAgentMeta(name string) (string, string) {
 	return a.Role, a.Runtime
 }
 
+// checkDependencyBlocked queries the recorded dependency verdict and applies
+// the same gating policy as dependency.IsBlocked, but also returns the
+// observed verdict string so the caller can stamp it on the
+// TypeDispatchBlockedByDependency payload (REQ-149 / #345). When the
+// gateStore is nil or has no recorded state, returns (false, "", nil).
+func (r *Router) checkDependencyBlocked(repo string, issueNum int) (bool, string, error) {
+	if r.gateStore == nil {
+		return false, "", nil
+	}
+	depState, err := r.gateStore.QueryIssueDependencyState(repo, issueNum)
+	if err != nil {
+		return false, "", err
+	}
+	if depState == nil {
+		return false, "", nil
+	}
+	switch depState.Verdict {
+	case store.DependencyVerdictBlocked, store.DependencyVerdictNeedsHuman:
+		return true, depState.Verdict, nil
+	default:
+		return false, depState.Verdict, nil
+	}
+}
+
 // decide is the pure scheduling core: no side effects other than logging.
 // Returns (decision, true) if the dispatch should proceed.
 func (r *Router) decide(req statemachine.DispatchRequest) (Decision, bool) {
 	agent, ok := r.agents[req.AgentName]
 	if !ok {
 		log.Printf("[router] agent %q not found, skipping dispatch for %s#%d", req.AgentName, req.Repo, req.IssueNum)
+		r.logEvent(eventlog.TypeDispatchSkippedAgentNotFound, req.Repo, req.IssueNum, map[string]any{
+			"agent":    req.AgentName,
+			"workflow": req.Workflow,
+			"state":    req.State,
+		})
 		return Decision{}, false
 	}
-	blocked, err := dependency.IsBlocked(r.gateStore, req.Repo, req.IssueNum)
+	blocked, verdict, err := r.checkDependencyBlocked(req.Repo, req.IssueNum)
 	if err != nil {
 		log.Printf("[router] failed to query dependency state for %s#%d: %v", req.Repo, req.IssueNum, err)
+		// Error branch omits verdict (we never observed one) and adds error
+		// per the REQ-149 unified payload schema.
+		r.logEvent(eventlog.TypeDispatchBlockedByDependency, req.Repo, req.IssueNum, map[string]any{
+			"agent":    req.AgentName,
+			"workflow": req.Workflow,
+			"state":    req.State,
+			"source":   "router",
+			"error":    err.Error(),
+		})
 		return Decision{}, false
 	}
 	if blocked {
-		log.Printf("[router] blocked dispatch for %s#%d due to dependency verdict", req.Repo, req.IssueNum)
+		log.Printf("[router] blocked dispatch for %s#%d due to dependency verdict=%s", req.Repo, req.IssueNum, verdict)
+		r.logEvent(eventlog.TypeDispatchBlockedByDependency, req.Repo, req.IssueNum, map[string]any{
+			"agent":    req.AgentName,
+			"workflow": req.Workflow,
+			"state":    req.State,
+			"source":   "router",
+			"verdict":  verdict,
+		})
 		return Decision{}, false
 	}
 	return Decision{

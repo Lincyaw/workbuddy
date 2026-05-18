@@ -2,14 +2,53 @@ package router
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
+	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/statemachine"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
+
+// errBoom is a sentinel returned by failingGateStore to force the router's
+// dep-gate error branch in tests.
+var errBoom = errors.New("boom")
+
+// fakeEventRecorder captures router-emitted events so silent-skip telemetry
+// (REQ #345) can be asserted in isolation from the SQLite event store.
+type fakeEventRecorder struct {
+	mu     sync.Mutex
+	events []fakeRouterEvent
+}
+
+type fakeRouterEvent struct {
+	Type     string
+	Repo     string
+	IssueNum int
+	Payload  interface{}
+}
+
+func (r *fakeEventRecorder) Log(eventType, repo string, issueNum int, payload interface{}) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, fakeRouterEvent{Type: eventType, Repo: repo, IssueNum: issueNum, Payload: payload})
+}
+
+func (r *fakeEventRecorder) find(eventType string) []fakeRouterEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []fakeRouterEvent
+	for _, e := range r.events {
+		if e.Type == eventType {
+			out = append(out, e)
+		}
+	}
+	return out
+}
 
 // fakePreparer captures the Decision the Router emits so scheduling
 // behaviour can be asserted in isolation from persistence / GH / dispatch.
@@ -247,5 +286,227 @@ func TestRouter_RunConsumesDispatchChannel(t *testing.T) {
 
 	if fp.seen != 1 {
 		t.Fatalf("preparer invocations = %d, want 1", fp.seen)
+	}
+}
+
+// TestRouter_EmitsEventOnAgentNotFound closes one of the three silent-skip
+// gaps surfaced in issue #345: when a workflow names an agent the catalog
+// doesn't know about, the router previously logged to stderr only. It must
+// now publish a structured event the operator can see via `workbuddy status
+// --events`.
+func TestRouter_EmitsEventOnAgentNotFound(t *testing.T) {
+	r, fp, _ := newSchedulingRouter(t, map[string]*config.AgentConfig{})
+	rec := &fakeEventRecorder{}
+	r.SetEventRecorder(rec)
+
+	r.handleDispatch(context.Background(), statemachine.DispatchRequest{
+		Repo:      "test/repo",
+		IssueNum:  101,
+		AgentName: "ghost-agent",
+		Workflow:  "default",
+		State:     "developing",
+	})
+
+	if len(fp.got) != 0 {
+		t.Fatalf("expected no preparer invocation for unknown agent, got %d", len(fp.got))
+	}
+	got := rec.find(eventlog.TypeDispatchSkippedAgentNotFound)
+	if len(got) != 1 {
+		t.Fatalf("expected exactly one %s event, got %d (all events=%v)",
+			eventlog.TypeDispatchSkippedAgentNotFound, len(got), rec.events)
+	}
+	ev := got[0]
+	if ev.Repo != "test/repo" || ev.IssueNum != 101 {
+		t.Fatalf("event identity mismatch: repo=%q issue=%d", ev.Repo, ev.IssueNum)
+	}
+	payload, ok := ev.Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", ev.Payload)
+	}
+	if payload["agent"] != "ghost-agent" {
+		t.Fatalf("payload.agent = %v, want ghost-agent", payload["agent"])
+	}
+	if payload["workflow"] != "default" {
+		t.Fatalf("payload.workflow = %v, want default", payload["workflow"])
+	}
+	if payload["state"] != "developing" {
+		t.Fatalf("payload.state = %v, want developing", payload["state"])
+	}
+}
+
+// TestRouter_EmitsEventOnDependencyBlock closes the second silent-skip gap:
+// when the dependency gate reports a blocked verdict, the router-side
+// dispatch-skip must surface as a TypeDispatchBlockedByDependency event with
+// source="router" and the observed verdict so it can be distinguished from
+// the state-machine-side emit of the same event type (REQ-149 / #345).
+func TestRouter_EmitsEventOnDependencyBlock(t *testing.T) {
+	agents := map[string]*config.AgentConfig{
+		"dev-agent": {Name: "dev-agent", Role: "dev", Runtime: "claude-code", Command: "echo"},
+	}
+	r, fp, st := newSchedulingRouter(t, agents)
+	rec := &fakeEventRecorder{}
+	r.SetEventRecorder(rec)
+
+	if err := st.UpsertIssueDependencyState(store.IssueDependencyState{
+		Repo:     "test/repo",
+		IssueNum: 77,
+		Verdict:  store.DependencyVerdictBlocked,
+	}); err != nil {
+		t.Fatalf("UpsertIssueDependencyState: %v", err)
+	}
+
+	r.handleDispatch(context.Background(), statemachine.DispatchRequest{
+		Repo:      "test/repo",
+		IssueNum:  77,
+		AgentName: "dev-agent",
+		Workflow:  "default",
+		State:     "developing",
+	})
+
+	if len(fp.got) != 0 {
+		t.Fatalf("expected no preparer invocation when dep verdict is blocked, got %d", len(fp.got))
+	}
+	got := rec.find(eventlog.TypeDispatchBlockedByDependency)
+	if len(got) != 1 {
+		t.Fatalf("expected exactly one %s event, got %d", eventlog.TypeDispatchBlockedByDependency, len(got))
+	}
+	payload, ok := got[0].Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", got[0].Payload)
+	}
+	if payload["source"] != "router" {
+		t.Fatalf("payload.source = %v, want router", payload["source"])
+	}
+	if payload["agent"] != "dev-agent" {
+		t.Fatalf("payload.agent = %v, want dev-agent", payload["agent"])
+	}
+	if payload["verdict"] != store.DependencyVerdictBlocked {
+		t.Fatalf("payload.verdict = %v, want %q", payload["verdict"], store.DependencyVerdictBlocked)
+	}
+	if _, hasErr := payload["error"]; hasErr {
+		t.Fatalf("payload.error should be absent on blocked-verdict path, got %v", payload["error"])
+	}
+}
+
+// failingGateStore returns an error from QueryIssueDependencyState so the
+// router takes the dep-gate error branch.
+type failingGateStore struct {
+	err error
+}
+
+func (f *failingGateStore) QueryIssueDependencyState(string, int) (*store.IssueDependencyState, error) {
+	return nil, f.err
+}
+
+// TestRouter_EmitsEventOnDependencyGateError exercises the err != nil branch
+// of the router's dep-gate. The unified REQ-149 payload schema requires
+// {agent, workflow, state, source: "router", error} and no verdict key on
+// this path.
+func TestRouter_EmitsEventOnDependencyGateError(t *testing.T) {
+	agents := map[string]*config.AgentConfig{
+		"dev-agent": {Name: "dev-agent", Role: "dev", Runtime: "claude-code", Command: "echo"},
+	}
+	r, fp, _ := newSchedulingRouter(t, agents)
+	rec := &fakeEventRecorder{}
+	r.SetEventRecorder(rec)
+	// Inject a failing gate store so checkDependencyBlocked returns err.
+	r.gateStore = &failingGateStore{err: errBoom}
+
+	r.handleDispatch(context.Background(), statemachine.DispatchRequest{
+		Repo:      "test/repo",
+		IssueNum:  78,
+		AgentName: "dev-agent",
+		Workflow:  "default",
+		State:     "developing",
+	})
+
+	if len(fp.got) != 0 {
+		t.Fatalf("expected no preparer invocation on dep-gate error, got %d", len(fp.got))
+	}
+	got := rec.find(eventlog.TypeDispatchBlockedByDependency)
+	if len(got) != 1 {
+		t.Fatalf("expected exactly one %s event, got %d", eventlog.TypeDispatchBlockedByDependency, len(got))
+	}
+	payload, ok := got[0].Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", got[0].Payload)
+	}
+	if payload["source"] != "router" {
+		t.Fatalf("payload.source = %v, want router", payload["source"])
+	}
+	errStr, ok := payload["error"].(string)
+	if !ok || errStr == "" {
+		t.Fatalf("payload.error = %v, want non-empty string", payload["error"])
+	}
+	if v, has := payload["verdict"]; has && v != "" {
+		t.Fatalf("payload.verdict must be absent or empty on error path, got %v", v)
+	}
+}
+
+// TestRouter_NilEventRecorderIsSafe defends the optionality contract: a
+// router whose event recorder was never wired (the default state for many
+// existing tests + non-coordinator call sites) must not panic when it
+// reaches any of the three silent-skip branches (REQ-149 / #345).
+func TestRouter_NilEventRecorderIsSafe(t *testing.T) {
+	cases := []struct {
+		name        string
+		setup       func(t *testing.T, r *Router, st store.Store)
+		req         statemachine.DispatchRequest
+		agents      map[string]*config.AgentConfig
+		failingGate bool
+	}{
+		{
+			name:   "agent_not_found",
+			agents: map[string]*config.AgentConfig{},
+			req: statemachine.DispatchRequest{
+				Repo: "test/repo", IssueNum: 9, AgentName: "nobody",
+			},
+		},
+		{
+			name: "dep_blocked_true",
+			agents: map[string]*config.AgentConfig{
+				"dev-agent": {Name: "dev-agent", Role: "dev", Runtime: "claude-code", Command: "echo"},
+			},
+			setup: func(t *testing.T, _ *Router, st store.Store) {
+				if err := st.UpsertIssueDependencyState(store.IssueDependencyState{
+					Repo: "test/repo", IssueNum: 10, Verdict: store.DependencyVerdictBlocked,
+				}); err != nil {
+					t.Fatalf("UpsertIssueDependencyState: %v", err)
+				}
+			},
+			req: statemachine.DispatchRequest{
+				Repo: "test/repo", IssueNum: 10, AgentName: "dev-agent",
+				Workflow: "default", State: "developing",
+			},
+		},
+		{
+			name: "dep_blocked_error",
+			agents: map[string]*config.AgentConfig{
+				"dev-agent": {Name: "dev-agent", Role: "dev", Runtime: "claude-code", Command: "echo"},
+			},
+			failingGate: true,
+			req: statemachine.DispatchRequest{
+				Repo: "test/repo", IssueNum: 11, AgentName: "dev-agent",
+				Workflow: "default", State: "developing",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, fp, st := newSchedulingRouter(t, tc.agents)
+			// Explicitly leave SetEventRecorder unset — the contract under test.
+			if tc.setup != nil {
+				tc.setup(t, r, st)
+			}
+			if tc.failingGate {
+				r.gateStore = &failingGateStore{err: errBoom}
+			}
+
+			r.handleDispatch(context.Background(), tc.req)
+
+			if len(fp.got) != 0 {
+				t.Fatalf("expected no preparer invocation, got %d", len(fp.got))
+			}
+		})
 	}
 }

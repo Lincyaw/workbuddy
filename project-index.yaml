@@ -5754,3 +5754,68 @@ requirements:
       - internal/failpoints/failpoints_noop_test.go
       - internal/failpoints/failpoints_inject_test.go
     deps: []
+
+  - id: REQ-149
+    title: Observability for silent dispatch/transition skips (REQ-149 / #345)
+    description: >
+      Issue #345 surfaced three "considered but did not enqueue"
+      branches that ran to log.Printf only and so never appeared on
+      `workbuddy status --events`. The result was operators staring
+      at an issue that the poller had observed and silently
+      dropped, with no audit trail to explain why.
+
+      This REQ closes those three gaps with structured eventlog
+      records, all routed through the existing best-effort
+      EventLogger pipeline so `workbuddy status --events` and any
+      downstream hook publisher see them:
+
+        1. internal/router/router.go decide(): when the
+           DispatchRequest names an agent absent from the catalog,
+           emit `TypeDispatchSkippedAgentNotFound` with
+           {agent, workflow, state}. Closes the typo-in-workflow
+           skip path.
+        2. internal/router/router.go decide(): when
+           dependency.IsBlocked returns true (or errors out) on
+           the router-side gate, emit
+           `TypeDispatchBlockedByDependency` with
+           {agent, workflow, state, source:"router", error?}. The
+           state-machine path already emitted this event; the
+           router path was the silent twin.
+        3. internal/statemachine/statemachine.go
+           evaluateTransitions(): when a label_added maps to a
+           transition but the target state name is unknown or
+           transitionAllowedForState rejects it, emit
+           `TypeTransitionSkipped` with
+           {from_state, target_state, added_label, reason}.
+
+      The router gains a narrow `EventRecorder` interface (Log
+      method, same signature as `*eventlog.EventLogger`) and a
+      nil-safe `SetEventRecorder` setter so existing tests that
+      construct routers without telemetry keep passing. The
+      coordinator wires `pm.eventlog` into the router in
+      internal/app/repo_runtime.go at the same point the state
+      machine already gets it.
+
+      The skip emitters are pure observability — no behavioral
+      change. Dispatch decisions and transition outcomes are
+      identical; only the audit trail improves.
+    priority: P1
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-149-1: TypeDispatchSkippedAgentNotFound is registered in internal/eventlog/eventlog.go AllEventTypes and the router emits it (with agent/workflow/state payload) on agent-lookup miss."
+      - "AC-149-2: Router emits TypeDispatchBlockedByDependency with source=router and (when applicable) the gate-store error on the dependency-block path, distinguishable from the state-machine emit of the same type."
+      - "AC-149-3: TypeTransitionSkipped is registered in AllEventTypes and the statemachine emits it for both reason=target_unknown and reason=transition_not_allowed, with from_state/target_state/added_label in the payload."
+      - "AC-149-4: SetEventRecorder is nil-safe; routers built without telemetry (existing tests, ad-hoc callers) hit no panic on any skip branch."
+      - "AC-149-5: internal/app/repo_runtime.go wires `pm.eventlog` into the router via SetEventRecorder so coordinator-side events flow into `workbuddy status --events`."
+      - "AC-149-6: Unit tests cover all three emits (TestRouter_EmitsEventOnAgentNotFound, TestRouter_EmitsEventOnDependencyBlock, TestTransitionSkipped_TargetUnknown, TestTransitionSkipped_NotAllowed) plus a nil-recorder safety test (TestRouter_NilEventRecorderIsSafe)."
+    code:
+      - internal/eventlog/eventlog.go
+      - internal/router/router.go
+      - internal/statemachine/statemachine.go
+      - internal/app/repo_runtime.go
+    tests:
+      - internal/router/router_test.go
+      - internal/statemachine/statemachine_test.go
+    deps:
+      - REQ-022

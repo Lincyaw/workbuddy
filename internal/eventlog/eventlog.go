@@ -87,6 +87,10 @@ const (
 	// dashboards can correlate auto-disable resets with the reload action.
 	// See issue #266.
 	TypeHooksReloaded = "hooks_reloaded"
+	// TypeDispatchSkippedAgentNotFound fires when the router gets a request for an unknown agent (REQ-149 / #345).
+	TypeDispatchSkippedAgentNotFound = "dispatch_skipped_agent_not_found"
+	// TypeTransitionSkipped fires when a label-driven transition is mapped but cannot be taken (REQ-149 / #345).
+	TypeTransitionSkipped = "transition_skipped"
 )
 
 // AllEventTypes lists every recognised event type.
@@ -139,6 +143,8 @@ var AllEventTypes = []string{
 	TypeCoordinatorStarted,
 	TypeCoordinatorStopping,
 	TypeHooksReloaded,
+	TypeDispatchSkippedAgentNotFound,
+	TypeTransitionSkipped,
 }
 
 // EventFilter specifies optional criteria for querying events.

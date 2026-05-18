@@ -524,12 +524,24 @@ func (sm *StateMachine) evaluateTransitions(ctx context.Context, wf *config.Work
 		return false, nil
 	}
 	if !transitionAllowedForState(currentStateName, currentState, addedLabel, targetStateName, event.Labels) {
+		sm.eventlog.Log(eventlog.TypeTransitionSkipped, event.Repo, event.IssueNum, map[string]any{
+			"from_state":   currentStateName,
+			"target_state": targetStateName,
+			"added_label":  addedLabel,
+			"reason":       "transition_not_allowed",
+		})
 		return false, nil
 	}
 
 	targetState, ok := wf.States[targetStateName]
 	if !ok {
 		log.Printf("[statemachine] warning: transition target %q not found in workflow %q", targetStateName, wf.Name)
+		sm.eventlog.Log(eventlog.TypeTransitionSkipped, event.Repo, event.IssueNum, map[string]any{
+			"from_state":   currentStateName,
+			"target_state": targetStateName,
+			"added_label":  addedLabel,
+			"reason":       "target_unknown",
+		})
 		return false, nil
 	}
 
@@ -844,7 +856,7 @@ func (sm *StateMachine) DispatchAgent(ctx context.Context, repo string, issueNum
 	} else if blocked {
 		return nil
 	}
-	if blocked, err := sm.isBlockedByDependency(repo, issueNum, agentName); err != nil {
+	if blocked, err := sm.isBlockedByDependency(repo, issueNum, agentName, workflow, state); err != nil {
 		return err
 	} else if blocked {
 		return nil
@@ -1049,7 +1061,13 @@ func (sm *StateMachine) isBlockedByFailureCap(repo string, issueNum int, agentNa
 
 // isBlockedByDependency checks if the issue is blocked by a dependency.
 // Returns true if blocked (and logs the event), false if ready.
-func (sm *StateMachine) isBlockedByDependency(repo string, issueNum int, agentForLog string) (bool, error) {
+//
+// workflow/state are passed through onto the emitted event payload so the
+// router-side and SM-side emits share a schema (REQ-149 / #345). Either may
+// be empty when the caller does not know them (e.g. DispatchAgent paths that
+// did not receive workflow/state context); empty string is preserved on the
+// payload rather than coerced.
+func (sm *StateMachine) isBlockedByDependency(repo string, issueNum int, agentForLog, workflow, state string) (bool, error) {
 	depState, err := sm.store.QueryIssueDependencyState(repo, issueNum)
 	if err != nil {
 		return false, fmt.Errorf("statemachine: query dependency state: %w", err)
@@ -1058,8 +1076,11 @@ func (sm *StateMachine) isBlockedByDependency(repo string, issueNum int, agentFo
 		log.Printf("[statemachine] dispatch blocked by dependency: %s#%d agent=%s verdict=%s",
 			repo, issueNum, agentForLog, depState.Verdict)
 		sm.eventlog.Log(eventlog.TypeDispatchBlockedByDependency, repo, issueNum, map[string]string{
-			"verdict": depState.Verdict,
-			"agent":   agentForLog,
+			"agent":    agentForLog,
+			"workflow": workflow,
+			"state":    state,
+			"source":   "statemachine",
+			"verdict":  depState.Verdict,
 		})
 		return true, nil
 	}
@@ -1177,7 +1198,7 @@ func (sm *StateMachine) dispatchStateAgents(ctx context.Context, repo string, is
 	wfName := wf.Name
 
 	// Check dependency once for all agents in this state.
-	if blocked, err := sm.isBlockedByDependency(repo, issueNum, agents[0]); err != nil {
+	if blocked, err := sm.isBlockedByDependency(repo, issueNum, agents[0], wfName, state); err != nil {
 		return err
 	} else if blocked {
 		return nil

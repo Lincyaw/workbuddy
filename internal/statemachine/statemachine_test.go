@@ -1744,6 +1744,145 @@ func TestRolloutCompletion_FailedThresholdTransitionsWorkflowToBlocked(t *testin
 	}
 }
 
+// TestTransitionSkipped_TargetUnknown closes the silent-skip gap from
+// issue #345 on the state-machine side: when a transition map points at a
+// state name that doesn't exist in the workflow definition, the evaluator
+// used to log to stderr and return false. It must now publish a structured
+// `TypeTransitionSkipped` event with reason="target_unknown".
+func TestTransitionSkipped_TargetUnknown(t *testing.T) {
+	st := newTestStore(t)
+	rec := &fakeRecorder{}
+	dispatch := make(chan DispatchRequest, 10)
+	// Workflow whose developing state's transition map references a target
+	// state ("ghost") that isn't registered in wf.States.
+	wf := &config.WorkflowConfig{
+		Name:       "phantom-flow",
+		MaxRetries: 2,
+		Trigger:    config.WorkflowTrigger{IssueLabel: "workbuddy"},
+		States: map[string]*config.State{
+			"developing": {
+				EnterLabel:  "status:developing",
+				Agent:       "dev-agent",
+				Transitions: map[string]string{"status:phantom": "ghost"},
+			},
+		},
+	}
+	sm := NewStateMachine(
+		map[string]*config.WorkflowConfig{"phantom-flow": wf},
+		st,
+		dispatch,
+		rec,
+		nil,
+	)
+
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
+		Type:     poller.EventLabelAdded,
+		Repo:     "test/repo",
+		IssueNum: 401,
+		Labels:   []string{"workbuddy", "status:developing"},
+		Detail:   "status:phantom",
+	}); err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+
+	got := rec.find(eventlog.TypeTransitionSkipped)
+	if len(got) != 1 {
+		t.Fatalf("expected exactly one %s event, got %d", eventlog.TypeTransitionSkipped, len(got))
+	}
+	payload, ok := got[0].Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", got[0].Payload)
+	}
+	if payload["reason"] != "target_unknown" {
+		t.Fatalf("payload.reason = %v, want target_unknown", payload["reason"])
+	}
+	if payload["from_state"] != "developing" {
+		t.Fatalf("payload.from_state = %v, want developing", payload["from_state"])
+	}
+	if payload["target_state"] != "ghost" {
+		t.Fatalf("payload.target_state = %v, want ghost", payload["target_state"])
+	}
+	if payload["added_label"] != "status:phantom" {
+		t.Fatalf("payload.added_label = %v, want status:phantom", payload["added_label"])
+	}
+}
+
+// TestTransitionSkipped_NotAllowed exercises the other silent-skip branch:
+// the developing state declares a `synthesizing` target, but
+// transitionAllowedForState rejects the transition for rollouts <= 1. The
+// evaluator must emit `TypeTransitionSkipped` with reason="transition_not_allowed".
+func TestTransitionSkipped_NotAllowed(t *testing.T) {
+	st := newTestStore(t)
+	rec := &fakeRecorder{}
+	dispatch := make(chan DispatchRequest, 10)
+	// Workflow where developing has a synthesizing target. With rollouts=1
+	// (default), transitionAllowedForState rejects transitions to
+	// synthesizing because the guard requires rollouts > 1.
+	wf := &config.WorkflowConfig{
+		Name:       "synth-flow",
+		MaxRetries: 2,
+		Trigger:    config.WorkflowTrigger{IssueLabel: "workbuddy"},
+		States: map[string]*config.State{
+			"developing": {
+				EnterLabel: "status:developing",
+				Agent:      "dev-agent",
+				Transitions: map[string]string{
+					"status:synthesizing": "synthesizing",
+					"status:reviewing":    "reviewing",
+				},
+			},
+			"synthesizing": {
+				EnterLabel: "status:synthesizing",
+			},
+			"reviewing": {
+				EnterLabel: "status:reviewing",
+			},
+		},
+	}
+	sm := NewStateMachine(
+		map[string]*config.WorkflowConfig{"synth-flow": wf},
+		st,
+		dispatch,
+		rec,
+		nil,
+	)
+
+	if err := sm.HandleEvent(context.Background(), ChangeEvent{
+		Type:     poller.EventLabelAdded,
+		Repo:     "test/repo",
+		IssueNum: 402,
+		Labels:   []string{"workbuddy", "status:developing"},
+		Detail:   "status:synthesizing",
+	}); err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+
+	got := rec.find(eventlog.TypeTransitionSkipped)
+	if len(got) != 1 {
+		t.Fatalf("expected exactly one %s event, got %d", eventlog.TypeTransitionSkipped, len(got))
+	}
+	payload, ok := got[0].Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", got[0].Payload)
+	}
+	if payload["reason"] != "transition_not_allowed" {
+		t.Fatalf("payload.reason = %v, want transition_not_allowed", payload["reason"])
+	}
+	if payload["from_state"] != "developing" {
+		t.Fatalf("payload.from_state = %v, want developing", payload["from_state"])
+	}
+	if payload["target_state"] != "synthesizing" {
+		t.Fatalf("payload.target_state = %v, want synthesizing", payload["target_state"])
+	}
+	if payload["added_label"] != "status:synthesizing" {
+		t.Fatalf("payload.added_label = %v, want status:synthesizing", payload["added_label"])
+	}
+	// No real transition should have been recorded.
+	if got := rec.find(eventlog.TypeTransition); len(got) != 0 {
+		t.Fatalf("expected zero transition events, got %d", len(got))
+	}
+}
+
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }

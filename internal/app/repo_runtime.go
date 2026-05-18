@@ -271,6 +271,8 @@ func (pm *PollerManager) StartOrUpdate(rec store.RepoRegistrationRecord) error {
 	depResolver := dependency.NewResolver(pm.store, pm.ghReader, pm.eventlog, pm.alertBus)
 	rt := router.NewRouter(cfg.Agents, pm.registry, pm.store, rec.Repo, pm.repoRoot, nil, nil, false)
 	rt.SetWorkflows(cfg.Workflows)
+	// Surface router-side silent skips via the shared eventlog (REQ-149 / #345).
+	rt.SetEventRecorder(pm.eventlog)
 	if issueDataReader, ok := pm.ghReader.(router.IssueDataReader); ok {
 		rt.SetIssueDataReader(issueDataReader)
 	}
