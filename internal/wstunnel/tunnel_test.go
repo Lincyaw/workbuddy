@@ -269,6 +269,125 @@ func TestKeepaliveDisabledByNegativeInterval(t *testing.T) {
 	}
 }
 
+// TestLargePayloadSurvivesDefaultReadLimit pins the #345 Wave 7 fix:
+// the sessionproxy fan-out routes JSON listing payloads through this
+// tunnel, and a production worker with a few hundred sessions easily
+// emits >32 KiB in a single GET /api/v1/sessions response. Pre-fix the
+// underlying coder/websocket Conn capped reads at its 32 KiB default,
+// so the tunnel tore down with "websocket: message too big: read
+// limited at 32769 bytes". This test exercises BOTH directions of the
+// tunnel inside one Endpoint.Do call:
+//
+//   - client → server: the request body is 100 KiB; the worker-side
+//     ServeRequests path must DecodeFrame it (server-side Read), which
+//     means the server-side conn's read limit covers it.
+//
+//   - server → client: the handler responds with a 100 KiB body; the
+//     client-side Run loop must DecodeFrame the response, which means
+//     the client-side conn's read limit covers it.
+//
+// If either side were missing the SetReadLimit bump the test would
+// fail; the symmetric application inside NewEndpoint is the whole
+// point of doing it there rather than at the call sites.
+func TestLargePayloadSurvivesDefaultReadLimit(t *testing.T) {
+	t.Parallel()
+	const size = 100 * 1024
+	want := bytes.Repeat([]byte("A"), size)
+	ep, cleanup := tunnelPair(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+			return
+		}
+		if len(got) != size {
+			t.Errorf("request body length = %d, want %d", len(got), size)
+			return
+		}
+		// Echo back a 100 KiB response so the client-side Run loop
+		// also has to read >32 KiB in a single frame.
+		_, _ = w.Write(bytes.Repeat([]byte("B"), size))
+	}))
+	defer cleanup()
+
+	req, _ := http.NewRequest(http.MethodPost, "http://worker/big", bytes.NewReader(want))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := ep.Do(ctx, req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if len(body) != size {
+		t.Fatalf("response body length = %d, want %d", len(body), size)
+	}
+	if !bytes.Equal(body, bytes.Repeat([]byte("B"), size)) {
+		t.Fatal("response body content mismatch")
+	}
+}
+
+// TestSmallReadLimitRejectsLargePayload is the RED-state companion to
+// TestLargePayloadSurvivesDefaultReadLimit: it tightens both ends back
+// to the upstream library's 32 KiB default via SetReadLimit, then sends
+// the same 100 KiB request and asserts the tunnel surfaces an error
+// rather than silently succeeding. This pins the underlying mechanism
+// (the upstream Conn read cap is what blew up production) and proves
+// that NewEndpoint's DefaultReadLimit bump is load-bearing — drop it
+// and this test plus the one above flip places.
+func TestSmallReadLimitRejectsLargePayload(t *testing.T) {
+	t.Parallel()
+	const size = 100 * 1024
+	// Custom pair so we can SetReadLimit on BOTH endpoints before any
+	// frames are exchanged. tunnelPair already disables keepalive.
+	serverEPCh := make(chan *Endpoint, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			t.Errorf("accept: %v", err)
+			return
+		}
+		ep := NewEndpoint(c)
+		ep.SetKeepalive(-1, 0)
+		ep.SetReadLimit(32 * 1024)
+		serverEPCh <- ep
+		go ep.ServeRequests(r.Context(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			_, _ = w.Write(body)
+		}))
+		_ = ep.Run(r.Context())
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	c, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	clientEP := NewEndpoint(c)
+	clientEP.SetKeepalive(-1, 0)
+	clientEP.SetReadLimit(32 * 1024)
+	go func() { _ = clientEP.Run(context.Background()) }()
+	defer func() { _ = clientEP.Close() }()
+	select {
+	case <-serverEPCh:
+	case <-ctx.Done():
+		t.Fatalf("server endpoint not ready: %v", ctx.Err())
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, "http://worker/big", bytes.NewReader(bytes.Repeat([]byte("A"), size)))
+	resp, err := clientEP.Do(ctx, req)
+	if err == nil {
+		// If Do somehow returned without error, the response stream
+		// itself must have been truncated/closed by the limit. Read
+		// the body to consume any partial state, then fail loudly.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		t.Fatal("expected Do to fail when both ends cap reads at 32 KiB, got nil")
+	}
+}
+
 func TestRegistryRemoveOnlyCurrentTunnel(t *testing.T) {
 	r := NewRegistry()
 	ep1 := NewEndpoint(nil)
