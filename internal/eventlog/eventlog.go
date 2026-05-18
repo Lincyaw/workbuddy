@@ -105,6 +105,16 @@ const (
 	// {task_id, repo, issue_num, agent, worker_id, last_heartbeat_at, reason}
 	// where reason is currently always "no_heartbeat". See REQ-151.
 	TypeTaskReaped = "task_reaped"
+	// TypeIssueResynced is the eventlog twin of poller.EventIssueResynced
+	// (REQ-150 / #345). It is emitted by the state machine only when a
+	// snapshot resync passes both the inflight and active-task guards and
+	// actually leads to a dispatch — suppressed resyncs surface as
+	// TypeDispatchSkippedInflight instead. This keeps audit volume bounded
+	// on a busy coordinator. Payload schema:
+	//   {workflow: string, state: string, labels: []string, author: string, title: string}
+	// Operators looking at `workbuddy status --events` use this to correlate
+	// post-restart dispatches with the snapshot that triggered them.
+	TypeIssueResynced = "issue_resynced"
 )
 
 // AllEventTypes lists every recognised event type.
@@ -160,6 +170,7 @@ var AllEventTypes = []string{
 	TypeDispatchSkippedAgentNotFound,
 	TypeTransitionSkipped,
 	TypeTaskReaped,
+	TypeIssueResynced,
 }
 
 // EventFilter specifies optional criteria for querying events.

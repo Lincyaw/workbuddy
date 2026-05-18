@@ -80,6 +80,34 @@ func drain(ch <-chan ChangeEvent, timeout time.Duration) []ChangeEvent {
 	}
 }
 
+// drainFilter is drain() but also skips the listed event types. Used by
+// tests that want to assert on pre-REQ-150 behaviour (label changes,
+// PR transitions) without having to thread the snapshot resync event
+// through every existing assertion.
+func drainFilter(ch <-chan ChangeEvent, timeout time.Duration, skip ...string) []ChangeEvent {
+	skipSet := make(map[string]bool, len(skip))
+	for _, s := range skip {
+		skipSet[s] = true
+	}
+	var out []ChangeEvent
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				return out
+			}
+			if ev.Type == EventPollCycleDone || skipSet[ev.Type] {
+				continue
+			}
+			out = append(out, ev)
+		case <-timer.C:
+			return out
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -158,7 +186,7 @@ func TestLabelAddedRemoved(t *testing.T) {
 		_ = p.Run(ctx)
 	}()
 
-	events := drain(p.Events(), 500*time.Millisecond)
+	events := drainFilter(p.Events(), 500*time.Millisecond, EventIssueResynced)
 	cancel()
 
 	if len(events) != 2 {
@@ -205,7 +233,10 @@ func TestNoChangeNoDuplicate(t *testing.T) {
 		_ = p.Run(ctx)
 	}()
 
-	events := drain(p.Events(), 500*time.Millisecond)
+	// Filter out the periodic snapshot resync (REQ-150) — this test
+	// asserts the diff-only behaviour: no label diff means no
+	// label_added/removed events.
+	events := drainFilter(p.Events(), 500*time.Millisecond, EventIssueResynced)
 	cancel()
 
 	if len(events) != 0 {
@@ -419,11 +450,10 @@ func TestCrashRecovery_FullSync(t *testing.T) {
 	events := drain(p.Events(), 500*time.Millisecond)
 	cancel()
 
-	// Expect: label_added "wontfix" for issue 1, issue_created for issue 2.
-	if len(events) != 2 {
-		t.Fatalf("expected 2 events, got %d: %+v", len(events), events)
-	}
-
+	// Expect: label_added "wontfix" for issue 1, issue_created for issue 2,
+	// plus an EventIssueResynced for issue 1 (REQ-150 / #345 — the
+	// snapshot resync fires for every cached issue with labels at the
+	// first opportunity after restart).
 	types := map[string]bool{}
 	for _, ev := range events {
 		types[ev.Type] = true
@@ -433,6 +463,12 @@ func TestCrashRecovery_FullSync(t *testing.T) {
 	}
 	if !types[EventIssueCreated] {
 		t.Error("expected issue_created event")
+	}
+	if !types[EventIssueResynced] {
+		t.Error("expected issue_resynced event for cached issue 1")
+	}
+	if len(events) != 3 {
+		t.Fatalf("expected 3 events (label_added, issue_created, issue_resynced), got %d: %+v", len(events), events)
 	}
 }
 
@@ -755,6 +791,124 @@ func collectAll(ch <-chan ChangeEvent, quiet time.Duration) []ChangeEvent {
 			return out
 		}
 	}
+}
+
+// TestPollerEmitsResyncForKnownIssue exercises the snapshot-resync gate
+// (REQ-150 / #345). A known issue (already in the cache) carrying labels
+// should fire EventIssueResynced once per resyncInterval — never on
+// first-seen (that path emits EventIssueCreated), never within the
+// interval, and again once the interval elapses.
+func TestPollerEmitsResyncForKnownIssue(t *testing.T) {
+	st := testStore(t)
+	gh := &mockGHReader{
+		issues: []Issue{
+			{Number: 7, Title: "review", State: "open",
+				Labels: []string{"workbuddy", "status:reviewing"},
+				Author: "alice"},
+		},
+	}
+	p := NewPoller(gh, st, "owner/repo", time.Hour)
+
+	// Drive the clock manually so we control the gate deterministically.
+	clockMu := struct {
+		now time.Time
+	}{now: time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)}
+	p.SetClock(func() time.Time { return clockMu.now })
+	p.SetResyncInterval(5 * time.Minute)
+
+	// Cycle 1: first sighting — must emit EventIssueCreated, NOT resync.
+	p.poll(context.Background())
+	c1 := drain(p.Events(), 200*time.Millisecond)
+	created, resync := countByType(c1, EventIssueCreated, EventIssueResynced)
+	if created != 1 {
+		t.Fatalf("cycle 1: want 1 issue_created, got %d (events=%+v)", created, c1)
+	}
+	if resync != 0 {
+		t.Fatalf("cycle 1: want 0 issue_resynced (first sighting), got %d (events=%+v)", resync, c1)
+	}
+
+	// Cycle 2: still inside the resyncInterval — must NOT emit resync.
+	clockMu.now = clockMu.now.Add(1 * time.Minute)
+	p.poll(context.Background())
+	c2 := drain(p.Events(), 200*time.Millisecond)
+	_, resync = countByType(c2, EventIssueCreated, EventIssueResynced)
+	if resync != 0 {
+		t.Fatalf("cycle 2: want 0 issue_resynced inside interval, got %d (events=%+v)", resync, c2)
+	}
+
+	// Cycle 3: interval elapsed — must emit exactly one resync.
+	clockMu.now = clockMu.now.Add(5 * time.Minute)
+	p.poll(context.Background())
+	c3 := drain(p.Events(), 200*time.Millisecond)
+	created, resync = countByType(c3, EventIssueCreated, EventIssueResynced)
+	if created != 0 {
+		t.Fatalf("cycle 3: want 0 issue_created, got %d (events=%+v)", created, c3)
+	}
+	if resync != 1 {
+		t.Fatalf("cycle 3: want 1 issue_resynced, got %d (events=%+v)", resync, c3)
+	}
+	// Sanity-check payload carries labels and author.
+	for _, ev := range c3 {
+		if ev.Type != EventIssueResynced {
+			continue
+		}
+		if ev.IssueNum != 7 {
+			t.Errorf("resync issue num = %d, want 7", ev.IssueNum)
+		}
+		if ev.Author != "alice" {
+			t.Errorf("resync author = %q, want alice", ev.Author)
+		}
+		if len(ev.Labels) != 2 {
+			t.Errorf("resync labels = %v, want [workbuddy status:reviewing]", ev.Labels)
+		}
+	}
+}
+
+// TestPollerSkipsResyncWhenLabelsEmpty: issues without labels are not
+// eligible for resync (no workflow trigger label can match anyway). This
+// keeps the snapshot stream from spamming the state machine with
+// no-op events for arbitrary repo issues.
+func TestPollerSkipsResyncWhenLabelsEmpty(t *testing.T) {
+	st := testStore(t)
+	gh := &mockGHReader{
+		issues: []Issue{
+			{Number: 8, Title: "no labels", State: "open", Labels: nil, Author: "bob"},
+		},
+	}
+	p := NewPoller(gh, st, "owner/repo", time.Hour)
+
+	clockNow := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	p.SetClock(func() time.Time { return clockNow })
+	p.SetResyncInterval(1 * time.Nanosecond) // interval as small as possible
+
+	// First poll registers the issue.
+	p.poll(context.Background())
+	drain(p.Events(), 100*time.Millisecond)
+
+	// Advance clock and re-poll. Even though the interval has elapsed,
+	// no resync should fire because the issue has no labels.
+	clockNow = clockNow.Add(1 * time.Hour)
+	p.poll(context.Background())
+	c2 := drain(p.Events(), 100*time.Millisecond)
+	for _, ev := range c2 {
+		if ev.Type == EventIssueResynced {
+			t.Fatalf("expected no resync for label-less issue, got %+v", ev)
+		}
+	}
+}
+
+// countByType returns the count of events of each requested type.
+func countByType(events []ChangeEvent, a, b string) (int, int) {
+	var ca, cb int
+	for _, ev := range events {
+		switch ev.Type {
+		case a:
+			ca++
+		case b:
+			cb++
+		}
+	}
+	return ca, cb
 }
 
 func TestMain(m *testing.M) {

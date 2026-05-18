@@ -239,21 +239,64 @@ func TestRestartIssueRedispatchesOnNextPoll(t *testing.T) {
 			"developing": {EnterLabel: "status:developing", Agent: "dev-agent"},
 		},
 	}
-	dispatchCh := make(chan statemachine.DispatchRequest, 1)
+	dispatchCh := make(chan statemachine.DispatchRequest, 2)
 	sm := statemachine.NewStateMachine(map[string]*config.WorkflowConfig{"dev-flow": workflow}, st, dispatchCh, eventlog.NewEventLogger(st), nil)
 
-	applyPollerEvents(t, sm, runSinglePoll(t, poller.NewPoller(gh, st, repo, time.Hour)))
+	// Reuse a SINGLE poller across both polls so lastResyncAt persists.
+	// After the first cycle the resync gate is set; with the interval at
+	// 1h the second cycle will NOT emit EventIssueResynced. That makes the
+	// second dispatch load-bearing on runRestartIssueStore: it deletes the
+	// issue cache row, so the next poll sees wasCached=false and emits
+	// EventIssueCreated, which is what re-triggers the dispatch.
+	// Interval is intentionally generous (500ms) so the test has time to
+	// drain cycle-1 events, run runRestartIssueStore, and prepare to read
+	// cycle-2 events before the next tick fires. resyncInterval is set to
+	// 1h so the second poll's resync gate is still active — any cycle-2
+	// dispatch must come from the cache-cleared EventIssueCreated path,
+	// not a re-emitted resync.
+	p := poller.NewPoller(gh, st, repo, 500*time.Millisecond)
+	p.SetResyncInterval(time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- p.Run(ctx) }()
+
+	// Drain the first poll cycle. REQ-150 (#345) means the first cycle
+	// fires EventIssueResynced (issue is already cached with labels) and
+	// dispatches dev-agent.
+	first := drainUntilCycleDone(t, p.Events(), 2*time.Second)
+	if !containsEventType(first, poller.EventIssueResynced) {
+		t.Fatalf("first poll missing EventIssueResynced: %+v", first)
+	}
+	applyPollerEvents(t, sm, first)
 	select {
 	case req := <-dispatchCh:
-		t.Fatalf("unexpected dispatch before restart-issue: %+v", req)
-	default:
+		if req.AgentName != "dev-agent" {
+			t.Fatalf("expected dev-agent dispatch from REQ-150 resync, got %+v", req)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected REQ-150 resync dispatch on first poll")
 	}
+	// Mark the resync dispatch complete so the next dispatch path is unblocked.
+	sm.MarkAgentCompleted(repo, issueNum, "", "dev-agent", 0, []string{"workbuddy", "status:developing"})
 
 	if _, err := runRestartIssueStore(st, repo, issueNum, "test"); err != nil {
 		t.Fatalf("runRestartIssueStore: %v", err)
 	}
 
-	applyPollerEvents(t, sm, runSinglePoll(t, poller.NewPoller(gh, st, repo, time.Hour)))
+	// Drain the second poll cycle. Because the resync gate is fresh from
+	// cycle 1, EventIssueResynced MUST NOT appear; the only path to a new
+	// dispatch is EventIssueCreated triggered by runRestartIssueStore
+	// having deleted the cache row. Asserting on both the event kind and
+	// the dispatch makes the restart-issue side effect load-bearing.
+	second := drainUntilCycleDone(t, p.Events(), 3*time.Second)
+	if containsEventType(second, poller.EventIssueResynced) {
+		t.Fatalf("second poll unexpectedly fired EventIssueResynced — resync gate failed: %+v", second)
+	}
+	if !containsEventType(second, poller.EventIssueCreated) {
+		t.Fatalf("second poll missing EventIssueCreated — restart-issue did not clear cache: %+v", second)
+	}
+	applyPollerEvents(t, sm, second)
 	select {
 	case req := <-dispatchCh:
 		if req.Repo != repo || req.IssueNum != issueNum || req.AgentName != "dev-agent" {
@@ -262,6 +305,44 @@ func TestRestartIssueRedispatchesOnNextPoll(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("expected dispatch after restart-issue")
 	}
+
+	cancel()
+	if err := <-runErr; err != nil {
+		t.Fatalf("poller run: %v", err)
+	}
+}
+
+// drainUntilCycleDone reads events from ch until it sees an
+// EventPollCycleDone, and returns everything that preceded it (excluding the
+// terminator). Used by tests that drive multiple poll cycles through a single
+// long-lived Poller.
+func drainUntilCycleDone(t *testing.T, ch <-chan poller.ChangeEvent, timeout time.Duration) []poller.ChangeEvent {
+	t.Helper()
+	deadline := time.After(timeout)
+	var events []poller.ChangeEvent
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatalf("poller events channel closed before cycle done; got %+v", events)
+			}
+			if ev.Type == poller.EventPollCycleDone {
+				return events
+			}
+			events = append(events, ev)
+		case <-deadline:
+			t.Fatalf("drainUntilCycleDone: timed out after %s; got %+v", timeout, events)
+		}
+	}
+}
+
+func containsEventType(events []poller.ChangeEvent, typ string) bool {
+	for _, ev := range events {
+		if ev.Type == typ {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRunRestartIssueWithOpts_DryRunHasNoSideEffects(t *testing.T) {

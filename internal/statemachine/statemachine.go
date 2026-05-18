@@ -428,9 +428,45 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 
 	// State-entry detection: dispatch the state agents if:
 	// 1. label_added matches the current state's enter_label (label just changed), OR
-	// 2. issue_created and the issue already has a state label with agents (first seen)
+	// 2. issue_created and the issue already has a state label with agents (first seen), OR
+	// 3. issue_resynced — periodic snapshot from the poller, gated by the
+	//    extra idempotency guards below (inflight group, active task row).
+	//    See REQ-150 / #345: closes the silent-stall after coordinator
+	//    restart where the cache is rebuilt in sync with GitHub and no
+	//    natural label_added / issue_created fires.
 	stateEntryDetected := (event.Type == poller.EventLabelAdded && event.Detail == currentState.EnterLabel) ||
-		(event.Type == poller.EventIssueCreated)
+		(event.Type == poller.EventIssueCreated) ||
+		(event.Type == poller.EventIssueResynced)
+
+	// Resync gating: a snapshot resync must never cause a double-dispatch.
+	// Skip if an inflight dispatch group already exists for this issue, or
+	// if a pending/running task row is sitting in the queue for it.
+	if event.Type == poller.EventIssueResynced && stateEntryDetected && sm.stateHasAgents(currentState) {
+		if sm.IsInflight(event.Repo, event.IssueNum) {
+			sm.eventlog.Log(eventlog.TypeDispatchSkippedInflight, event.Repo, event.IssueNum, map[string]any{
+				"state":   currentStateName,
+				"source":  "resync",
+				"reason":  "inflight",
+				"trigger": event.Type,
+			})
+			return nil
+		}
+		if sm.store != nil {
+			active, err := sm.store.HasAnyActiveTask(event.Repo, event.IssueNum)
+			if err != nil {
+				log.Printf("[statemachine] resync HasAnyActiveTask for %s#%d: %v", event.Repo, event.IssueNum, err)
+			} else if active {
+				sm.eventlog.Log(eventlog.TypeDispatchSkippedInflight, event.Repo, event.IssueNum, map[string]any{
+					"state":   currentStateName,
+					"source":  "resync",
+					"reason":  "active_task",
+					"trigger": event.Type,
+				})
+				return nil
+			}
+		}
+	}
+
 	if stateEntryDetected && sm.stateHasAgents(currentState) {
 		log.Printf("[statemachine] state entry detected: %s#%d entered %q, candidate agents=%q",
 			event.Repo, event.IssueNum, currentStateName, sm.stateAgents(currentState))
@@ -455,12 +491,17 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 		// REQ-085: orchestrator-level dev↔review cycle counter and cap.
 		// Production state changes flow through the state-entry branch (agents
 		// flip labels atomically), so this is where we count round-trips.
-		blocked, err := sm.applyDevReviewCycleCap(ctx, wf, event.Repo, event.IssueNum, currentStateName)
-		if err != nil {
-			return err
-		}
-		if blocked {
-			return nil
+		// Snapshot resyncs (REQ-150) are NOT real state changes — they fire
+		// periodically against an issue already sitting in the same state —
+		// so they must not advance the cycle counter or trip the cap.
+		if event.Type != poller.EventIssueResynced {
+			blocked, err := sm.applyDevReviewCycleCap(ctx, wf, event.Repo, event.IssueNum, currentStateName)
+			if err != nil {
+				return err
+			}
+			if blocked {
+				return nil
+			}
 		}
 
 		// Persist the new current state so future cycles can compare against it.
@@ -472,6 +513,21 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 			if err := sm.store.TouchIssueFirstDispatch(event.Repo, event.IssueNum); err != nil {
 				log.Printf("[statemachine] touch first dispatch for %s#%d: %v", event.Repo, event.IssueNum, err)
 			}
+		}
+
+		// Snapshot resync audit: emit only when a resync actually leads to a
+		// dispatch (i.e. both the inflight and active-task guards above
+		// passed). Suppressed resyncs are already covered by
+		// TypeDispatchSkippedInflight, so logging here would double up the
+		// audit volume on a busy coordinator without adding signal.
+		if event.Type == poller.EventIssueResynced {
+			sm.eventlog.Log(eventlog.TypeIssueResynced, event.Repo, event.IssueNum, map[string]any{
+				"workflow": wf.Name,
+				"state":    currentStateName,
+				"labels":   append([]string(nil), event.Labels...),
+				"author":   event.Author,
+				"title":    event.Detail,
+			})
 		}
 
 		return sm.dispatchStateAgents(ctx, event.Repo, event.IssueNum, wf, priorStateName, currentStateName, currentState, event.Labels)

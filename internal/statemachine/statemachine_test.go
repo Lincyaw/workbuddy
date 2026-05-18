@@ -1883,6 +1883,133 @@ func TestTransitionSkipped_NotAllowed(t *testing.T) {
 	}
 }
 
+// TestStateMachineDispatchesOnResync exercises the snapshot-resync
+// state-entry path (REQ-150 / #345): a periodic EventIssueResynced
+// against an issue sitting in `reviewing` should dispatch the
+// review-agent when no work is currently in flight, AND a follow-up
+// resync while the dispatch is still inflight must NOT cause a
+// second dispatch.
+func TestStateMachineDispatchesOnResync(t *testing.T) {
+	sm, rec, dispatch := newTestSM(t)
+	repo := "test/repo"
+	issueNum := 4242
+
+	// Seed an issue cache row + workflow_instance row so the state
+	// machine treats this as "already in reviewing". We can rely on
+	// the fact that the state machine derives current state purely
+	// from event.Labels, so we just feed the resync event directly.
+	resync := ChangeEvent{
+		Type:     poller.EventIssueResynced,
+		Repo:     repo,
+		IssueNum: issueNum,
+		Labels:   []string{"workbuddy", "status:reviewing"},
+		Detail:   "snapshot",
+		Author:   "alice",
+	}
+
+	if err := sm.HandleEvent(context.Background(), resync); err != nil {
+		t.Fatalf("HandleEvent (1st resync): %v", err)
+	}
+
+	// First resync must dispatch the review-agent.
+	select {
+	case req := <-dispatch:
+		if req.AgentName != "review-agent" {
+			t.Fatalf("first resync dispatch agent = %q, want review-agent", req.AgentName)
+		}
+		if req.State != "reviewing" {
+			t.Fatalf("first resync dispatch state = %q, want reviewing", req.State)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected a dispatch on the first resync event, got none")
+	}
+
+	// Eventlog should have the resync audit + state_entry markers.
+	if len(rec.find(eventlog.TypeIssueResynced)) != 1 {
+		t.Fatalf("expected one issue_resynced eventlog entry, got %d", len(rec.find(eventlog.TypeIssueResynced)))
+	}
+	if len(rec.find(eventlog.TypeStateEntry)) != 1 {
+		t.Fatalf("expected one state_entry eventlog entry, got %d", len(rec.find(eventlog.TypeStateEntry)))
+	}
+
+	// Reset dedup so the next event is not idempotently swallowed.
+	sm.ResetDedup()
+
+	// Second resync — agent is still inflight. Must NOT dispatch again.
+	if err := sm.HandleEvent(context.Background(), resync); err != nil {
+		t.Fatalf("HandleEvent (2nd resync): %v", err)
+	}
+	select {
+	case req := <-dispatch:
+		t.Fatalf("second resync should not dispatch while inflight, got %+v", req)
+	case <-time.After(100 * time.Millisecond):
+		// good
+	}
+	skips := rec.find(eventlog.TypeDispatchSkippedInflight)
+	if len(skips) == 0 {
+		t.Fatalf("expected a dispatch_skipped_inflight eventlog entry on inflight resync")
+	}
+
+	// Now the agent reports completion (labels unchanged — review-agent
+	// has not yet posted its verdict; the resync remains the only way
+	// the state machine would dispatch it again).
+	sm.MarkAgentCompleted(repo, issueNum, "", "review-agent", 0, []string{"workbuddy", "status:reviewing"})
+	sm.ResetDedup()
+
+	// Third resync, after completion — must dispatch again so the
+	// stalled issue gets unwedged.
+	if err := sm.HandleEvent(context.Background(), resync); err != nil {
+		t.Fatalf("HandleEvent (3rd resync): %v", err)
+	}
+	select {
+	case req := <-dispatch:
+		if req.AgentName != "review-agent" {
+			t.Fatalf("post-completion resync dispatch agent = %q, want review-agent", req.AgentName)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected a dispatch on the post-completion resync, got none")
+	}
+}
+
+// TestResyncDoesNotAdvanceCycleCounter verifies that periodic snapshot
+// resyncs do not tick the dev↔review cycle counter (REQ-150).
+// Otherwise an idle issue parked in `developing` would eventually hit
+// the cycle cap with no actual round-trips happening.
+func TestResyncDoesNotAdvanceCycleCounter(t *testing.T) {
+	sm, rec, dispatch := newTestSM(t)
+	repo := "test/repo"
+	issueNum := 5050
+
+	// Resync into developing — no prior reviewing state, no count.
+	for i := 0; i < 3; i++ {
+		ev := ChangeEvent{
+			Type:     poller.EventIssueResynced,
+			Repo:     repo,
+			IssueNum: issueNum,
+			Labels:   []string{"workbuddy", "status:developing"},
+			Detail:   "snapshot",
+		}
+		if err := sm.HandleEvent(context.Background(), ev); err != nil {
+			t.Fatalf("HandleEvent (resync %d): %v", i, err)
+		}
+		// Drain whichever dispatch comes back so the next cycle isn't blocked.
+		select {
+		case <-dispatch:
+		case <-time.After(200 * time.Millisecond):
+		}
+		sm.MarkAgentCompleted(repo, issueNum, "", "dev-agent", 0, []string{"workbuddy", "status:developing"})
+		sm.ResetDedup()
+	}
+
+	// Cap-reached events should not appear.
+	if got := rec.find(eventlog.TypeDevReviewCycleCount); len(got) != 0 {
+		t.Fatalf("expected zero dev_review_cycle_count events on resync, got %d", len(got))
+	}
+	if got := rec.find(eventlog.TypeDevReviewCycleCapReached); len(got) != 0 {
+		t.Fatalf("expected zero dev_review_cycle_cap_reached events on resync, got %d", len(got))
+	}
+}
+
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }

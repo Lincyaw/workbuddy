@@ -5889,3 +5889,70 @@ requirements:
       - internal/app/task_reaper_test.go
     deps:
       - REQ-022
+
+  - id: REQ-150
+    title: Periodic snapshot resync closes silent-stall after coordinator restart (REQ-150 / #345)
+    description: >
+      Issue #345 root cause #1: after a coordinator restart, the poller's
+      first sweep against GitHub rebuilds the in-memory cache so it is
+      already in sync with what GitHub shows. No EventLabelAdded /
+      EventIssueCreated fires, the state machine never reconsiders the
+      issue, and any issue that was sitting in an actionable state (e.g.
+      status:reviewing) silently stalls until a human nudges a label.
+
+      Fix: the poller now emits a new event type EventIssueResynced as
+      a snapshot for every issue observed during a poll cycle that
+        (a) carries a non-empty Labels slice,
+        (b) was already in the cache (first-seen still emits
+            EventIssueCreated, which we seed the gate against), and
+        (c) was last resynced no more recently than resyncInterval
+            (default 5 minutes; configurable via SetResyncInterval).
+
+      The state machine treats EventIssueResynced as state-entry but
+      with two extra idempotency guards so a resync can never cause
+      double-dispatch:
+        1. IsInflight(repo, issueNum) returns true → emit
+           TypeDispatchSkippedInflight with source=resync and skip.
+        2. store.HasAnyActiveTask(repo, issueNum) returns true → same.
+
+      Resync events are explicitly excluded from applyDevReviewCycleCap,
+      so an idle issue parked in `developing` does not accumulate
+      phantom dev↔review cycles and trip the cap.
+
+      The poller's resync gate stores per-issue last-emit timestamps in
+      memory (single Run() goroutine, no lock needed) and seeds the gate
+      for first-sighting issues so the cycle following EventIssueCreated
+      does not immediately fire a redundant snapshot.
+
+      Eventlog gains TypeIssueResynced as the audit twin so
+      `workbuddy status --events` shows the cadence and operators can
+      correlate post-restart dispatches with the snapshot that woke them.
+
+      The native processedEvents dedup keys
+      `repo#issue#type#detail` already de-duplicate resync events
+      observed inside a single processing window, and Poll cycle done
+      semantics are unchanged — resync events are appended AFTER label
+      change events in the pending queue and inherit the existing
+      phase-1-abort-on-error guarantee.
+    priority: P1
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-150-1: internal/poller/poller.go exports EventIssueResynced, DefaultResyncInterval, SetResyncInterval, and SetClock; Poller emits EventIssueResynced only for cached issues with labels and only when resyncInterval has elapsed since last emit."
+      - "AC-150-2: First-seen issues are seeded into the resync gate so the cycle immediately following EventIssueCreated does not fire a redundant EventIssueResynced."
+      - "AC-150-3: poll()'s phase-1-abort-on-error guarantee covers resync events — they live in the same `pending` queue and never reach the events channel when ListIssues / ListPRs / cache reads fail."
+      - "AC-150-4: internal/statemachine/statemachine.go processWorkflowEvent treats EventIssueResynced as state-entry, but skips dispatch when IsInflight or store.HasAnyActiveTask returns true and emits TypeDispatchSkippedInflight with source=resync in those cases."
+      - "AC-150-5: applyDevReviewCycleCap is NOT invoked for EventIssueResynced — an idle issue parked in `developing` does not accumulate phantom round-trips."
+      - "AC-150-6: internal/eventlog/eventlog.go registers TypeIssueResynced in AllEventTypes; the state machine emits a TypeIssueResynced audit record only when a resync passes both idempotency guards (IsInflight + HasAnyActiveTask) and actually dispatches — suppressed resyncs surface as TypeDispatchSkippedInflight, keeping audit volume bounded."
+      - "AC-150-7: TestPollerEmitsResyncForKnownIssue verifies the three-cycle gate behaviour (no resync on first sight, no resync inside interval, exactly one resync after interval elapses)."
+      - "AC-150-8: TestStateMachineDispatchesOnResync verifies dispatch + inflight-skip + post-completion-redispatch sequence, and TestResyncDoesNotAdvanceCycleCounter verifies the cycle counter is untouched by resync events."
+    code:
+      - internal/poller/poller.go
+      - internal/statemachine/statemachine.go
+      - internal/eventlog/eventlog.go
+    tests:
+      - internal/poller/poller_test.go
+      - internal/statemachine/statemachine_test.go
+    deps:
+      - REQ-022
+      - REQ-085

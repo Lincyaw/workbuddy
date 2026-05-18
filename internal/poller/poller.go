@@ -31,11 +31,28 @@ const (
 	EventPRCreated      = "pr_created"
 	EventPRStateChanged = "pr_state_changed"
 	EventIssueClosed    = "issue_closed"
+	// EventIssueResynced is a snapshot-style event emitted periodically for
+	// every known issue that carries labels. It exists to close the
+	// "coordinator restart silent stall" gap (issue #345): after a restart
+	// the in-memory cache is rebuilt by the first poll against GitHub, so no
+	// EventLabelAdded / EventIssueCreated would naturally fire for issues
+	// already in their target state. EventIssueResynced gives the state
+	// machine a periodic opportunity to reconsider eligible issues. The
+	// payload mirrors EventIssueCreated: current Labels slice + Author.
+	//
+	// The state machine treats this as state-entry only when there is no
+	// active dispatch group AND no pending/running task row, so a resync
+	// can never cause a double-dispatch.
+	EventIssueResynced = "issue_resynced"
 	// EventPollCycleDone is emitted at the end of every successful poll cycle.
 	// Consumers use it as a boundary signal — e.g. resetting per-cycle dedup
 	// state — and MUST NOT treat it as a per-issue event (IssueNum is 0).
 	EventPollCycleDone = "poll_cycle_done"
 )
+
+// DefaultResyncInterval is the minimum time between EventIssueResynced
+// emissions for the same issue. See EventIssueResynced doc.
+const DefaultResyncInterval = 5 * time.Minute
 
 // ghListLimit is the maximum number of results returned by gh issue/pr list.
 // When a poll returns this many results, the list may be truncated and close
@@ -109,6 +126,17 @@ type Poller struct {
 	eventlog   EventRecorder
 	backoff    time.Duration
 	maxBackoff time.Duration
+
+	// resyncInterval is the minimum time between EventIssueResynced
+	// emissions for any given issue. Defaults to DefaultResyncInterval.
+	resyncInterval time.Duration
+	// lastResyncAt tracks the last time EventIssueResynced was emitted
+	// for each issue. Accessed only from poll() which runs on the single
+	// Run() goroutine, so no lock is needed.
+	lastResyncAt map[int]time.Time
+	// now is the clock used by the resync gate. Defaults to time.Now;
+	// tests override it via SetClock.
+	now func() time.Time
 }
 
 // NewPoller creates a Poller with the given configuration.
@@ -118,15 +146,36 @@ func NewPoller(gh GHReader, st store.Store, repo string, interval time.Duration)
 		interval = 30 * time.Second
 	}
 	return &Poller{
-		gh:         gh,
-		store:      st,
-		repo:       repo,
-		interval:   interval,
-		events:     make(chan ChangeEvent, 256),
-		eventlog:   nil,
-		backoff:    0,
-		maxBackoff: 15 * time.Minute,
+		gh:             gh,
+		store:          st,
+		repo:           repo,
+		interval:       interval,
+		events:         make(chan ChangeEvent, 256),
+		eventlog:       nil,
+		backoff:        0,
+		maxBackoff:     15 * time.Minute,
+		resyncInterval: DefaultResyncInterval,
+		lastResyncAt:   make(map[int]time.Time),
+		now:            time.Now,
 	}
+}
+
+// SetResyncInterval overrides the periodic resync gate. A value <= 0 falls
+// back to DefaultResyncInterval. See EventIssueResynced doc.
+func (p *Poller) SetResyncInterval(d time.Duration) {
+	if d <= 0 {
+		d = DefaultResyncInterval
+	}
+	p.resyncInterval = d
+}
+
+// SetClock overrides the time source used by the resync gate. Intended for
+// tests; production callers should leave it at the default (time.Now).
+func (p *Poller) SetClock(now func() time.Time) {
+	if now == nil {
+		now = time.Now
+	}
+	p.now = now
 }
 
 // EventRecorder receives lightweight event records from the poller.
@@ -218,11 +267,19 @@ func (p *Poller) poll(ctx context.Context) {
 		return
 	}
 
+	// Track per-issue resync decisions. We can only decide to emit a
+	// snapshot resync for issues that were *already cached* before this
+	// cycle (first-seen issues fire EventIssueCreated instead). Decisions
+	// are appended to pending after the label-change events so that real
+	// state-change events still arrive first in the queue.
+	var resyncCandidates []Issue
+	var firstSightingNumbers []int
+
 	for _, iss := range issues {
 		if ctx.Err() != nil {
 			return
 		}
-		evts, op, ok := p.planDiffIssue(iss)
+		evts, op, wasCached, ok := p.planDiffIssue(iss)
 		if !ok {
 			// Cache query failed; treat as a phase-1 failure and abort
 			// before touching anything so the next cycle can retry.
@@ -231,6 +288,15 @@ func (p *Poller) poll(ctx context.Context) {
 		pending = append(pending, evts...)
 		if op != nil {
 			cacheOps = append(cacheOps, op)
+		}
+		if wasCached && len(iss.Labels) > 0 {
+			resyncCandidates = append(resyncCandidates, iss)
+		} else if !wasCached && len(iss.Labels) > 0 {
+			// First sighting already fires EventIssueCreated. Seed the
+			// resync gate so the next snapshot does not fire until
+			// resyncInterval has elapsed — the create event covers
+			// state-entry for this cycle.
+			firstSightingNumbers = append(firstSightingNumbers, iss.Number)
 		}
 	}
 
@@ -309,9 +375,50 @@ func (p *Poller) poll(ctx context.Context) {
 				if err := p.store.ClearIssuePipelineHazard(p.repo, closedNum); err != nil {
 					log.Printf("[poller] error clearing pipeline hazard for closed issue %s#%d: %v", p.repo, closedNum, err)
 				}
+				// Drop the resync timestamp so a future re-open starts
+				// the gate from scratch.
+				delete(p.lastResyncAt, closedNum)
 				return nil
 			})
 		}
+	}
+
+	// Schedule snapshot resync events for known issues that are eligible:
+	// already in the cache (not first-seen) and carrying labels. The
+	// resyncInterval gate prevents flooding the state machine; the actual
+	// double-dispatch guards live in the state machine itself. Resync
+	// events are appended AFTER label-change events so real state changes
+	// are observed first.
+	now := p.now()
+	for _, iss := range resyncCandidates {
+		last, seen := p.lastResyncAt[iss.Number]
+		if seen && now.Sub(last) < p.resyncInterval {
+			continue
+		}
+		pending = append(pending, ChangeEvent{
+			Type:     EventIssueResynced,
+			Repo:     p.repo,
+			IssueNum: iss.Number,
+			Labels:   iss.Labels,
+			Detail:   iss.Title,
+			Author:   iss.Author,
+		})
+		issueNum := iss.Number
+		cacheOps = append(cacheOps, func() error {
+			p.lastResyncAt[issueNum] = now
+			return nil
+		})
+	}
+	// Seed the resync gate for first-sighting issues so EventIssueCreated
+	// is not immediately followed by an EventIssueResynced on the next
+	// poll cycle. Resync fires only after resyncInterval has elapsed
+	// from the moment the issue first entered the cache.
+	for _, n := range firstSightingNumbers {
+		num := n
+		cacheOps = append(cacheOps, func() error {
+			p.lastResyncAt[num] = now
+			return nil
+		})
 	}
 
 	// All GH reads succeeded. Safe to reset backoff now.
@@ -336,16 +443,20 @@ func (p *Poller) poll(ctx context.Context) {
 // planDiffIssue computes pending change events and a deferred cache-write op
 // for a live issue without mutating the cache. The ok return is false only
 // when querying the cache itself fails — which we treat as a phase-1 failure
-// so the whole cycle can be retried.
-func (p *Poller) planDiffIssue(iss Issue) (events []ChangeEvent, cacheOp func() error, ok bool) {
+// so the whole cycle can be retried. wasCached reports whether the issue was
+// already present in the cache before this cycle; callers use it to decide
+// whether to schedule a snapshot EventIssueResynced for the issue (first-seen
+// issues fire EventIssueCreated instead, so resyncs are skipped on them).
+func (p *Poller) planDiffIssue(iss Issue) (events []ChangeEvent, cacheOp func() error, wasCached bool, ok bool) {
 	labelsJSON := labelsToJSON(iss.Labels)
 
 	cached, err := p.store.QueryIssueCache(p.repo, iss.Number)
 	if err != nil {
 		log.Printf("[poller] error querying cache for %s#%d: %v", p.repo, iss.Number, err)
-		return nil, nil, false
+		return nil, nil, false, false
 	}
 
+	wasCached = cached != nil
 	if cached == nil {
 		events = append(events, ChangeEvent{
 			Type:     EventIssueCreated,
@@ -394,7 +505,7 @@ func (p *Poller) planDiffIssue(iss Issue) (events []ChangeEvent, cacheOp func() 
 		}
 		return nil
 	}
-	return events, cacheOp, true
+	return events, cacheOp, wasCached, true
 }
 
 // planDiffPR computes pending change events and a deferred cache-write op
