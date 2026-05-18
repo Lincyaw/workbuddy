@@ -34,7 +34,12 @@ func TestCoordinatorTunnelSessionProxyEndToEnd(t *testing.T) {
 	}
 	tunnels := wstunnel.NewRegistry()
 	api := &app.FullCoordinatorServer{Store: st, Registry: registry.NewRegistry(st, time.Second), Eventlog: eventlog.NewEventLogger(st), Tunnels: tunnels}
-	proxy := sessionproxy.NewHandler(sessionproxy.HandlerConfig{Resolver: sessionproxy.NewResolver(st), Tunnels: tunnels, PerWorkerTimeout: 500 * time.Millisecond, OverallTimeout: time.Second})
+	// #345 W4-A: sessionproxy now gates tunnel routing on the live
+	// wstunnel registry, not the workers.tunnel column. Mirror the
+	// production wire-up at cmd/coordinator.go: adapt the registry to
+	// sessionproxy.TunnelConnectivity.
+	connectivity := tunnelRegistryAdapter{registry: tunnels}
+	proxy := sessionproxy.NewHandler(sessionproxy.HandlerConfig{Resolver: sessionproxy.NewResolver(st).WithTunnels(connectivity), Tunnels: tunnels, Connectivity: connectivity, PerWorkerTimeout: 500 * time.Millisecond, OverallTimeout: time.Second})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/workers/tunnel", api.HandleWorkerTunnel)
 	mux.HandleFunc("/api/v1/sessions", proxy.ServeHTTP)

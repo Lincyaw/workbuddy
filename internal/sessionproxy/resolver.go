@@ -29,6 +29,30 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
+// TunnelConnectivity reports whether the coordinator currently holds a
+// live WSS reverse-tunnel endpoint for a given worker. *wstunnel.Registry
+// satisfies it via its existing Status method; tests inject a stub.
+//
+// This is the "tunnel ready for routing" signal sessionproxy uses to
+// decide its transport. The legacy WorkerRecord.Tunnel column is NOT
+// the right predicate: it is set once at registration and never updated
+// when a worker reconnects after a network blip, so it lies (#345 W4-A;
+// W3-B fixed the same class of bug on the diagnose surface, but
+// sessionproxy's question is sharper: not "is this worker reachable for
+// dispatch?" but "is the WSS tunnel up right now?", so the heartbeat
+// heuristic isn't quite right either — heartbeats flow regardless of
+// whether the worker advertised a tunnel at registration).
+//
+// In-memory connectivity is the only source of truth, because the
+// coordinator's wstunnel.Registry adds an endpoint when the WSS handshake
+// completes and removes it when the connection closes — which is
+// exactly the lifetime sessionproxy cares about.
+type TunnelConnectivity interface {
+	// Connected reports whether the named worker currently has a WSS
+	// endpoint registered.
+	Connected(workerID string) bool
+}
+
 // Sentinel errors returned by Resolve. Callers turn these into
 // 404 / 503 / fall-back-local responses.
 var (
@@ -58,8 +82,14 @@ type Resolution struct {
 	// Empty when the resolver decides the request should be served
 	// locally (see Local).
 	AuditURL string
-	// Tunnel is true when the worker asked the coordinator to route the
-	// management request through the reverse WebSocket tunnel.
+	// Tunnel is true when the request should be routed through the
+	// coordinator-maintained reverse WebSocket tunnel rather than
+	// directly to AuditURL. Derived from the in-memory tunnel registry
+	// (TunnelConnectivity.Connected) — NOT from the legacy
+	// WorkerRecord.Tunnel column, which is only written at registration
+	// time and lies after a reconnect (#345 W4-A; W3-B fixed the same
+	// class of bug on the diagnose surface using a different predicate
+	// suited to the diagnose question).
 	Tunnel bool
 	// Local is true when the request should fall through to the
 	// coordinator's local audit handler instead of being proxied. Two
@@ -84,6 +114,11 @@ type Resolver struct {
 	// fall-back rule. Always includes the loopbacks; callers can append
 	// the coordinator's external hostname via WithLocalHost.
 	localHosts map[string]struct{}
+	// tunnels reports current WSS tunnel connectivity per worker; nil
+	// when no tunnel registry is wired (e.g. a coordinator launched
+	// without the tunnel listener). When nil, Resolve never routes via
+	// the tunnel — it always picks the audit_url branch.
+	tunnels TunnelConnectivity
 }
 
 // NewResolver constructs a Resolver. The store is used for both the
@@ -96,6 +131,18 @@ func NewResolver(st store.Store) *Resolver {
 	for _, h := range []string{"127.0.0.1", "::1", "localhost", "0.0.0.0"} {
 		r.localHosts[h] = struct{}{}
 	}
+	return r
+}
+
+// WithTunnels wires the in-memory WSS tunnel connectivity used to decide
+// "should this session-view request go through the reverse tunnel?".
+// nil disables tunnel routing entirely (every Resolution.Tunnel will be
+// false). Returns r for chaining.
+func (r *Resolver) WithTunnels(t TunnelConnectivity) *Resolver {
+	if r == nil {
+		return nil
+	}
+	r.tunnels = t
 	return r
 }
 
@@ -187,7 +234,15 @@ func (r *Resolver) Resolve(sessionID string) (*Resolution, error) {
 		// coordinator host — fall back to local before giving up.
 		return &Resolution{WorkerID: workerID, Local: true}, nil
 	}
-	if worker.Tunnel {
+	// Route via the WSS reverse tunnel only when an endpoint is live in
+	// the in-memory tunnel registry — that is the actual, current,
+	// reconnect-aware truth. The legacy WorkerRecord.Tunnel column is
+	// intentionally NOT consulted: it is set once at registration and
+	// never updated on disconnect/reconnect, so trusting it both
+	// misroutes traffic to workers that have just reconnected (column
+	// stale at false) and keeps routing to workers whose row says yes
+	// but whose tunnel has dropped (dead infrastructure). #345 W4-A.
+	if r.tunnels != nil && r.tunnels.Connected(workerID) {
 		return &Resolution{WorkerID: workerID, Tunnel: true}, nil
 	}
 	auditURL := strings.TrimRight(strings.TrimSpace(worker.AuditURL), "/")

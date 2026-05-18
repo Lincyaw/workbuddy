@@ -40,6 +40,11 @@ type Handler struct {
 	// lets us tune its timeout independently from the streaming client.
 	listClient *http.Client
 	tunnels    TunnelRoundTripper
+	// connectivity reports current WSS tunnel state per worker. Nil-safe;
+	// nil disables tunnel routing in the fan-out (every worker falls
+	// through to the audit_url path). The single-session detail path
+	// uses Resolver.Resolve, which has its own TunnelConnectivity wire.
+	connectivity TunnelConnectivity
 
 	// listing cache (5s TTL).
 	cacheMu  sync.Mutex
@@ -79,8 +84,17 @@ type HandlerConfig struct {
 	OverallTimeout time.Duration
 	// Now is the clock; tests inject.
 	Now func() time.Time
-	// Tunnels routes requests to workers that registered tunnel=true.
+	// Tunnels routes requests through the WSS reverse tunnel for workers
+	// whose tunnel is currently up. Pair with Connectivity for the gating
+	// decision; passing Tunnels without Connectivity disables tunnel
+	// routing in fan-out listing.
 	Tunnels TunnelRoundTripper
+	// Connectivity gates tunnel-vs-audit-URL routing decisions for the
+	// fan-out listing path. Production: pass the same *wstunnel.Registry
+	// adapted to TunnelConnectivity (see cmd/coordinator.go). Tests
+	// usually pass a stub that implements both Tunnels.Do and
+	// Connectivity.Connected. Nil disables tunnel routing in fan-out.
+	Connectivity TunnelConnectivity
 }
 
 // NewHandler constructs the proxy handler.
@@ -92,11 +106,21 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		client:           cfg.HTTPClient,
 		listClient:       cfg.ListClient,
 		tunnels:          cfg.Tunnels,
+		connectivity:     cfg.Connectivity,
 		listings:         map[string]listingCacheEntry{},
 		cacheTTL:         cfg.CacheTTL,
 		perWorkerTimeout: cfg.PerWorkerTimeout,
 		overallTimeout:   cfg.OverallTimeout,
 		now:              cfg.Now,
+	}
+	// Convenience fallback: when only Tunnels is provided and it also
+	// satisfies TunnelConnectivity, reuse it. This keeps the production
+	// wire-up at cmd/coordinator.go a single-argument pass-through
+	// without forcing every test fixture to fill in both fields.
+	if h.connectivity == nil && cfg.Tunnels != nil {
+		if c, ok := cfg.Tunnels.(TunnelConnectivity); ok {
+			h.connectivity = c
+		}
 	}
 	if h.client == nil {
 		// No overall timeout: SSE streams must outlive the default
@@ -585,7 +609,12 @@ func (h *Handler) fanOutListing(parent context.Context, q map[string][]string) (
 	// local handler they degrade to "offline" with reason no_audit_url.
 	emptyAuditWorkers := make([]string, 0)
 	for _, worker := range workers {
-		if worker.Tunnel {
+		// Route through the WSS reverse tunnel only when the in-memory
+		// tunnel registry currently holds a live endpoint for this
+		// worker. The legacy WorkerRecord.Tunnel column is intentionally
+		// NOT consulted — see resolver.Resolve for the rationale
+		// (#345 W4-A).
+		if h.connectivity != nil && h.connectivity.Connected(worker.ID) {
 			wg.Add(1)
 			go func(workerID string) {
 				defer wg.Done()

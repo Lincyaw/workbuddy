@@ -6274,3 +6274,92 @@ requirements:
       - REQ-151
       - REQ-152
       - REQ-153
+  - id: REQ-155
+    title: sessionproxy tunnel routing gates on live wstunnel registry, not the stale Tunnel column (REQ-155 / #345 Wave 4-A)
+    description: >
+      Wave 4 follow-up on issue #345. Same root-cause class as Wave 3-B
+      (which fixed `workbuddy diagnose`): `WorkerRecord.Tunnel` is set
+      once at registration and never updated when a worker reconnects
+      after a network blip, so it lies about which workers currently
+      hold a live WSS reverse tunnel.
+
+      Three `worker.Tunnel` reads in `internal/sessionproxy/` were
+      misrouting traffic on the same lie:
+
+        - `resolver.go:Resolve` (~L190) — single-session detail decision:
+          should this session-view request go via the WSS tunnel or
+          directly to `worker.AuditURL`?
+        - `handler.go:handleDetail` (~L200) — branches on the
+          `Resolution.Tunnel` propagated from the resolver.
+        - `handler.go:fanOutListing` (~L588) — fan-out listing path
+          that bypasses the resolver and reads `worker.Tunnel` directly
+          per candidate worker.
+
+      The Wave 3-B fix on the diagnose surface used a heartbeat-freshness
+      predicate (`diagnose.IsHealthyTunneledWorker`). That predicate is
+      correct for diagnose ("is this worker reachable for dispatch?")
+      but wrong for sessionproxy ("is the WSS tunnel up right now?"):
+      every registered worker heartbeats regardless of tunnel
+      registration, so heartbeat freshness alone misclassifies a
+      non-tunnel worker as tunnel-routable. The right signal is the
+      in-memory `*wstunnel.Registry` state itself — the registry adds
+      an endpoint when the WSS handshake completes and removes it on
+      disconnect, which is exactly the lifetime sessionproxy cares
+      about.
+
+      Fix: introduce `sessionproxy.TunnelConnectivity` interface
+      (`Connected(workerID string) bool`). Wire it into Resolver via
+      `WithTunnels(...)` and into Handler via `HandlerConfig.Connectivity`.
+      Production wiring at `cmd/coordinator.go` adapts the existing
+      `*wstunnel.Registry` (whose `Status(workerID).Connected` is the
+      ground truth) via a small `tunnelRegistryAdapter` defined in the
+      cmd package — `internal/wstunnel` is intentionally untouched
+      (out of scope per Wave 4 brief). For convenience, `NewHandler`
+      type-asserts a passed `TunnelRoundTripper` against the
+      connectivity interface so test fixtures that already satisfy both
+      need not wire both fields.
+
+      The legacy `WorkerRecord.Tunnel` column stays in the schema for
+      backward compatibility; no consumer in sessionproxy reads it
+      anymore. The deeper Option C fix (writing Tunnel=true/false on
+      WSS connect/disconnect inside `internal/wstunnel`) is deferred
+      per the Wave 3-B reviewer's scoping note.
+
+      Tests:
+
+        - `TestResolverRoutesViaTunnelWhenConnectedDespiteTunnelColumnFalse`
+          pins the production failure case: Tunnel:false in the row,
+          Connected:true in the registry → must route via tunnel.
+        - `TestResolverDoesNotRouteViaTunnelWhenDisconnectedDespiteTunnelColumnTrue`
+          pins the inverse guard: Tunnel:true in the row, Connected:false
+          → must NOT route into dead infrastructure.
+        - `TestHandlerDetailRoutesViaTunnelWhenConnected` and
+          `TestHandlerDetailFallsBackWhenTunnelDropped` cover
+          handler.go:200 (the propagated `res.Tunnel` branch).
+        - `TestFanOutListingUsesTunnelWhenConnected` and
+          `TestFanOutListingSkipsTunnelWhenTunnelDropped` cover
+          handler.go:588 (the parallel fan-out decision).
+        - Existing `TestCoordinatorTunnelSessionProxyEndToEnd` updated
+          to wire the new `Connectivity` field, exercising the
+          adapter end-to-end against a real `*wstunnel.Registry`.
+    priority: P1
+    version: v0.7.0
+    status: tested
+    acceptance_criteria:
+      - "AC-155-1: `sessionproxy.TunnelConnectivity` interface with `Connected(workerID string) bool` ships in `internal/sessionproxy/resolver.go`, doc-commented to explain why it supersedes the legacy `WorkerRecord.Tunnel` column read."
+      - "AC-155-2: `Resolver.WithTunnels(t TunnelConnectivity) *Resolver` wires the interface; `Resolve` uses `r.tunnels.Connected(workerID)` for the tunnel decision and never reads `worker.Tunnel`."
+      - "AC-155-3: `HandlerConfig.Connectivity` field plus convenience type-assertion fallback on `Tunnels`; `fanOutListing` gates on `h.connectivity.Connected(worker.ID)` instead of `worker.Tunnel`."
+      - "AC-155-4: `cmd/coordinator.go` wires the production path via a `tunnelRegistryAdapter` that calls `Tunnels.Status(workerID).Connected`; `internal/wstunnel` is not modified."
+      - "AC-155-5: Six regression tests in `internal/sessionproxy/tunnel_heuristic_test.go` cover the three call sites with both the production-failure scenario (Tunnel:false + Connected:true must route via tunnel) and the inverse guard (Tunnel:true + Connected:false must NOT route via tunnel)."
+      - "AC-155-6: `go build ./... && go vet ./... && go test ./... -count=1` stays green; the existing `TestCoordinatorTunnelSessionProxyEndToEnd` continues to pass via the production adapter wiring."
+    code:
+      - internal/sessionproxy/resolver.go
+      - internal/sessionproxy/handler.go
+      - cmd/coordinator.go
+    tests:
+      - internal/sessionproxy/tunnel_heuristic_test.go
+      - internal/sessionproxy/resolver_routes_test.go
+      - internal/sessionproxy/handler_test.go
+      - cmd/coordinator_tunnel_test.go
+    deps:
+      - REQ-037

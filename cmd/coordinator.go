@@ -768,11 +768,18 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st store.Store, evlog *
 	if hostname, err := os.Hostname(); err == nil && strings.TrimSpace(hostname) != "" {
 		resolver.WithLocalHost(hostname)
 	}
+	// Adapt the in-memory wstunnel.Registry to sessionproxy's
+	// TunnelConnectivity interface. The legacy WorkerRecord.Tunnel
+	// column lies after reconnects, so sessionproxy gates routing on
+	// the live registry instead (#345 W4-A).
+	tunnelConn := tunnelRegistryAdapter{registry: api.Tunnels}
+	resolver.WithTunnels(tunnelConn)
 	sessionProxy := sessionproxy.NewHandler(sessionproxy.HandlerConfig{
-		Resolver:  resolver,
-		Local:     dashboardMux,
-		AuthToken: api.AuthToken,
-		Tunnels:   api.Tunnels,
+		Resolver:     resolver,
+		Local:        dashboardMux,
+		AuthToken:    api.AuthToken,
+		Tunnels:      api.Tunnels,
+		Connectivity: tunnelConn,
 	})
 	// Phase 3 (REQ-122): the coordinator's issue-detail endpoint used to
 	// read sessions from the local store. Now that the coordinator drops
@@ -817,6 +824,25 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st store.Store, evlog *
 	// (login, /api/, /sessions/, etc.) wins over the embedded bundle.
 	mux.Handle("/", api.WrapAuth(spa))
 	return mux
+}
+
+// tunnelRegistryAdapter exposes the in-memory *wstunnel.Registry as the
+// sessionproxy.TunnelConnectivity interface. Pure read-only — surfaces
+// the registry's existing Status accessor so sessionproxy can decide
+// per request whether the WSS tunnel is up right now, instead of
+// trusting the stale workers.tunnel DB column (#345 W4-A).
+type tunnelRegistryAdapter struct {
+	registry *wstunnel.Registry
+}
+
+// Connected reports whether the registry currently holds an endpoint
+// for workerID. nil-safe: a coordinator launched without the tunnel
+// listener will pass a nil registry, which is treated as "no tunnel".
+func (a tunnelRegistryAdapter) Connected(workerID string) bool {
+	if a.registry == nil {
+		return false
+	}
+	return a.registry.Status(workerID).Connected
 }
 
 // initHooksDispatcher loads ~/.config/workbuddy/hooks.yaml (or the override),
