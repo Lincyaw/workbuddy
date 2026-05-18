@@ -5956,3 +5956,73 @@ requirements:
     deps:
       - REQ-022
       - REQ-085
+
+  - id: REQ-152
+    title: Periodic orphan-state recovery sweep (REQ-152 / #345 Wave 2)
+    description: >
+      Root cause #3 of the silent-stall bug tracked in #345: today
+      `internal/app/repo_runtime.go::recoverOrphanedActiveStates` only runs
+      once at `PollerManager.StartOrUpdate` time. A coordinator restart
+      re-dispatches orphaned active issues, but during long uptime no
+      re-recovery ever fires — so a worker tunnel drop mid-task or a
+      W2-B-reaped zombie task leaves the issue with an active `status:*`
+      label and no live task, and the operator only notices via stuck-state
+      dwell-time alerts hours later.
+
+      This REQ adds a periodic recovery sweep:
+
+        1. `PollerManager.recoverAllPeriodically(ctx, interval)` ticks every
+           `interval` (default 60s) and iterates `pm.runtimes` under
+           RLock, calling the existing `recoverOrphanedActiveStates(runtime)`
+           for each non-cancelled runtime. Runtime cancellation (i.e. the
+           repo was deregistered) is detected via the new `RepoRuntime.ctx`
+           field and silently skipped. Exits cleanly on `ctx.Done()`.
+
+        2. `recoverOrphanedActiveStates` is widened to return
+           `(int, error)` — the number of issues re-dispatched on the sweep
+           — so the periodic tick can emit an aggregate count without a
+           closure dance. The start-time caller in `StartOrUpdate` keeps
+           the old behaviour (log + continue on error).
+
+        3. `cmd/coordinator.go::startCoordinatorPeriodicRecovery` launches
+           the goroutine AFTER `startCoordinatorTaskReaper` so the reaper
+           has already had at least one tick before recovery runs against
+           the post-reaped task_queue. `cmd/serve.go` inherits the wire-up
+           through `runCoordinatorWithOpts`.
+
+        4. `internal/eventlog/eventlog.go` registers
+           `TypePeriodicRecoveryTick` (`periodic_recovery_tick`); each tick
+           emits one event with `{repos_swept, issues_redispatched}` so an
+           operator can confirm via `workbuddy logs` or
+           `/api/v1/events?type=periodic_recovery_tick` that the sweep is
+           alive.
+
+      Idempotency: `recoverOrphanedActiveStates` already filters by
+      `store.HasAnyActiveTask`, so once a tick dispatches a new task the
+      follow-on ticks see that task and skip — the periodic loop CANNOT
+      double-dispatch in steady state. The state machine's per-poll-cycle
+      `processedEvents` dedup is a second line of defence.
+
+      Interaction with W2-A (snapshot resync): both mechanisms can fire on
+      the same tick — resync covers cache-drift, periodic recovery covers
+      stale-task post-reap. The state-machine dedup map collapses each
+      event type independently, so the two are NOT coordinated — defense
+      in depth is intentional.
+    priority: P1
+    version: v0.6.0
+    status: tested
+    acceptance_criteria:
+      - "AC-152-1: PollerManager.recoverAllPeriodically(ctx, interval) iterates pm.runtimes under RLock and calls recoverOrphanedActiveStates for each non-nil, non-cancelled runtime on every tick; exits on ctx.Done()."
+      - "AC-152-2: RepoRuntime gains an unexported ctx field set at construction; recoverAllPeriodically reads it without locking pm.mu (write-once) and skips runtimes whose ctx is Done."
+      - "AC-152-3: recoverOrphanedActiveStates returns (int, error); the int is the count of re-dispatched issues and the error is fatal-only (list_issue_caches failure). The existing StartOrUpdate caller logs the error and continues."
+      - "AC-152-4: cmd/coordinator.go startCoordinatorPeriodicRecovery launches the goroutine with interval=60s AFTER startCoordinatorTaskReaper so the reaper runs first. serve.go inherits via runCoordinatorWithOpts."
+      - "AC-152-5: eventlog.TypePeriodicRecoveryTick (`periodic_recovery_tick`) is registered in AllEventTypes; runPeriodicRecoveryOnce emits exactly one event per tick with {repos_swept, issues_redispatched}."
+      - "AC-152-6: Unit tests cover the dispatch contract (TestPeriodicRecoveryReDispatchesOrphanedIssues), the audit-trail contract (TestPeriodicRecoveryEmitsTickEvent), and the cancelled-runtime contract (TestPeriodicRecoverySkipsCancelledRuntime). RED-then-GREEN was verified by raising the interval to 1h and confirming the periodic test fails."
+    code:
+      - internal/app/repo_runtime.go
+      - internal/eventlog/eventlog.go
+      - cmd/coordinator.go
+    tests:
+      - internal/app/repo_runtime_test.go
+    deps:
+      - REQ-151

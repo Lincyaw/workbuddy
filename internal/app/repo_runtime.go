@@ -47,6 +47,7 @@ type RepoRuntime struct {
 	StateMachine          *statemachine.StateMachine
 	DepResolver           *dependency.Resolver
 	DispatchCh            chan statemachine.DispatchRequest
+	ctx                   context.Context
 	cancel                context.CancelFunc
 	done                  chan struct{}
 	depsResolvedThisCycle bool
@@ -283,6 +284,7 @@ func (pm *PollerManager) StartOrUpdate(rec store.RepoRegistrationRecord) error {
 		StateMachine: sm,
 		DepResolver:  depResolver,
 		DispatchCh:   dispatchCh,
+		ctx:          runCtx,
 		cancel:       cancel,
 		done:         make(chan struct{}),
 	}
@@ -319,21 +321,28 @@ func (pm *PollerManager) StartOrUpdate(rec store.RepoRegistrationRecord) error {
 	pm.mu.Lock()
 	pm.runtimes[rec.Repo] = runtime
 	pm.mu.Unlock()
-	pm.recoverOrphanedActiveStates(runtime)
+	if _, err := pm.recoverOrphanedActiveStates(runtime); err != nil {
+		log.Printf("[coordinator] recovery: %s: %v", rec.Repo, err)
+	}
 	return nil
 }
 
-func (pm *PollerManager) recoverOrphanedActiveStates(runtime *RepoRuntime) {
+// recoverOrphanedActiveStates re-emits EventIssueCreated for any cached open
+// issue whose labels point at an active workflow state but which has no live
+// task_queue row. Returns the number of issues that were re-dispatched. Errors
+// from individual issues are logged and swallowed; only a fatal store-level
+// failure (couldn't even list caches) is returned. See REQ-152.
+func (pm *PollerManager) recoverOrphanedActiveStates(runtime *RepoRuntime) (int, error) {
 	if runtime == nil || runtime.Config == nil {
-		return
+		return 0, nil
 	}
 
 	caches, err := pm.store.ListIssueCaches(runtime.Registration.Repo)
 	if err != nil {
-		log.Printf("[coordinator] recovery: list issue cache for %s: %v", runtime.Registration.Repo, err)
-		return
+		return 0, fmt.Errorf("list issue cache for %s: %w", runtime.Registration.Repo, err)
 	}
 
+	redispatched := 0
 	for _, cached := range caches {
 		if cached.State != "open" {
 			continue
@@ -374,7 +383,93 @@ func (pm *PollerManager) recoverOrphanedActiveStates(runtime *RepoRuntime) {
 			Labels:   labels,
 		}); err != nil {
 			log.Printf("[coordinator] recovery: failed to re-dispatch %s#%d: %v", cached.Repo, cached.IssueNum, err)
+			continue
 		}
+		redispatched++
+	}
+	return redispatched, nil
+}
+
+// recoverAllPeriodically runs the orphan-recovery sweep on a fixed cadence
+// across every registered runtime until ctx is cancelled. Together with the
+// W2-B task_queue reaper, this closes silent-stall root cause #3 in #345:
+// once the reaper flips a zombie running row to failed, the next periodic
+// recovery tick re-emits EventIssueCreated so the state machine can dispatch
+// a fresh task. See REQ-152.
+//
+// Idempotency: recoverOrphanedActiveStates already filters by
+// store.HasAnyActiveTask, so once a recovery tick dispatches a new task the
+// follow-on ticks see that task and skip. The state machine's own
+// processedEvents dedup (cleared once per poll cycle) is a second line of
+// defence.
+//
+// Each tick emits a TypePeriodicRecoveryTick event with the number of repos
+// swept and issues re-dispatched, so operators can confirm the sweep is alive.
+func (pm *PollerManager) recoverAllPeriodically(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 60 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pm.runPeriodicRecoveryOnce()
+		}
+	}
+}
+
+// RecoverAllPeriodically is the exported wrapper used by the cmd-layer
+// wiring; the actual loop lives on the unexported recoverAllPeriodically so
+// tests in the same package can drive a deterministic single tick via
+// runPeriodicRecoveryOnce without spinning up the goroutine.
+func (pm *PollerManager) RecoverAllPeriodically(ctx context.Context, interval time.Duration) {
+	pm.recoverAllPeriodically(ctx, interval)
+}
+
+// runPeriodicRecoveryOnce performs a single sweep across every registered
+// runtime. Extracted so tests can drive a deterministic tick without racing
+// the ticker goroutine.
+func (pm *PollerManager) runPeriodicRecoveryOnce() {
+	pm.mu.RLock()
+	runtimes := make([]*RepoRuntime, 0, len(pm.runtimes))
+	for _, rt := range pm.runtimes {
+		if rt == nil {
+			continue
+		}
+		runtimes = append(runtimes, rt)
+	}
+	pm.mu.RUnlock()
+
+	reposSwept := 0
+	issuesRedispatched := 0
+	for _, rt := range runtimes {
+		// Skip runtimes whose context has already been cancelled (e.g. the
+		// repo was deregistered mid-tick). Reading rt.ctx without holding
+		// pm.mu is safe because ctx is set exactly once at runtime
+		// construction.
+		if rt.ctx != nil {
+			select {
+			case <-rt.ctx.Done():
+				continue
+			default:
+			}
+		}
+		reposSwept++
+		n, err := pm.recoverOrphanedActiveStates(rt)
+		if err != nil {
+			log.Printf("[coordinator] periodic recovery: %s: %v", rt.Registration.Repo, err)
+			continue
+		}
+		issuesRedispatched += n
+	}
+	if pm.eventlog != nil {
+		pm.eventlog.Log(eventlog.TypePeriodicRecoveryTick, "", 0, map[string]any{
+			"repos_swept":         reposSwept,
+			"issues_redispatched": issuesRedispatched,
+		})
 	}
 }
 

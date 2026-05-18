@@ -115,6 +115,16 @@ const (
 	// Operators looking at `workbuddy status --events` use this to correlate
 	// post-restart dispatches with the snapshot that triggered them.
 	TypeIssueResynced = "issue_resynced"
+	// TypePeriodicRecoveryTick fires once per periodic-recovery sweep that
+	// PollerManager runs after startup, complementing the start-time
+	// recoverOrphanedActiveStates call. It closes silent-stall root cause #3
+	// in #345: after a coordinator has been running for a while, a worker
+	// tunnel drop or a TaskReaper-cleared zombie task can leave an issue
+	// with an active status:* label and no in-flight task; the periodic
+	// sweep re-emits EventIssueCreated for those issues so the state
+	// machine re-dispatches. Payload: {repos_swept, issues_redispatched}.
+	// See REQ-152.
+	TypePeriodicRecoveryTick = "periodic_recovery_tick"
 )
 
 // AllEventTypes lists every recognised event type.
@@ -171,6 +181,7 @@ var AllEventTypes = []string{
 	TypeTransitionSkipped,
 	TypeTaskReaped,
 	TypeIssueResynced,
+	TypePeriodicRecoveryTick,
 }
 
 // EventFilter specifies optional criteria for querying events.

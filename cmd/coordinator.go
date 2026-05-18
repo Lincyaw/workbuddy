@@ -502,13 +502,18 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 		go app.RunRateLimitBudgetCheck(ctx, "coordinator", bootstrapCfg.Global.Repo)
 	}
 
+	pollers := app.NewPollerManager(ctx, st, reg, evlog, alertBus, ghReader, rep, mustRepoRoot(), pollInterval, secRuntime)
+	// Periodic orphan-state recovery (REQ-152). Started after the TaskReaper
+	// so the reaper has already had at least one tick by the time recovery
+	// runs against the post-reaped task_queue.
+	startCoordinatorPeriodicRecovery(ctx, pollers)
 	api := &app.FullCoordinatorServer{
 		RootCtx:        ctx,
 		Store:          st,
 		Registry:       reg,
 		Eventlog:       evlog,
 		TaskHub:        taskHub,
-		Pollers:        app.NewPollerManager(ctx, st, reg, evlog, alertBus, ghReader, rep, mustRepoRoot(), pollInterval, secRuntime),
+		Pollers:        pollers,
 		AuthEnabled:    opts.auth,
 		AuthToken:      authToken,
 		Tunnels:        wstunnel.NewRegistry(),
@@ -647,6 +652,15 @@ func startCoordinatorTaskReaper(ctx context.Context, st store.Store, evlog *even
 			log.Printf("[coordinator] task reaper error: %v", err)
 		}
 	}()
+}
+
+// startCoordinatorPeriodicRecovery launches the periodic sweep that re-emits
+// EventIssueCreated for orphaned active issues across every registered repo
+// (REQ-152). Together with the TaskReaper, this closes silent-stall root
+// cause #3 in #345: after a zombie running task is reaped, the next recovery
+// tick re-dispatches the issue without waiting for a coordinator restart.
+func startCoordinatorPeriodicRecovery(ctx context.Context, pollers *app.PollerManager) {
+	go pollers.RecoverAllPeriodically(ctx, 60*time.Second)
 }
 
 func bootstrapCoordinatorRegistration(
