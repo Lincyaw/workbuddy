@@ -212,7 +212,6 @@ func TestAnalyzeWorkerTunnelDown(t *testing.T) {
 			Roles:     `["dev"]`,
 			Runtime:   "codex",
 			Hostname:  "host",
-			Tunnel:    true,
 			Status:    "online",
 		}); err != nil {
 			t.Fatalf("InsertWorker: %v", err)
@@ -233,7 +232,7 @@ func TestAnalyzeWorkerTunnelDown(t *testing.T) {
 		}
 	})
 
-	t.Run("offline tunneled worker still triggers the finding", func(t *testing.T) {
+	t.Run("registered repo with offline worker triggers the finding", func(t *testing.T) {
 		st, _ := newDiagnoseStore(t)
 		defer func() { _ = st.Close() }()
 		if err := st.UpsertRepoRegistration(store.RepoRegistrationRecord{
@@ -246,7 +245,6 @@ func TestAnalyzeWorkerTunnelDown(t *testing.T) {
 			ID:        "worker-offline",
 			Repo:      "owner/repo",
 			ReposJSON: `["owner/repo"]`,
-			Tunnel:    true,
 			Status:    "offline",
 		}); err != nil {
 			t.Fatalf("InsertWorker: %v", err)
@@ -261,7 +259,11 @@ func TestAnalyzeWorkerTunnelDown(t *testing.T) {
 		}
 	})
 
-	t.Run("online tunneled worker with fresh heartbeat suppresses the finding", func(t *testing.T) {
+	t.Run("online worker with fresh heartbeat suppresses the finding", func(t *testing.T) {
+		// Tunnel column is irrelevant since #345 Wave 3 — heartbeat
+		// freshness alone gates the finding, so this subtest no longer
+		// sets Tunnel:true. The Tunnel-column-false variant below is
+		// the explicit regression guard.
 		st, _ := newDiagnoseStore(t)
 		defer func() { _ = st.Close() }()
 		if err := st.UpsertRepoRegistration(store.RepoRegistrationRecord{
@@ -274,7 +276,6 @@ func TestAnalyzeWorkerTunnelDown(t *testing.T) {
 			ID:        "worker-healthy",
 			Repo:      "owner/repo",
 			ReposJSON: `["owner/repo"]`,
-			Tunnel:    true,
 			Status:    "online",
 		}); err != nil {
 			t.Fatalf("InsertWorker: %v", err)
@@ -290,6 +291,79 @@ func TestAnalyzeWorkerTunnelDown(t *testing.T) {
 		}
 		if len(findings) != 0 {
 			t.Fatalf("findings=%+v, want none", findings)
+		}
+	})
+
+	t.Run("online worker with fresh heartbeat but Tunnel column false still suppresses the finding", func(t *testing.T) {
+		// Regression for the v0.6.24 deploy slip (#345 Wave 3): the
+		// coordinator's serialized worker is `online` with a fresh
+		// heartbeat, but `workers.tunnel` was never flipped to 1.
+		// Previously this fooled diagnose into emitting a phantom
+		// `tunnel: disconnected` reading. Heartbeat freshness is now
+		// the sole source of truth.
+		st, _ := newDiagnoseStore(t)
+		defer func() { _ = st.Close() }()
+		if err := st.UpsertRepoRegistration(store.RepoRegistrationRecord{
+			Repo:   "owner/repo",
+			Status: "active",
+		}); err != nil {
+			t.Fatalf("UpsertRepoRegistration: %v", err)
+		}
+		if err := st.InsertWorker(store.WorkerRecord{
+			ID:        "worker-tunnelcol-zero",
+			Repo:      "owner/repo",
+			ReposJSON: `["owner/repo"]`,
+			Tunnel:    false,
+			Status:    "online",
+		}); err != nil {
+			t.Fatalf("InsertWorker: %v", err)
+		}
+		freshAt := now.Add(-5 * time.Second).UTC().Format("2006-01-02 15:04:05")
+		if _, err := st.Exec(`UPDATE workers SET last_heartbeat = ? WHERE id = ?`, freshAt, "worker-tunnelcol-zero"); err != nil {
+			t.Fatalf("force fresh heartbeat: %v", err)
+		}
+
+		findings, err := analyzeWithConfig(st, "owner/repo", now, diagnoseConfig{})
+		if err != nil {
+			t.Fatalf("analyzeWithConfig: %v", err)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("findings=%+v, want none (Tunnel column must not gate the check)", findings)
+		}
+	})
+
+	t.Run("Tunnel column true but heartbeat stale still emits the finding", func(t *testing.T) {
+		// Companion to the regression above: prove the staleness
+		// guard remains the load-bearing check after the Tunnel
+		// column was dropped.
+		st, _ := newDiagnoseStore(t)
+		defer func() { _ = st.Close() }()
+		if err := st.UpsertRepoRegistration(store.RepoRegistrationRecord{
+			Repo:   "owner/repo",
+			Status: "active",
+		}); err != nil {
+			t.Fatalf("UpsertRepoRegistration: %v", err)
+		}
+		if err := st.InsertWorker(store.WorkerRecord{
+			ID:        "worker-tunnelcol-true-stale",
+			Repo:      "owner/repo",
+			ReposJSON: `["owner/repo"]`,
+			Tunnel:    true,
+			Status:    "online",
+		}); err != nil {
+			t.Fatalf("InsertWorker: %v", err)
+		}
+		staleAt := now.Add(-1 * time.Hour).UTC().Format("2006-01-02 15:04:05")
+		if _, err := st.Exec(`UPDATE workers SET last_heartbeat = ? WHERE id = ?`, staleAt, "worker-tunnelcol-true-stale"); err != nil {
+			t.Fatalf("force stale heartbeat: %v", err)
+		}
+
+		findings, err := analyzeWithConfig(st, "owner/repo", now, diagnoseConfig{})
+		if err != nil {
+			t.Fatalf("analyzeWithConfig: %v", err)
+		}
+		if len(findings) != 1 || findings[0].Kind != KindWorkerTunnelDown {
+			t.Fatalf("findings=%+v, want one worker_tunnel_down (stale heartbeat must still fire)", findings)
 		}
 	})
 

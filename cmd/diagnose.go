@@ -105,7 +105,12 @@ func runDiagnoseWithOpts(_ context.Context, opts *diagnoseOpts, stdout io.Writer
 	}
 	defer func() { _ = st.Close() }()
 
-	findings, err := diag.Analyze(st, opts.repo, opts.now().UTC())
+	// Compute `now` once so the structured finding and the text-mode
+	// tunnel status line evaluate heartbeat freshness against the same
+	// instant — otherwise a worker straddling the 45s threshold could
+	// emit a finding while the line below reports "connected".
+	nowUTC := opts.now().UTC()
+	findings, err := diag.Analyze(st, opts.repo, nowUTC)
 	if err != nil {
 		return err
 	}
@@ -144,14 +149,14 @@ func runDiagnoseWithOpts(_ context.Context, opts *diagnoseOpts, stdout io.Writer
 		}
 	} else if len(results) == 0 {
 		_, _ = fmt.Fprintln(stdout, "Pipeline healthy: no issues detected")
-		renderDiagnoseTunnelStatus(stdout, st)
+		renderDiagnoseTunnelStatus(stdout, st, nowUTC)
 	} else {
 		renderDiagnoseTable(stdout, results)
 		// When the table already carries a worker_tunnel_down finding the
 		// separate tunnel line would just restate it, so skip it. Callers
 		// who want the structured form should use --format json.
 		if !findingsIncludeTunnelDown(results) {
-			renderDiagnoseTunnelStatus(stdout, st)
+			renderDiagnoseTunnelStatus(stdout, st, nowUTC)
 		}
 	}
 
@@ -170,24 +175,32 @@ func findingsIncludeTunnelDown(results []diagnoseResult) bool {
 	return false
 }
 
-func renderDiagnoseTunnelStatus(w io.Writer, st store.Store) {
+// renderDiagnoseTunnelStatus prints a one-line summary derived from the
+// same heuristic as KindWorkerTunnelDown: an online worker with a fresh
+// last_heartbeat counts as "connected", regardless of the legacy
+// `workers.tunnel` column. See KindWorkerTunnelDown for why the column
+// is no longer consulted (#345 Wave 3).
+func renderDiagnoseTunnelStatus(w io.Writer, st store.Store, now time.Time) {
 	workers, err := st.QueryWorkers("")
 	if err != nil {
 		_, _ = fmt.Fprintf(w, "tunnel: disconnected (last_handshake=unknown; status_error=%v)\n", err)
 		return
 	}
+	// `latest` tracks the most-recently-heartbeating worker across ALL
+	// statuses so the disconnected fallback below can show a meaningful
+	// last_handshake. Note: this widened from "only Tunnel=true workers"
+	// in #345 Wave 3 — we no longer gate on the legacy Tunnel column, so
+	// the field is reused as "most recent activity from any worker".
 	var latest store.WorkerRecord
 	for _, worker := range workers {
-		if !worker.Tunnel {
-			continue
-		}
 		if latest.ID == "" || worker.LastHeartbeat.After(latest.LastHeartbeat) {
 			latest = worker
 		}
-		if worker.Status == "online" {
-			_, _ = fmt.Fprintf(w, "tunnel: connected (worker=%s last_handshake=%s)\n", worker.ID, formatTunnelHandshake(worker.LastHeartbeat))
-			return
+		if !diag.IsHealthyTunneledWorker(now, worker) {
+			continue
 		}
+		_, _ = fmt.Fprintf(w, "tunnel: connected (worker=%s last_handshake=%s)\n", worker.ID, formatTunnelHandshake(worker.LastHeartbeat))
+		return
 	}
 	_, _ = fmt.Fprintf(w, "tunnel: disconnected (last_handshake=%s)\n", formatTunnelHandshake(latest.LastHeartbeat))
 }
