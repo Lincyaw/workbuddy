@@ -147,13 +147,27 @@ func runDiagnoseWithOpts(_ context.Context, opts *diagnoseOpts, stdout io.Writer
 		renderDiagnoseTunnelStatus(stdout, st)
 	} else {
 		renderDiagnoseTable(stdout, results)
-		renderDiagnoseTunnelStatus(stdout, st)
+		// When the table already carries a worker_tunnel_down finding the
+		// separate tunnel line would just restate it, so skip it. Callers
+		// who want the structured form should use --format json.
+		if !findingsIncludeTunnelDown(results) {
+			renderDiagnoseTunnelStatus(stdout, st)
+		}
 	}
 
 	if len(results) > 0 {
 		return &cliExitError{code: exitCodeFailure}
 	}
 	return nil
+}
+
+func findingsIncludeTunnelDown(results []diagnoseResult) bool {
+	for _, r := range results {
+		if r.Kind == diag.KindWorkerTunnelDown {
+			return true
+		}
+	}
+	return false
 }
 
 func renderDiagnoseTunnelStatus(w io.Writer, st store.Store) {

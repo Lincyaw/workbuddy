@@ -161,6 +161,152 @@ func TestAnalyzePipelineHazard_MalformedDependencyRefIncludesLineHint(t *testing
 	}
 }
 
+func TestAnalyzeWorkerTunnelDown(t *testing.T) {
+	now := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	restore := stubTaskProcesses(func() ([]taskProcess, error) { return nil, nil })
+	defer restore()
+
+	t.Run("registered repo with no tunneled worker emits finding", func(t *testing.T) {
+		st, _ := newDiagnoseStore(t)
+		defer func() { _ = st.Close() }()
+		if err := st.UpsertRepoRegistration(store.RepoRegistrationRecord{
+			Repo:        "owner/repo",
+			Environment: "test",
+			Status:      "active",
+			ConfigJSON:  `{"repo":"owner/repo"}`,
+		}); err != nil {
+			t.Fatalf("UpsertRepoRegistration: %v", err)
+		}
+
+		findings, err := analyzeWithConfig(st, "owner/repo", now, diagnoseConfig{})
+		if err != nil {
+			t.Fatalf("analyzeWithConfig: %v", err)
+		}
+		if len(findings) != 1 {
+			t.Fatalf("findings=%d, want 1: %+v", len(findings), findings)
+		}
+		if findings[0].Kind != KindWorkerTunnelDown {
+			t.Fatalf("kind=%q, want %q", findings[0].Kind, KindWorkerTunnelDown)
+		}
+		if findings[0].Repo != "owner/repo" || findings[0].IssueNum != 0 {
+			t.Fatalf("unexpected target: %+v", findings[0])
+		}
+		if findings[0].Severity != SeverityError || findings[0].AutoFixable {
+			t.Fatalf("severity/auto_fixable wrong: %+v", findings[0])
+		}
+	})
+
+	t.Run("registered repo with stale heartbeat is reported", func(t *testing.T) {
+		st, _ := newDiagnoseStore(t)
+		defer func() { _ = st.Close() }()
+		if err := st.UpsertRepoRegistration(store.RepoRegistrationRecord{
+			Repo:   "owner/repo",
+			Status: "active",
+		}); err != nil {
+			t.Fatalf("UpsertRepoRegistration: %v", err)
+		}
+		if err := st.InsertWorker(store.WorkerRecord{
+			ID:        "worker-stale",
+			Repo:      "owner/repo",
+			ReposJSON: `["owner/repo"]`,
+			Roles:     `["dev"]`,
+			Runtime:   "codex",
+			Hostname:  "host",
+			Tunnel:    true,
+			Status:    "online",
+		}); err != nil {
+			t.Fatalf("InsertWorker: %v", err)
+		}
+		// Force the heartbeat well outside the staleness window so the
+		// test does not depend on wall-clock skew relative to `now`.
+		staleAt := now.Add(-10 * time.Minute).UTC().Format("2006-01-02 15:04:05")
+		if _, err := st.Exec(`UPDATE workers SET last_heartbeat = ? WHERE id = ?`, staleAt, "worker-stale"); err != nil {
+			t.Fatalf("force stale heartbeat: %v", err)
+		}
+
+		findings, err := analyzeWithConfig(st, "owner/repo", now, diagnoseConfig{})
+		if err != nil {
+			t.Fatalf("analyzeWithConfig: %v", err)
+		}
+		if len(findings) != 1 || findings[0].Kind != KindWorkerTunnelDown {
+			t.Fatalf("findings=%+v, want one worker_tunnel_down", findings)
+		}
+	})
+
+	t.Run("offline tunneled worker still triggers the finding", func(t *testing.T) {
+		st, _ := newDiagnoseStore(t)
+		defer func() { _ = st.Close() }()
+		if err := st.UpsertRepoRegistration(store.RepoRegistrationRecord{
+			Repo:   "owner/repo",
+			Status: "active",
+		}); err != nil {
+			t.Fatalf("UpsertRepoRegistration: %v", err)
+		}
+		if err := st.InsertWorker(store.WorkerRecord{
+			ID:        "worker-offline",
+			Repo:      "owner/repo",
+			ReposJSON: `["owner/repo"]`,
+			Tunnel:    true,
+			Status:    "offline",
+		}); err != nil {
+			t.Fatalf("InsertWorker: %v", err)
+		}
+
+		findings, err := analyzeWithConfig(st, "owner/repo", now, diagnoseConfig{})
+		if err != nil {
+			t.Fatalf("analyzeWithConfig: %v", err)
+		}
+		if len(findings) != 1 || findings[0].Kind != KindWorkerTunnelDown {
+			t.Fatalf("findings=%+v, want one worker_tunnel_down", findings)
+		}
+	})
+
+	t.Run("online tunneled worker with fresh heartbeat suppresses the finding", func(t *testing.T) {
+		st, _ := newDiagnoseStore(t)
+		defer func() { _ = st.Close() }()
+		if err := st.UpsertRepoRegistration(store.RepoRegistrationRecord{
+			Repo:   "owner/repo",
+			Status: "active",
+		}); err != nil {
+			t.Fatalf("UpsertRepoRegistration: %v", err)
+		}
+		if err := st.InsertWorker(store.WorkerRecord{
+			ID:        "worker-healthy",
+			Repo:      "owner/repo",
+			ReposJSON: `["owner/repo"]`,
+			Tunnel:    true,
+			Status:    "online",
+		}); err != nil {
+			t.Fatalf("InsertWorker: %v", err)
+		}
+		freshAt := now.Add(-5 * time.Second).UTC().Format("2006-01-02 15:04:05")
+		if _, err := st.Exec(`UPDATE workers SET last_heartbeat = ? WHERE id = ?`, freshAt, "worker-healthy"); err != nil {
+			t.Fatalf("force fresh heartbeat: %v", err)
+		}
+
+		findings, err := analyzeWithConfig(st, "owner/repo", now, diagnoseConfig{})
+		if err != nil {
+			t.Fatalf("analyzeWithConfig: %v", err)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("findings=%+v, want none", findings)
+		}
+	})
+
+	t.Run("no registered repos means no tunnel finding", func(t *testing.T) {
+		st, _ := newDiagnoseStore(t)
+		defer func() { _ = st.Close() }()
+
+		findings, err := analyzeWithConfig(st, "", now, diagnoseConfig{})
+		if err != nil {
+			t.Fatalf("analyzeWithConfig: %v", err)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("findings=%+v, want none (no repo registrations)", findings)
+		}
+	})
+}
+
 type runningTaskFixture struct {
 	repo         string
 	issueNum     int

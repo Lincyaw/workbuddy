@@ -188,6 +188,190 @@ func TestRunDiagnoseWithOpts(t *testing.T) {
 	})
 }
 
+func TestRunDiagnoseTunnelFindings(t *testing.T) {
+	now := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+
+	t.Run("tunnel disconnected and no issue findings reports the new finding", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "tunnel-down.db")
+		st, err := store.NewStore(dbPath)
+		if err != nil {
+			t.Fatalf("NewStore: %v", err)
+		}
+		if err := st.UpsertRepoRegistration(store.RepoRegistrationRecord{
+			Repo:        "owner/repo",
+			Environment: "test",
+			Status:      "active",
+		}); err != nil {
+			t.Fatalf("UpsertRepoRegistration: %v", err)
+		}
+		_ = st.Close()
+
+		var out bytes.Buffer
+		err = runDiagnoseWithOpts(context.Background(), &diagnoseOpts{
+			dbPath: dbPath,
+			now:    func() time.Time { return now },
+		}, &out)
+		var exitErr *cliExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			t.Fatalf("expected exit code 1, got %v", err)
+		}
+		body := out.String()
+		if strings.Contains(body, "Pipeline healthy") {
+			t.Fatalf("expected no 'Pipeline healthy' banner, got: %q", body)
+		}
+		if !strings.Contains(body, "no online tunneled worker") {
+			t.Fatalf("expected tunnel-down diagnosis in output, got: %q", body)
+		}
+		// The redundant "tunnel: disconnected" line should be suppressed
+		// when the finding is already in the table.
+		if strings.Contains(body, "tunnel: disconnected") {
+			t.Fatalf("did not expect duplicate tunnel line, got: %q", body)
+		}
+	})
+
+	t.Run("tunnel disconnected surfaces in JSON output", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "tunnel-down-json.db")
+		st, err := store.NewStore(dbPath)
+		if err != nil {
+			t.Fatalf("NewStore: %v", err)
+		}
+		if err := st.UpsertRepoRegistration(store.RepoRegistrationRecord{
+			Repo:   "owner/repo",
+			Status: "active",
+		}); err != nil {
+			t.Fatalf("UpsertRepoRegistration: %v", err)
+		}
+		_ = st.Close()
+
+		var out bytes.Buffer
+		err = runDiagnoseWithOpts(context.Background(), &diagnoseOpts{
+			dbPath:  dbPath,
+			jsonOut: true,
+			now:     func() time.Time { return now },
+		}, &out)
+		var exitErr *cliExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			t.Fatalf("expected exit code 1, got %v", err)
+		}
+		var rows []diagnoseResult
+		if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if len(rows) != 1 || rows[0].Kind != "worker_tunnel_down" {
+			t.Fatalf("expected one worker_tunnel_down row, got %+v", rows)
+		}
+	})
+
+	t.Run("tunnel connected with no issue findings stays healthy", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "tunnel-up.db")
+		st, err := store.NewStore(dbPath)
+		if err != nil {
+			t.Fatalf("NewStore: %v", err)
+		}
+		if err := st.UpsertRepoRegistration(store.RepoRegistrationRecord{
+			Repo:   "owner/repo",
+			Status: "active",
+		}); err != nil {
+			t.Fatalf("UpsertRepoRegistration: %v", err)
+		}
+		if err := st.InsertWorker(store.WorkerRecord{
+			ID:        "worker-up",
+			Repo:      "owner/repo",
+			ReposJSON: `["owner/repo"]`,
+			Tunnel:    true,
+			Status:    "online",
+		}); err != nil {
+			t.Fatalf("InsertWorker: %v", err)
+		}
+		freshAt := now.Add(-5 * time.Second).UTC().Format("2006-01-02 15:04:05")
+		if _, err := st.Exec(`UPDATE workers SET last_heartbeat = ? WHERE id = ?`, freshAt, "worker-up"); err != nil {
+			t.Fatalf("force fresh heartbeat: %v", err)
+		}
+		_ = st.Close()
+
+		var out bytes.Buffer
+		err = runDiagnoseWithOpts(context.Background(), &diagnoseOpts{
+			dbPath: dbPath,
+			now:    func() time.Time { return now },
+		}, &out)
+		if err != nil {
+			t.Fatalf("runDiagnoseWithOpts: %v", err)
+		}
+		body := out.String()
+		if !strings.Contains(body, "Pipeline healthy: no issues detected") {
+			t.Fatalf("expected healthy banner, got: %q", body)
+		}
+		if !strings.Contains(body, "tunnel: connected") {
+			t.Fatalf("expected 'tunnel: connected' line, got: %q", body)
+		}
+	})
+
+	t.Run("issue finding and tunnel down both appear", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "combined.db")
+		st, err := store.NewStore(dbPath)
+		if err != nil {
+			t.Fatalf("NewStore: %v", err)
+		}
+		if err := st.UpsertRepoRegistration(store.RepoRegistrationRecord{
+			Repo:   "owner/repo",
+			Status: "active",
+		}); err != nil {
+			t.Fatalf("UpsertRepoRegistration: %v", err)
+		}
+		if err := st.UpsertIssueCache(store.IssueCache{
+			Repo:     "owner/repo",
+			IssueNum: 99,
+			Labels:   `["status:developing"]`,
+			State:    "open",
+		}); err != nil {
+			t.Fatalf("UpsertIssueCache: %v", err)
+		}
+		if err := st.UpsertIssueDependencyState(store.IssueDependencyState{
+			Repo:     "owner/repo",
+			IssueNum: 99,
+			Verdict:  store.DependencyVerdictReady,
+		}); err != nil {
+			t.Fatalf("UpsertIssueDependencyState: %v", err)
+		}
+		if _, err := st.InsertEvent(store.Event{
+			Type:     "state_entry",
+			Repo:     "owner/repo",
+			IssueNum: 99,
+			Payload:  `{"state":"status:developing"}`,
+		}); err != nil {
+			t.Fatalf("InsertEvent: %v", err)
+		}
+		_ = st.Close()
+
+		var out bytes.Buffer
+		err = runDiagnoseWithOpts(context.Background(), &diagnoseOpts{
+			dbPath:  dbPath,
+			jsonOut: true,
+			now:     func() time.Time { return now },
+		}, &out)
+		var exitErr *cliExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			t.Fatalf("expected exit code 1, got %v", err)
+		}
+		var rows []diagnoseResult
+		if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		gotIssue, gotTunnel := false, false
+		for _, r := range rows {
+			switch r.Kind {
+			case "missed_redispatch":
+				gotIssue = true
+			case "worker_tunnel_down":
+				gotTunnel = true
+			}
+		}
+		if !gotIssue || !gotTunnel {
+			t.Fatalf("expected both issue + tunnel findings, got %+v", rows)
+		}
+	})
+}
+
 func TestDiagnoseHelpTextUsesFormatJSONCanonically(t *testing.T) {
 	if strings.Contains(diagnoseCmd.Long, "Use --json when piping into another tool.") {
 		t.Fatalf("diagnose help still advertises --json as canonical: %q", diagnoseCmd.Long)

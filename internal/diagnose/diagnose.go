@@ -29,12 +29,23 @@ const (
 	// flagged in issue_pipeline_hazards (REQ #255): configuration-
 	// incompleteness conditions that cause silent dispatch skips.
 	KindPipelineHazard = "pipeline_hazard"
+	// KindWorkerTunnelDown is emitted when a registered repo has no online
+	// tunneled worker with a fresh heartbeat. Without such a worker the
+	// coordinator cannot dispatch agent tasks for that repo, so the
+	// pipeline cannot make progress even though no per-issue finding
+	// fires (issue #345).
+	KindWorkerTunnelDown = "worker_tunnel_down"
 
 	stuckThreshold       = time.Hour
 	defaultAgentTimeout  = 60 * time.Minute
 	defaultIdleThreshold = 10 * time.Minute
 	defaultOrphanedAfter = 2 * defaultAgentTimeout
 	noChildGracePeriod   = 2 * time.Minute
+	// tunnelHeartbeatStaleAfter mirrors operator.Detector's 3×heartbeat
+	// staleness window (default 15s interval → 45s). A tunneled worker
+	// whose last_heartbeat is older than this is treated as effectively
+	// disconnected for the purposes of the diagnose verdict.
+	tunnelHeartbeatStaleAfter = 45 * time.Second
 )
 
 type Finding struct {
@@ -301,6 +312,12 @@ func analyzeWithConfig(st store.Store, repo string, now time.Time, cfg diagnoseC
 		})
 	}
 
+	tunnelFindings, err := workerTunnelFindings(st, repo, now)
+	if err != nil {
+		return nil, err
+	}
+	findings = append(findings, tunnelFindings...)
+
 	sort.Slice(findings, func(i, j int) bool {
 		if findings[i].Repo != findings[j].Repo {
 			return findings[i].Repo < findings[j].Repo
@@ -557,6 +574,66 @@ func listIssueCaches(st store.Store, repo string) ([]store.IssueCache, error) {
 		caches = append(caches, rows...)
 	}
 	return caches, nil
+}
+
+// workerTunnelFindings emits a KindWorkerTunnelDown finding for every
+// active repo registration that has no online tunneled worker with a
+// fresh heartbeat. Without that worker the coordinator cannot dispatch
+// tasks for the repo, which the per-issue heuristics cannot otherwise
+// surface (#345).
+func workerTunnelFindings(st store.Store, repo string, now time.Time) ([]Finding, error) {
+	regs, err := st.ListRepoRegistrations()
+	if err != nil {
+		return nil, fmt.Errorf("diagnose: list repo registrations: %w", err)
+	}
+	if len(regs) == 0 {
+		return nil, nil
+	}
+	var out []Finding
+	for _, reg := range regs {
+		if reg.Status != "active" {
+			continue
+		}
+		if repo != "" && reg.Repo != repo {
+			continue
+		}
+		workers, err := st.QueryWorkers(reg.Repo)
+		if err != nil {
+			return nil, fmt.Errorf("diagnose: query workers for %s: %w", reg.Repo, err)
+		}
+		if hasHealthyTunneledWorker(workers, now) {
+			continue
+		}
+		out = append(out, Finding{
+			Kind:         KindWorkerTunnelDown,
+			Repo:         reg.Repo,
+			IssueNum:     0,
+			Severity:     SeverityError,
+			Diagnosis:    "no online tunneled worker with a fresh heartbeat is registered for this repo; coordinator cannot dispatch agent tasks",
+			SuggestedFix: "start or restart the worker bound to this repo; ensure --tunnel is enabled and the worker reaches the coordinator",
+			AutoFixable:  false,
+		})
+	}
+	return out, nil
+}
+
+func hasHealthyTunneledWorker(workers []store.WorkerRecord, now time.Time) bool {
+	for _, w := range workers {
+		if !w.Tunnel {
+			continue
+		}
+		if w.Status != "online" {
+			continue
+		}
+		if w.LastHeartbeat.IsZero() {
+			continue
+		}
+		if now.Sub(w.LastHeartbeat) > tunnelHeartbeatStaleAfter {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func consecutiveFailureCounts(tasks []store.TaskRecord, repo string) map[string]int {

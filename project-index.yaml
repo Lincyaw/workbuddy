@@ -1301,6 +1301,7 @@ requirements:
       - "AC-037-10: 无诊断问题时输出 Pipeline healthy: no issues detected 并 exit 0；有问题时 exit 1（warn 也算）"
       - "AC-037-11: 诊断逻辑在 internal/diagnose/ 包中实现，接收 *store.Store + time.Now，纯逻辑无副作用；修复逻辑在 cmd 层调用 cache-invalidate"
       - "AC-037-12: 单元测试：每种检测项（stuck/missed/orphaned/repeated）各一条正例 + 一条反例；--fix 执行验证"
+      - "AC-037-13: 检测 worker_tunnel_down：对每个 status='active' 的 repo_registrations 行，若没有一个 worker 同时满足 tunnel=true / status='online' / last_heartbeat 在 45s 内，则发出 KindWorkerTunnelDown finding（severity=error, auto_fixable=false, issue_num=0），并抑制冗余的 `tunnel: disconnected` 单独输出（#345）"
     code:
       - cmd/cache_invalidate.go
       - cmd/diagnose.go
