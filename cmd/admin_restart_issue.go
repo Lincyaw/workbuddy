@@ -146,6 +146,9 @@ func runRestartIssueWithOpts(ctx context.Context, opts *restartIssueOpts, stdout
 	if err != nil {
 		return err
 	}
+	if !opts.dryRun && !restartIssueHasWork(preview) && opts.coordinator == "" {
+		return writeRestartIssueNothing(stdout, preview, opts.jsonOut)
+	}
 	if opts.dryRun {
 		return writeRestartIssueResult(stdout, preview, true, opts.jsonOut)
 	}
@@ -184,6 +187,26 @@ func runRestartIssueWithOpts(ctx context.Context, opts *restartIssueOpts, stdout
 		result.InflightCleared = cleared
 	}
 	return writeRestartIssueResult(stdout, result, false, opts.jsonOut)
+}
+
+func restartIssueHasWork(result restartIssueResult) bool {
+	return result.CacheCleared || result.DependencyStateCleared || result.ClaimCleared || result.CycleStateCleared || result.InflightCleared
+}
+
+func writeRestartIssueNothing(stdout io.Writer, result restartIssueResult, jsonOut bool) error {
+	if jsonOut {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(struct {
+			restartIssueResult
+			Message string `json:"message"`
+		}{
+			restartIssueResult: result,
+			Message:            "nothing to restart (gates already cleared)",
+		})
+	}
+	_, _ = fmt.Fprintf(stdout, "%s#%d: nothing to restart (gates already cleared)\n", result.Repo, result.IssueNum)
+	return nil
 }
 
 func writeRestartIssueResult(stdout io.Writer, result restartIssueResult, dryRun, jsonOut bool) error {

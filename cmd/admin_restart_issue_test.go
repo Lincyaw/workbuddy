@@ -416,6 +416,43 @@ func TestRunRestartIssueWithOpts_DryRunHasNoSideEffects(t *testing.T) {
 	}
 }
 
+func TestRunRestartIssueWithOpts_NoOpDoesNotRequireForce(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "restart-noop.db")
+	st, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	_ = st.Close()
+
+	var out bytes.Buffer
+	err = runRestartIssueWithOpts(context.Background(), &restartIssueOpts{
+		repo:        "owner/repo",
+		issue:       55,
+		dbPath:      dbPath,
+		source:      "test",
+		interactive: false,
+	}, &out)
+	if err != nil {
+		t.Fatalf("runRestartIssueWithOpts: %v", err)
+	}
+	if !strings.Contains(out.String(), "nothing to restart (gates already cleared)") {
+		t.Fatalf("expected no-op message, got %q", out.String())
+	}
+
+	verify, err := store.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	t.Cleanup(func() { _ = verify.Close() })
+	events, err := verify.QueryEvents("owner/repo")
+	if err != nil {
+		t.Fatalf("QueryEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("noop restart should not log events, got %+v", events)
+	}
+}
+
 func runSinglePoll(t *testing.T, p *poller.Poller) []poller.ChangeEvent {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())

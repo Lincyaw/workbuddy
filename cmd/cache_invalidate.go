@@ -36,7 +36,11 @@ var cacheInvalidateCmd = &cobra.Command{
 	Long: `Clear the poller's cached issue snapshot so the next poll treats each
 listed issue as new. Use this when an issue's labels changed on GitHub but
 workbuddy didn't react (poller de-dup kept it out of the state machine),
-or after manually editing labels to kick off a retry.`,
+or after manually editing labels to kick off a retry.
+
+This command is DB-local only: it does not accept --coordinator. For a remote
+coordinator, SSH to the coordinator host and pass --db-path for that
+deployment's SQLite database.`,
 	Example: `  # Force re-poll of one issue
   workbuddy cache invalidate --repo owner/name --issue 42
 

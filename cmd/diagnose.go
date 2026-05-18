@@ -40,7 +40,11 @@ fix. Pass --fix to apply safe automated remediations (for example cache
 invalidation for stuck issues); destructive actions are never auto-applied.
 
 Use --format json when piping into another tool. Exit code is non-zero if any
-error-severity findings remain after --fix.`,
+error-severity findings remain after --fix.
+
+This command is DB-local only: it does not accept --coordinator. For a remote
+coordinator, SSH to the coordinator host and pass --db-path for that
+deployment's SQLite database.`,
 	Example: `  # Scan all repos
   workbuddy diagnose
 

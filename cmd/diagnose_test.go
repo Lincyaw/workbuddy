@@ -430,8 +430,16 @@ func TestDiagnoseHelpTextUsesFormatJSONCanonically(t *testing.T) {
 	if strings.Contains(diagnoseCmd.Long, "Use --json when piping into another tool.") {
 		t.Fatalf("diagnose help still advertises --json as canonical: %q", diagnoseCmd.Long)
 	}
-	if !strings.Contains(diagnoseCmd.Long, "Use --format json when piping into another tool.") {
-		t.Fatalf("diagnose help missing canonical --format json guidance: %q", diagnoseCmd.Long)
+	for _, want := range []string{
+		"Use --format json when piping into another tool.",
+		"DB-local only",
+		"does not accept --coordinator",
+		"SSH to the coordinator host",
+		"--db-path",
+	} {
+		if !strings.Contains(diagnoseCmd.Long, want) {
+			t.Fatalf("diagnose help missing %q: %q", want, diagnoseCmd.Long)
+		}
 	}
 }
 

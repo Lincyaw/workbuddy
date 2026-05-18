@@ -44,6 +44,14 @@ func TestCacheInvalidateCommands(t *testing.T) {
 
 }
 
+func TestCacheInvalidateHelpDocumentsDBLocalOnly(t *testing.T) {
+	for _, want := range []string{"DB-local only", "does not accept --coordinator", "SSH to the coordinator host", "--db-path"} {
+		if !strings.Contains(cacheInvalidateCmd.Long, want) {
+			t.Fatalf("cache invalidate help missing %q: %q", want, cacheInvalidateCmd.Long)
+		}
+	}
+}
+
 func TestRunCacheInvalidateStore(t *testing.T) {
 	t.Run("deletes cache and dependency state", func(t *testing.T) {
 		st := newStatusTestStore(t)
