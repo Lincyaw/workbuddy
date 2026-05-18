@@ -6363,3 +6363,124 @@ requirements:
       - cmd/coordinator_tunnel_test.go
     deps:
       - REQ-037
+  - id: REQ-156
+    title: Migrate-time timestamp rewrite for MySQL strict sql_mode (REQ-156 / #345 Wave 4)
+    description: >
+      Wave 4 follow-up on issue #345. The W3-A reviewer surfaced a latent
+      bug in `cmd/db_migrate.go` that the W3-A `dialect.FormatTimestamp`
+      helper (REQ-154) did not cover: the migrate command streams rows
+      SQLite source → MySQL destination via raw `SELECT col, ... FROM t`
+      followed by `INSERT INTO t (cols) VALUES (?, ?, ...)`, scanning
+      into `[]any` and binding the values directly. Because the typed
+      repository methods are bypassed, the dialect-routed formatter
+      never runs on the migrate path. SQLite stores DATETIME values as
+      RFC3339 TEXT (`2026-04-18T11:30:45Z`); MySQL `DATETIME(6)` under
+      `STRICT_TRANS_TABLES` (the MySQL 8 default) rejects that literal
+      with "Incorrect datetime value: '...Z'" and the INSERT fails.
+
+      Fix (Option B in the W3-A reviewer's taxonomy — schema-aware):
+
+        - Extend `migrationTable` in `cmd/db_migrate.go` with a
+          `timestampCols []string` field listing each DATETIME(6)
+          column for that table. Source of truth is
+          `internal/store/mysql/schema.sql`; the test
+          `TestMigrateTimestampColumnsCoverSchema` walks the schema and
+          fails the build if a new DATETIME column ships without the
+          flag.
+
+        - Introduce a `newTimestampRewriter(destDSN)` closure in
+          `cmd/db_migrate.go` that:
+
+            * Returns nil for nil / zero-time inputs (NULL passthrough).
+            * Accepts `time.Time` (symmetric for a hypothetical
+              MySQL-source leg with `parseTime=true`) and `string`
+              (today's SQLite source).
+            * Parses the source value via `store.ParseTimestamp` and
+              re-emits via `store.FormatTimestampForDSN(destDSN, t)`.
+            * Leaves un-parseable strings untouched so a real driver
+              error surfaces rather than silent corruption.
+
+        - In `copyTable`, after `rows.Scan(...)`, walk the scanned
+          values and rewrite only the entries whose column name is in
+          `table.timestampCols`. Detection-by-shape (Option A) was
+          rejected because a TEXT column whose payload happens to parse
+          as RFC3339 (e.g. a free-form `body` blob) would be silently
+          reformatted; pinning by column name eliminates the
+          false-positive risk.
+
+        - Expose a narrow new public helper
+          `store.FormatTimestampForDSN(dsn string, t time.Time) string`
+          in `internal/store/migrate_helpers.go` so `cmd/` does not
+          duplicate the DSN-scheme → dialect mapping (which lives in
+          store's `newWithMode`) nor the format string itself (which
+          lives in `dialect.FormatTimestamp`). The `dialect` type stays
+          unexported; this is the single seam.
+
+      Why a helper in `internal/store/` rather than in `cmd/`: the
+      DSN-prefix-to-engine mapping and the MySQL DATETIME(6) literal
+      grammar are both store-package invariants. A cmd-local
+      reimplementation would create two sources of truth and silently
+      drift the day a new engine lands.
+
+      Tests:
+
+        - `TestMigrateTimestampColumnsCoverSchema` enforces parity
+          between the `timestampCols` flags and the DATETIME(6)
+          declarations in `internal/store/mysql/schema.sql`.
+        - `TestNewTimestampRewriter_SQLiteIdentity` pins that the
+          parse-then-format round-trip is identity-preserving when
+          destination is SQLite (otherwise a forced re-migrate would
+          gratuitously rewrite every DATETIME row).
+        - `TestNewTimestampRewriter_MySQLConversion` pins that the
+          RFC3339 input becomes the MySQL space-form on a `mysql://`
+          DSN, with no 'T' or 'Z' characters.
+        - `TestNewTimestampRewriter_NilAndEmpty` covers NULL,
+          empty-string, and un-parseable-string passthrough.
+        - `TestNewTimestampRewriter_TimeValue` covers the time.Time
+          branch (symmetric for a future MySQL source) and the
+          zero-time → nil mapping for nullable DATETIME columns.
+        - `TestDBMigrateDatetimeRoundTripSQLite` seeds a SQLite source
+          with an `issue_claim` row (NOT NULL DATETIME(6) columns),
+          runs SQLite → SQLite migrate, and asserts the destination
+          row round-trips within second precision.
+        - `TestDBMigrateToMySQLStrictSqlMode` (build tag
+          `mysql_integration`, requires `WORKBUDDY_MYSQL_TEST_DSN`)
+          pins the MySQL-side bug fix: opens the destination via
+          `sql_mode=STRICT_TRANS_TABLES,...` in the DSN, verifies the
+          mode is in force on the connection (skips with a clear
+          message if a managed offering overrides it), then runs
+          SQLite → MySQL migrate and asserts the migrated `issue_claim`
+          row round-trips within second precision. Pre-fix the INSERT
+          would be rejected by the server; post-fix the round-trip
+          succeeds.
+
+      Constraints honoured:
+
+        - `internal/store/store.go`, `dialect.go`, `iface.go`, and
+          other existing store files are untouched. The new helper
+          lives in its own file, `internal/store/migrate_helpers.go`.
+        - The MySQL integration test stays opt-in via build tag and
+          `WORKBUDDY_MYSQL_TEST_DSN`.
+        - `go build ./... && go vet ./... && go test ./... -count=1`
+          stay green; `go build -tags mysql_integration ./...` and
+          `go vet -tags mysql_integration ./...` stay green.
+    priority: P1
+    version: v0.7.0
+    status: tested
+    acceptance_criteria:
+      - "AC-156-1: `migrationTable` in `cmd/db_migrate.go` gains a `timestampCols []string` field populated for every table that has DATETIME(6) columns per `internal/store/mysql/schema.sql`."
+      - "AC-156-2: A `newTimestampRewriter(destDSN string) func(any) any` function in `cmd/db_migrate.go` parses scanned timestamp values via `store.ParseTimestamp` and re-emits via `store.FormatTimestampForDSN(destDSN, t)`, with nil / empty / zero-time / un-parseable passthrough."
+      - "AC-156-3: `copyTable` in `cmd/db_migrate.go` invokes the rewriter on exactly the columns flagged by `migrationTable.timestampCols` after `rows.Scan`, before the value reaches `bulkInsert`."
+      - "AC-156-4: `store.FormatTimestampForDSN(dsn string, t time.Time) string` is exported from `internal/store/migrate_helpers.go`. The function maps `mysql://` to the MySQL dialect and `sqlite://` / bare path to SQLite, mirroring `newWithMode` in `store.go`. The unexported `dialect` type is not leaked."
+      - "AC-156-5: `TestMigrateTimestampColumnsCoverSchema`, `TestNewTimestampRewriter_SQLiteIdentity`, `TestNewTimestampRewriter_MySQLConversion`, `TestNewTimestampRewriter_NilAndEmpty`, `TestNewTimestampRewriter_TimeValue`, and `TestDBMigrateDatetimeRoundTripSQLite` ship in `cmd/db_migrate_timestamp_test.go` and pass under `go test ./cmd/... -count=1 -run 'Migrate|Migration|RewriteTimestamp|TimestampColumns|DatetimeRoundTrip'`."
+      - "AC-156-6: `TestDBMigrateToMySQLStrictSqlMode` ships in `cmd/db_migrate_mysql_test.go` under build tag `mysql_integration`; when `WORKBUDDY_MYSQL_TEST_DSN` is set, it pins `sql_mode=STRICT_TRANS_TABLES` on the destination connection and verifies the migrate succeeds with second-precision timestamp parity."
+      - "AC-156-7: `go build ./... && go vet ./... && go test ./... -count=1`, plus `go build -tags mysql_integration ./...` and `go vet -tags mysql_integration ./...`, all stay green."
+    code:
+      - cmd/db_migrate.go
+      - internal/store/migrate_helpers.go
+    tests:
+      - cmd/db_migrate_test.go
+      - cmd/db_migrate_timestamp_test.go
+      - cmd/db_migrate_mysql_test.go
+    deps:
+      - REQ-154

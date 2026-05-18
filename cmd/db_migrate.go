@@ -47,12 +47,14 @@ import (
 // arrangement. Both engines accept the order below.
 var migrationTables = []migrationTable{
 	{
-		name:    "events",
-		columns: []string{"id", "ts", "type", "repo", "issue_num", "payload"},
+		name:           "events",
+		columns:        []string{"id", "ts", "type", "repo", "issue_num", "payload"},
+		timestampCols:  []string{"ts"},
 	},
 	{
-		name:    "repo_registrations",
-		columns: []string{"repo", "environment", "status", "config_json", "registered_at", "updated_at"},
+		name:          "repo_registrations",
+		columns:       []string{"repo", "environment", "status", "config_json", "registered_at", "updated_at"},
+		timestampCols: []string{"registered_at", "updated_at"},
 	},
 	{
 		name: "workers",
@@ -61,6 +63,7 @@ var migrationTables = []migrationTable{
 			"mgmt_base_url", "audit_url", "tunnel", "status", "token_kid",
 			"token_hash", "token_revoked_at", "last_heartbeat", "registered_at",
 		},
+		timestampCols: []string{"token_revoked_at", "last_heartbeat", "registered_at"},
 	},
 	{
 		name: "workflow_instances",
@@ -68,6 +71,7 @@ var migrationTables = []migrationTable{
 			"id", "workflow_name", "repo", "issue_num", "current_state",
 			"created_at", "updated_at",
 		},
+		timestampCols: []string{"created_at", "updated_at"},
 	},
 	{
 		// workflow_transitions has a FOREIGN KEY to workflow_instances(id).
@@ -77,6 +81,7 @@ var migrationTables = []migrationTable{
 			"id", "workflow_instance_id", "from_state", "to_state",
 			"trigger_agent", "created_at",
 		},
+		timestampCols: []string{"created_at"},
 	},
 	{
 		name: "task_queue",
@@ -87,6 +92,10 @@ var migrationTables = []migrationTable{
 			"exit_code", "session_refs", "rollout_index", "rollouts_total",
 			"rollout_group_id", "supervisor_agent_id", "created_at", "updated_at",
 		},
+		timestampCols: []string{
+			"lease_expires_at", "acked_at", "heartbeat_at", "completed_at",
+			"created_at", "updated_at",
+		},
 	},
 	{
 		name: "issue_cache",
@@ -94,6 +103,7 @@ var migrationTables = []migrationTable{
 			"repo", "issue_num", "labels", "body", "state",
 			"root_trace_id", "parent_issue_num", "updated_at",
 		},
+		timestampCols: []string{"updated_at"},
 	},
 	{
 		name: "agent_sessions",
@@ -101,6 +111,7 @@ var migrationTables = []migrationTable{
 			"id", "session_id", "task_id", "repo", "issue_num", "agent_name",
 			"summary", "raw_path", "created_at",
 		},
+		timestampCols: []string{"created_at"},
 	},
 	{
 		name: "sessions",
@@ -110,12 +121,14 @@ var migrationTables = []migrationTable{
 			"stdout_path", "stderr_path", "tool_calls_path", "metadata_path",
 			"summary", "raw_path", "created_at", "closed_at",
 		},
+		timestampCols: []string{"created_at", "closed_at"},
 	},
 	{
 		name: "session_routes",
 		columns: []string{
 			"session_id", "worker_id", "repo", "issue_num", "created_at",
 		},
+		timestampCols: []string{"created_at"},
 	},
 	{
 		name: "issue_dependencies",
@@ -123,6 +136,7 @@ var migrationTables = []migrationTable{
 			"repo", "issue_num", "depends_on_repo", "depends_on_issue_num",
 			"source_hash", "status",
 		},
+		// no DATETIME columns
 	},
 	{
 		name: "issue_dependency_state",
@@ -131,6 +145,7 @@ var migrationTables = []migrationTable{
 			"blocked_reason_hash", "override_active", "graph_version",
 			"last_reaction_blocked", "last_evaluated_at",
 		},
+		timestampCols: []string{"last_evaluated_at"},
 	},
 	{
 		name: "issue_claim",
@@ -138,17 +153,22 @@ var migrationTables = []migrationTable{
 			"repo", "issue_num", "worker_id", "claim_token",
 			"acquired_at", "expires_at",
 		},
+		timestampCols: []string{"acquired_at", "expires_at"},
 	},
 	{
 		name: "issue_pipeline_hazards",
 		columns: []string{
 			"repo", "issue_num", "kind", "fingerprint", "detected_at",
 		},
+		timestampCols: []string{"detected_at"},
 	},
 	{
 		name: "issue_cycle_state",
 		columns: []string{
 			"repo", "issue_num", "dev_review_cycle_count", "synth_cycle_count",
+			"first_dispatch_at", "cap_hit_at", "synth_cap_hit_at", "updated_at",
+		},
+		timestampCols: []string{
 			"first_dispatch_at", "cap_hit_at", "synth_cap_hit_at", "updated_at",
 		},
 	},
@@ -157,12 +177,51 @@ var migrationTables = []migrationTable{
 		columns: []string{
 			"repo", "issue_num", "from_state", "to_state", "count",
 		},
+		// no DATETIME columns
 	},
 }
 
+// migrationTable is a per-table copy plan.
+//
+// `timestampCols` flags which entries in `columns` are DATETIME(6) on the
+// MySQL side (and TEXT-typed timestamps on the SQLite side). The migrate
+// path needs the flag because raw `[]any` scan from a SQLite source
+// surfaces these values as RFC3339 strings like `2026-04-18T11:30:45Z`,
+// which MySQL `DATETIME(6)` rejects under STRICT_TRANS_TABLES with
+// "Incorrect datetime value". The fix in copyTable rewrites flagged
+// values through `store.FormatTimestampForDSN(opts.to, t)` — identity for
+// SQLite destinations (so the unit tests round-trip cleanly) and the
+// MySQL-native space form for MySQL destinations.
+//
+// The flag is schema-aware rather than detection-by-shape (the rejected
+// Option A): a TEXT column whose payload happens to parse as RFC3339
+// (e.g. a free-form `body` blob) must NOT be reformatted. Pinning by
+// column name eliminates the false-positive risk.
+//
+// Source of truth: the DATETIME(6) declarations in
+// internal/store/mysql/schema.sql (which TestSchemaParity keeps aligned
+// with the SQLite DDL in dbStore.createTables). When a new DATETIME
+// column lands, add it here too; TestMigrateTimestampColumnsCoverSchema
+// guards the parity by cross-checking against the MySQL schema source.
 type migrationTable struct {
-	name    string
-	columns []string
+	name          string
+	columns       []string
+	timestampCols []string
+}
+
+// isTimestampCol reports whether column at index `i` in t.columns is a
+// DATETIME-style column for the purposes of migrate-time value rewriting.
+func (t migrationTable) isTimestampCol(i int) bool {
+	if i < 0 || i >= len(t.columns) {
+		return false
+	}
+	name := t.columns[i]
+	for _, ts := range t.timestampCols {
+		if ts == name {
+			return true
+		}
+	}
+	return false
 }
 
 // dbMigrateOpts captures parsed flags for `workbuddy db migrate`.
@@ -281,13 +340,15 @@ func runDBMigrate(ctx context.Context, opts dbMigrateOpts, progress io.Writer) e
 		}
 	}
 
+	rewriteTimestamp := newTimestampRewriter(opts.to)
+
 	start := time.Now()
 	var totalRows int64
 	for _, table := range migrationTables {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		copied, err := copyTable(ctx, src, dst, table, opts.batchSize, progress)
+		copied, err := copyTable(ctx, src, dst, table, opts.batchSize, progress, rewriteTimestamp)
 		if err != nil {
 			return fmt.Errorf("db migrate: table %q: %w", table.name, err)
 		}
@@ -365,6 +426,7 @@ func copyTable(
 	src store.Store, dst store.Store,
 	table migrationTable, batchSize int,
 	progress io.Writer,
+	rewriteTimestamp func(any) any,
 ) (int64, error) {
 	cols := strings.Join(quoteIdents(table.columns), ", ")
 	selectSQL := "SELECT " + cols + " FROM " + table.name
@@ -413,6 +475,18 @@ func copyTable(
 		}
 		if err := rows.Scan(scanHolders...); err != nil {
 			return copied, fmt.Errorf("scan row %d: %w", copied+int64(len(batch))+1, err)
+		}
+		// Rewrite DATETIME-typed columns into the destination's literal
+		// form before they reach bulkInsert. Skipping this on a MySQL
+		// destination under STRICT_TRANS_TABLES surfaces as "Incorrect
+		// datetime value: '2026-04-18T11:30:45Z'" — the bug class this
+		// migrate-path treatment exists to neutralise.
+		if rewriteTimestamp != nil && len(table.timestampCols) > 0 {
+			for i := range scanTargets {
+				if table.isTimestampCol(i) {
+					scanTargets[i] = rewriteTimestamp(scanTargets[i])
+				}
+			}
 		}
 		batch = append(batch, scanTargets)
 		if len(batch) >= batchCap {
@@ -501,6 +575,66 @@ func countTable(s store.Store, table string) (int64, error) {
 		return 0, err
 	}
 	return n, nil
+}
+
+// newTimestampRewriter returns a function that converts a single scanned
+// value at a flagged timestamp column into the destination dialect's
+// native literal form.
+//
+// Why this exists (REQ-156, follow-up on issue #345 Wave 3 / W3-A review):
+// The migrate command streams rows source → destination through raw
+// `SELECT` + `INSERT ... VALUES (?, ?, ...)`. Scan targets are `[]any`
+// so the SQLite driver hands the value back as a string (TEXT columns
+// scan as Go string in modernc.org/sqlite). Those strings are RFC3339
+// with a trailing `Z` because internal/store writes them via
+// `dialect.FormatTimestamp` on a SQLite store. Binding that string
+// back into a MySQL DATETIME(6) parameter under STRICT_TRANS_TABLES
+// (the default sql_mode on MySQL 8) is rejected with
+// "Incorrect datetime value: '2026-04-18T11:30:45Z'" — the W3-A
+// `dialect.FormatTimestamp` helper exists exactly for this conversion
+// class but the migrate path bypasses it.
+//
+// The rewriter parses the source value via `store.ParseTimestamp`
+// (which already accepts every layout the package writes) and re-emits
+// it via `store.FormatTimestampForDSN(destDSN, t)`. For a SQLite
+// destination the round-trip is identity-preserving (RFC3339 →
+// time.Time → RFC3339); for a MySQL destination the output is the
+// space-form `2006-01-02 15:04:05.000000` that MySQL accepts
+// regardless of sql_mode.
+//
+// The rewriter is only invoked on columns explicitly flagged in
+// `migrationTable.timestampCols`. Shape-based detection ("does this
+// string look like a timestamp?") was rejected because it false-positives
+// on body/payload TEXT columns that happen to contain ISO-8601 dates.
+func newTimestampRewriter(destDSN string) func(any) any {
+	return func(v any) any {
+		if v == nil {
+			return nil
+		}
+		// MySQL with parseTime=true returns time.Time directly. The
+		// migrate source today is SQLite (TEXT → string), but cover
+		// both for symmetry — a future "MySQL → MySQL" leg or a
+		// non-SQLite source would otherwise silently fall through.
+		if t, ok := v.(time.Time); ok {
+			if t.IsZero() {
+				return nil
+			}
+			return store.FormatTimestampForDSN(destDSN, t)
+		}
+		s, ok := v.(string)
+		if !ok || s == "" {
+			return v
+		}
+		t, ok := store.ParseTimestamp(s, "migrate")
+		if !ok || t.IsZero() {
+			// ParseTimestamp logs a warning. Leave the raw bytes
+			// alone — the destination's own type coercion (or
+			// strict-mode rejection) will surface the problem with
+			// a real driver error rather than silent corruption.
+			return v
+		}
+		return store.FormatTimestampForDSN(destDSN, t)
+	}
 }
 
 // quoteIdents wraps each identifier in backticks. MySQL requires backticks
