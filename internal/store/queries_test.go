@@ -73,13 +73,11 @@ func TestQueryEventsFilteredTimestamp(t *testing.T) {
 	}
 }
 
-// TestQueryEventsFilteredSinceUntil pins the second half of #345: the
-// Since/Until WHERE args were formatted with "2006-01-02 15:04:05" while
-// the underlying TEXT column holds RFC3339 ("...T...Z"). SQLite compares
-// TEXT lexicographically, and ' ' (0x20) < 'T' (0x54), so the rigid
-// layout caused Since to under-filter and Until to over-filter when the
-// boundary fell on the same date but a different time-of-day. The fix
-// formats both as time.RFC3339 to match what's actually stored.
+// TestQueryEventsFilteredSinceUntil pins the second half of #345: events.ts
+// is written by SQLite's CURRENT_TIMESTAMP default as the space-separated
+// form 'YYYY-MM-DD HH:MM:SS' (not RFC3339), and SQLite compares TEXT
+// lexicographically. The Since/Until WHERE args must use the same layout
+// so the boundary doesn't mis-order against 'T'.
 //
 // To get deterministic ts values we overwrite events.ts via the Store's
 // Exec passthrough after insertion — CURRENT_TIMESTAMP would set it to
@@ -87,11 +85,6 @@ func TestQueryEventsFilteredTimestamp(t *testing.T) {
 func TestQueryEventsFilteredSinceUntil(t *testing.T) {
 	s := newTestStore(t)
 
-	// Insert three events, then pin their ts to known RFC3339 values
-	// on the same date with different times-of-day. This shape is what
-	// surfaced the lexicographic bug: a filter like "2020-01-01 10:00:00"
-	// sorts BEFORE "2020-01-01T01:00:00Z" because ' ' < 'T', so a
-	// Since=10:00 filter would incorrectly include the 01:00 row.
 	id1, err := s.InsertEvent(Event{Type: "poll", Repo: "org/a", IssueNum: 1, Payload: `{}`})
 	if err != nil {
 		t.Fatalf("InsertEvent 1: %v", err)
@@ -109,9 +102,9 @@ func TestQueryEventsFilteredSinceUntil(t *testing.T) {
 		id int64
 		ts string
 	}{
-		{id1, "2020-01-01T01:00:00Z"},
-		{id2, "2020-01-01T12:00:00Z"},
-		{id3, "2020-01-01T23:00:00Z"},
+		{id1, "2020-01-01 01:00:00"},
+		{id2, "2020-01-01 12:00:00"},
+		{id3, "2020-01-01 23:00:00"},
 	} {
 		if _, err := s.Exec(`UPDATE events SET ts = ? WHERE id = ?`, row.ts, row.id); err != nil {
 			t.Fatalf("backdate ts for id=%d: %v", row.id, err)
