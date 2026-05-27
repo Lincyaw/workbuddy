@@ -6899,3 +6899,58 @@ requirements:
       - REQ-134
       - REQ-142
       - REQ-146
+
+  - id: REQ-161
+    title: AgentM sandbox→PR diff sync (close the pod→worktree gap for agent_env dev work)
+    description: >
+      Companion to REQ-160. The serve-path agentm loop dispatched, executed in a
+      sandbox pod, and flipped labels — but every coordinator-managed PR was
+      EMPTY, because the agent edits the agent-env pod's /workspace while the
+      coordinator's publish commits from the worker's worktree (a filesystem the
+      pod never touches). This blocked real dev/reviewer work on otel-demo.
+
+      Fixed entirely on the AgentM side (sibling repo ../AgentM,
+      contrib/extensions/operations_agent_env.py) so workbuddy needs NO code
+      change and the credential boundary is preserved (the pod never receives a
+      GitHub token):
+
+      - New opt-in atom config `sync_cwd` (+ optional `host_workspace`, default
+        os.getcwd() == workbuddy's --cwd). A new `agent_env_repo` scenario =
+        `agent_env` + `sync_cwd: true`; the general `agent_env` scenario is
+        untouched.
+      - Seed: before the run, `git archive HEAD` of the worktree → upload via the
+        agent-env gateway `/v1/sessions/{id}/files` endpoint → `git init/commit`
+        + tag an immovable `wb-baseline` inside the pod.
+      - Sync back: on SessionShutdownEvent (before delete_sandbox),
+        `git diff --cached --binary wb-baseline | base64` in the pod →
+        `git apply` onto the worktree. Diffing the TAG (not HEAD) captures the
+        agent's work even when it commits inside the pod.
+      - AgentM's own host-side `.agentm/` runtime droppings are kept out of the
+        commit via a local `.git/info/exclude` entry the atom writes.
+
+      workbuddy's existing coordinator-managed publish
+      (internal/runtime/agent_bridge.go → internal/gitops) then commits+pushes
+      the real diff. The dev/review agent configs select the synced behavior by
+      pointing `scenario:` at `agent_env_repo` (deployment config, not bundled in
+      this repo). Documented in docs/planned/agentm-runtime.md.
+
+      Verified live on kind (workbuddy serve + agentm worker, isolated agentm
+      venv): an issue whose AC required creating MARKER.md ran
+      developing→reviewing→done autonomously, and the resulting PR contained
+      MARKER.md ("synced-from-pod") as its SOLE diff — no .agentm noise. The
+      plain agent_env scenario still runs in a non-git workdir with no seeding.
+    priority: P1
+    version: v0.7.0
+    status: tested
+    acceptance_criteria:
+      - "AC-161-1: AgentM operations_agent_env accepts `sync_cwd` (bool, default false) and `host_workspace` (string, default cwd); the `agent_env_repo` scenario enables sync_cwd while leaving the general `agent_env` scenario unchanged."
+      - "AC-161-2: With sync_cwd, the sandbox /workspace is seeded from the host cwd's `git archive HEAD` and a `wb-baseline` tag is created in-pod before the agent runs; a seed failure aborts the run rather than producing an empty diff."
+      - "AC-161-3: On shutdown the agent's changes are diffed against `wb-baseline` (capturing in-pod commits) and git-applied onto the host worktree; an empty diff (e.g. review agent) is a clean no-op; the pod never receives GitHub credentials."
+      - "AC-161-4: AgentM's host-side `.agentm/` runtime files are excluded from the dispatcher's commit via the worktree's `.git/info/exclude`."
+      - "AC-161-5: Live serve e2e: an AC requiring a new file yields a PR whose sole diff is that file with the exact required contents; the plain `agent_env` scenario still works in a non-git workdir."
+    code:
+      - docs/planned/agentm-runtime.md
+    tests:
+      - docs/planned/agentm-runtime.md
+    deps:
+      - REQ-160

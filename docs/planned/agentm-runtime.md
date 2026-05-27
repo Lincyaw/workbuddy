@@ -162,6 +162,28 @@ delta:
   the post-run `git push` + `gh pr create` + label flip using `next_label`.
 - The workspace is an ephemeral sandbox clone; nothing persists between runs.
 
+### Sandbox workspace sync (closing the pod→PR diff gap)
+
+When AgentM runs in an agent-env sandbox pod, the agent edits the pod's
+`/workspace`, **not** the worker's worktree — so the coordinator's
+`git push` had nothing to commit and PRs came out empty. This is closed on
+the **AgentM side** (no workbuddy change), keeping the credential boundary:
+
+- The worker still clones the repo into its worktree (with its PAT) and hands
+  it to AgentM as `--cwd`.
+- The `operations_agent_env` atom, configured with `sync_cwd: true` (the
+  `agent_env_repo` scenario), **seeds** the pod from the worktree's `git HEAD`
+  before the run and **applies the agent's diff back** onto the worktree on
+  shutdown — diffed against an immovable baseline tag so an agent that commits
+  inside the pod is still captured. The pod never receives a token.
+- The coordinator's existing publish path then commits+pushes the real diff.
+
+So an `agentm` dev agent that should produce code uses
+`scenario: <abs path>/contrib/scenarios/agent_env_repo`; AgentM's own
+`.agentm/` runtime files are kept out of the commit via a local
+`.git/info/exclude` entry the atom writes. See AgentM
+`contrib/extensions/operations_agent_env.py` (`sync_cwd`) and REQ-161.
+
 Because the output contract is identical, no schema bump is expected when
 v0.6 ships. If a bump *is* needed (e.g. AgentM wants to return multiple
 artifacts), the schema MUST add an optional field rather than break v0.5
