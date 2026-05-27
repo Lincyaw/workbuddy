@@ -7008,13 +7008,13 @@ requirements:
       pod.
     priority: P1
     version: v0.7.0
-    status: implemented
+    status: tested
     acceptance_criteria:
       - "AC-162-1: `workbuddy serve --runtime agentm` advertises the agentm capability on the embedded worker so ClaimNextTask hands it agentm tasks; default remains claude-code; covered by cmd/serve_test.go TestParseServeFlagsRuntime."
       - "AC-162-2: deploy/docker/Dockerfile builds an image with `workbuddy` + `agentm` on PATH, gh + git installed, and the agent_env_repo scenario resolvable BY NAME via discover_contrib_atoms + load_scenario (editable install + AGENTM_PROJECT_ROOT)."
       - "AC-162-3: `helm lint` and `helm template` succeed for mode=serve; the rendered Deployment runs `serve --config-dir --runtime=agentm --listen=0.0.0.0 --auth`, mounts config+agents+workspace, sets the AGENTM_AGENT_ENV_* / token / provider env, and has an initContainer that clones config.repo into the workspace PVC."
       - "AC-162-4: agent configs reference `scenario: agent_env_repo` by name (no absolute path); the sandbox image is injected from agentEnv.image as dev_container_image."
-      - "AC-162-5: Live kind smoke — the chart deploys into a cluster with an agent-env Gateway, and an issue with a real-code AC runs developing→reviewing→done with a non-empty PR whose diff is exactly the agent's changes."
+      - "AC-162-5: Live kind smoke (VERIFIED) — chart deployed into kind arl-agentm (agentEnv.gatewayUrl=http://arl-operator-gateway.arl.svc:8080, combined image kind-loaded); initContainer cloned the repo into the workspace PVC; serve bound 0.0.0.0:8080 with --auth and ran the embedded agentm worker; issue #9 (real-code AC) ran developing→reviewing→done autonomously and produced PR #10 containing the agent's actual k8s_marker.py + test (the agent ran the test in-sandbox). The credential boundary held: the pod cloned/pushed with the token, the sandbox got none."
     code:
       - cmd/serve.go
       - deploy/docker/Dockerfile
