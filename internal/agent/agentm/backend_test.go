@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,9 +17,10 @@ func newSpec(t *testing.T) agent.Spec {
 	t.Helper()
 	work := t.TempDir()
 	return agent.Spec{
-		Backend: "agentm",
-		Workdir: work,
-		Prompt:  "do the thing",
+		Backend:  "agentm",
+		Workdir:  work,
+		Prompt:   "do the thing",
+		Scenario: "agent_env",
 		Env: map[string]string{
 			"WORKBUDDY_ISSUE_NUMBER": "319",
 			"WORKBUDDY_REPO":         "Lincyaw/workbuddy",
@@ -28,8 +30,31 @@ func newSpec(t *testing.T) agent.Spec {
 	}
 }
 
-func TestBackend_HappyPath_Success(t *testing.T) {
-	fake := agentmtest.BuildFake(t, agentmtest.Config{Mode: agentmtest.ModeSuccess})
+func waitForSession(ctx context.Context, t *testing.T, sess agent.Session) agent.Result {
+	t.Helper()
+	doneEvt := make(chan struct{})
+	go func() {
+		//nolint:revive // draining the event channel until close
+		for range sess.Events() {
+		}
+		close(doneEvt)
+	}()
+	res, err := sess.Wait(ctx)
+	<-doneEvt
+	if err != nil {
+		t.Fatalf("Wait returned error: %v", err)
+	}
+	return res
+}
+
+// TestBackend_CLISuccess_CapturesFinalText is the new normal mode: AgentM
+// exits 0 with no RESULT: line; the backend treats it as success and surfaces
+// the trailing assistant paragraph as FinalMsg.
+func TestBackend_CLISuccess_CapturesFinalText(t *testing.T) {
+	fake := agentmtest.BuildFake(t, agentmtest.Config{
+		Mode:      agentmtest.ModeSuccess,
+		FinalText: "Implemented REQ-134 and all tests pass.",
+	})
 	be := &agentm.Backend{Binary: fake}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -38,46 +63,128 @@ func TestBackend_HappyPath_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	// Drain events in the background; the channel must close.
-	doneEvt := make(chan struct{})
-	go func() {
-		for range sess.Events() {
-		}
-		close(doneEvt)
-	}()
-	res, err := sess.Wait(ctx)
-	if err != nil {
-		t.Fatalf("Wait returned error: %v", err)
-	}
+	res := waitForSession(ctx, t, sess)
 	if res.ExitCode != 0 {
 		t.Fatalf("expected exit 0, got %d", res.ExitCode)
 	}
-	<-doneEvt
+	if res.FinalMsg != "Implemented REQ-134 and all tests pass." {
+		t.Fatalf("FinalMsg = %q, want the trailing assistant paragraph", res.FinalMsg)
+	}
 
-	extractor, ok := sess.(interface {
+	// No RESULT: line means Output() returns (nil, nil) — not an error.
+	extractor := sess.(interface {
 		Output() (*agentm.Output, error)
 		SessionLogPath() string
 	})
-	if !ok {
-		t.Fatalf("session does not expose Output()")
-	}
 	out, perr := extractor.Output()
 	if perr != nil {
-		t.Fatalf("Output(): %v", perr)
+		t.Fatalf("Output() should not error in CLI mode: %v", perr)
 	}
-	if !out.Success {
-		t.Fatalf("expected success=true")
+	if out != nil {
+		t.Fatalf("Output() should be nil with no RESULT: line, got %+v", out)
 	}
-	if out.NextLabel != "status:review" {
-		t.Fatalf("expected next_label=status:review, got %q", out.NextLabel)
-	}
+
+	// The captured stdout transcript is the session-log artifact.
 	logPath := extractor.SessionLogPath()
 	if logPath == "" {
 		t.Fatalf("expected session log path")
 	}
-	if _, err := os.Stat(logPath); err != nil {
+	data, err := os.ReadFile(logPath)
+	if err != nil {
 		t.Fatalf("session log missing: %v", err)
 	}
+	if !strings.Contains(string(data), "Implemented REQ-134") {
+		t.Fatalf("session log missing transcript text:\n%s", data)
+	}
+}
+
+// TestBackend_NoResultNoBanner_IsSuccess covers exit-0 with neither a RESULT:
+// line nor a `====` summary banner — the trailing stdout text is FinalMsg.
+func TestBackend_NoResultNoBanner_IsSuccess(t *testing.T) {
+	fake := agentmtest.BuildFake(t, agentmtest.Config{
+		Mode:      agentmtest.ModeNoResult,
+		FinalText: "Done — nothing else to do.",
+	})
+	be := &agentm.Backend{Binary: fake}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	sess, err := be.NewSession(ctx, newSpec(t))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	res := waitForSession(ctx, t, sess)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+	if res.FinalMsg != "Done — nothing else to do." {
+		t.Fatalf("FinalMsg = %q", res.FinalMsg)
+	}
+}
+
+// TestBackend_BuildArgs_NewCLIShape asserts the backend emits the real AgentM
+// CLI argv: positional prompt first, then --scenario, -e pairs, --cwd, and
+// --max-turns. No more run/--task-file/--result-file/--session-log.
+func TestBackend_BuildArgs_NewCLIShape(t *testing.T) {
+	argvDump := filepath.Join(t.TempDir(), "argv")
+	fake := agentmtest.BuildFake(t, agentmtest.Config{
+		Mode:         agentmtest.ModeSuccess,
+		ArgvDumpPath: argvDump,
+	})
+	be := &agentm.Backend{Binary: fake}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	work := t.TempDir()
+	spec := agent.Spec{
+		Backend:  "agentm",
+		Workdir:  work,
+		Prompt:   "resolve issue #319",
+		Scenario: "agent_env",
+		Model:    "claude-sonnet",
+		MaxTurns: 40,
+		Extensions: []agent.SpecExtension{
+			{Module: "agentm.extensions.builtin.system_prompt", Config: map[string]any{"prompt": "be terse"}},
+			{Module: "llmharness.adapters.agentm"},
+		},
+	}
+
+	sess, err := be.NewSession(ctx, spec)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	waitForSession(ctx, t, sess)
+
+	data, err := os.ReadFile(argvDump)
+	if err != nil {
+		t.Fatalf("read argv dump: %v", err)
+	}
+	args := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(args) == 0 || args[0] != "resolve issue #319" {
+		t.Fatalf("argv[0] must be the positional prompt, got %v", args)
+	}
+	joined := strings.Join(args, "\x00")
+	mustContainSeq(t, args, "--scenario", "agent_env")
+	mustContainSeq(t, args, "--model", "claude-sonnet")
+	mustContainSeq(t, args, "--cwd", work)
+	mustContainSeq(t, args, "--max-turns", "40")
+	mustContainSeq(t, args, "-e", `agentm.extensions.builtin.system_prompt:{"prompt":"be terse"}`)
+	mustContainSeq(t, args, "-e", "llmharness.adapters.agentm")
+	for _, banned := range []string{"run", "--task-file", "--result-file", "--session-log", "--workspace"} {
+		if strings.Contains(joined, "\x00"+banned+"\x00") || args[0] == banned {
+			t.Fatalf("argv must not contain legacy flag %q: %v", banned, args)
+		}
+	}
+}
+
+func mustContainSeq(t *testing.T, args []string, flag, value string) {
+	t.Helper()
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == value {
+			return
+		}
+	}
+	t.Fatalf("argv missing %q %q in %v", flag, value, args)
 }
 
 func TestBackend_Close_RemovesTempDir(t *testing.T) {
@@ -90,13 +197,7 @@ func TestBackend_Close_RemovesTempDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	go func() {
-		for range sess.Events() {
-		}
-	}()
-	if _, err := sess.Wait(ctx); err != nil {
-		t.Fatalf("Wait returned error: %v", err)
-	}
+	waitForSession(ctx, t, sess)
 
 	extractor := sess.(interface {
 		SessionLogPath() string
@@ -105,15 +206,11 @@ func TestBackend_Close_RemovesTempDir(t *testing.T) {
 	if logPath == "" {
 		t.Fatalf("expected session log path")
 	}
-	// The session log lives inside the per-session temp dir; capture its
-	// parent so we can assert removal after the full lifecycle.
 	tmpDir := filepath.Dir(logPath)
 	if _, err := os.Stat(tmpDir); err != nil {
 		t.Fatalf("temp dir missing before close: %v", err)
 	}
 
-	// The worker calls Close() after audit has persisted the run. This must
-	// remove the temp dir so successful dispatches don't leak /tmp.
 	if err := sess.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -124,6 +221,37 @@ func TestBackend_Close_RemovesTempDir(t *testing.T) {
 	// Close must be idempotent.
 	if err := sess.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// TestBackend_ResultSuccess_PreservesStructuredPath asserts the legacy
+// coordinator-managed RESULT: line path still parses into a structured
+// Output (success + next_label) when AgentM emits one.
+func TestBackend_ResultSuccess_PreservesStructuredPath(t *testing.T) {
+	fake := agentmtest.BuildFake(t, agentmtest.Config{Mode: agentmtest.ModeResultSuccess})
+	be := &agentm.Backend{Binary: fake}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	sess, err := be.NewSession(ctx, newSpec(t))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	waitForSession(ctx, t, sess)
+
+	extractor := sess.(interface {
+		Output() (*agentm.Output, error)
+		SessionLogPath() string
+	})
+	out, perr := extractor.Output()
+	if perr != nil {
+		t.Fatalf("Output(): %v", perr)
+	}
+	if out == nil || !out.Success {
+		t.Fatalf("expected structured success Output, got %+v", out)
+	}
+	if out.NextLabel != "status:review" {
+		t.Fatalf("expected next_label=status:review, got %q", out.NextLabel)
 	}
 }
 
@@ -211,26 +339,6 @@ func TestBackend_Failure_SurfacesReason(t *testing.T) {
 	}
 	if out.NextLabel != "status:failed" {
 		t.Fatalf("got next_label=%q", out.NextLabel)
-	}
-}
-
-func TestBackend_NoResult_IsInfraFailure(t *testing.T) {
-	fake := agentmtest.BuildFake(t, agentmtest.Config{Mode: agentmtest.ModeNoResult})
-	be := &agentm.Backend{Binary: fake}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	sess, err := be.NewSession(ctx, newSpec(t))
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	go func() {
-		for range sess.Events() {
-		}
-	}()
-	_, err = sess.Wait(ctx)
-	if err == nil {
-		t.Fatalf("expected wait error when no RESULT emitted")
 	}
 }
 

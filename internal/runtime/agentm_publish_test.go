@@ -35,7 +35,7 @@ func (f *fakeGitOps) PublishArtifact(_ context.Context, req AgentMPublishRequest
 // AC-1-1 / AC-1-2: successful AgentM run with a GitOps adapter must
 // trigger PublishArtifact and surface the PR URL on Result.Meta.
 func TestAgentMBridge_PublishOnSuccess(t *testing.T) {
-	fake := agentmtest.BuildFake(t, agentmtest.Config{Mode: agentmtest.ModeSuccess})
+	fake := agentmtest.BuildFake(t, agentmtest.Config{Mode: agentmtest.ModeResultSuccess})
 	gops := &fakeGitOps{prURL: "https://github.com/Lincyaw/workbuddy/pull/501"}
 	rt := NewAgentBridgeRuntime(config.RuntimeAgentM, func() (agent.Backend, error) {
 		return &agentm.Backend{Binary: fake}, nil
@@ -123,7 +123,7 @@ func TestAgentMBridge_NoPublishOnFailure(t *testing.T) {
 // coordinator could not commit/push. We mark the result as infra failure
 // so the reporter shows it distinctly.
 func TestAgentMBridge_PublishFailureIsInfraFailure(t *testing.T) {
-	fake := agentmtest.BuildFake(t, agentmtest.Config{Mode: agentmtest.ModeSuccess})
+	fake := agentmtest.BuildFake(t, agentmtest.Config{Mode: agentmtest.ModeResultSuccess})
 	gops := &fakeGitOps{err: errors.New("commit-push: git push: permission denied")}
 	rt := NewAgentBridgeRuntime(config.RuntimeAgentM, func() (agent.Backend, error) {
 		return &agentm.Backend{Binary: fake}, nil
@@ -151,7 +151,7 @@ func TestAgentMBridge_PublishFailureIsInfraFailure(t *testing.T) {
 // No-changes from gitops should NOT escalate to infra failure: AgentM is
 // telling us the task was already satisfied.
 func TestAgentMBridge_PublishNoChanges(t *testing.T) {
-	fake := agentmtest.BuildFake(t, agentmtest.Config{Mode: agentmtest.ModeSuccess})
+	fake := agentmtest.BuildFake(t, agentmtest.Config{Mode: agentmtest.ModeResultSuccess})
 	gops := &fakeGitOps{noDiff: true}
 	rt := NewAgentBridgeRuntime(config.RuntimeAgentM, func() (agent.Backend, error) {
 		return &agentm.Backend{Binary: fake}, nil

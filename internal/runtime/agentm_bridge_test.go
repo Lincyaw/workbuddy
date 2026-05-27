@@ -15,11 +15,61 @@ import (
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 )
 
-// TestAgentMBridge_HappyPath wires an AgentMBackend (pointed at the fake
+// TestAgentMBridge_CLISuccess wires an AgentMBackend (pointed at the fake
 // binary) into the bridge runtime and walks the full Start → Run → Result
-// path. This is the v0.5 host-exec happy-path covered by AC-1-1.
-func TestAgentMBridge_HappyPath(t *testing.T) {
-	fake := agentmtest.BuildFake(t, agentmtest.Config{Mode: agentmtest.ModeSuccess})
+// path for the normal CLI mode: exit 0, no RESULT: line, the trailing
+// assistant text surfaced as LastMessage (which the reporter posts as a
+// comment). No next_label is produced in this mode.
+func TestAgentMBridge_CLISuccess(t *testing.T) {
+	fake := agentmtest.BuildFake(t, agentmtest.Config{
+		Mode:      agentmtest.ModeSuccess,
+		FinalText: "All acceptance criteria met.",
+	})
+	rt := NewAgentBridgeRuntime(config.RuntimeAgentM, func() (agent.Backend, error) {
+		return &agentm.Backend{Binary: fake}, nil
+	})
+
+	work := t.TempDir()
+	task := &TaskContext{
+		Repo:     "Lincyaw/workbuddy",
+		WorkDir:  work,
+		RepoRoot: work,
+		Issue:    IssueContext{Number: 319, Title: "test"},
+		Session:  SessionContext{ID: "test-session", TaskID: "task-1", Attempt: 1},
+	}
+	agentCfg := &config.AgentConfig{
+		Name:     "dev-agent",
+		Runtime:  config.RuntimeAgentM,
+		Role:     "dev",
+		Prompt:   "ship REQ-134",
+		Scenario: "agent_env",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	res, err := rt.Launch(ctx, agentCfg, task)
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("exit=%d", res.ExitCode)
+	}
+	if res.LastMessage != "All acceptance criteria met." {
+		t.Fatalf("LastMessage = %q, want the trailing assistant text", res.LastMessage)
+	}
+	if IsInfraFailure(res) {
+		t.Fatalf("clean exit-0 CLI run must not be infra failure, meta=%v", res.Meta)
+	}
+	if res.SessionPath == "" {
+		t.Fatalf("expected SessionPath populated from captured stdout transcript")
+	}
+}
+
+// TestAgentMBridge_ResultSuccess covers the coordinator-managed RESULT: line
+// path (REQ-142/146 preserved): when AgentM emits a structured success line,
+// the bridge surfaces next_label on Result.Meta as before.
+func TestAgentMBridge_ResultSuccess(t *testing.T) {
+	fake := agentmtest.BuildFake(t, agentmtest.Config{Mode: agentmtest.ModeResultSuccess})
 	rt := NewAgentBridgeRuntime(config.RuntimeAgentM, func() (agent.Backend, error) {
 		return &agentm.Backend{Binary: fake}, nil
 	})
@@ -52,7 +102,38 @@ func TestAgentMBridge_HappyPath(t *testing.T) {
 		t.Fatalf("next_label meta = %q", got)
 	}
 	if res.SessionPath == "" {
-		t.Fatalf("expected SessionPath populated from agentm session_log_path")
+		t.Fatalf("expected SessionPath populated")
+	}
+}
+
+// TestResolvePrompt_AgentMSuppressesFooter asserts the transition footer
+// (the `gh issue edit --add-label …` routing instructions) is appended for
+// claude/codex runtimes but NOT for agentm — the pod agent cannot run gh and
+// the coordinator-managed LabelWriter owns the transition.
+func TestResolvePrompt_AgentMSuppressesFooter(t *testing.T) {
+	task := &TaskContext{
+		Repo:  "Lincyaw/workbuddy",
+		Issue: IssueContext{Number: 319, Title: "test"},
+	}
+	task.SetWorkflowState("developing", "status:developing", map[string]string{
+		"status:review": "reviewing",
+	})
+
+	body := "Implement the change."
+
+	claudeCfg := &config.AgentConfig{Name: "dev", Runtime: config.RuntimeClaudeCode, Prompt: body}
+	claudePrompt := resolvePrompt(claudeCfg, task)
+	if !strings.Contains(claudePrompt, "gh issue edit") {
+		t.Fatalf("claude prompt should keep the transition footer:\n%s", claudePrompt)
+	}
+
+	agentmCfg := &config.AgentConfig{Name: "dev", Runtime: config.RuntimeAgentM, Prompt: body}
+	agentmPrompt := resolvePrompt(agentmCfg, task)
+	if strings.Contains(agentmPrompt, "gh issue edit") {
+		t.Fatalf("agentm prompt must NOT carry the gh-edit footer:\n%s", agentmPrompt)
+	}
+	if !strings.Contains(agentmPrompt, body) {
+		t.Fatalf("agentm prompt should still contain the agent body:\n%s", agentmPrompt)
 	}
 }
 

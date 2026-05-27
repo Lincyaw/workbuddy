@@ -118,6 +118,31 @@
       "type": "string",
       "minLength": 1,
       "description": "Dev container image AgentM should run the task inside. Only meaningful for runtime=agentm; workbuddy injects it into the AgentM subprocess env as AGENTM_AGENT_ENV_IMAGE (see docs/planned/agentm-runtime.md). Setting it on other runtimes produces a config warning, not an error. workbuddy does NOT talk to agent-env directly — image dispatch is AgentM's job."
+    },
+    "scenario": {
+      "type": "string",
+      "minLength": 1,
+      "description": "AgentM scenario name passed as `agentm --scenario <name>`. Only meaningful for runtime=agentm. When unset, AgentM picks its own default scenario (general_purpose). See docs/planned/agentm-runtime.md for the CLI invocation contract."
+    },
+    "extensions": {
+      "type": "array",
+      "description": "Extra AgentM atoms to mount on top of the scenario, emitted as repeated `-e module[:json]` CLI flags. Only meaningful for runtime=agentm. The system prompt is just an extension entry (e.g. module agentm.extensions.builtin.system_prompt with a prompt/prompt_file config) — no special-casing.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["module"],
+        "properties": {
+          "module": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Dotted Python import path of the AgentM atom (e.g. llmharness.adapters.agentm)."
+          },
+          "config": {
+            "type": "object",
+            "description": "Optional JSON config for the atom, serialized after a colon in the `-e module:{...}` flag."
+          }
+        }
+      }
     }
   }
 }

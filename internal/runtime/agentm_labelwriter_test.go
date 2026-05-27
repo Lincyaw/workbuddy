@@ -53,7 +53,7 @@ func (f *fakeLabelWriter) Calls() []labelCall {
 // label the agent emitted, and stamp Result.Meta["agentm_label_applied"].
 func TestAgentMBridge_AppliesNextLabelOnSuccess(t *testing.T) {
 	fake := agentmtest.BuildFake(t, agentmtest.Config{
-		Mode:      agentmtest.ModeSuccess,
+		Mode:      agentmtest.ModeResultSuccess,
 		NextLabel: "status:reviewing",
 	})
 	gops := &fakeGitOps{prURL: "https://example.com/pull/1"}
@@ -134,7 +134,7 @@ func TestAgentMBridge_NoLabelOnFailure(t *testing.T) {
 // machine when the PR was not opened.
 func TestAgentMBridge_NoLabelWhenPublishFails(t *testing.T) {
 	fake := agentmtest.BuildFake(t, agentmtest.Config{
-		Mode:      agentmtest.ModeSuccess,
+		Mode:      agentmtest.ModeResultSuccess,
 		NextLabel: "status:reviewing",
 	})
 	gops := &fakeGitOps{err: errors.New("commit-push: permission denied")}

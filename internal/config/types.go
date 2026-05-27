@@ -145,7 +145,26 @@ type AgentConfig struct {
 	// it on other runtimes emits a config warning (not an error) so a
 	// per-agent override can be staged ahead of an upcoming migration.
 	DevContainerImage string `yaml:"dev_container_image,omitempty"`
-	SourcePath        string `yaml:"-"`
+	// Scenario names the AgentM scenario to load (`agentm --scenario X`).
+	// Only meaningful for `runtime: agentm`. When empty, AgentM falls back
+	// to its own default scenario (general_purpose). See
+	// docs/planned/agentm-runtime.md for the CLI invocation contract.
+	Scenario string `yaml:"scenario,omitempty"`
+	// Extensions lists extra AgentM atoms to mount on top of the scenario,
+	// emitted as repeated `-e module[:json]` CLI flags. The system prompt
+	// is just an extension entry (e.g. module
+	// `agentm.extensions.builtin.system_prompt` with a `prompt`/`prompt_file`
+	// config) — no special-casing. Only meaningful for `runtime: agentm`.
+	Extensions []AgentExtension `yaml:"extensions,omitempty"`
+	SourcePath string           `yaml:"-"`
+}
+
+// AgentExtension is one `-e module[:json]` pair passed to the AgentM CLI.
+// Module is a dotted Python import path; Config is serialized to JSON and
+// appended after a colon when non-empty.
+type AgentExtension struct {
+	Module string         `yaml:"module"`
+	Config map[string]any `yaml:"config,omitempty"`
 }
 
 // TriggerRule defines when an agent is activated. The agent references workflow

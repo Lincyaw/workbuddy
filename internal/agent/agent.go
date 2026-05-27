@@ -18,6 +18,21 @@ type Spec struct {
 	Approval string            `json:"approval,omitempty"`
 	Env      map[string]string `json:"env,omitempty"`
 	Tags     map[string]string `json:"tags,omitempty"`
+	// Scenario is the AgentM scenario name (`agentm --scenario X`). Only
+	// consumed by the agentm backend; other backends ignore it.
+	Scenario string `json:"scenario,omitempty"`
+	// Extensions are AgentM `-e module[:json]` atoms. Only consumed by the
+	// agentm backend.
+	Extensions []SpecExtension `json:"extensions,omitempty"`
+	// MaxTurns, when > 0, caps the AgentM agent loop (`--max-turns N`).
+	// Only consumed by the agentm backend.
+	MaxTurns int `json:"max_turns,omitempty"`
+}
+
+// SpecExtension is one AgentM `-e module[:json]` atom mount.
+type SpecExtension struct {
+	Module string         `json:"module"`
+	Config map[string]any `json:"config,omitempty"`
 }
 
 // Event is a single streaming event from the agent.

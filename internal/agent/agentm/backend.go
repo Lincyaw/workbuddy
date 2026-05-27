@@ -1,14 +1,25 @@
 // Package agentm implements the agent.Backend interface for the AgentM
-// pluggable agent SDK (../AgentM). v0.5 ships host-exec only: the worker
-// spawns the `agentm` binary as a subprocess, feeds it task context via a
-// JSON file, then parses a single stdout line beginning with `RESULT: {…}`
-// for the structured outcome. The structured output is validated against
-// schemas/agentm-output.schema.json; malformed/missing output is classified
-// as an infra failure surfaced through the standard reporter path.
+// pluggable agent SDK (../AgentM). The worker spawns the real `agentm` CLI
+// as a subprocess:
+//
+//	agentm "<prompt>" --scenario <name> [-e module[:json] ...] \
+//	    [--cwd <workspace>] [--max-turns N]
+//
+// AgentM streams the agent's activity to stdout and prints a final summary
+// line beginning with a `====` banner; the agent's final human-readable text
+// appears as the last assistant block(s) before that banner. There is no
+// `RESULT:` line in this CLI mode, so a clean exit-0 run is SUCCESS whose
+// FinalMsg is that trailing assistant text. The backend captures the full
+// stdout stream into a session-log file for audit.
+//
+// Backwards-compatible coordinator-managed mode: if a run DOES emit a
+// `RESULT: {…}` line (validated against schemas/agentm-output.schema.json),
+// the backend parses it into a structured Output so the bridge's GitOps /
+// LabelWriter path (REQ-142 / REQ-146) keeps working. A malformed RESULT
+// line is still an infra failure; the absence of any RESULT line is NOT.
 //
 // See docs/planned/agentm-runtime.md for the invocation/output contract and
 // docs/decisions/2026-05-13-k8s-agentm-otel.md (Block 1) for design context.
-// Sandbox / coordinator-managed mode is v0.6.
 package agentm
 
 import (
@@ -21,6 +32,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -60,35 +72,21 @@ func (b *Backend) NewSession(ctx context.Context, spec agent.Spec) (agent.Sessio
 		workspace = "."
 	}
 
-	// Sidecar files: task input + result + session log. We let AgentM write
-	// the result/session log inside a per-session temp dir so multiple
-	// dispatches don't collide.
+	// We capture the AgentM CLI's stdout transcript into a per-session
+	// session-log file so audit always has something, since the CLI has no
+	// --session-log flag in this invocation mode.
 	tmpDir, err := os.MkdirTemp("", "workbuddy-agentm-"+id+"-")
 	if err != nil {
 		return nil, fmt.Errorf("agentm: create temp dir: %w", err)
 	}
-	taskFile := filepath.Join(tmpDir, "task.json")
-	resultFile := filepath.Join(tmpDir, "result.json")
-	sessionLog := filepath.Join(tmpDir, "session.jsonl")
-
-	if err := writeTaskFile(taskFile, spec); err != nil {
-		_ = os.RemoveAll(tmpDir)
-		return nil, fmt.Errorf("agentm: write task file: %w", err)
-	}
+	sessionLog := filepath.Join(tmpDir, "session.log")
 
 	binary := b.Binary
 	if binary == "" {
 		binary = DefaultBinary
 	}
 
-	args := []string{
-		"run",
-		"--workspace", workspace,
-		"--task-file", taskFile,
-		"--session-log", sessionLog,
-		"--result-file", resultFile,
-	}
-	args = append(args, spec.Args...)
+	args := buildArgs(spec, workspace)
 
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir = workspace
@@ -118,6 +116,11 @@ func (b *Backend) NewSession(ctx context.Context, spec agent.Spec) (agent.Sessio
 	}
 
 	events := make(chan agent.Event, 64)
+	logFile, err := os.OpenFile(sessionLog, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return nil, fmt.Errorf("agentm: open session log: %w", err)
+	}
 	s := &session{
 		id:         id,
 		cmd:        cmd,
@@ -125,9 +128,8 @@ func (b *Backend) NewSession(ctx context.Context, spec agent.Spec) (agent.Sessio
 		done:       make(chan struct{}),
 		start:      time.Now(),
 		tmpDir:     tmpDir,
-		taskFile:   taskFile,
-		resultFile: resultFile,
 		sessionLog: sessionLog,
+		logFile:    logFile,
 		sessionRef: agent.SessionRef{ID: id, Kind: "agentm"},
 	}
 
@@ -145,18 +147,19 @@ func (b *Backend) NewSession(ctx context.Context, spec agent.Spec) (agent.Sessio
 		}
 	}()
 
-	// Stdout reader: extracts the RESULT: line and forwards every line as a
-	// log event for transcript capture.
+	// Stdout reader: streams every line into the session-log file (audit
+	// transcript), tracks the trailing assistant text for FinalMsg, and
+	// captures any RESULT: line for the coordinator-managed path.
 	go func() {
 		defer close(events)
-		// tmpDir holds task.json/result.json/session.jsonl. These must
-		// outlive the process exit because Wait() / SessionLogPath() read
-		// the result and session log after the process returns. The bridge
-		// (internal/runtime/agent_bridge.go) copies session.jsonl into the
-		// durable worker session dir, then the worker calls Close() once the
-		// run is finalized — Close() removes tmpDir. If Close() raced ahead
-		// of process exit, the cleanup is deferred to here via removeTmpDir,
-		// which is a no-op until both done is closed and Close() ran.
+		// tmpDir holds the session-log file, which must outlive the process
+		// exit because Wait() / SessionLogPath() read it after the process
+		// returns. The bridge (internal/runtime/agent_bridge.go) copies it
+		// into the durable worker session dir, then the worker calls Close()
+		// once the run is finalized — Close() removes tmpDir. If Close()
+		// raced ahead of process exit, the cleanup is deferred to here via
+		// removeTmpDir, which is a no-op until both done is closed and
+		// Close() ran.
 		defer func() {
 			close(s.done)
 			s.removeTmpDir()
@@ -164,6 +167,9 @@ func (b *Backend) NewSession(ctx context.Context, spec agent.Spec) (agent.Sessio
 
 		s.scanStdout(stdout)
 		stderrWG.Wait()
+		if s.logFile != nil {
+			_ = s.logFile.Close()
+		}
 
 		waitErr := cmd.Wait()
 		exitCode := 0
@@ -176,9 +182,6 @@ func (b *Backend) NewSession(ctx context.Context, spec agent.Spec) (agent.Sessio
 			}
 		}
 
-		// Prefer the stdout RESULT: line. Fall back to the result file
-		// (the contract permits both; #321's schema description names the
-		// stdout RESULT: line as the canonical signal).
 		out, parseErr := s.resolveOutput()
 
 		s.mu.Lock()
@@ -187,11 +190,17 @@ func (b *Backend) NewSession(ctx context.Context, spec agent.Spec) (agent.Sessio
 		s.waitErr = waitErr
 		s.output = out
 		s.parseErr = parseErr
-		if out != nil {
+		switch {
+		case out != nil:
+			// Structured RESULT: line present (coordinator-managed path).
 			s.finalMsg = strings.TrimSpace(out.FailureReason)
 			if out.Success && out.NextLabel != "" {
 				s.finalMsg = out.NextLabel
 			}
+		default:
+			// CLI mode: FinalMsg is the agent's trailing assistant text
+			// captured before the `====` summary banner.
+			s.finalMsg = strings.TrimSpace(s.finalText.String())
 		}
 		s.mu.Unlock()
 	}()
@@ -209,9 +218,8 @@ type session struct {
 	start  time.Time
 
 	tmpDir     string
-	taskFile   string
-	resultFile string
 	sessionLog string
+	logFile    *os.File
 
 	mu            sync.Mutex
 	exitCode      int
@@ -222,6 +230,10 @@ type session struct {
 	output        *Output
 	parseErr      error
 	resultLineRaw string
+	// finalText accumulates the trailing human-readable assistant text from
+	// the CLI stdout stream — everything printed before the `====` summary
+	// banner. Guarded by mu (written from scanStdout, read at finalize).
+	finalText strings.Builder
 
 	// closeRequested is set by Close(); tmpDirGone makes removal idempotent.
 	// Both are guarded by mu. tmpDir is removed only once both the process
@@ -248,10 +260,11 @@ func (s *session) Wait(ctx context.Context) (agent.Result, error) {
 		Duration:   s.duration,
 		SessionRef: s.sessionRef,
 	}
-	// If the run produced no parseable structured output, surface that as
-	// the wait error so the bridge can mark an infra failure. We keep the
-	// process exit code separate so the caller can tell apart "agent
-	// reported task failure" from "agent never reported anything".
+	// A malformed RESULT: line (parseErr set) is surfaced as the wait error
+	// so the bridge marks an infra failure. The ABSENCE of a RESULT line is
+	// NOT an error — CLI-mode runs report their outcome purely via exit code
+	// and the trailing assistant text (FinalMsg). A clean RESULT line with
+	// success=false is surfaced as a task failure.
 	if s.parseErr != nil {
 		return res, s.parseErr
 	}
@@ -350,12 +363,41 @@ func (s *session) SessionLogPath() string {
 	return ""
 }
 
+// summaryBanner is the `"="*60` line AgentM's _print_final emits before the
+// `messages=…`/`tokens:…` summary. Everything after it is run accounting, not
+// agent output, so it terminates final-text accumulation.
+const summaryBanner = "============================================================"
+
 func (s *session) scanStdout(stdout io.Reader) {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	// para accumulates the current run of human-readable assistant lines.
+	// On a blank line we flush para into lastPara (the most recent finished
+	// paragraph). FinalMsg is the last paragraph emitted before the summary
+	// banner. Lines after the banner (summary/session_id) are ignored for
+	// final-text purposes but still written to the transcript.
+	var para []string
+	var lastPara string
+	inSummary := false
+
+	flush := func() {
+		if len(para) > 0 {
+			lastPara = strings.Join(para, "\n")
+			para = para[:0]
+		}
+	}
+
 	for scanner.Scan() {
 		line := scanner.Text()
+		// Persist the raw line to the session-log transcript regardless of
+		// how it is classified below.
+		if s.logFile != nil {
+			_, _ = s.logFile.WriteString(line + "\n")
+		}
 		trimmed := strings.TrimSpace(line)
+
+		// Backwards-compatible coordinator-managed signal: a RESULT: line
+		// short-circuits the CLI-text path entirely.
 		if strings.HasPrefix(trimmed, resultLinePrefix) {
 			s.mu.Lock()
 			s.resultLineRaw = strings.TrimSpace(strings.TrimPrefix(trimmed, resultLinePrefix))
@@ -364,19 +406,55 @@ func (s *session) scanStdout(stdout io.Reader) {
 			emit(s.events, agent.Event{Kind: "task.complete", Body: body})
 			continue
 		}
+
+		if trimmed == summaryBanner {
+			inSummary = true
+			flush()
+		}
+
+		if !inSummary {
+			switch {
+			case trimmed == "":
+				flush()
+			case isTranscriptDecoration(trimmed):
+				// Tool calls (→ …), tool results (⇐ …), injected messages,
+				// and AgentM's trailing `session_id=…  (resume with: …)` are
+				// not agent prose; they break the current paragraph but are
+				// not themselves final text.
+				flush()
+			default:
+				para = append(para, line)
+			}
+		}
+
 		body, _ := json.Marshal(map[string]string{"stream": "stdout", "line": line})
 		emit(s.events, agent.Event{Kind: "agent.message", Body: body})
 	}
+	flush()
+
+	s.mu.Lock()
+	s.finalText.WriteString(lastPara)
+	s.mu.Unlock()
 }
 
-// resolveOutput returns the parsed structured output. The stdout RESULT: line
-// is the canonical signal (per #321 schema description). If absent, we fall
-// back to the --result-file written by AgentM. Returns (nil, err) when
-// neither is parseable.
+// isTranscriptDecoration reports whether a stdout line is AgentM streaming
+// chrome (tool calls / tool results / injected messages / the resume hint)
+// rather than agent prose. These break a paragraph but never become FinalMsg.
+func isTranscriptDecoration(trimmed string) bool {
+	return strings.HasPrefix(trimmed, "→ ") ||
+		strings.HasPrefix(trimmed, "⇐") ||
+		strings.HasPrefix(trimmed, "[injected") ||
+		strings.HasPrefix(trimmed, "session_id=")
+}
+
+// resolveOutput returns the parsed structured output from a RESULT: line if
+// one was emitted (coordinator-managed mode). A malformed RESULT: line is a
+// (nil, err) infra failure. The ABSENCE of a RESULT: line is the normal CLI
+// case: returns (nil, nil) so the run is treated as success carrying its
+// trailing assistant text as FinalMsg.
 func (s *session) resolveOutput() (*Output, error) {
 	s.mu.Lock()
 	resultLine := s.resultLineRaw
-	resultPath := s.resultFile
 	sessionPath := s.sessionLog
 	s.mu.Unlock()
 
@@ -391,18 +469,7 @@ func (s *session) resolveOutput() (*Output, error) {
 		return out, nil
 	}
 
-	if data, err := os.ReadFile(resultPath); err == nil {
-		out, perr := ParseAndValidate(data)
-		if perr != nil {
-			return nil, fmt.Errorf("agentm: invalid result file %s: %w", resultPath, perr)
-		}
-		if out.SessionLogPath == "" && fileExists(sessionPath) {
-			out.SessionLogPath = sessionPath
-		}
-		return out, nil
-	}
-
-	return nil, fmt.Errorf("agentm: no RESULT: line on stdout and no result file at %s", resultPath)
+	return nil, nil
 }
 
 // Output is the host representation of schemas/agentm-output.schema.json.
@@ -420,12 +487,11 @@ type Output struct {
 // against a wedged consumer and prevent the process from being reaped.
 //
 // Routing is never affected by a drop: the canonical RESULT: line is captured
-// into s.resultLineRaw inside scanStdout BEFORE emit runs, and the
-// --result-file fallback is read from disk in resolveOutput. Only the
+// into s.resultLineRaw inside scanStdout BEFORE emit runs, and the trailing
+// assistant text is accumulated into s.finalText there too. Only the
 // transcript rendering on the secondary events stream can lose a line. The
-// agentm-native session log (session.jsonl) is captured separately and copied
-// to the durable worker session dir by the bridge, so the full conversation
-// is preserved independent of this channel.
+// full stdout transcript is written to the session-log file independent of
+// this channel, so the conversation is preserved for audit either way.
 func emit(ch chan<- agent.Event, evt agent.Event) {
 	defer func() { _ = recover() }()
 	select {
@@ -435,38 +501,43 @@ func emit(ch chan<- agent.Event, evt agent.Event) {
 	}
 }
 
-func writeTaskFile(path string, spec agent.Spec) error {
-	doc := map[string]any{
-		"schema_version": 1,
-		"workspace":      spec.Workdir,
-		"prompt":         spec.Prompt,
-		"model":          spec.Model,
-		"sandbox":        spec.Sandbox,
-		"approval":       spec.Approval,
-		"tags":           spec.Tags,
+// buildArgs assembles the real AgentM CLI argv:
+//
+//	"<prompt>" --scenario <name> [-e module[:json] ...] \
+//	    [--model M] [--cwd <workspace>] [--max-turns N]
+//
+// The prompt is positional and always first. --scenario is emitted only when
+// the spec names one (otherwise AgentM picks its own default). Each extension
+// becomes a `-e module` flag, or `-e module:<json>` when it carries config.
+// The system prompt is just another extension — no special-casing here.
+func buildArgs(spec agent.Spec, workspace string) []string {
+	args := []string{spec.Prompt}
+	if scenario := strings.TrimSpace(spec.Scenario); scenario != "" {
+		args = append(args, "--scenario", scenario)
 	}
-	// Pull workbuddy-* env into structured fields so AgentM doesn't have
-	// to read them from process env to populate spans/audit.
-	if v := spec.Env["WORKBUDDY_ISSUE_NUMBER"]; v != "" {
-		doc["issue_number"] = v
+	for _, ext := range spec.Extensions {
+		module := strings.TrimSpace(ext.Module)
+		if module == "" {
+			continue
+		}
+		if len(ext.Config) > 0 {
+			if cfg, err := json.Marshal(ext.Config); err == nil {
+				args = append(args, "-e", module+":"+string(cfg))
+				continue
+			}
+		}
+		args = append(args, "-e", module)
 	}
-	if v := spec.Env["WORKBUDDY_ISSUE_TITLE"]; v != "" {
-		doc["issue_title"] = v
+	if model := strings.TrimSpace(spec.Model); model != "" {
+		args = append(args, "--model", model)
 	}
-	if v := spec.Env["WORKBUDDY_REPO"]; v != "" {
-		doc["repo"] = v
+	if workspace != "" && workspace != "." {
+		args = append(args, "--cwd", workspace)
 	}
-	if v := spec.Env["WORKBUDDY_SESSION_ID"]; v != "" {
-		doc["session_id"] = v
+	if spec.MaxTurns > 0 {
+		args = append(args, "--max-turns", strconv.Itoa(spec.MaxTurns))
 	}
-	data, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return err
-	}
-	// 0o600: task.json carries the rendered prompt and lives in a shared
-	// temp location. The enclosing MkdirTemp dir is 0o700, but keep the file
-	// owner-only too so a permissive umask can't widen it.
-	return os.WriteFile(path, data, 0o600)
+	return args
 }
 
 func fileExists(p string) bool {

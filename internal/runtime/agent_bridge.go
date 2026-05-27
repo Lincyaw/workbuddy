@@ -161,6 +161,10 @@ func (r *AgentBridgeRuntime) Start(ctx context.Context, agentCfg *config.AgentCo
 			"repo":  task.Repo,
 		},
 	}
+	if agentCfg.Runtime == config.RuntimeAgentM {
+		spec.Scenario = agentCfg.Scenario
+		spec.Extensions = agentMExtensions(agentCfg)
+	}
 
 	backend, err := r.backendInstance()
 	if err != nil {
@@ -513,6 +517,27 @@ func (s *AgentBridgeSession) Close() error {
 }
 
 func resolvePrompt(agentCfg *config.AgentConfig, task *TaskContext) string {
+	// AgentM runs inside a sandboxed pod and cannot (and must not) run
+	// `gh issue edit` to flip labels — the coordinator-managed LabelWriter
+	// owns that transition. So suppress the transition footer for agentm and
+	// render the body alone. claude/codex keep the footer (they self-route).
+	if agentCfg.Runtime == config.RuntimeAgentM {
+		if p := ResolvePromptBody(agentCfg, task); p != "" {
+			rendered, err := RenderCommandRaw(p, task)
+			if err == nil {
+				return rendered
+			}
+			return p
+		}
+		if cmd := strings.TrimSpace(agentCfg.Command); cmd != "" {
+			rendered, err := RenderCommandRaw(cmd, task)
+			if err == nil {
+				return rendered
+			}
+			return cmd
+		}
+		return ""
+	}
 	if p := ResolvePromptBody(agentCfg, task); p != "" {
 		rendered, err := RenderAgentPrompt(p, task)
 		if err == nil {
@@ -530,6 +555,23 @@ func resolvePrompt(agentCfg *config.AgentConfig, task *TaskContext) string {
 		return cmd
 	}
 	return ""
+}
+
+// agentMExtensions converts the agent-config extension list into agent.Spec
+// extensions for the AgentM CLI `-e` flags. The system prompt, if any, is
+// just an ordinary extension entry in agentCfg.Extensions — no special-casing.
+func agentMExtensions(agentCfg *config.AgentConfig) []agent.SpecExtension {
+	if len(agentCfg.Extensions) == 0 {
+		return nil
+	}
+	out := make([]agent.SpecExtension, 0, len(agentCfg.Extensions))
+	for _, ext := range agentCfg.Extensions {
+		if strings.TrimSpace(ext.Module) == "" {
+			continue
+		}
+		out = append(out, agent.SpecExtension{Module: ext.Module, Config: ext.Config})
+	}
+	return out
 }
 
 // injectTraceContext adds W3C TraceContext (TRACEPARENT, TRACESTATE) and

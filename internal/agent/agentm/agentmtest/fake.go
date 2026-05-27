@@ -1,6 +1,16 @@
 // Package agentmtest provides a fake AgentM binary builder for unit tests.
 // It mirrors the codextest pattern (sibling fake harness for the codex
-// app-server) but for AgentM's stdout-RESULT contract.
+// app-server) but for the real AgentM CLI shape:
+//
+//	agentm "<prompt>" --scenario <name> [-e module[:json] ...] \
+//	    [--cwd <workspace>] [--max-turns N] [--model M]
+//
+// AgentM streams the agent's text to stdout and prints a `====` summary
+// banner; the agent's final human-readable text is the last assistant
+// paragraph before that banner. There is no RESULT: line in normal CLI mode.
+// The coordinator-managed modes (failure / malformed / missing-required)
+// still emit a RESULT: line so the legacy GitOps/LabelWriter path stays
+// exercised.
 //
 // Usage:
 //
@@ -24,40 +34,58 @@ import (
 type Mode string
 
 const (
-	// ModeSuccess emits a well-formed RESULT: line with success=true plus a
-	// dummy session log path, then exits 0.
+	// ModeSuccess streams an agent paragraph + the `====` summary banner and
+	// exits 0 with NO RESULT: line. This is the normal CLI-mode success: the
+	// backend MUST capture the trailing paragraph as FinalMsg and treat the
+	// run as success.
 	ModeSuccess Mode = "success"
 	// ModeFailure emits a well-formed RESULT: line with success=false plus
-	// a failure_reason and exits 0. The bridge MUST still surface the
-	// failure_reason and apply the agent's next_label.
+	// a failure_reason and exits 0 (coordinator-managed path). The bridge
+	// MUST surface the failure_reason and apply the agent's next_label.
 	ModeFailure Mode = "failure"
-	// ModeMalformedJSON emits a RESULT: line whose body is not valid JSON
-	// (and no result file). This MUST be classified as an infra failure.
+	// ModeResultSuccess emits a well-formed RESULT: line with success=true
+	// (coordinator-managed path). Asserts the structured Output/next_label
+	// path still works alongside the new CLI-text path.
+	ModeResultSuccess Mode = "result-success"
+	// ModeMalformedJSON emits a RESULT: line whose body is not valid JSON.
+	// This MUST be classified as an infra failure.
 	ModeMalformedJSON Mode = "malformed-json"
-	// ModeNoResult emits stdout/stderr transcript but no RESULT: line.
-	// MUST be classified as an infra failure.
+	// ModeNoResult emits stdout transcript and exits 0 with no RESULT: line
+	// and no `====` summary banner. In CLI mode this is SUCCESS whose
+	// FinalMsg is the trailing stdout text.
 	ModeNoResult Mode = "no-result"
-	// ModeMissingRequired emits a JSON object that is missing a required
+	// ModeMissingRequired emits a RESULT: line that is missing a required
 	// field per the output schema (no next_label). MUST surface a schema
-	// violation as the failure_reason.
+	// violation as an infra failure.
 	ModeMissingRequired Mode = "missing-required"
 )
 
 // Config configures the fake binary.
 type Config struct {
 	Mode Mode
-	// NextLabel overrides the default "status:review" in ModeSuccess /
+	// NextLabel overrides the default "status:review" in ModeResultSuccess /
 	// "status:failed" in ModeFailure.
 	NextLabel string
 	// FailureReason overrides the default reason in ModeFailure.
 	FailureReason string
+	// FinalText overrides the agent paragraph emitted in ModeSuccess /
+	// ModeNoResult. Defaults to a recognizable sentinel.
+	FinalText string
 	// EnvDumpPath, when non-empty, makes the fake write its full process
 	// environment (one `KEY=VALUE` per line) to this absolute path before
-	// emitting RESULT:. Tests use it to assert workbuddy-injected env vars
+	// emitting output. Tests use it to assert workbuddy-injected env vars
 	// (TRACEPARENT, AGENTM_AGENT_ENV_IMAGE, …) actually reach the
 	// AgentM subprocess.
 	EnvDumpPath string
+	// ArgvDumpPath, when non-empty, makes the fake write its argv (one arg
+	// per line) to this absolute path. Tests assert the new CLI invocation
+	// form (positional prompt, --scenario, -e pairs, --cwd, --max-turns).
+	ArgvDumpPath string
 }
+
+// DefaultFinalText is the agent paragraph the success/no-result fakes emit
+// when Config.FinalText is empty.
+const DefaultFinalText = "All acceptance criteria are met; the change is complete."
 
 // BuildFake writes a shell-script fake to a temp file marked executable and
 // returns its absolute path. The script is removed via t.Cleanup.
@@ -75,17 +103,24 @@ func BuildFake(t *testing.T, cfg Config) string {
 	}
 	nextLabel := cfg.NextLabel
 	failureReason := cfg.FailureReason
+	finalText := cfg.FinalText
+	if finalText == "" {
+		finalText = DefaultFinalText
+	}
 
-	// emitResult is a bash snippet that writes the RESULT: line to stdout
-	// AND the result file. Variables $SESSION_LOG / $RESULT_FILE are bash
-	// expansions; everything else must be safe inside single-quotes.
+	// emitResult holds a bash assignment of BODY for the RESULT: modes; empty
+	// for the CLI-text modes.
 	var emitResult string
 	switch mode {
-	case ModeSuccess:
+	case ModeSuccess, ModeNoResult:
+		emitResult = ""
+	case ModeResultSuccess:
 		if nextLabel == "" {
 			nextLabel = "status:review"
 		}
-		emitResult = fmt.Sprintf(`BODY='{"success":true,"next_label":"%s","session_log_path":"'"$SESSION_LOG"'"}'`, nextLabel)
+		// session_log_path is required by the schema when success=true; point
+		// it at a file the script writes below so validation passes.
+		emitResult = fmt.Sprintf(`BODY='{"success":true,"next_label":"%s","session_log_path":"'"$RESULT_SESSION_LOG"'"}'`, nextLabel)
 	case ModeFailure:
 		if nextLabel == "" {
 			nextLabel = "status:failed"
@@ -93,56 +128,50 @@ func BuildFake(t *testing.T, cfg Config) string {
 		if failureReason == "" {
 			failureReason = "fake agentm reports failure"
 		}
-		emitResult = fmt.Sprintf(`BODY='{"success":false,"next_label":"%s","failure_reason":"%s","session_log_path":"'"$SESSION_LOG"'"}'`,
+		emitResult = fmt.Sprintf(`BODY='{"success":false,"next_label":"%s","failure_reason":"%s"}'`,
 			nextLabel, failureReason)
 	case ModeMalformedJSON:
 		emitResult = `BODY='{not valid json at all'`
-	case ModeNoResult:
-		emitResult = ""
 	case ModeMissingRequired:
-		emitResult = `BODY='{"success":true,"session_log_path":"'"$SESSION_LOG"'"}'`
+		emitResult = `BODY='{"success":true}'`
 	default:
 		t.Fatalf("agentmtest: unknown mode %q", mode)
 	}
 
-	// Parse --result-file / --session-log / --task-file out of $@. The fake
-	// always touches the session log so the host can ingest a non-empty
-	// artifact even when the contract is malformed.
-	script := `#!/usr/bin/env bash
-set -eu
-WORKSPACE=""
-TASK_FILE=""
-SESSION_LOG=""
-RESULT_FILE=""
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --workspace) WORKSPACE="$2"; shift 2 ;;
-    --task-file) TASK_FILE="$2"; shift 2 ;;
-    --session-log) SESSION_LOG="$2"; shift 2 ;;
-    --result-file) RESULT_FILE="$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
-
-if [[ -n "$SESSION_LOG" ]]; then
-  mkdir -p "$(dirname "$SESSION_LOG")"
-  cat > "$SESSION_LOG" <<'JSONL'
-{"kind":"turn.started","ts":"2026-05-13T00:00:00Z"}
-{"kind":"agent.message","ts":"2026-05-13T00:00:01Z","text":"fake agentm running"}
-{"kind":"turn.completed","ts":"2026-05-13T00:00:02Z"}
-JSONL
-fi
-
-echo "fake agentm starting in $WORKSPACE"
-echo "task file: $TASK_FILE"
-`
+	// The fake dumps argv/env first (for assertions), then streams an agent
+	// transcript. The first positional arg is the prompt under the new CLI.
+	script := "#!/usr/bin/env bash\nset -eu\n"
+	if cfg.ArgvDumpPath != "" {
+		script += fmt.Sprintf("printf '%%s\\n' \"$@\" > %q\n", cfg.ArgvDumpPath)
+	}
 	if cfg.EnvDumpPath != "" {
 		script += fmt.Sprintf("env > %q\n", cfg.EnvDumpPath)
 	}
+
+	// Stream a short transcript: a tool call line (decoration) then the
+	// agent's final paragraph, mirroring AgentM's streaming presenter.
+	script += "echo '→ read_file(path=README.md)'\n"
+	script += fmt.Sprintf("echo %q\n", finalText)
+	script += "echo\n"
+
+	switch mode {
+	case ModeSuccess, ModeResultSuccess, ModeFailure, ModeMalformedJSON, ModeMissingRequired:
+		// Emit the AgentM `====` summary banner so final-text accumulation
+		// stops before the run accounting lines.
+		script += "echo '============================================================'\n"
+		script += "echo 'messages=2 tool_calls=1'\n"
+		script += "echo 'tokens: in=10 out=5 cache_r=0 cache_w=0 (over 1 turn)'\n"
+	case ModeNoResult:
+		// No summary banner: FinalMsg comes from the trailing paragraph.
+	}
+
 	if emitResult != "" {
+		// Provide a real session-log path for the RESULT: session_log_path
+		// field (schema-required when success=true).
+		script += fmt.Sprintf("RESULT_SESSION_LOG=%q\n", filepath.Join(dir, "result-session.jsonl"))
+		script += `printf '{"kind":"turn.completed"}\n' > "$RESULT_SESSION_LOG"` + "\n"
 		script += emitResult + "\n"
 		script += `echo "RESULT: $BODY"` + "\n"
-		script += `if [[ -n "$RESULT_FILE" ]]; then echo "$BODY" > "$RESULT_FILE"; fi` + "\n"
 	}
 	script += "exit 0\n"
 
