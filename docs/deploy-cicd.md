@@ -7,7 +7,10 @@ from GitHub on a schedule, how to pause it, and how to roll back.
 The pipeline has three pieces:
 
 1. `release.yml` — produces the `vX.Y.Z` tarballs + `checksums.txt` on
-   GitHub Releases (Phase 2.1, REQ-093).
+   GitHub Releases (Phase 2.1, REQ-093). Triggered automatically after CI
+   passes on `main` (auto-cuts the next patch) or by a pushed `vX.Y.0` tag
+   (minor/major bump). Releases are never hand-created — see CLAUDE.md
+   "Release" for the contract.
 2. `workbuddy deploy watch` — long-running poller that downloads the
    newest release, verifies the SHA256 against the published
    checksums file, atomically swaps the binary in place, and restarts
