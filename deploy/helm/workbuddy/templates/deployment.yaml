@@ -1,6 +1,19 @@
 {{- $isServe := eq (.Values.mode | default "serve") "serve" -}}
 {{- $cfgDir := include "workbuddy.configDir" . -}}
 {{- $mount := .Values.persistence.mountPath | default "/var/lib/workbuddy" -}}
+{{- /*
+Fail fast at render time when a hard-required Secret has no source. Without
+this the Deployment renders a dangling secretKeyRef and the pod wedges in
+CreateContainerConfigError with no clear cause. The GitHub/Gitea token backs
+the poller + gitops in both modes; serve additionally binds 0.0.0.0 with
+--auth, so an auth token is mandatory there.
+*/ -}}
+{{- if and (not .Values.giteaToken.secretName) (not .Values.giteaToken.token) -}}
+{{- fail "giteaToken.secretName or giteaToken.token is required (GitHub/Gitea API token for the poller + gitops)" -}}
+{{- end -}}
+{{- if and $isServe (not .Values.auth.secretName) (not .Values.auth.token) -}}
+{{- fail "serve mode binds 0.0.0.0 with --auth: set auth.token or auth.secretName" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
