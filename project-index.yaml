@@ -6820,3 +6820,82 @@ requirements:
     deps:
       - REQ-157
       - REQ-158
+
+  - id: REQ-160
+    title: AgentM serve-path dispatch end-to-end (worker capability + coordinator-managed publish/label robustness)
+    description: >
+      A serve-driven GitHub-issue e2e (workbuddy serve → agentm dev/review
+      agents executing in agent-env sandbox pods → coordinator-managed
+      label flips) surfaced four defects that each blocked the loop. REQ-134
+      (real AgentM CLI invocation) and the `run` one-shot path worked, but
+      the orchestrated coordinator+worker dispatch path had never been
+      exercised end-to-end. The fixes:
+
+      1. Worker runtime capability for AgentM. ClaimNextTask filters the
+         task_queue by the worker's advertised `runtime`, but
+         normalizeWorkerRuntime (cmd/worker.go) only accepted
+         claude-code|codex — so an `agentm` task could never be claimed by
+         any worker. normalizeWorkerRuntime now accepts `agentm` (config
+         already lists it in publicRuntimes); the --runtime flag help is
+         updated.
+
+      2. session_log_path is backend-owned, not agent-owned. The output
+         schema requires session_log_path when success=true, but a
+         sandboxed agent cannot know AgentM's host-side log path. The
+         backend already fills it from the run's own session log — but
+         AFTER schema validation, so a valid RESULT was rejected. output.go
+         splits ParseAndValidate into ParseResult (lenient,
+         DisallowUnknownFields to preserve additionalProperties:false) +
+         ValidateOutput (schema on the completed struct); resolveOutput now
+         parses, fills session_log_path, then validates.
+
+      3. Idempotent PR creation. publishAgentMArtifact reuses branch
+         workbuddy/issue-<n> for both dev and review; the review run's
+         `gh pr create` failed with "a pull request already exists",
+         producing an infra_failure that blocked the reviewing→done label
+         flip. gitops.OpenPR now treats an already-open PR as success by
+         recovering the existing PR URL via `gh pr view` (analogous to the
+         existing ErrNoChanges handling).
+
+      4. labelwriter must remove the prior status:* label. Self-managed
+         runtimes flip state with --add-label X --remove-label Y; the
+         coordinator-managed labelwriter only added, so status labels
+         accumulated (status:developing + status:reviewing) and the
+         coordinator recovery sweep refused to act ("multiple active
+         workflow states match labels"), stranding the issue. applyViaGH
+         now lists current labels and removes other status:* labels in the
+         same `gh issue edit`, best-effort (listing failure falls back to
+         add-only).
+
+      Verified live on kind (cluster arl-agentm, isolated agentm venv to
+      avoid a concurrent uv-sync pruning the agent-env extra): issue #1 on a
+      throwaway repo went developing → reviewing → done autonomously with
+      single-status labels throughout; both agents executed in distinct
+      sandbox pods; and an injected TRACEPARENT was continued by AgentM
+      (every emitted span carried the same trace_id), confirming the
+      workbuddy↔agentm single-trace linking through the serve dispatch
+      path.
+    priority: P1
+    version: v0.7.0
+    status: tested
+    acceptance_criteria:
+      - "AC-160-1: normalizeWorkerRuntime accepts \"agentm\" (case-insensitive) returning (agentm, agentm), so a worker advertises the agentm capability and ClaimNextTask hands it agentm-runtime tasks; unsupported values still error mentioning claude-code, codex, or agentm."
+      - "AC-160-2: agentm.ParseResult unmarshals a RESULT body without the conditional schema checks and rejects unknown fields; agentm.ValidateOutput runs the full schema on a completed Output; resolveOutput parses, fills backend-owned session_log_path, then validates, so a success RESULT lacking session_log_path is accepted once the backend fills it."
+      - "AC-160-3: gitops.OpenPR returns the existing PR URL (recovered via gh pr view) instead of an error when gh pr create reports the PR already exists; other create failures still surface."
+      - "AC-160-4: labelwriter.applyViaGH removes the issue's other status:* labels in the same gh issue edit when applying the next label, leaving non-status labels untouched and never removing the label being applied; label listing failure degrades to add-only."
+      - "AC-160-5: go build ./... && go vet ./... && go test ./... -count=1 stays green."
+    code:
+      - cmd/worker.go
+      - internal/agent/agentm/output.go
+      - internal/agent/agentm/backend.go
+      - internal/gitops/gitops.go
+      - internal/labelwriter/labelwriter.go
+    tests:
+      - cmd/worker_test.go
+      - internal/agent/agentm/backend_test.go
+      - internal/gitops/gitops_test.go
+      - internal/labelwriter/labelwriter_test.go
+    deps:
+      - REQ-134
+      - REQ-142
+      - REQ-146

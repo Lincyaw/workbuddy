@@ -459,12 +459,19 @@ func (s *session) resolveOutput() (*Output, error) {
 	s.mu.Unlock()
 
 	if resultLine != "" {
-		out, err := ParseAndValidate([]byte(resultLine))
+		// Parse first WITHOUT the conditional schema checks: session_log_path
+		// is a host-side artifact path the sandboxed agent cannot know, so the
+		// backend fills it from the run's own session log before validating
+		// the completed object against the full contract.
+		out, err := ParseResult([]byte(resultLine))
 		if err != nil {
 			return nil, fmt.Errorf("agentm: invalid RESULT: line: %w", err)
 		}
 		if out.SessionLogPath == "" && fileExists(sessionPath) {
 			out.SessionLogPath = sessionPath
+		}
+		if err := ValidateOutput(out); err != nil {
+			return nil, fmt.Errorf("agentm: invalid RESULT: line: %w", err)
 		}
 		return out, nil
 	}

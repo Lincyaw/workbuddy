@@ -205,6 +205,43 @@ func TestOpenPR_NoURL(t *testing.T) {
 	}
 }
 
+// TestOpenPR_AlreadyExists_RecoversURL pins the idempotent publish contract:
+// when `gh pr create` fails because a PR for the branch is already open, OpenPR
+// recovers the existing PR URL (via `gh pr view`) and returns success, so a
+// retried dispatch or a second agent on the same issue branch (e.g. review
+// after dev) does not block the coordinator-managed label flip.
+func TestOpenPR_AlreadyExists_RecoversURL(t *testing.T) {
+	fr := &fakeRunner{next: []fakeResult{
+		{stderr: "a pull request for branch \"workbuddy/issue-1\" into branch \"main\" already exists", err: errors.New("exit status 1")},
+		{stdout: "https://github.com/Lincyaw/wb-agentm-e2e/pull/1\n"},
+	}}
+	c := Client{Runner: fr}
+	url, err := c.OpenPR(context.Background(), "Lincyaw/wb-agentm-e2e", "workbuddy/issue-1", "t", "")
+	if err != nil {
+		t.Fatalf("expected idempotent success, got %v", err)
+	}
+	if url != "https://github.com/Lincyaw/wb-agentm-e2e/pull/1" {
+		t.Fatalf("url = %q", url)
+	}
+	if len(fr.calls) != 2 {
+		t.Fatalf("expected create+view (2 calls), got %d", len(fr.calls))
+	}
+}
+
+// TestOpenPR_AlreadyExists_NoRecovery surfaces the original create error when
+// the existing-PR lookup yields nothing (e.g. gh pr view also fails).
+func TestOpenPR_AlreadyExists_NoRecovery(t *testing.T) {
+	fr := &fakeRunner{next: []fakeResult{
+		{stderr: "already exists", err: errors.New("exit status 1")},
+		{stdout: "", err: errors.New("exit status 1")},
+	}}
+	c := Client{Runner: fr}
+	_, err := c.OpenPR(context.Background(), "r/r", "b", "t", "")
+	if err == nil {
+		t.Fatal("expected create error to surface when recovery fails")
+	}
+}
+
 func TestOpenPR_RejectsBadInput(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {

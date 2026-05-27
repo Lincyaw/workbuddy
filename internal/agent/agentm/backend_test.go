@@ -349,6 +349,34 @@ func TestParseAndValidate_RejectsBadLabel(t *testing.T) {
 	}
 }
 
+// TestParseResult_DefersSessionLogPath pins the split that lets the backend
+// fill the host-side session_log_path before validation: a sandboxed agent
+// cannot know that path, so ParseResult must accept a success RESULT without
+// it, ValidateOutput must reject it until filled, and accept it once set.
+func TestParseResult_DefersSessionLogPath(t *testing.T) {
+	out, err := agentm.ParseResult([]byte(`{"success":true,"next_label":"status:reviewing"}`))
+	if err != nil {
+		t.Fatalf("ParseResult should accept success without session_log_path: %v", err)
+	}
+	if err := agentm.ValidateOutput(out); err == nil {
+		t.Fatalf("ValidateOutput should reject success=true with empty session_log_path")
+	}
+	out.SessionLogPath = "/var/run/agentm/session.jsonl"
+	if err := agentm.ValidateOutput(out); err != nil {
+		t.Fatalf("ValidateOutput should accept once session_log_path is filled: %v", err)
+	}
+}
+
+// TestParseResult_RejectsUnknownField keeps the schema's additionalProperties:
+// false intent on the agent's raw RESULT even though ParseResult skips the
+// conditional schema checks.
+func TestParseResult_RejectsUnknownField(t *testing.T) {
+	_, err := agentm.ParseResult([]byte(`{"success":true,"next_label":"status:reviewing","bogus":1}`))
+	if err == nil {
+		t.Fatalf("expected ParseResult to reject unknown field")
+	}
+}
+
 func TestSchemaEmbedMatchesRepo(t *testing.T) {
 	// Guardrail: keep the embedded schema in lockstep with the canonical
 	// schemas/agentm-output.schema.json so contributors who touch one are
