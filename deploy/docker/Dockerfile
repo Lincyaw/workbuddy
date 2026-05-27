@@ -65,36 +65,29 @@ RUN apt-get update \
 # uv to materialize a self-contained venv with the agent-env extra.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Clone AgentM at the requested ref and install it EDITABLE (+ agent-env
-# extra = arl-env, the ARL Gateway SDK) into a dedicated venv. Editable is
-# load-bearing, not a shortcut: AgentM's contrib atoms + scenarios are
-# discovered by walking up from agentm.__file__ to a sibling contrib/ dir
-# (src/agentm/extensions/discover.py, loader.py). A non-editable wheel
-# install drops contrib/ entirely, so `operations_agent_env` / the
-# `agent_env_repo` scenario would be invisible. Editable keeps
-# agentm.__file__ at /opt/agentm/src/agentm so /opt/agentm/contrib resolves.
+# Clone AgentM at the requested ref and install — NON-editable — both the
+# core `agentm` package and the `agentm-agentenv` plugin distribution
+# (carries arl-env + registers the `operations_agent_env` atom and the
+# `agent_env_repo` scenario via the agentm.atoms / agentm.scenarios entry
+# points). Entry-point discovery is install-mode-agnostic, so the scenario
+# resolves BY NAME from a wheel — no editable, no AGENTM_PROJECT_ROOT, no
+# path. (See AgentM src/agentm/extensions/{discover,loader}.py.)
 #
-# This is the ONLY reason the AgentM source is vendored. Once `agentm` is
-# published to PyPI (shipping contrib/ as package data), this collapses to
-# `uv pip install "agentm[agent-env]"` with no clone — tracked upstream.
+# The clone exists only because `agentm` / `agentm-agentenv` aren't on PyPI
+# yet; once published this collapses to `uv pip install "agentm[agent-env]"`.
 ENV AGENTM_HOME=/opt/agentm
 ENV VIRTUAL_ENV=${AGENTM_HOME}/venv
 RUN git clone --depth 1 --branch "${AGENTM_REF}" "${AGENTM_REPO}" "${AGENTM_HOME}" \
       || git clone "${AGENTM_REPO}" "${AGENTM_HOME}" \
     && ( cd "${AGENTM_HOME}" && git checkout "${AGENTM_REF}" || true ) \
     && uv venv "${VIRTUAL_ENV}" \
-    && uv pip install --python "${VIRTUAL_ENV}/bin/python" -e "${AGENTM_HOME}[agent-env]" \
+    && uv pip install --python "${VIRTUAL_ENV}/bin/python" \
+         "${AGENTM_HOME}" "${AGENTM_HOME}/contrib/extensions/agentenv" \
     && "${VIRTUAL_ENV}/bin/agentm" --help >/dev/null
 
 # Put the agentm console script on PATH for the worker subprocess lookup
 # (internal/agent/agentm/backend.go DefaultBinary = "agentm").
 ENV PATH=${VIRTUAL_ENV}/bin:${PATH}
-
-# Canonical scenario-resolution anchor (loader.py _candidate_roots root #1).
-# Lets the agent configs reference the scenario BY NAME (scenario:
-# agent_env_repo) instead of hardcoding an absolute path — and keeps name
-# resolution working even from an unrelated cwd (the per-repo worktree).
-ENV AGENTM_PROJECT_ROOT=${AGENTM_HOME}
 
 COPY --from=build /out/workbuddy /usr/local/bin/workbuddy
 
