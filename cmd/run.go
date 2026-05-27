@@ -29,6 +29,7 @@ type runOpts struct {
 	sandbox    string
 	approval   string
 	model      string
+	scenario   string
 	timeout    time.Duration
 }
 
@@ -47,6 +48,7 @@ func init() {
 	runCmd.Flags().String("sandbox", "danger-full-access", "Runtime sandbox policy")
 	runCmd.Flags().String("approval", "never", "Runtime approval policy")
 	runCmd.Flags().String("model", "", "Optional runtime model override")
+	runCmd.Flags().String("scenario", "", "AgentM scenario name (agentm runtime only)")
 	runCmd.Flags().Duration("timeout", 30*time.Minute, "Runtime timeout")
 	rootCmd.AddCommand(runCmd)
 }
@@ -80,6 +82,7 @@ func parseRunFlags(cmd *cobra.Command) (*runOpts, error) {
 	sandbox, _ := cmd.Flags().GetString("sandbox")
 	approval, _ := cmd.Flags().GetString("approval")
 	model, _ := cmd.Flags().GetString("model")
+	scenario, _ := cmd.Flags().GetString("scenario")
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 
 	if prompt != "" && promptFile != "" {
@@ -91,7 +94,7 @@ func parseRunFlags(cmd *cobra.Command) (*runOpts, error) {
 	if workdir == "" {
 		workdir = "."
 	}
-	return &runOpts{runtime: runtimeName, prompt: prompt, promptFile: promptFile, workdir: workdir, sandbox: sandbox, approval: approval, model: model, timeout: timeout}, nil
+	return &runOpts{runtime: runtimeName, prompt: prompt, promptFile: promptFile, workdir: workdir, sandbox: sandbox, approval: approval, model: model, scenario: scenario, timeout: timeout}, nil
 }
 
 func runRuntimeWithOpts(ctx context.Context, opts *runOpts, lnch *runtimepkg.Registry, stdout, stderr io.Writer) error {
@@ -105,9 +108,10 @@ func runRuntimeWithOpts(ctx context.Context, opts *runOpts, lnch *runtimepkg.Reg
 	}
 
 	agent := &config.AgentConfig{
-		Name:    "cli-runtime",
-		Runtime: opts.runtime,
-		Prompt:  prompt,
+		Name:     "cli-runtime",
+		Runtime:  opts.runtime,
+		Prompt:   prompt,
+		Scenario: opts.scenario,
 		Policy: config.PolicyConfig{
 			Sandbox:  opts.sandbox,
 			Approval: opts.approval,
