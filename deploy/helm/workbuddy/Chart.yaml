@@ -1,14 +1,15 @@
 apiVersion: v2
 name: workbuddy
 description: |
-  Workbuddy coordinator — GitHub Issue-driven agent orchestration platform.
-  This chart deploys the coordinator process for the K8s topology (single-replica,
-  MySQL-backed, OTel-instrumented). Agent execution (claude-code, codex, agentm)
-  and ingress are configured separately; see the decision doc
-  docs/decisions/2026-05-13-k8s-agentm-otel.md for the full v0.6 design.
+  Workbuddy — GitHub Issue-driven agent orchestration platform. Default
+  mode=serve deploys a single self-contained pod (coordinator + embedded
+  worker) that runs runtime:agentm against a separate agent-env Gateway,
+  using the combined workbuddy+agentm image (deploy/docker/Dockerfile).
+  mode=coordinator keeps the legacy split topology. Single-replica,
+  OTel-instrumented; see docs/decisions/2026-05-13-k8s-agentm-otel.md.
 type: application
-version: 0.6.0
-appVersion: "v0.6.0"
+version: 0.7.0
+appVersion: "v0.7.0"
 keywords:
   - workbuddy
   - github

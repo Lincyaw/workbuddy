@@ -5,8 +5,26 @@
 # AegisLab via plain values references — NEITHER is bundled here as a
 # subchart, per the decision doc.
 
+# ----------------------------------------------------------------------
+# Execution mode
+# ----------------------------------------------------------------------
+# "serve"       — single pod = coordinator + embedded worker (one process,
+#                 shared DB). This is the K8s realization of the decision
+#                 doc's "single-process in K8s" model and the only mode
+#                 that can run runtime: agentm (the embedded worker owns
+#                 the agentm subprocess + coordinator-managed publish).
+# "coordinator" — poller + state machine only; CANNOT execute agentm
+#                 (no worker to claim tasks). Kept for split topologies
+#                 that pair it with a standalone `workbuddy worker`.
+mode: serve
+
+# Embedded-worker runtime capability advertised to the claim filter. Must
+# be "agentm" for the sandbox topology; "claude-code"/"codex" are host-exec
+# and not supported in K8s (see decision doc Block 2 mode matrix).
+runtime: agentm
+
 image:
-  repository: ghcr.io/lincyaw/workbuddy
+  repository: ghcr.io/lincyaw/workbuddy-agentm   # combined workbuddy+agentm image (deploy/docker/Dockerfile)
   tag: ""          # defaults to .Chart.AppVersion when empty
   pullPolicy: IfNotPresent
 
@@ -85,6 +103,14 @@ giteaToken:
 #   - configMapName == "":  chart renders one from deploy/helm/workbuddy/agents/*.md.
 agents:
   configMapName: ""
+  # AgentM scenario referenced BY NAME (not a path). Resolved inside the
+  # image from AGENTM_PROJECT_ROOT (deploy/docker/Dockerfile). The bundled
+  # agent_env_repo scenario seeds the sandbox from the worktree's git HEAD
+  # and syncs the agent's diff back — the cwd<->pod sync that makes
+  # coordinator-managed PRs non-empty.
+  scenarioName: agent_env_repo
+  devTimeout: 15m
+  reviewTimeout: 10m
 
 # Ingress for the coordinator Service. Disabled by default; enable in K8s
 # topologies that need external webui + webhook access (decision doc Block 3
@@ -100,6 +126,77 @@ ingress:
   tls:
     enabled: false
     secretName: ""
+
+# ----------------------------------------------------------------------
+# Coordinator config (rendered into config.yaml in the mounted config-dir)
+# ----------------------------------------------------------------------
+# The single repository the coordinator polls. The init container clones it
+# into the workspace volume so the embedded worker can `git worktree add`.
+# Multi-repo fan-out (dynamic worker repo registration) is out of scope for
+# this chart; deploy one release per repo, or extend with --repos.
+config:
+  repo: ""                     # required, "OWNER/NAME" form
+  environment: dev
+  pollInterval: 15s
+  # Default branch to clone/track. Empty = the remote's default branch.
+  branch: ""
+
+# Workflow Markdown mounted at <config-dir>/workflows/default.md. The chart
+# ships the standard 2-agent (dev → review) state machine; override to point
+# at your own by setting workflow.inline to the full Markdown document.
+workflow:
+  inline: ""                   # empty = use the bundled default workflow
+
+# ----------------------------------------------------------------------
+# Coordinator HTTP bind + auth
+# ----------------------------------------------------------------------
+# In K8s the process must bind 0.0.0.0 so the Service / kubelet probes can
+# reach it, which workbuddy requires --auth for (a non-loopback bind without
+# auth is rejected). The embedded worker authenticates to the in-pod
+# coordinator with the same token, so a token is mandatory in serve mode.
+auth:
+  token: ""                    # plaintext; chart materializes a Secret (dev)
+  secretName: ""               # or reference an existing Secret (recommended)
+  secretKey: token
+
+# URL written into GitHub issue comments as the prefix of session links.
+# Required because the process binds non-loopback. Defaults to the in-cluster
+# Service DNS (not browser-clickable but valid); set to your ingress host for
+# clickable links.
+reportBaseURL: ""
+
+# ----------------------------------------------------------------------
+# agent-env (ARL sandbox Gateway) — consumed by the agentm subprocess
+# ----------------------------------------------------------------------
+# workbuddy Go never talks to the Gateway; the agentm CLI does, via these
+# AGENTM_AGENT_ENV_* env vars. agent-env is a SEPARATE Helm release; point
+# gatewayUrl at its in-cluster Service.
+agentEnv:
+  gatewayUrl: ""               # required, e.g. http://arl-operator-gateway.arl.svc:8080
+  image: ""                    # sandbox dev-container image, e.g. otel-demo-dev:latest
+  experimentId: workbuddy      # AGENTM_AGENT_ENV_EXPERIMENT_ID
+
+# ----------------------------------------------------------------------
+# Provider API keys for the agentm subprocess (ANTHROPIC_API_KEY,
+# OPENAI_API_KEY, CRS_OAI_KEY, …). All keys in the referenced Secret are
+# injected as env via envFrom. Leave empty to inherit nothing (the agent
+# will fail at model-call time).
+# ----------------------------------------------------------------------
+providerKeys:
+  secretName: ""               # existing Secret; every key becomes an env var
+
+# ----------------------------------------------------------------------
+# Workspace volume — holds the repo clone, per-issue worktrees, and (by
+# default) the SQLite DB under .workbuddy/. Use a PVC for persistence across
+# restarts; emptyDir is fine for ephemeral test runs.
+# ----------------------------------------------------------------------
+persistence:
+  enabled: true
+  existingClaim: ""
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 10Gi
+  mountPath: /var/lib/workbuddy
 
 resources: {}
 nodeSelector: {}

@@ -1,31 +1,62 @@
 # workbuddy Helm chart
 
-Helm chart for deploying the workbuddy coordinator into a Kubernetes
-cluster. Single-replica, MySQL-backed, OTel-instrumented — the K8s
-topology described in `docs/decisions/2026-05-13-k8s-agentm-otel.md`
-Block 3 (Storage) and Block 4 (Collector).
+Helm chart for deploying workbuddy into a Kubernetes cluster, in the K8s
+topology described in `docs/decisions/2026-05-13-k8s-agentm-otel.md`.
 
-The chart is intentionally **service-reusing, not service-bundling**:
-MySQL and the OTel collector are reused from a co-located AegisLab
-release via plain values references. There is no MySQL subchart and no
-OTel-collector subchart — by design, per the decision doc.
+Two modes (`.Values.mode`):
 
-## Quickstart
+- **`serve`** (default) — one pod = coordinator + embedded worker. This is
+  the only mode that runs `runtime: agentm`: the agentm subprocess exec and
+  the coordinator-managed publish (commit + push + PR + label) both live in
+  the worker's runtime layer, so a bare coordinator cannot do agentm work.
+  Requires the **combined workbuddy+agentm image** (`deploy/docker/Dockerfile`),
+  which bundles the `agentm` CLI, gh, git, and the `agent_env_repo` scenario.
+- **`coordinator`** — poller + state machine only (legacy split topology;
+  pair with a standalone `workbuddy worker`). Cannot execute agentm.
+
+The chart is **service-reusing, not service-bundling**: MySQL, the OTel
+collector, and the **agent-env Gateway** are each a separate release reached
+by URL. No subcharts.
+
+## Build the image
+
+```bash
+docker build -f deploy/docker/Dockerfile \
+  --build-arg AGENTM_REF=main \
+  -t ghcr.io/lincyaw/workbuddy-agentm:dev .
+# kind: kind load docker-image ghcr.io/lincyaw/workbuddy-agentm:dev --name <cluster>
+```
+
+## Quickstart (serve + agentm)
+
+```bash
+helm install wb deploy/helm/workbuddy \
+  --set image.repository=ghcr.io/lincyaw/workbuddy-agentm --set image.tag=dev \
+  --set config.repo=OWNER/NAME \
+  --set agentEnv.gatewayUrl=http://arl-operator-gateway.arl.svc:8080 \
+  --set agentEnv.image=otel-demo-dev:latest \
+  --set giteaToken.token=ghp_xxx \
+  --set auth.token=$(openssl rand -hex 16) \
+  --set providerKeys.secretName=workbuddy-provider-keys
+```
+
+`providerKeys.secretName` is an existing Secret whose keys (e.g.
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `CRS_OAI_KEY`) are injected as env for
+the agentm subprocess. `agentEnv.gatewayUrl` points at a **separately
+deployed** agent-env release. The init container clones `config.repo` into
+the workspace PVC; the embedded worker `git worktree add`s from there.
+
+Credential boundary: the pod holds the GitHub token and pushes; the agentm
+subprocess shuttles diffs to/from the sandbox pod, which never sees a token.
+
+### Legacy coordinator-only mode
 
 ```bash
 helm install my-workbuddy deploy/helm/workbuddy \
+  --set mode=coordinator \
   --set mysql.dsnSecretRef.name=workbuddy-mysql \
   --set otel.endpoint=http://otel-collector.aegislab.svc.cluster.local:4317 \
   --set giteaToken.secretName=workbuddy-gitea
-```
-
-Or, for dev/CI where Secrets are inconvenient:
-
-```bash
-helm install my-workbuddy deploy/helm/workbuddy \
-  --set mysql.dsn='mysql://wb:wb@tcp(mysql:3306)/workbuddy?parseTime=true' \
-  --set otel.endpoint=http://otel:4317 \
-  --set giteaToken.token=ghp_xxx
 ```
 
 ## Values

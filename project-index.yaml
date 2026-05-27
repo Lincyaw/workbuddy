@@ -6954,3 +6954,79 @@ requirements:
       - docs/planned/agentm-runtime.md
     deps:
       - REQ-160
+
+  - id: REQ-162
+    title: Kubernetes deployment — combined workbuddy+agentm image + single-pod serve Helm chart
+    description: >
+      The v0.6 Helm chart (deploy/helm/workbuddy) deployed only the bare
+      `coordinator`, which CANNOT execute runtime:agentm — the agentm
+      subprocess exec and the coordinator-managed publish both live in the
+      runtime layer the WORKER drives (internal/runtime/agent_bridge.go:
+      publishAgentMArtifact). This requirement makes the chart actually run
+      agentm on K8s, as a single self-contained pod, matching the decision
+      doc's "single-process in K8s" model.
+
+      Three pieces:
+
+      1. `serve --runtime` flag. cmd/serve.go's embedded worker never set a
+         runtime, so it defaulted away from agentm and ClaimNextTask's
+         runtime filter starved agentm tasks. serve now exposes --runtime
+         (default claude-code, matching `worker`) and threads it into the
+         embedded workerOpts, making `serve --runtime agentm` a working
+         single-process coordinator+worker that claims and executes agentm.
+
+      2. Combined container image (deploy/docker/Dockerfile). Multi-stage:
+         Go-builds workbuddy, then a python:3.12-slim layer with gh + git +
+         the REAL AgentM installed EDITABLE from a build-arg ref
+         (AGENTM_REF). Editable is load-bearing: AgentM discovers contrib
+         atoms + scenarios by walking up from agentm.__file__ to a sibling
+         contrib/ (discover.py, loader.py), which a non-editable wheel drops.
+         AGENTM_PROJECT_ROOT is set so the agent_env_repo scenario resolves
+         BY NAME (loader.py _candidate_roots root #1) — agent configs say
+         `scenario: agent_env_repo`, never an absolute path. The agentm CLI
+         is on PATH for the worker's DefaultBinary lookup. (Vendoring AgentM
+         source is required only until `agentm` is published to PyPI with
+         contrib as package data; then the clone collapses to a pip install.)
+
+      3. Chart serve topology. mode=serve runs the combined image as one
+         Deployment: an initContainer git-clones the configured repo into a
+         workspace PVC (workbuddy does NOT auto-clone — the worker
+         `git worktree add`s an existing clone); config.yaml + the default
+         2-agent workflow + templated agentm dev/review agent configs are
+         mounted via a config ConfigMap (subPath) + agents ConfigMap;
+         AGENTM_AGENT_ENV_GATEWAY_URL/IMAGE/EXPERIMENT_ID point the agentm
+         subprocess at a SEPARATE in-cluster agent-env release (workbuddy Go
+         never calls the Gateway); provider API keys come via envFrom a
+         Secret; GH/Gitea token + a mandatory auth token (serve binds
+         0.0.0.0 so probes/Service work, which requires --auth) come from
+         Secrets. SQLite on the workspace PVC is the serve default; the
+         MySQL DSN env is rendered forward-compat.
+
+      The credential boundary is preserved end-to-end: the worker container
+      clones with the token (origin URL), the agentm subprocess shuttles the
+      diff to/from the sandbox pod, and no GitHub credential ever enters the
+      pod.
+    priority: P1
+    version: v0.7.0
+    status: implemented
+    acceptance_criteria:
+      - "AC-162-1: `workbuddy serve --runtime agentm` advertises the agentm capability on the embedded worker so ClaimNextTask hands it agentm tasks; default remains claude-code; covered by cmd/serve_test.go TestParseServeFlagsRuntime."
+      - "AC-162-2: deploy/docker/Dockerfile builds an image with `workbuddy` + `agentm` on PATH, gh + git installed, and the agent_env_repo scenario resolvable BY NAME via discover_contrib_atoms + load_scenario (editable install + AGENTM_PROJECT_ROOT)."
+      - "AC-162-3: `helm lint` and `helm template` succeed for mode=serve; the rendered Deployment runs `serve --config-dir --runtime=agentm --listen=0.0.0.0 --auth`, mounts config+agents+workspace, sets the AGENTM_AGENT_ENV_* / token / provider env, and has an initContainer that clones config.repo into the workspace PVC."
+      - "AC-162-4: agent configs reference `scenario: agent_env_repo` by name (no absolute path); the sandbox image is injected from agentEnv.image as dev_container_image."
+      - "AC-162-5: Live kind smoke — the chart deploys into a cluster with an agent-env Gateway, and an issue with a real-code AC runs developing→reviewing→done with a non-empty PR whose diff is exactly the agent's changes."
+    code:
+      - cmd/serve.go
+      - deploy/docker/Dockerfile
+      - deploy/helm/workbuddy/values.yaml
+      - deploy/helm/workbuddy/templates/deployment.yaml
+      - deploy/helm/workbuddy/templates/config-configmap.yaml
+      - deploy/helm/workbuddy/templates/configmap.yaml
+      - deploy/helm/workbuddy/templates/secret.yaml
+      - deploy/helm/workbuddy/templates/pvc.yaml
+      - deploy/helm/workbuddy/templates/_helpers.tpl
+    tests:
+      - cmd/serve_test.go
+    deps:
+      - REQ-160
+      - REQ-161
