@@ -149,11 +149,18 @@ func (b *Backend) NewSession(ctx context.Context, spec agent.Spec) (agent.Sessio
 	// log event for transcript capture.
 	go func() {
 		defer close(events)
-		defer close(s.done)
-		// Intentionally do NOT remove tmpDir here: the session-log file is
-		// referenced by Result.SessionPath / session_log_path and consumed by
-		// the audit layer after Wait returns. Lifecycle cleanup is the
-		// caller's responsibility (worker session manager).
+		// tmpDir holds task.json/result.json/session.jsonl. These must
+		// outlive the process exit because Wait() / SessionLogPath() read
+		// the result and session log after the process returns. The bridge
+		// (internal/runtime/agent_bridge.go) copies session.jsonl into the
+		// durable worker session dir, then the worker calls Close() once the
+		// run is finalized — Close() removes tmpDir. If Close() raced ahead
+		// of process exit, the cleanup is deferred to here via removeTmpDir,
+		// which is a no-op until both done is closed and Close() ran.
+		defer func() {
+			close(s.done)
+			s.removeTmpDir()
+		}()
 
 		s.scanStdout(stdout)
 		stderrWG.Wait()
@@ -206,15 +213,22 @@ type session struct {
 	resultFile string
 	sessionLog string
 
-	mu             sync.Mutex
-	exitCode       int
-	duration       time.Duration
-	waitErr        error
-	finalMsg       string
-	sessionRef     agent.SessionRef
-	output         *Output
-	parseErr       error
-	resultLineRaw  string
+	mu            sync.Mutex
+	exitCode      int
+	duration      time.Duration
+	waitErr       error
+	finalMsg      string
+	sessionRef    agent.SessionRef
+	output        *Output
+	parseErr      error
+	resultLineRaw string
+
+	// closeRequested is set by Close(); tmpDirGone makes removal idempotent.
+	// Both are guarded by mu. tmpDir is removed only once both the process
+	// has exited (done closed) and Close() has been called, whichever order
+	// they happen in — see removeTmpDir.
+	closeRequested bool
+	tmpDirGone     bool
 }
 
 func (s *session) ID() string                 { return s.id }
@@ -272,7 +286,39 @@ func (s *session) Interrupt(ctx context.Context) error {
 	return nil
 }
 
-func (s *session) Close() error { return nil }
+// Close marks the session as finalized and removes the per-session temp dir
+// (task.json/result.json/session.jsonl). The worker calls this after audit
+// has persisted the run, so the durable session artifacts are already copied
+// out of tmpDir by the bridge. Close is safe to call multiple times and from
+// either the running or completed state: if the process is still running,
+// removal is deferred until the stdout-reader goroutine exits.
+func (s *session) Close() error {
+	s.mu.Lock()
+	s.closeRequested = true
+	s.mu.Unlock()
+	s.removeTmpDir()
+	return nil
+}
+
+// removeTmpDir deletes tmpDir exactly once, but only after both the process
+// has exited (s.done closed) and Close() has been requested. It is called
+// from both Close() and the stdout-reader goroutine's deferred cleanup so
+// that whichever happens last performs the removal — no leak regardless of
+// ordering.
+func (s *session) removeTmpDir() {
+	select {
+	case <-s.done:
+	default:
+		return // process still running; nothing to clean yet
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tmpDirGone || !s.closeRequested || s.tmpDir == "" {
+		return
+	}
+	_ = os.RemoveAll(s.tmpDir)
+	s.tmpDirGone = true
+}
 
 // Output exposes the parsed structured output for callers that need to
 // route on next_label / failure_reason / artifact_path. Returns (nil, err)
@@ -368,12 +414,24 @@ type Output struct {
 	FailureReason  string `json:"failure_reason,omitempty"`
 }
 
+// emit is lossy by design: if the buffered events channel is full (a slow or
+// stalled consumer) the event is dropped rather than blocking the stdout/
+// stderr reader goroutines. Blocking here would risk deadlocking the reader
+// against a wedged consumer and prevent the process from being reaped.
+//
+// Routing is never affected by a drop: the canonical RESULT: line is captured
+// into s.resultLineRaw inside scanStdout BEFORE emit runs, and the
+// --result-file fallback is read from disk in resolveOutput. Only the
+// transcript rendering on the secondary events stream can lose a line. The
+// agentm-native session log (session.jsonl) is captured separately and copied
+// to the durable worker session dir by the bridge, so the full conversation
+// is preserved independent of this channel.
 func emit(ch chan<- agent.Event, evt agent.Event) {
 	defer func() { _ = recover() }()
 	select {
 	case ch <- evt:
 	default:
-		// Drop on slow consumer to avoid blocking the read goroutine.
+		// Drop on slow consumer — see doc comment above.
 	}
 }
 
@@ -405,7 +463,10 @@ func writeTaskFile(path string, spec agent.Spec) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	// 0o600: task.json carries the rendered prompt and lives in a shared
+	// temp location. The enclosing MkdirTemp dir is 0o700, but keep the file
+	// owner-only too so a permissive umask can't widen it.
+	return os.WriteFile(path, data, 0o600)
 }
 
 func fileExists(p string) bool {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -308,8 +310,19 @@ func (s *AgentBridgeSession) Run(ctx context.Context, events chan<- launchereven
 		Output() (*agentm.Output, error)
 		SessionLogPath() string
 	}); ok {
+		// The agentm session log lives inside the backend's per-session temp
+		// dir, which the backend removes on Close() (called by the worker
+		// after this run). Copy it into the durable worker session dir before
+		// that happens so the native conversation log survives for audit, and
+		// point SessionPath at the copy rather than the soon-to-be-deleted
+		// temp file. If there's no handle (e.g. the one-shot Launch path) or
+		// the copy fails, fall back to the temp path — correctness of the run
+		// does not depend on capturing the log.
 		if logPath := extractor.SessionLogPath(); logPath != "" {
 			sessionPath = logPath
+			if durable, err := copyAgentMSessionLog(s.Handle, logPath); err == nil && durable != "" {
+				sessionPath = durable
+			}
 		}
 		out, perr := extractor.Output()
 		switch {
@@ -593,6 +606,33 @@ func bridgeSessionPath(handle BridgeSessionHandle) string {
 		return ""
 	}
 	return handle.StdoutPath()
+}
+
+// copyAgentMSessionLog copies the agentm-native session log out of the
+// backend's per-session temp dir (which the backend deletes on Close) into
+// the durable worker session dir, alongside stdout. It returns the path to
+// the copy. An empty handle, an empty source path, or an unreadable source
+// yields ("", err) and the caller keeps the original path.
+func copyAgentMSessionLog(handle BridgeSessionHandle, srcPath string) (string, error) {
+	if handle == nil || srcPath == "" {
+		return "", nil
+	}
+	stdoutPath := handle.StdoutPath()
+	if stdoutPath == "" {
+		return "", nil
+	}
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		return "", err
+	}
+	dst := filepath.Join(filepath.Dir(stdoutPath), "agentm-session.jsonl")
+	if dst == srcPath {
+		return dst, nil
+	}
+	if err := os.WriteFile(dst, data, 0o600); err != nil {
+		return "", err
+	}
+	return dst, nil
 }
 
 func TranslateAgentEventKind(kind string) launcherevents.EventKind {
