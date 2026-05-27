@@ -80,6 +80,53 @@ func TestBackend_HappyPath_Success(t *testing.T) {
 	}
 }
 
+func TestBackend_Close_RemovesTempDir(t *testing.T) {
+	fake := agentmtest.BuildFake(t, agentmtest.Config{Mode: agentmtest.ModeSuccess})
+	be := &agentm.Backend{Binary: fake}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	sess, err := be.NewSession(ctx, newSpec(t))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	go func() {
+		for range sess.Events() {
+		}
+	}()
+	if _, err := sess.Wait(ctx); err != nil {
+		t.Fatalf("Wait returned error: %v", err)
+	}
+
+	extractor := sess.(interface {
+		SessionLogPath() string
+	})
+	logPath := extractor.SessionLogPath()
+	if logPath == "" {
+		t.Fatalf("expected session log path")
+	}
+	// The session log lives inside the per-session temp dir; capture its
+	// parent so we can assert removal after the full lifecycle.
+	tmpDir := filepath.Dir(logPath)
+	if _, err := os.Stat(tmpDir); err != nil {
+		t.Fatalf("temp dir missing before close: %v", err)
+	}
+
+	// The worker calls Close() after audit has persisted the run. This must
+	// remove the temp dir so successful dispatches don't leak /tmp.
+	if err := sess.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Stat(tmpDir); !os.IsNotExist(err) {
+		t.Fatalf("temp dir %q still exists after Close (err=%v): agentm dispatch leaks /tmp", tmpDir, err)
+	}
+
+	// Close must be idempotent.
+	if err := sess.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
 func TestBackend_MalformedJSON_IsInfraFailure(t *testing.T) {
 	fake := agentmtest.BuildFake(t, agentmtest.Config{Mode: agentmtest.ModeMalformedJSON})
 	be := &agentm.Backend{Binary: fake}

@@ -12,6 +12,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/agent/agentm"
 	"github.com/Lincyaw/workbuddy/internal/agent/agentm/agentmtest"
 	"github.com/Lincyaw/workbuddy/internal/config"
+	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 )
 
 // TestAgentMBridge_HappyPath wires an AgentMBackend (pointed at the fake
@@ -197,5 +198,89 @@ func TestAgentMBridge_DevContainerImageNotInjectedForOtherRuntimes(t *testing.T)
 	}, map[string]string{})
 	if _, ok := env2[EnvDevContainerImage]; ok {
 		t.Fatalf("empty dev_container_image must not be injected, got %v", env2)
+	}
+}
+
+// TestAgentMBridge_SessionLogDurableAndNoLeak covers the resource-leak fix:
+// when a session handle is wired (the production worker path), the bridge
+// copies the agentm-native session log into the durable worker session dir
+// and points SessionPath at the copy, and the backend's per-session temp dir
+// is removed on Close() so successful dispatches don't leak /tmp.
+func TestAgentMBridge_SessionLogDurableAndNoLeak(t *testing.T) {
+	fake := agentmtest.BuildFake(t, agentmtest.Config{Mode: agentmtest.ModeSuccess})
+	rt := NewAgentBridgeRuntime(config.RuntimeAgentM, func() (agent.Backend, error) {
+		return &agentm.Backend{Binary: fake}, nil
+	})
+
+	work := t.TempDir()
+	sessionsDir := filepath.Join(t.TempDir(), "sessions")
+	mgr := NewSessionManager(sessionsDir, nil)
+	handle, err := mgr.Create(SessionCreateInput{SessionID: "test-session", Repo: "Lincyaw/workbuddy", IssueNum: 319})
+	if err != nil {
+		t.Fatalf("create managed session: %v", err)
+	}
+
+	task := &TaskContext{
+		Repo:     "Lincyaw/workbuddy",
+		WorkDir:  work,
+		RepoRoot: work,
+		Issue:    IssueContext{Number: 319, Title: "test"},
+		Session:  SessionContext{ID: "test-session", TaskID: "task-1", Attempt: 1},
+	}
+	task.SetSessionHandle(handle)
+	agentCfg := &config.AgentConfig{Name: "dev-agent", Runtime: config.RuntimeAgentM, Role: "dev", Prompt: "ship it"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	sess, err := rt.Start(ctx, agentCfg, task)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Reach into the backend session to capture the temp dir before Close.
+	bridgeSess, ok := sess.(*AgentBridgeSession)
+	if !ok {
+		t.Fatalf("expected *AgentBridgeSession, got %T", sess)
+	}
+	logExtractor := bridgeSess.Session.(interface{ SessionLogPath() string })
+
+	ch := make(chan launcherevents.Event, 32)
+	drained := make(chan struct{})
+	go func() {
+		for range ch {
+		}
+		close(drained)
+	}()
+	res, runErr := sess.Run(ctx, ch)
+	close(ch)
+	<-drained
+	if runErr != nil {
+		t.Fatalf("Run: %v", runErr)
+	}
+
+	tmpDir := filepath.Dir(logExtractor.SessionLogPath())
+
+	// SessionPath must point at the durable copy in the session dir, not the
+	// backend temp dir that Close() will delete.
+	if res.SessionPath == "" {
+		t.Fatalf("expected SessionPath populated")
+	}
+	if got := filepath.Dir(res.SessionPath); got != handle.Dir() {
+		t.Fatalf("SessionPath %q not in durable session dir %q", res.SessionPath, handle.Dir())
+	}
+	if _, err := os.Stat(res.SessionPath); err != nil {
+		t.Fatalf("durable session log missing: %v", err)
+	}
+
+	if err := sess.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// The durable copy survives Close; the backend temp dir does not.
+	if _, err := os.Stat(res.SessionPath); err != nil {
+		t.Fatalf("durable session log removed by Close: %v", err)
+	}
+	if _, err := os.Stat(tmpDir); !os.IsNotExist(err) {
+		t.Fatalf("backend temp dir %q still exists after Close (err=%v): agentm leaks /tmp", tmpDir, err)
 	}
 }

@@ -9,9 +9,13 @@
 // coordinator owns the GH/Gitea write surface and must apply the label
 // transition the agent suggests in its structured Result.
 //
-// This package is intentionally dormant until the dispatch path wires it
-// (tracked in #332). It compiles and is unit-tested, but no production
-// code path imports ApplyNextLabel yet.
+// This package is wired into the production dispatch path (#332). The chain:
+// cmd/worker.go calls Launcher.SetAgentMLabelWriter with
+// launcher.NewAgentMLabelWriterAdapter(store), which wraps *Writer in a
+// runtime.AgentMLabelWriter; internal/runtime/agent_bridge.go's
+// AgentBridgeSession.Run invokes ApplyNextLabel after a successful AgentM run
+// AND a successful gitops publish. Self-managed runtimes (claude-code, codex)
+// never wire this adapter, so the Go-side label write stays AgentM-only.
 package labelwriter
 
 import (
