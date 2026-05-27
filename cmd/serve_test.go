@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/app"
+	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/store"
@@ -158,6 +159,7 @@ func newServeFlagCommand(t *testing.T, configDir string) *cobra.Command {
 	cmd.Flags().Duration("poll-interval", defaultPollInterval, "")
 	cmd.Flags().Int("max-parallel-tasks", 0, "")
 	cmd.Flags().StringSlice("roles", []string{"dev"}, "")
+	cmd.Flags().String("runtime", config.RuntimeClaudeCode, "")
 	cmd.Flags().String("config-dir", configDir, "")
 	cmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "")
 	cmd.Flags().Bool("loopback-only", false, "")
@@ -165,6 +167,37 @@ func newServeFlagCommand(t *testing.T, configDir string) *cobra.Command {
 	cmd.Flags().String("trusted-authors", "", "")
 	cmd.Flags().String("report-base-url", "", "")
 	return cmd
+}
+
+func TestParseServeFlagsRuntime(t *testing.T) {
+	configDir := setupTestConfigDir(t, "owner/repo")
+
+	// Default: claude-code, matching the standalone worker default so the
+	// embedded worker advertises the same capability.
+	cmd := newServeFlagCommand(t, configDir)
+	opts, err := parseServeFlags(cmd)
+	if err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	if opts.runtime != config.RuntimeClaudeCode {
+		t.Fatalf("default runtime = %q, want %q", opts.runtime, config.RuntimeClaudeCode)
+	}
+
+	// agentm flows through so the single-process serve pod can claim and
+	// execute coordinator-managed agentm tasks (otherwise ClaimNextTask's
+	// runtime filter starves them).
+	cmd = newServeFlagCommand(t, configDir)
+	_ = cmd.Flags().Set("runtime", config.RuntimeAgentM)
+	opts, err = parseServeFlags(cmd)
+	if err != nil {
+		t.Fatalf("parse flags (agentm): %v", err)
+	}
+	if opts.runtime != config.RuntimeAgentM {
+		t.Fatalf("runtime = %q, want %q", opts.runtime, config.RuntimeAgentM)
+	}
+	if _, _, err := normalizeWorkerRuntime(opts.runtime); err != nil {
+		t.Fatalf("normalizeWorkerRuntime(%q): %v", opts.runtime, err)
+	}
 }
 
 func TestParseServeFlagsRejectsNonLoopbackListenWithoutAuth(t *testing.T) {

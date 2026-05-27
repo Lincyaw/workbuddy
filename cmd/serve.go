@@ -43,6 +43,7 @@ type serveOpts struct {
 	cookieInsecure    bool
 	reportBaseURL     string
 	hooksConfig       string
+	runtime           string
 }
 
 var serveCmd = &cobra.Command{
@@ -62,6 +63,7 @@ func init() {
 	serveCmd.Flags().Duration("poll-interval", defaultPollInterval, "GitHub poll interval")
 	serveCmd.Flags().Int("max-parallel-tasks", 0, fmt.Sprintf("Worker task concurrency override (0 = worker default, min(NumCPU, %d))", defaultMaxParallelTasks))
 	serveCmd.Flags().StringSlice("roles", []string{"dev", "test", "review"}, "Worker roles")
+	serveCmd.Flags().String("runtime", config.RuntimeClaudeCode, "Embedded worker runtime capability: claude-code, codex, or agentm")
 	serveCmd.Flags().String("config-dir", ".github/workbuddy", "Configuration directory")
 	serveCmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "SQLite database path shared by coordinator and worker")
 	serveCmd.Flags().Bool("loopback-only", false, "Allow auth-free task endpoints only when the listen address is loopback-only")
@@ -89,6 +91,7 @@ func parseServeFlags(cmd *cobra.Command) (*serveOpts, error) {
 	pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
 	maxParallelTasks, _ := cmd.Flags().GetInt("max-parallel-tasks")
 	roles, _ := cmd.Flags().GetStringSlice("roles")
+	runtimeName, _ := cmd.Flags().GetString("runtime")
 	configDir, _ := cmd.Flags().GetString("config-dir")
 	dbPath, _ := cmd.Flags().GetString("db-path")
 	authEnabled, _ := cmd.Flags().GetBool("auth")
@@ -107,6 +110,7 @@ func parseServeFlags(cmd *cobra.Command) (*serveOpts, error) {
 		pollInterval:      pollInterval,
 		maxParallelTasks:  maxParallelTasks,
 		roles:             roles,
+		runtime:           strings.TrimSpace(runtimeName),
 		configDir:         configDir,
 		dbPath:            dbPath,
 		auth:              authEnabled,
@@ -194,6 +198,7 @@ func runServeWithOutput(opts *serveOpts, ghReader poller.GHReader, launcherOverr
 			reportBaseURL:     resolvedReportBaseURL,
 			mgmtAuthToken:     strings.TrimSpace(os.Getenv("WORKBUDDY_AUTH_TOKEN")),
 			roleCSV:           strings.Join(opts.roles, ","),
+			runtime:           opts.runtime,
 			configDir:         opts.configDir,
 			workDir:           repoRoot,
 			sessionsDir:       deriveServeSessionsDir(opts.dbPath, repoRoot),

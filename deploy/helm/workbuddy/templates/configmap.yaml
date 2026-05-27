@@ -1,10 +1,14 @@
 {{- /*
-Render an agent-configs ConfigMap only when the user has not pointed at an
-existing one via .Values.agents.configMapName. The chart bundles default
-agent definitions in deploy/helm/workbuddy/agents/*.md; .Files.Glob picks
-them up at render time. If no defaults are bundled the ConfigMap is created
-empty — production deployments should override `agents.configMapName` with
-their organization's ConfigMap (see README, #334 for the full surface).
+Agent-configs ConfigMap (mounted at <config-dir>/agents). Rendered only when
+the user has not pointed at an existing one via .Values.agents.configMapName.
+
+The chart ships templated defaults for the two-role catalog (dev + review),
+both runtime: agentm in coordinator-managed mode. They are rendered (not read
+from .Files) so the sandbox image (.Values.agentEnv.image) and the in-image
+scenario path (.Values.agents.scenarioPath) are injected from values and stay
+consistent with deploy/docker/Dockerfile. The doubled braces escape the agent
+template placeholders (e.g. {{ "{{" }}.Issue.Number{{ "}}" }}) so Helm emits
+them verbatim for workbuddy's own template engine.
 */ -}}
 {{- if not .Values.agents.configMapName }}
 apiVersion: v1
@@ -13,11 +17,85 @@ metadata:
   name: {{ include "workbuddy.agentsConfigMapName" . }}
   labels:
     {{- include "workbuddy.labels" . | nindent 4 }}
-{{- $files := .Files.Glob "agents/*.md" }}
-{{- if $files }}
 data:
-{{ ($files).AsConfig | indent 2 }}
-{{- else }}
-data: {}
-{{- end }}
+  dev-agent.md: |
+    ---
+    name: dev-agent
+    description: AgentM dev agent (agent-env sandbox, repo-synced)
+    triggers:
+      - state: developing
+    role: dev
+    runtime: agentm
+    scenario: {{ .Values.agents.scenarioName }}
+    {{- if .Values.agentEnv.image }}
+    dev_container_image: {{ .Values.agentEnv.image }}
+    {{- end }}
+    policy:
+      sandbox: danger-full-access
+      approval: never
+      timeout: {{ .Values.agents.devTimeout | default "15m" }}
+    context:
+      - Repo
+      - Issue.Number
+      - Issue.Title
+      - Issue.Body
+    ---
+
+    You are the dev agent for issue #{{ "{{" }}.Issue.Number{{ "}}" }} in {{ "{{" }}.Repo{{ "}}" }}.
+
+    Title: {{ "{{" }}.Issue.Title{{ "}}" }}
+
+    Body:
+    {{ "{{" }}.Issue.Body{{ "}}" }}
+
+    The repository is checked out in your sandbox working directory
+    (/workspace). Use the file and bash tools to make the code changes the
+    acceptance criteria require. Make the actual file changes in /workspace —
+    they are collected into a pull request automatically.
+
+    When finished, your FINAL line of output MUST be a single line of JSON
+    prefixed with `RESULT:` exactly in this form (no other text after it):
+
+    RESULT: {"success": true, "next_label": "status:reviewing", "failure_reason": ""}
+
+    Set "success" to true only if you made the required changes.
+  review-agent.md: |
+    ---
+    name: review-agent
+    description: AgentM review agent (agent-env sandbox, repo-synced)
+    triggers:
+      - state: reviewing
+    role: review
+    runtime: agentm
+    scenario: {{ .Values.agents.scenarioName }}
+    {{- if .Values.agentEnv.image }}
+    dev_container_image: {{ .Values.agentEnv.image }}
+    {{- end }}
+    policy:
+      sandbox: danger-full-access
+      approval: never
+      timeout: {{ .Values.agents.reviewTimeout | default "10m" }}
+    context:
+      - Repo
+      - Issue.Number
+      - Issue.Title
+      - Issue.Body
+    ---
+
+    You are the review agent for issue #{{ "{{" }}.Issue.Number{{ "}}" }} in {{ "{{" }}.Repo{{ "}}" }}.
+
+    Title: {{ "{{" }}.Issue.Title{{ "}}" }}
+
+    The dev agent's changes are checked out in your sandbox working directory
+    (/workspace). Verify the acceptance criteria are satisfied — read the
+    changed files and, where the criteria call for it, run the relevant
+    commands with the bash tool.
+
+    When finished, your FINAL line of output MUST be a single line of JSON
+    prefixed with `RESULT:` exactly in this form (no other text after it):
+
+    RESULT: {"success": true, "next_label": "status:done", "failure_reason": ""}
+
+    Set "next_label" to "status:done" when the criteria pass, or
+    "status:developing" to send it back to the dev agent with a reason.
 {{- end }}
