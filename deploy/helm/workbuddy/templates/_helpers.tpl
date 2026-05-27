@@ -78,3 +78,37 @@ Name of the agent-configs ConfigMap to mount. Same pattern as Gitea Secret.
 {{- printf "%s-agents" (include "workbuddy.fullname" .) -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Name of the coordinator-config ConfigMap (config.yaml + workflows/default.md).
+*/}}
+{{- define "workbuddy.configConfigMapName" -}}
+{{- printf "%s-config" (include "workbuddy.fullname" .) -}}
+{{- end -}}
+
+{{/*
+Name of the auth-token Secret. Existing one if supplied, else chart-managed.
+*/}}
+{{- define "workbuddy.authSecretName" -}}
+{{- if .Values.auth.secretName -}}
+{{- .Values.auth.secretName -}}
+{{- else -}}
+{{- printf "%s-auth" (include "workbuddy.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+In-container config directory passed to `serve --config-dir`.
+*/}}
+{{- define "workbuddy.configDir" -}}/etc/workbuddy{{- end -}}
+
+{{/*
+Resolved report base URL: explicit value, else the in-cluster Service DNS.
+*/}}
+{{- define "workbuddy.reportBaseURL" -}}
+{{- if .Values.reportBaseURL -}}
+{{- .Values.reportBaseURL -}}
+{{- else -}}
+{{- printf "http://%s.%s.svc:%v" (include "workbuddy.fullname" .) .Release.Namespace .Values.service.port -}}
+{{- end -}}
+{{- end -}}

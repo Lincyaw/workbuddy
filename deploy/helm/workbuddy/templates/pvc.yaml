@@ -1,0 +1,23 @@
+{{- /*
+Workspace PersistentVolumeClaim — repo clone, per-issue worktrees, and the
+SQLite DB under .workbuddy/. Rendered only when persistence is enabled and the
+user did not supply an existing claim. Single-replica + Recreate (see
+deployment.yaml) means ReadWriteOnce is sufficient.
+*/ -}}
+{{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "workbuddy.fullname" . }}-workspace
+  labels:
+    {{- include "workbuddy.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.persistence.accessMode | default "ReadWriteOnce" }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size | default "10Gi" }}
+  {{- if .Values.persistence.storageClass }}
+  storageClassName: {{ .Values.persistence.storageClass | quote }}
+  {{- end }}
+{{- end }}
