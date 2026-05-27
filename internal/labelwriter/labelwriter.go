@@ -187,11 +187,43 @@ func (w *Writer) applyViaGH(ctx context.Context, repo string, issueNum int, labe
 		"--repo", repo,
 		"--add-label", label,
 	}
+	// Drop any other status:* label in the same edit. Self-managed runtimes
+	// flip state with --add-label X --remove-label Y; the coordinator-managed
+	// path must match, otherwise stale status labels accumulate and the
+	// coordinator's recovery sweep refuses to act ("multiple active workflow
+	// states match labels"), stranding the issue. Best-effort: if the label
+	// listing fails we fall back to add-only rather than blocking the flip.
+	for _, stale := range w.staleStatusLabels(ctx, run, bin, repo, issueNum, label) {
+		args = append(args, "--remove-label", stale)
+	}
 	out, err := run(ctx, bin, args...)
 	if err != nil {
 		return fmt.Errorf("labelwriter: gh issue edit %d on %s: %w (output: %s)", issueNum, repo, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// staleStatusLabels returns the issue's current `status:*` labels other than
+// keep, so applyViaGH can remove them when advancing state. Best-effort: any
+// error (gh failure, parse) yields nil and the caller keeps add-only behaviour.
+func (w *Writer) staleStatusLabels(ctx context.Context, run commandRunner, bin, repo string, issueNum int, keep string) []string {
+	out, err := run(ctx, bin,
+		"issue", "view", fmt.Sprintf("%d", issueNum), "--repo", repo,
+		"--json", "labels", "--jq", ".labels[].name")
+	if err != nil {
+		return nil
+	}
+	var stale []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" || name == keep {
+			continue
+		}
+		if strings.HasPrefix(name, "status:") {
+			stale = append(stale, name)
+		}
+	}
+	return stale
 }
 
 func (w *Writer) applyViaGitea(ctx context.Context, baseURL, repo string, issueNum int, label string) error {

@@ -291,6 +291,40 @@ func TestParseWorkerFlags_TokenFile(t *testing.T) {
 }
 
 
+func TestNormalizeWorkerRuntime(t *testing.T) {
+	cases := []struct {
+		raw      string
+		public   string
+		alias    string
+		wantErr  bool
+	}{
+		{"", "claude-code", "claude-code", false},
+		{"claude-code", "claude-code", "claude-code", false},
+		{"codex", "codex", "codex", false},
+		{"AgentM", "agentm", "agentm", false}, // case-insensitive
+		{"agentm", "agentm", "agentm", false},
+		{"nonsense", "", "", true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.raw, func(t *testing.T) {
+			pub, alias, err := normalizeWorkerRuntime(tc.raw)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q", tc.raw)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("normalizeWorkerRuntime(%q): %v", tc.raw, err)
+			}
+			if pub != tc.public || alias != tc.alias {
+				t.Fatalf("got (%q,%q), want (%q,%q)", pub, alias, tc.public, tc.alias)
+			}
+		})
+	}
+}
+
 func TestParseWorkerFlags_DefaultReportBaseURLAndMgmtAuthToken(t *testing.T) {
 	t.Setenv("WORKBUDDY_AUTH_TOKEN", "shared-token")
 

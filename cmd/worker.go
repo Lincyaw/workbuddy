@@ -178,7 +178,7 @@ func bindWorkerFlags(cmd *cobra.Command) {
 	cmd.Flags().String("coordinator", "", "Coordinator base URL")
 	addCoordinatorAuthFlags(cmd.Flags(), "", "Bearer token for Coordinator authentication")
 	cmd.Flags().String("role", "", "Comma-separated worker roles (default: roles from local agent config)")
-	cmd.Flags().String("runtime", config.RuntimeClaudeCode, "Worker runtime capability: claude-code or codex")
+	cmd.Flags().String("runtime", config.RuntimeClaudeCode, "Worker runtime capability: claude-code, codex, or agentm")
 	cmd.Flags().String("config-dir", ".github/workbuddy", "Configuration directory (relative to each bound repo unless absolute)")
 	cmd.Flags().String("repos", "", "Repo bindings: comma-separated OWNER/NAME=/path entries (path defaults to cwd)")
 	cmd.Flags().String("repos-file", "", "Persistent YAML file recording runtime repo bindings; survives worker restart. Default: $XDG_CONFIG_HOME/workbuddy/worker-repos.yaml (or ~/.config/workbuddy/worker-repos.yaml). Empty value disables persistence.")
@@ -774,8 +774,15 @@ func normalizeWorkerRuntime(raw string) (public string, runtimeAlias string, err
 		return config.RuntimeClaudeCode, config.RuntimeClaudeCode, nil
 	case config.RuntimeCodex, config.RuntimeCodexServer:
 		return config.RuntimeCodex, config.RuntimeCodex, nil
+	case config.RuntimeAgentM:
+		// AgentM is a first-class worker capability: the worker invokes the
+		// `agentm` CLI (which dispatches into an agent-env sandbox pod) and
+		// owns the coordinator-managed label/gitops path. Without advertising
+		// this capability the runtime-scoped claim filter (ClaimNextTask)
+		// would never hand an `agentm` task to any worker.
+		return config.RuntimeAgentM, config.RuntimeAgentM, nil
 	default:
-		return "", "", fmt.Errorf("worker: unsupported runtime %q (want claude-code or codex)", raw)
+		return "", "", fmt.Errorf("worker: unsupported runtime %q (want claude-code, codex, or agentm)", raw)
 	}
 }
 

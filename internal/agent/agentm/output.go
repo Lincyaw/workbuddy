@@ -38,11 +38,55 @@ func ParseAndValidate(raw []byte) (*Output, error) {
 	if trimmed == "" {
 		return nil, fmt.Errorf("empty structured output")
 	}
+	if err := validateJSON([]byte(trimmed)); err != nil {
+		return nil, err
+	}
+	var out Output
+	if err := json.Unmarshal([]byte(trimmed), &out); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return &out, nil
+}
 
-	documentLoader := gojsonschema.NewStringLoader(trimmed)
-	res, err := compiledSchema.Validate(documentLoader)
+// ParseResult unmarshals a RESULT body into an Output WITHOUT running the
+// conditional schema checks (e.g. session_log_path-required-on-success) that
+// the backend can only satisfy after filling backend-owned fields. Unknown
+// fields are rejected to preserve the schema's additionalProperties:false
+// intent. Callers MUST run ValidateOutput after filling backend-owned fields
+// (session_log_path) — see (*session).resolveOutput. session_log_path is a
+// host-side artifact path the sandboxed agent cannot know, so requiring it on
+// the agent's raw RESULT line would be unsatisfiable in agent_env mode.
+func ParseResult(raw []byte) (*Output, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return nil, fmt.Errorf("empty structured output")
+	}
+	dec := json.NewDecoder(strings.NewReader(trimmed))
+	dec.DisallowUnknownFields()
+	var out Output
+	if err := dec.Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return &out, nil
+}
+
+// ValidateOutput runs the embedded schema against a (possibly backend-
+// completed) Output. Used after ParseResult + backend field-fill so the
+// final object is held to the full contract.
+func ValidateOutput(out *Output) error {
+	raw, err := json.Marshal(out)
 	if err != nil {
-		return nil, fmt.Errorf("validate: %w", err)
+		return fmt.Errorf("encode: %w", err)
+	}
+	return validateJSON(raw)
+}
+
+// validateJSON runs the embedded schema against a JSON document and collapses
+// any violations into a single-line error safe for an issue comment.
+func validateJSON(raw []byte) error {
+	res, err := compiledSchema.Validate(gojsonschema.NewBytesLoader(raw))
+	if err != nil {
+		return fmt.Errorf("validate: %w", err)
 	}
 	if !res.Valid() {
 		issues := res.Errors()
@@ -50,12 +94,7 @@ func ParseAndValidate(raw []byte) (*Output, error) {
 		for _, e := range issues {
 			msgs = append(msgs, e.String())
 		}
-		return nil, fmt.Errorf("schema violations: %s", strings.Join(msgs, "; "))
+		return fmt.Errorf("schema violations: %s", strings.Join(msgs, "; "))
 	}
-
-	var out Output
-	if err := json.Unmarshal([]byte(trimmed), &out); err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
-	}
-	return &out, nil
+	return nil
 }

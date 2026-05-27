@@ -223,6 +223,16 @@ func (c *Client) OpenPR(ctx context.Context, repo, branch, title, body string) (
 	}
 	stdout, stderr, err := c.runner().Run(ctx, "", nil, c.gh(), args...)
 	if err != nil {
+		// An already-open PR for this branch is not a failure for our
+		// idempotent publish path: a retried dispatch, or a second agent
+		// (e.g. review after dev) targeting the same issue branch, will hit
+		// this. Recover the existing PR URL and treat it as success so the
+		// coordinator-managed label flip is not blocked.
+		if prAlreadyExists(stderr) {
+			if url := c.existingPRURL(ctx, repo, branch); url != "" {
+				return url, nil
+			}
+		}
 		// gh prints the URL on success; on failure stderr carries the
 		// reason. Surface it so the reporter can render the issue
 		// comment.
@@ -234,6 +244,25 @@ func (c *Client) OpenPR(ctx context.Context, repo, branch, title, body string) (
 		return "", fmt.Errorf("gitops: gh pr create returned no URL (stdout=%q)", stdout)
 	}
 	return url, nil
+}
+
+// prAlreadyExists reports whether `gh pr create` failed solely because a pull
+// request for the head branch is already open. gh's message is stable:
+// "a pull request for branch \"X\" into branch \"Y\" already exists".
+func prAlreadyExists(stderr string) bool {
+	return strings.Contains(strings.ToLower(stderr), "already exists")
+}
+
+// existingPRURL resolves the URL of the open PR whose head is `branch`. Returns
+// "" if none is found or gh errors — callers fall back to surfacing the
+// original create error.
+func (c *Client) existingPRURL(ctx context.Context, repo, branch string) string {
+	stdout, _, err := c.runner().Run(ctx, "", nil, c.gh(),
+		"pr", "view", branch, "--repo", repo, "--json", "url", "--jq", ".url")
+	if err != nil {
+		return ""
+	}
+	return lastNonEmptyLine(stdout)
 }
 
 func lastNonEmptyLine(s string) string {

@@ -66,6 +66,43 @@ func TestApplyNextLabel_GitHubGHArgs(t *testing.T) {
 	}
 }
 
+// TestApplyNextLabel_RemovesStaleStatusLabels pins the state-advance contract:
+// when the issue already carries other status:* labels, the coordinator-managed
+// flip removes them in the same edit (so the SM sees exactly one active state),
+// while leaving non-status labels (e.g. workbuddy) untouched.
+func TestApplyNextLabel_RemovesStaleStatusLabels(t *testing.T) {
+	var editArgs []string
+	w := &Writer{
+		lookup:   func(string) (*store.RepoRegistrationRecord, error) { return nil, nil },
+		lookPath: func(string) (string, error) { return "/usr/bin/gh", nil },
+		run: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+			if len(args) > 1 && args[1] == "view" {
+				return []byte("workbuddy\nstatus:developing\nstatus:reviewing\n"), nil
+			}
+			editArgs = args
+			return []byte("ok"), nil
+		},
+	}
+	if err := w.ApplyNextLabel(context.Background(), "org/repo", 1, "status:done"); err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	joined := strings.Join(editArgs, " ")
+	if !strings.Contains(joined, "--add-label status:done") {
+		t.Fatalf("expected add-label status:done, got %v", editArgs)
+	}
+	for _, stale := range []string{"status:developing", "status:reviewing"} {
+		if !strings.Contains(joined, "--remove-label "+stale) {
+			t.Fatalf("expected --remove-label %s, got %v", stale, editArgs)
+		}
+	}
+	if strings.Contains(joined, "--remove-label workbuddy") {
+		t.Fatalf("must not remove non-status label, got %v", editArgs)
+	}
+	if strings.Contains(joined, "--remove-label status:done") {
+		t.Fatalf("must not remove the label being applied, got %v", editArgs)
+	}
+}
+
 func TestApplyNextLabel_HostKindGitHubExplicit(t *testing.T) {
 	w, cap := newWriterWithCapture()
 	w.lookup = fakeRegistration(map[string]string{
