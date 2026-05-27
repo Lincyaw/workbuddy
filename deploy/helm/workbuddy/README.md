@@ -23,15 +23,15 @@ by URL. No subcharts.
 ```bash
 docker build -f deploy/docker/Dockerfile \
   --build-arg AGENTM_REF=main \
-  -t ghcr.io/lincyaw/workbuddy-agentm:dev .
-# kind: kind load docker-image ghcr.io/lincyaw/workbuddy-agentm:dev --name <cluster>
+  -t docker.io/opspai/workbuddy-agentm:dev .
+# kind: kind load docker-image docker.io/opspai/workbuddy-agentm:dev --name <cluster>
 ```
 
 ## Quickstart (serve + agentm)
 
 ```bash
 helm install wb deploy/helm/workbuddy \
-  --set image.repository=ghcr.io/lincyaw/workbuddy-agentm --set image.tag=dev \
+  --set image.repository=docker.io/opspai/workbuddy-agentm --set image.tag=v0.7.0 \
   --set config.repo=OWNER/NAME \
   --set agentEnv.gatewayUrl=http://arl-operator-gateway.arl.svc:8080 \
   --set agentEnv.image=otel-demo-dev:latest \
