@@ -24,7 +24,7 @@ mode: serve
 runtime: agentm
 
 image:
-  repository: ghcr.io/lincyaw/workbuddy-agentm   # combined workbuddy+agentm image (deploy/docker/Dockerfile)
+  repository: docker.io/opspai/workbuddy-agentm   # combined workbuddy+agentm image (deploy/docker/Dockerfile)
   tag: ""          # defaults to .Chart.AppVersion when empty
   pullPolicy: IfNotPresent
 
