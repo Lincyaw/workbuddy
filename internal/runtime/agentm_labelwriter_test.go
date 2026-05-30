@@ -95,10 +95,13 @@ func TestAgentMBridge_AppliesNextLabelOnSuccess(t *testing.T) {
 
 // AC-1-2: AgentM run with success=false MUST NOT fire the label writer.
 // failure_reason still flows into Meta for the reporter to surface.
-func TestAgentMBridge_NoLabelOnFailure(t *testing.T) {
+// Failed runs (success=false) still apply next_label — a review-agent
+// bouncing an issue back to developing is a legitimate routing decision.
+// Only the gitops publish is skipped (no artifact to commit).
+func TestAgentMBridge_LabelAppliedOnFailure(t *testing.T) {
 	fake := agentmtest.BuildFake(t, agentmtest.Config{
 		Mode:          agentmtest.ModeFailure,
-		NextLabel:     "status:failed",
+		NextLabel:     "status:developing",
 		FailureReason: "ac not met",
 	})
 	gops := &fakeGitOps{}
@@ -121,11 +124,15 @@ func TestAgentMBridge_NoLabelOnFailure(t *testing.T) {
 	if _, err := rt.Launch(ctx, &config.AgentConfig{Name: "dev-agent", Runtime: config.RuntimeAgentM}, task); err == nil {
 		t.Fatal("expected non-nil err on clean failure")
 	}
-	if calls := lw.Calls(); len(calls) != 0 {
-		t.Fatalf("expected 0 label-writer calls on failure, got %v", calls)
+	calls := lw.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 label-writer call on failure (routing decision), got %v", calls)
+	}
+	if calls[0].label != "status:developing" {
+		t.Fatalf("expected label %q, got %q", "status:developing", calls[0].label)
 	}
 	if got := len(gops.calls); got != 0 {
-		t.Fatalf("publish must also be skipped on failure, got %d calls", got)
+		t.Fatalf("publish must be skipped on failure, got %d calls", got)
 	}
 }
 

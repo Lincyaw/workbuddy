@@ -109,8 +109,9 @@ agents:
   # and syncs the agent's diff back — the cwd<->pod sync that makes
   # coordinator-managed PRs non-empty.
   scenarioName: agent_env_repo
-  devTimeout: 15m
-  reviewTimeout: 10m
+  model: ""                    # AgentM --model profile name (e.g. "litellm"); empty = AgentM default
+  devTimeout: 30m
+  reviewTimeout: 30m
 
 # Ingress for the coordinator Service. Disabled by default; enable in K8s
 # topologies that need external webui + webhook access (decision doc Block 3
@@ -175,6 +176,18 @@ agentEnv:
   gatewayUrl: ""               # required, e.g. http://arl-operator-gateway.arl.svc:8080
   image: ""                    # sandbox dev-container image, e.g. otel-demo-dev:latest
   experimentId: workbuddy      # AGENTM_AGENT_ENV_EXPERIMENT_ID
+
+# ----------------------------------------------------------------------
+# AgentM config.toml — model profiles for the agentm subprocess
+# ----------------------------------------------------------------------
+# When configSecretName is set, the Secret's `config.toml` key is mounted
+# at $AGENTM_HOME/config.toml so the agentm CLI can resolve model profiles
+# (e.g. `--model litellm`). This replaces per-env-var model wiring and
+# keeps API keys + endpoints in one file. Precedence (per AgentM docs):
+# CLI flag > env var > profile > built-in default — so remove conflicting
+# env vars from providerKeys when using config.toml profiles.
+agentm:
+  configSecretName: ""         # existing Secret with a `config.toml` key
 
 # ----------------------------------------------------------------------
 # Provider API keys for the agentm subprocess (ANTHROPIC_API_KEY,

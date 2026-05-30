@@ -202,6 +202,12 @@ spec:
             - name: workspace
               mountPath: {{ $mount }}
             {{- end }}
+            {{- if .Values.agentm.configSecretName }}
+            - name: agentm-config
+              mountPath: /opt/agentm/config.toml
+              subPath: config.toml
+              readOnly: true
+            {{- end }}
           readinessProbe:
             tcpSocket:
               port: http
@@ -231,6 +237,14 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        {{- end }}
+        {{- if .Values.agentm.configSecretName }}
+        - name: agentm-config
+          secret:
+            secretName: {{ .Values.agentm.configSecretName | quote }}
+            items:
+              - key: config.toml
+                path: config.toml
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

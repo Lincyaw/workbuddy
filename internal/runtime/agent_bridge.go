@@ -365,14 +365,16 @@ func (s *AgentBridgeSession) Run(ctx context.Context, events chan<- launchereven
 				}
 			}
 			// Coordinator-managed label writer (REQ-146 / #332).
-			// Strict sequence: only fire after a successful AgentM run
-			// AND a successful gitops publish (or no-changes, which the
-			// publish adapter classifies as a non-failure no-op). If
-			// the PR could not be opened we MUST NOT advance the state
-			// machine. Self-managed runtimes (claude-code, codex) never
-			// wire LabelWriter, so this branch is AgentM-only by
-			// construction.
-			if out.Success && publishOK && s.LabelWriter != nil && s.Task != nil && strings.TrimSpace(out.NextLabel) != "" {
+			// The agent's next_label is the routing decision for the
+			// state machine and MUST be applied regardless of
+			// success/failure — a review-agent returning success=false
+			// with next_label=status:developing is a legitimate bounce.
+			// The only gate is: if the run succeeded AND produced
+			// artifacts, those must have been published first (we must
+			// not advance past a failed publish). Failed runs skip
+			// publish entirely, so publishOK is irrelevant for them.
+			labelGated := (out.Success && publishOK) || !out.Success
+			if labelGated && s.LabelWriter != nil && s.Task != nil && strings.TrimSpace(out.NextLabel) != "" {
 				if applied, applyErr := s.applyAgentMNextLabel(ctx, out.NextLabel); applyErr != nil {
 					meta["agentm_label_apply_error"] = applyErr.Error()
 				} else if applied != "" {

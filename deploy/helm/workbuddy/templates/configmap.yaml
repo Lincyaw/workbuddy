@@ -34,6 +34,9 @@ data:
       sandbox: danger-full-access
       approval: never
       timeout: {{ .Values.agents.devTimeout | default "15m" }}
+      {{- if .Values.agents.model }}
+      model: {{ .Values.agents.model }}
+      {{- end }}
     context:
       - Repo
       - Issue.Number
@@ -75,6 +78,9 @@ data:
       sandbox: danger-full-access
       approval: never
       timeout: {{ .Values.agents.reviewTimeout | default "10m" }}
+      {{- if .Values.agents.model }}
+      model: {{ .Values.agents.model }}
+      {{- end }}
     context:
       - Repo
       - Issue.Number
