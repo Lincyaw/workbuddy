@@ -30,6 +30,12 @@ data:
     {{- if .Values.agentEnv.image }}
     dev_container_image: {{ .Values.agentEnv.image }}
     {{- end }}
+    extensions:
+      - module: agentm.extensions.builtin.tool_result_cap
+      - module: agentm.extensions.builtin.dedup
+      - module: agentm.extensions.builtin.retry_policy
+      - module: agentm.extensions.builtin.runtime_context
+      - module: agentm.extensions.builtin.tool_error_messages
     policy:
       sandbox: danger-full-access
       approval: never
@@ -74,6 +80,12 @@ data:
     {{- if .Values.agentEnv.image }}
     dev_container_image: {{ .Values.agentEnv.image }}
     {{- end }}
+    extensions:
+      - module: agentm.extensions.builtin.tool_result_cap
+      - module: agentm.extensions.builtin.dedup
+      - module: agentm.extensions.builtin.retry_policy
+      - module: agentm.extensions.builtin.runtime_context
+      - module: agentm.extensions.builtin.tool_error_messages
     policy:
       sandbox: danger-full-access
       approval: never
@@ -116,6 +128,12 @@ data:
     {{- if .Values.agentEnv.image }}
     dev_container_image: {{ .Values.agentEnv.image }}
     {{- end }}
+    extensions:
+      - module: agentm.extensions.builtin.tool_result_cap
+      - module: agentm.extensions.builtin.dedup
+      - module: agentm.extensions.builtin.retry_policy
+      - module: agentm.extensions.builtin.runtime_context
+      - module: agentm.extensions.builtin.tool_error_messages
     policy:
       sandbox: danger-full-access
       approval: never
