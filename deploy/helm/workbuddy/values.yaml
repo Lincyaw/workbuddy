@@ -112,6 +112,7 @@ agents:
   model: ""                    # AgentM --model profile name (e.g. "litellm"); empty = AgentM default
   devTimeout: 30m
   reviewTimeout: 30m
+  mergeTimeout: 15m
 
 # Ingress for the coordinator Service. Disabled by default; enable in K8s
 # topologies that need external webui + webhook access (decision doc Block 3
@@ -210,6 +211,35 @@ persistence:
   accessMode: ReadWriteOnce
   size: 10Gi
   mountPath: /var/lib/workbuddy
+
+# ----------------------------------------------------------------------
+# PM Agent CronJob — autonomous requirement proposer
+# ----------------------------------------------------------------------
+# Self-managed (has GH_TOKEN, runs on host, no sandbox). Reads open/closed
+# issues, recent PRs, and source code, then creates 1-2 new issues with
+# acceptance criteria and the `workbuddy` + `status:developing` labels.
+pm:
+  enabled: false
+  schedule: "0 */4 * * *"       # every 4 hours
+  scenario: general_purpose     # no sandbox — PM reads repo on host
+  prompt: |
+    You are the PM agent for this repository. Your job is to propose 1-2
+    small, well-scoped improvements as GitHub issues.
+
+    Steps:
+    1. Run `gh issue list -R $REPO --state all --limit 20` to see recent issues.
+    2. Run `gh pr list -R $REPO --state all --limit 10` to see recent PRs.
+    3. Read key source files to identify improvement opportunities.
+    4. Create 1-2 new issues using `gh issue create -R $REPO` with:
+       - A clear title
+       - A body with `## Acceptance Criteria` section (AC-1, AC-2, etc.)
+       - Labels: `workbuddy,enhancement,status:developing`
+
+    Focus on: code quality, observability improvements, error handling,
+    test coverage, documentation. Keep each issue small enough for a
+    single dev-agent session (~15 min of work).
+
+    Do NOT create issues that duplicate existing open issues.
 
 resources: {}
 nodeSelector: {}
