@@ -69,12 +69,28 @@ spec:
               args:
                 - "--prompt"
                 - {{ .Values.pm.prompt | quote }}
-                - "--scenario"
-                - {{ .Values.pm.scenario | default "general_purpose" | quote }}
                 {{- if .Values.agents.model }}
                 - "--model"
                 - {{ .Values.agents.model | quote }}
                 {{- end }}
+                - "-e"
+                - "agentm.extensions.builtin.operations_local"
+                - "-e"
+                - "agentm.extensions.builtin.tool_read"
+                - "-e"
+                - "agentm.extensions.builtin.tool_edit"
+                - "-e"
+                - "agentm.extensions.builtin.tool_bash"
+                - "-e"
+                - "agentm.extensions.builtin.tool_result_cap"
+                - "-e"
+                - "agentm.extensions.builtin.dedup"
+                - "-e"
+                - "agentm.extensions.builtin.retry_policy"
+                - "-e"
+                - "agentm.extensions.builtin.runtime_context"
+                - "-e"
+                - "agentm.extensions.builtin.tool_error_messages"
                 - "-e"
                 - 'agentm.extensions.builtin.memory:{"path":"{{ $mount }}/memories/pm"}'
               env:
