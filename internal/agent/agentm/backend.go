@@ -510,15 +510,16 @@ func emit(ch chan<- agent.Event, evt agent.Event) {
 
 // buildArgs assembles the real AgentM CLI argv:
 //
-//	"<prompt>" --scenario <name> [-e module[:json] ...] \
+//	--prompt "<prompt>" --scenario <name> [-e module[:json] ...] \
 //	    [--model M] [--cwd <workspace>] [--max-turns N]
 //
-// The prompt is positional and always first. --scenario is emitted only when
-// the spec names one (otherwise AgentM picks its own default). Each extension
-// becomes a `-e module` flag, or `-e module:<json>` when it carries config.
+// The prompt is passed via --prompt (agentm no longer accepts a bare
+// positional argument). --scenario is emitted only when the spec names one
+// (otherwise AgentM picks its own default). Each extension becomes a
+// `-e module` flag, or `-e module:<json>` when it carries config.
 // The system prompt is just another extension — no special-casing here.
 func buildArgs(spec agent.Spec, workspace string) []string {
-	args := []string{spec.Prompt}
+	args := []string{"--prompt", spec.Prompt}
 	if scenario := strings.TrimSpace(spec.Scenario); scenario != "" {
 		args = append(args, "--scenario", scenario)
 	}

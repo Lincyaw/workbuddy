@@ -123,8 +123,8 @@ func TestBackend_NoResultNoBanner_IsSuccess(t *testing.T) {
 }
 
 // TestBackend_BuildArgs_NewCLIShape asserts the backend emits the real AgentM
-// CLI argv: positional prompt first, then --scenario, -e pairs, --cwd, and
-// --max-turns. No more run/--task-file/--result-file/--session-log.
+// CLI argv: --prompt first, then --scenario, -e pairs, --cwd, and --max-turns.
+// No more run/--task-file/--result-file/--session-log or bare positional prompt.
 func TestBackend_BuildArgs_NewCLIShape(t *testing.T) {
 	argvDump := filepath.Join(t.TempDir(), "argv")
 	fake := agentmtest.BuildFake(t, agentmtest.Config{
@@ -160,10 +160,8 @@ func TestBackend_BuildArgs_NewCLIShape(t *testing.T) {
 		t.Fatalf("read argv dump: %v", err)
 	}
 	args := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	if len(args) == 0 || args[0] != "resolve issue #319" {
-		t.Fatalf("argv[0] must be the positional prompt, got %v", args)
-	}
 	joined := strings.Join(args, "\x00")
+	mustContainSeq(t, args, "--prompt", "resolve issue #319")
 	mustContainSeq(t, args, "--scenario", "agent_env")
 	mustContainSeq(t, args, "--model", "claude-sonnet")
 	mustContainSeq(t, args, "--cwd", work)
