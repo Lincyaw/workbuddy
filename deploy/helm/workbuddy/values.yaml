@@ -221,7 +221,8 @@ persistence:
 pm:
   enabled: false
   schedule: "0 */4 * * *"       # every 4 hours
-  scenario: general_purpose     # no sandbox — PM reads repo on host
+  # PM runs without a scenario — extensions loaded via -e flags directly.
+  # Uses operations_local (host filesystem, no sandbox).
   prompt: |
     You are the PM agent for this repository. Your job is to propose 1-2
     small, well-scoped improvements as GitHub issues.
