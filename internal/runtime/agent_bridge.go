@@ -407,6 +407,12 @@ func (s *AgentBridgeSession) Run(ctx context.Context, events chan<- launchereven
 						branch := fmt.Sprintf("workbuddy/issue-%d", s.Task.Issue.Number)
 						if mergeErr := s.PRMerger.MergePR(ctx, s.Task.Repo, branch); mergeErr != nil {
 							meta["agentm_merge_error"] = mergeErr.Error()
+							// Merge failed (conflict, permissions, etc.) — roll
+							// back to developing so the dev-agent can rebase.
+							if s.LabelWriter != nil {
+								_ = s.LabelWriter.ApplyNextLabel(ctx, s.Task.Repo, s.Task.Issue.Number, "status:developing")
+								meta["agentm_label_applied"] = "status:developing"
+							}
 						} else {
 							meta["agentm_pr_merged"] = "true"
 						}
