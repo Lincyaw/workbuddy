@@ -1,0 +1,121 @@
+{{- /*
+PM Agent CronJob — periodically reads issues, PRs, and code, then proposes
+new requirements as GitHub issues. Self-managed (has GH_TOKEN, runs on host,
+no sandbox). Uses the same combined image as the serve pod.
+*/ -}}
+{{- if .Values.pm.enabled }}
+{{- $mount := .Values.persistence.mountPath | default "/var/lib/workbuddy" -}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "workbuddy.fullname" . }}-pm
+  labels:
+    {{- include "workbuddy.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pm-agent
+spec:
+  schedule: {{ .Values.pm.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            {{- include "workbuddy.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: pm-agent
+        spec:
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          restartPolicy: Never
+          initContainers:
+            - name: clone-repo
+              image: {{ include "workbuddy.image" . | quote }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["/bin/bash", "-ec"]
+              args:
+                - |
+                  REPO={{ .Values.config.repo | quote }}
+                  DEST="{{ $mount }}/pm-repo"
+                  URL="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+                  mkdir -p "$DEST"
+                  git config --global --add safe.directory '*'
+                  if [ -d "$DEST/.git" ]; then
+                    git -C "$DEST" fetch --prune origin
+                    BR="$(git -C "$DEST" remote show origin | sed -n 's/.*HEAD branch: //p')"
+                    git -C "$DEST" checkout "$BR"
+                    git -C "$DEST" reset --hard "origin/$BR"
+                  else
+                    git clone "$URL" "$DEST"
+                  fi
+              env:
+                - name: GH_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "workbuddy.giteaSecretName" . | quote }}
+                      key: {{ .Values.giteaToken.secretKey | default "token" | quote }}
+              volumeMounts:
+                - name: workspace
+                  mountPath: {{ $mount }}
+          containers:
+            - name: pm-agent
+              image: {{ include "workbuddy.image" . | quote }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              workingDir: {{ $mount }}/pm-repo
+              command: ["agentm"]
+              args:
+                - "--prompt"
+                - {{ .Values.pm.prompt | quote }}
+                - "--scenario"
+                - {{ .Values.pm.scenario | default "general_purpose" | quote }}
+                {{- if .Values.agents.model }}
+                - "--model"
+                - {{ .Values.agents.model | quote }}
+                {{- end }}
+                - "-e"
+                - 'agentm.extensions.builtin.memory:{"path":"{{ $mount }}/memories/pm"}'
+              env:
+                - name: GH_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "workbuddy.giteaSecretName" . | quote }}
+                      key: {{ .Values.giteaToken.secretKey | default "token" | quote }}
+                - name: GIT_CONFIG_COUNT
+                  value: "1"
+                - name: GIT_CONFIG_KEY_0
+                  value: safe.directory
+                - name: GIT_CONFIG_VALUE_0
+                  value: "*"
+              {{- if .Values.agentm.configSecretName }}
+              volumeMounts:
+                - name: workspace
+                  mountPath: {{ $mount }}
+                - name: agentm-config
+                  mountPath: /opt/agentm/config.toml
+                  subPath: config.toml
+                  readOnly: true
+              {{- else }}
+              volumeMounts:
+                - name: workspace
+                  mountPath: {{ $mount }}
+              {{- end }}
+          volumes:
+            - name: workspace
+              {{- if .Values.persistence.enabled }}
+              persistentVolumeClaim:
+                claimName: {{ .Values.persistence.existingClaim | default (printf "%s-workspace" (include "workbuddy.fullname" .)) }}
+              {{- else }}
+              emptyDir: {}
+              {{- end }}
+            {{- if .Values.agentm.configSecretName }}
+            - name: agentm-config
+              secret:
+                secretName: {{ .Values.agentm.configSecretName | quote }}
+                items:
+                  - key: config.toml
+                    path: config.toml
+            {{- end }}
+{{- end }}

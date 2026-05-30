@@ -107,7 +107,7 @@ spec:
             - serve
             - --config-dir={{ $cfgDir }}
             - --runtime={{ .Values.runtime | default "agentm" }}
-            - --roles=dev,review
+            - --roles=dev,review,merge
             - --listen=0.0.0.0:{{ .Values.service.port }}
             - --auth
             - --report-base-url={{ include "workbuddy.reportBaseURL" . }}

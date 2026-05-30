@@ -19,8 +19,8 @@
     },
     "role": {
       "type": "string",
-      "enum": ["dev", "review"],
-      "description": "Role catalog is intentionally tiny (see docs/decisions/2026-04-15-agent-role-consolidation.md)."
+      "enum": ["dev", "review", "merge"],
+      "description": "Role catalog: dev (implement), review (verify), merge (approve+ship)."
     },
     "runtime": {
       "type": "string",

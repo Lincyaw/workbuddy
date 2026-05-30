@@ -23,7 +23,7 @@ data:
 {{- else }}
     ---
     name: default
-    description: Default 2-agent lifecycle for any workbuddy-tracked issue
+    description: Three-agent lifecycle (dev → review → merge) for workbuddy-tracked issues
     trigger:
       issue_label: "workbuddy"
     max_retries: 3
@@ -32,10 +32,10 @@ data:
 
     ## Default Workflow
 
-    Two-agent state machine applied to every issue labeled `workbuddy`.
-    Humans author issues with a `## Acceptance Criteria` section; in
-    coordinator-managed (agentm) mode workbuddy flips labels using the
-    structured `next_label` the agent returns.
+    Three-agent state machine: dev implements, review verifies, merge ships.
+    In coordinator-managed (agentm) mode workbuddy flips labels using the
+    structured `next_label` the agent returns and squash-merges the PR when
+    the merge-agent approves.
 
     ```yaml
     states:
@@ -50,16 +50,23 @@ data:
         enter_label: "status:reviewing"
         agent: review-agent
         transitions:
-          "status:done": done
+          "status:merging": merging
           "status:developing": developing
+
+      merging:
+        enter_label: "status:merging"
+        agent: merge-agent
+        transitions:
+          "status:merged": merged
+          "status:developing": developing
+
+      merged:
+        enter_label: "status:merged"
 
       blocked:
         enter_label: "status:blocked"
         transitions:
           "status:developing": developing
-
-      done:
-        enter_label: "status:done"
 
       failed:
         enter_label: "status:failed"

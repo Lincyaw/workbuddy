@@ -2,13 +2,13 @@
 Agent-configs ConfigMap (mounted at <config-dir>/agents). Rendered only when
 the user has not pointed at an existing one via .Values.agents.configMapName.
 
-The chart ships templated defaults for the two-role catalog (dev + review),
-both runtime: agentm in coordinator-managed mode. They are rendered (not read
-from .Files) so the sandbox image (.Values.agentEnv.image) and the in-image
-scenario path (.Values.agents.scenarioPath) are injected from values and stay
-consistent with deploy/docker/Dockerfile. The doubled braces escape the agent
-template placeholders (e.g. {{ "{{" }}.Issue.Number{{ "}}" }}) so Helm emits
-them verbatim for workbuddy's own template engine.
+The chart ships templated defaults for the three-role catalog (dev + review +
+merge), all runtime: agentm in coordinator-managed mode. They are rendered
+(not read from .Files) so the sandbox image (.Values.agentEnv.image) and the
+in-image scenario path (.Values.agents.scenarioPath) are injected from values
+and stay consistent with deploy/docker/Dockerfile. The doubled braces escape
+the agent template placeholders (e.g. {{ "{{" }}.Issue.Number{{ "}}" }}) so
+Helm emits them verbatim for workbuddy's own template engine.
 */ -}}
 {{- if not .Values.agents.configMapName }}
 apiVersion: v1
@@ -33,7 +33,7 @@ data:
     policy:
       sandbox: danger-full-access
       approval: never
-      timeout: {{ .Values.agents.devTimeout | default "15m" }}
+      timeout: {{ .Values.agents.devTimeout | default "30m" }}
       {{- if .Values.agents.model }}
       model: {{ .Values.agents.model }}
       {{- end }}
@@ -77,7 +77,7 @@ data:
     policy:
       sandbox: danger-full-access
       approval: never
-      timeout: {{ .Values.agents.reviewTimeout | default "10m" }}
+      timeout: {{ .Values.agents.reviewTimeout | default "30m" }}
       {{- if .Values.agents.model }}
       model: {{ .Values.agents.model }}
       {{- end }}
@@ -100,8 +100,59 @@ data:
     When finished, your FINAL line of output MUST be a single line of JSON
     prefixed with `RESULT:` exactly in this form (no other text after it):
 
-    RESULT: {"success": true, "next_label": "status:done", "failure_reason": ""}
+    RESULT: {"success": true, "next_label": "status:merging", "failure_reason": ""}
 
-    Set "next_label" to "status:done" when the criteria pass, or
+    Set "next_label" to "status:merging" when the criteria pass, or
     "status:developing" to send it back to the dev agent with a reason.
+  merge-agent.md: |
+    ---
+    name: merge-agent
+    description: AgentM merge agent (agent-env sandbox, repo-synced)
+    triggers:
+      - state: merging
+    role: merge
+    runtime: agentm
+    scenario: {{ .Values.agents.scenarioName }}
+    {{- if .Values.agentEnv.image }}
+    dev_container_image: {{ .Values.agentEnv.image }}
+    {{- end }}
+    policy:
+      sandbox: danger-full-access
+      approval: never
+      timeout: {{ .Values.agents.mergeTimeout | default "15m" }}
+      {{- if .Values.agents.model }}
+      model: {{ .Values.agents.model }}
+      {{- end }}
+    context:
+      - Repo
+      - Issue.Number
+      - Issue.Title
+      - Issue.Body
+    ---
+
+    You are the merge agent for issue #{{ "{{" }}.Issue.Number{{ "}}" }} in {{ "{{" }}.Repo{{ "}}" }}.
+
+    Title: {{ "{{" }}.Issue.Title{{ "}}" }}
+
+    The dev agent's changes are on the `workbuddy/issue-{{ "{{" }}.Issue.Number{{ "}}" }}`
+    branch and have been approved by the review agent. Your job is to verify
+    the PR is ready to merge:
+
+    1. Run `git log --oneline main..HEAD` to see what commits will be merged.
+    2. Run `git diff main...HEAD --stat` to review the scope of changes.
+    3. Check for merge conflicts: `git merge-tree $(git merge-base main HEAD) main HEAD`
+       or simply `git diff main...HEAD` and look for conflict markers.
+    4. If the changes look clean and conflict-free, approve the merge.
+
+    When finished, your FINAL line of output MUST be a single line of JSON
+    prefixed with `RESULT:` exactly in this form (no other text after it):
+
+    RESULT: {"success": true, "next_label": "status:merged", "failure_reason": ""}
+
+    Set "success" to true and "next_label" to "status:merged" if the PR is
+    ready to merge. The coordinator will perform the actual squash-merge.
+
+    If there are merge conflicts or issues, set "success" to false and
+    "next_label" to "status:developing" with a failure_reason explaining
+    what needs to be fixed.
 {{- end }}
