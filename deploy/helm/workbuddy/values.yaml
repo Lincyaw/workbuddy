@@ -115,18 +115,18 @@ agents:
   mergeTimeout: 15m
 
   # --- Agent prompts (Markdown body after the YAML frontmatter) ----------
-  # Workbuddy template placeholders use {{ .Issue.Number }} etc. — these are
+  # Workbuddy template placeholders use {{ "{{" }}.Issue.Number{{ "}}" }} etc. — these are
   # NOT Helm variables; the chart escapes them so they pass through to the
   # workbuddy template engine at dispatch time.
   devPrompt: |
-    You are the dev agent for issue #{{ .Issue.Number }} in {{ .Repo }}.
+    You are the dev agent for issue #{{ "{{" }}.Issue.Number{{ "}}" }} in {{ "{{" }}.Repo{{ "}}" }}.
 
-    Title: {{ .Issue.Title }}
+    Title: {{ "{{" }}.Issue.Title{{ "}}" }}
 
     Body:
-    {{ .Issue.Body }}
+    {{ "{{" }}.Issue.Body{{ "}}" }}
 
-    {{ .Issue.CommentsText }}
+    {{ "{{" }}.Issue.CommentsText{{ "}}" }}
 
     The repository is checked out at /workspace. Your changes are collected
     into a pull request automatically — do NOT run git commit or git push.
@@ -148,7 +148,7 @@ agents:
     ## Reporting
 
     When done, write a brief comment on the issue summarizing what you did:
-      `gh issue comment {{ .Issue.Number }} -R {{ .Repo }} --body "..."`
+      `gh issue comment {{ "{{" }}.Issue.Number{{ "}}" }} -R {{ "{{" }}.Repo{{ "}}" }} --body "..."`
 
     Then output your FINAL line — a single JSON prefixed with `RESULT:`:
 
@@ -157,11 +157,11 @@ agents:
     Set "success" to true only if you made and verified the required changes.
 
   reviewPrompt: |
-    You are the review agent for issue #{{ .Issue.Number }} in {{ .Repo }}.
+    You are the review agent for issue #{{ "{{" }}.Issue.Number{{ "}}" }} in {{ "{{" }}.Repo{{ "}}" }}.
 
-    Title: {{ .Issue.Title }}
+    Title: {{ "{{" }}.Issue.Title{{ "}}" }}
 
-    {{ .Issue.CommentsText }}
+    {{ "{{" }}.Issue.CommentsText{{ "}}" }}
 
     The dev agent's changes are checked out in your sandbox working directory
     (/workspace). Verify the acceptance criteria are satisfied — read the
@@ -184,7 +184,7 @@ agents:
     ## Reporting
 
     Write a comment on the issue with your review findings:
-      `gh issue comment {{ .Issue.Number }} -R {{ .Repo }} --body "..."`
+      `gh issue comment {{ "{{" }}.Issue.Number{{ "}}" }} -R {{ "{{" }}.Repo{{ "}}" }} --body "..."`
 
     Include: which ACs pass/fail, and WHY any failed (with specifics).
 
@@ -196,9 +196,9 @@ agents:
     "status:developing" with a failure_reason when any fail.
 
   mergePrompt: |
-    You are the merge agent for issue #{{ .Issue.Number }} in {{ .Repo }}.
+    You are the merge agent for issue #{{ "{{" }}.Issue.Number{{ "}}" }} in {{ "{{" }}.Repo{{ "}}" }}.
 
-    Title: {{ .Issue.Title }}
+    Title: {{ "{{" }}.Issue.Title{{ "}}" }}
 
     The dev agent's changes have been approved by the review agent. Your job
     is the final quality gate before the coordinator squash-merges the PR.
@@ -223,7 +223,7 @@ agents:
     ## Reporting
 
     Write a comment on the issue with your merge assessment:
-      `gh issue comment {{ .Issue.Number }} -R {{ .Repo }} --body "..."`
+      `gh issue comment {{ "{{" }}.Issue.Number{{ "}}" }} -R {{ "{{" }}.Repo{{ "}}" }} --body "..."`
 
     Then output your FINAL line — a single JSON prefixed with `RESULT:`:
 

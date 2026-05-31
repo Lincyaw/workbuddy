@@ -17,9 +17,9 @@ to escape them in the YAML frontmatter (where they appear inline), and for
 the prompt body we pipe .Values through a regex replace that converts every
 {{ X }} into the escaped form Helm emits literally.
 */ -}}
-{{- define "workbuddy.escapePrompt" -}}
-{{- . | replace "{{ .Issue.Number }}" "{{ \"{{\" }}.Issue.Number{{ \"}}\" }}" | replace "{{ .Issue.Title }}" "{{ \"{{\" }}.Issue.Title{{ \"}}\" }}" | replace "{{ .Issue.Body }}" "{{ \"{{\" }}.Issue.Body{{ \"}}\" }}" | replace "{{ .Issue.CommentsText }}" "{{ \"{{\" }}.Issue.CommentsText{{ \"}}\" }}" | replace "{{ .Repo }}" "{{ \"{{\" }}.Repo{{ \"}}\" }}" -}}
-{{- end -}}
+{{- /* Prompts in values.yaml use the escaped form directly:
+     {{ "{{" }}.Issue.Number{{ "}}" }} — Helm passes it through verbatim.
+     No helper needed; nindent handles the indentation. */ -}}
 {{- if not .Values.agents.configMapName }}
 apiVersion: v1
 kind: ConfigMap
@@ -70,7 +70,7 @@ data:
       - Issue.Body
     ---
 
-    {{ include "workbuddy.escapePrompt" .Values.agents.devPrompt | nindent 4 }}
+    {{ .Values.agents.devPrompt | nindent 4 }}
   review-agent.md: |
     ---
     name: review-agent
@@ -113,7 +113,7 @@ data:
       - Issue.Body
     ---
 
-    {{ include "workbuddy.escapePrompt" .Values.agents.reviewPrompt | nindent 4 }}
+    {{ .Values.agents.reviewPrompt | nindent 4 }}
   merge-agent.md: |
     ---
     name: merge-agent
@@ -156,5 +156,5 @@ data:
       - Issue.Body
     ---
 
-    {{ include "workbuddy.escapePrompt" .Values.agents.mergePrompt | nindent 4 }}
+    {{ .Values.agents.mergePrompt | nindent 4 }}
 {{- end }}
