@@ -32,6 +32,9 @@ data:
     {{- end }}
     extensions:
       - module: agentm.extensions.builtin.tool_result_cap
+        config:
+          max_chars: 24000
+          preview_chars: 6000
       - module: agentm.extensions.builtin.dedup
       - module: agentm.extensions.builtin.retry_policy
       - module: agentm.extensions.builtin.runtime_context
@@ -62,6 +65,17 @@ data:
     acceptance criteria require. Make the actual file changes in /workspace —
     they are collected into a pull request automatically.
 
+    ## File editing rules
+
+    - ALWAYS read a file before editing it. The read tool shows line numbers.
+    - To edit, use the edit tool with EITHER:
+      - `old_string` + `new_string` for exact text replacement, OR
+      - `start_line` + `end_line` + `new_string` for line-range replacement.
+    - When old_string match fails, re-read the file to get the exact content.
+    - NEVER use `sed -i` to edit files. NEVER use bash redirects (`>`, `>>`)
+      to rewrite existing files. These are destructive and error-prone.
+    - For new files, use bash heredoc: `cat > path << 'EOF' ... EOF`
+
     When finished, your FINAL line of output MUST be a single line of JSON
     prefixed with `RESULT:` exactly in this form (no other text after it):
 
@@ -82,6 +96,9 @@ data:
     {{- end }}
     extensions:
       - module: agentm.extensions.builtin.tool_result_cap
+        config:
+          max_chars: 24000
+          preview_chars: 6000
       - module: agentm.extensions.builtin.dedup
       - module: agentm.extensions.builtin.retry_policy
       - module: agentm.extensions.builtin.runtime_context
@@ -130,6 +147,9 @@ data:
     {{- end }}
     extensions:
       - module: agentm.extensions.builtin.tool_result_cap
+        config:
+          max_chars: 24000
+          preview_chars: 6000
       - module: agentm.extensions.builtin.dedup
       - module: agentm.extensions.builtin.retry_policy
       - module: agentm.extensions.builtin.runtime_context
