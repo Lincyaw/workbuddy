@@ -18,7 +18,7 @@ the prompt body we pipe .Values through a regex replace that converts every
 {{ X }} into the escaped form Helm emits literally.
 */ -}}
 {{- define "workbuddy.escapePrompt" -}}
-{{- . | replace "{{ .Issue.Number }}" "{{ \"{{\" }}.Issue.Number{{ \"}}\" }}" | replace "{{ .Issue.Title }}" "{{ \"{{\" }}.Issue.Title{{ \"}}\" }}" | replace "{{ .Issue.Body }}" "{{ \"{{\" }}.Issue.Body{{ \"}}\" }}" | replace "{{ .Repo }}" "{{ \"{{\" }}.Repo{{ \"}}\" }}" -}}
+{{- . | replace "{{ .Issue.Number }}" "{{ \"{{\" }}.Issue.Number{{ \"}}\" }}" | replace "{{ .Issue.Title }}" "{{ \"{{\" }}.Issue.Title{{ \"}}\" }}" | replace "{{ .Issue.Body }}" "{{ \"{{\" }}.Issue.Body{{ \"}}\" }}" | replace "{{ .Issue.CommentsText }}" "{{ \"{{\" }}.Issue.CommentsText{{ \"}}\" }}" | replace "{{ .Repo }}" "{{ \"{{\" }}.Repo{{ \"}}\" }}" -}}
 {{- end -}}
 {{- if not .Values.agents.configMapName }}
 apiVersion: v1
