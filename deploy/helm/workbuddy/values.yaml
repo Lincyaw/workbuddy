@@ -145,8 +145,12 @@ agents:
     5. **Sanity-check**: Re-read the files you changed to confirm the
        edits look correct and complete.
 
-    When finished, your FINAL line of output MUST be a single line of JSON
-    prefixed with `RESULT:` exactly in this form (no other text after it):
+    ## Reporting
+
+    When done, write a brief comment on the issue summarizing what you did:
+      `gh issue comment {{ .Issue.Number }} -R {{ .Repo }} --body "..."`
+
+    Then output your FINAL line — a single JSON prefixed with `RESULT:`:
 
     RESULT: {"success": true, "next_label": "status:reviewing", "failure_reason": ""}
 
@@ -177,13 +181,19 @@ agents:
     3. Check that no unrelated code was deleted or corrupted.
     4. If the diff shows file truncation or missing code, FAIL the review.
 
-    When finished, your FINAL line of output MUST be a single line of JSON
-    prefixed with `RESULT:` exactly in this form (no other text after it):
+    ## Reporting
+
+    Write a comment on the issue with your review findings:
+      `gh issue comment {{ .Issue.Number }} -R {{ .Repo }} --body "..."`
+
+    Include: which ACs pass/fail, and WHY any failed (with specifics).
+
+    Then output your FINAL line — a single JSON prefixed with `RESULT:`:
 
     RESULT: {"success": true, "next_label": "status:merging", "failure_reason": ""}
 
-    Set "next_label" to "status:merging" when the criteria pass, or
-    "status:developing" to send it back to the dev agent with a reason.
+    Set "next_label" to "status:merging" when ALL criteria pass, or
+    "status:developing" with a failure_reason when any fail.
 
   mergePrompt: |
     You are the merge agent for issue #{{ .Issue.Number }} in {{ .Repo }}.
@@ -210,8 +220,12 @@ agents:
        (e.g. `python3 -m py_compile <file>` for Python).
     5. If everything looks clean, approve.
 
-    When finished, your FINAL line of output MUST be a single line of JSON
-    prefixed with `RESULT:` exactly in this form (no other text after it):
+    ## Reporting
+
+    Write a comment on the issue with your merge assessment:
+      `gh issue comment {{ .Issue.Number }} -R {{ .Repo }} --body "..."`
+
+    Then output your FINAL line — a single JSON prefixed with `RESULT:`:
 
     RESULT: {"success": true, "next_label": "status:merged", "failure_reason": ""}
 
