@@ -666,11 +666,17 @@ const EnvAgentMObservabilityDir = "AGENTM_OBSERVABILITY_DIR"
 // (persistence.mountPath in values.yaml).
 const DefaultDataDir = "/var/lib/workbuddy"
 
+// EnvAgentMGitBaseRef is the env var workbuddy injects to tell AgentM's
+// agent-env sync to do two-stage seeding (base_ref → HEAD). Review and
+// merge agents need a real git diff to inspect the PR changes.
+const EnvAgentMGitBaseRef = "AGENTM_GIT_BASE_REF"
+
 // injectAgentMEnv adds AgentM-specific env vars derived from the agent
 // config and task context. Injected only when runtime=agentm; other
 // runtimes ignore these fields. Currently sets:
 //   - AGENTM_AGENT_ENV_IMAGE from dev_container_image
 //   - AGENTM_OBSERVABILITY_DIR from task repo+issue (PVC-backed path)
+//   - AGENTM_GIT_BASE_REF for review/merge agents (two-stage sandbox seeding)
 func injectAgentMEnv(agentCfg *config.AgentConfig, env map[string]string, task *TaskContext) map[string]string {
 	if agentCfg == nil || agentCfg.Runtime != config.RuntimeAgentM {
 		return env
@@ -690,6 +696,13 @@ func injectAgentMEnv(agentCfg *config.AgentConfig, env map[string]string, task *
 				DefaultDataDir, "traces", slug,
 				fmt.Sprintf("issue-%d", task.Issue.Number),
 			)
+		}
+	}
+	// Review and merge agents need two-stage seeding so they can diff
+	// the PR changes against the base branch inside the sandbox.
+	if agentCfg.Role == "review" || agentCfg.Role == "merge" {
+		if _, exists := env[EnvAgentMGitBaseRef]; !exists {
+			env[EnvAgentMGitBaseRef] = "origin/main"
 		}
 	}
 	return env
