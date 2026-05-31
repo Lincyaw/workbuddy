@@ -70,7 +70,7 @@ data:
       - Issue.Body
     ---
 
-    {{ .Values.agents.devPrompt | nindent 4 }}
+    {{ .Values.agents.devPrompt | default "" | nindent 4 }}
   review-agent.md: |
     ---
     name: review-agent
@@ -113,7 +113,7 @@ data:
       - Issue.Body
     ---
 
-    {{ .Values.agents.reviewPrompt | nindent 4 }}
+    {{ .Values.agents.reviewPrompt | default "" | nindent 4 }}
   merge-agent.md: |
     ---
     name: merge-agent
@@ -156,5 +156,5 @@ data:
       - Issue.Body
     ---
 
-    {{ .Values.agents.mergePrompt | nindent 4 }}
+    {{ .Values.agents.mergePrompt | default "" | nindent 4 }}
 {{- end }}
