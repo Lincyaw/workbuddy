@@ -39,6 +39,7 @@ data:
       - module: agentm.extensions.builtin.retry_policy
       - module: agentm.extensions.builtin.runtime_context
       - module: agentm.extensions.builtin.tool_error_messages
+      - module: agentm.extensions.builtin.tool_bash_guard
     policy:
       sandbox: danger-full-access
       approval: never
@@ -103,6 +104,7 @@ data:
       - module: agentm.extensions.builtin.retry_policy
       - module: agentm.extensions.builtin.runtime_context
       - module: agentm.extensions.builtin.tool_error_messages
+      - module: agentm.extensions.builtin.tool_bash_guard
     policy:
       sandbox: danger-full-access
       approval: never
@@ -154,6 +156,7 @@ data:
       - module: agentm.extensions.builtin.retry_policy
       - module: agentm.extensions.builtin.runtime_context
       - module: agentm.extensions.builtin.tool_error_messages
+      - module: agentm.extensions.builtin.tool_bash_guard
     policy:
       sandbox: danger-full-access
       approval: never
