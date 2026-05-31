@@ -491,6 +491,17 @@ func (r *Reporter) report(
 	if output == "" && result.Stderr != "" {
 		output = result.Stderr
 	}
+	// Surface AgentM failure_reason so the next agent (dev) can see why
+	// review/merge bounced the issue back.
+	if result.Meta != nil {
+		if reason := result.Meta["agentm_failure_reason"]; reason != "" {
+			if output == "" {
+				output = reason
+			} else {
+				output = output + "\n\nFailure reason: " + reason
+			}
+		}
+	}
 
 	data := ReportData{
 		AgentName:    agentName,
