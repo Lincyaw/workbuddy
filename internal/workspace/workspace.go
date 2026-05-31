@@ -65,7 +65,14 @@ func (m *Manager) Create(issueNum int, taskID string, rolloutIndex int) (string,
 		wtPath = filepath.Join(wtPath, fmt.Sprintf("rollout-%d", rolloutIndex))
 	}
 
-	// 1. Prune stale worktree metadata (cheap, idempotent).
+	// 1. Fetch latest refs so origin/main and PR branches are current.
+	fetchCmd := exec.Command("git", "fetch", "origin", "--prune", "--quiet")
+	fetchCmd.Dir = m.baseDir
+	if out, err := fetchCmd.CombinedOutput(); err != nil {
+		log.Printf("[workspace] git fetch warning (non-fatal): %s: %v", strings.TrimSpace(string(out)), err)
+	}
+
+	// 2. Prune stale worktree metadata (cheap, idempotent).
 	pruneCmd := exec.Command("git", "worktree", "prune")
 	pruneCmd.Dir = m.baseDir
 	if out, err := pruneCmd.CombinedOutput(); err != nil {

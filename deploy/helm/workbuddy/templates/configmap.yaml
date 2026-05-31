@@ -128,6 +128,19 @@ data:
     changed files and, where the criteria call for it, run the relevant
     commands with the bash tool.
 
+    ## How to see what the dev agent changed
+
+    Run `git diff main-base..HEAD` to see the full diff of changes.
+    Run `git diff main-base..HEAD --stat` for a file-level summary.
+    The `main-base` tag represents the base branch before the PR.
+
+    ## Review checklist
+
+    1. Read the diff to understand what changed.
+    2. For each acceptance criterion, verify it is satisfied by the changes.
+    3. Check that no unrelated code was deleted or corrupted.
+    4. If the diff shows file truncation or missing code, FAIL the review.
+
     When finished, your FINAL line of output MUST be a single line of JSON
     prefixed with `RESULT:` exactly in this form (no other text after it):
 
@@ -175,15 +188,25 @@ data:
 
     Title: {{ "{{" }}.Issue.Title{{ "}}" }}
 
-    The dev agent's changes are on the `workbuddy/issue-{{ "{{" }}.Issue.Number{{ "}}" }}`
-    branch and have been approved by the review agent. Your job is to verify
-    the PR is ready to merge:
+    The dev agent's changes have been approved by the review agent. Your job
+    is the final quality gate before the coordinator squash-merges the PR.
 
-    1. Run `git log --oneline main..HEAD` to see what commits will be merged.
-    2. Run `git diff main...HEAD --stat` to review the scope of changes.
-    3. Check for merge conflicts: `git merge-tree $(git merge-base main HEAD) main HEAD`
-       or simply `git diff main...HEAD` and look for conflict markers.
-    4. If the changes look clean and conflict-free, approve the merge.
+    ## How to inspect the changes
+
+    Run `git diff main-base..HEAD --stat` for a file-level summary.
+    Run `git diff main-base..HEAD` to see the full diff.
+    The `main-base` tag represents the base branch before the PR.
+
+    ## Merge readiness checklist
+
+    1. Review the diff: are the changes focused and relevant to the issue?
+    2. Check for accidental deletions — if large blocks of code were removed
+       that are unrelated to the issue, REJECT.
+    3. Check for file truncation — if any file ends abruptly mid-line or
+       mid-expression, REJECT.
+    4. Check for syntax: run the appropriate linter/compiler for changed files
+       (e.g. `python3 -m py_compile <file>` for Python).
+    5. If everything looks clean, approve.
 
     When finished, your FINAL line of output MUST be a single line of JSON
     prefixed with `RESULT:` exactly in this form (no other text after it):
@@ -193,7 +216,6 @@ data:
     Set "success" to true and "next_label" to "status:merged" if the PR is
     ready to merge. The coordinator will perform the actual squash-merge.
 
-    If there are merge conflicts or issues, set "success" to false and
-    "next_label" to "status:developing" with a failure_reason explaining
-    what needs to be fixed.
+    If there are issues, set "success" to false and "next_label" to
+    "status:developing" with a failure_reason explaining what needs fixing.
 {{- end }}
