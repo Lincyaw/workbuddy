@@ -128,33 +128,33 @@ agents:
 
     {{.Issue.CommentsText}}
 
-    The repository is checked out at /workspace. Your changes are collected
-    into a pull request automatically — do NOT run git commit or git push.
+    The repository is checked out at /workspace on branch `workbuddy/issue-{{.Issue.Number}}`.
 
     ## Workflow
 
-    1. **Understand**: Read the acceptance criteria carefully. Explore the
-       codebase to find the relevant files (`find`, `grep`, read tool).
-    2. **Plan**: Identify what to change and where. Keep changes minimal
-       and focused on the AC.
-    3. **Implement**: Make the code changes. Read before editing.
-    4. **Verify**: Run the project's existing tests or linters to confirm
-       nothing is broken. If the AC specifies how to verify, follow it.
-       At minimum, syntax-check your changes (e.g. `python3 -m py_compile`,
-       `go vet`, `npm run lint`).
-    5. **Sanity-check**: Re-read the files you changed to confirm the
-       edits look correct and complete.
+    1. **Understand**: Read the acceptance criteria. Explore the codebase.
+    2. **Implement**: Make the code changes. Read files before editing.
+    3. **Verify**: Run tests/linters to confirm nothing is broken.
+       At minimum: `python3 -m py_compile`, `go vet`, or `npm run lint`.
+    4. **Commit & Push**:
+       ```
+       git add -A && git commit -m "resolve issue #{{.Issue.Number}}"
+       git push origin workbuddy/issue-{{.Issue.Number}}
+       ```
+    5. **Create PR**:
+       ```
+       gh pr create -R {{.Repo}} --title "workbuddy: resolve issue #{{.Issue.Number}}" \
+         --body "Resolves #{{.Issue.Number}}" --head workbuddy/issue-{{.Issue.Number}}
+       ```
+       (If PR already exists, just push — it updates automatically.)
+    6. **Comment on issue** with what you did:
+       `gh issue comment {{.Issue.Number}} -R {{.Repo}} --body "..."`
+    7. **Advance the state machine**:
+       ```
+       gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:reviewing --remove-label status:developing
+       ```
 
-    ## Reporting
-
-    When done, write a brief comment on the issue summarizing what you did:
-      `gh issue comment {{.Issue.Number}} -R {{.Repo}} --body "..."`
-
-    Then output your FINAL line — a single JSON prefixed with `RESULT:`:
-
-    RESULT: {"success": true, "next_label": "status:reviewing", "failure_reason": ""}
-
-    Set "success" to true only if you made and verified the required changes.
+    Then output: RESULT: {"success": true, "next_label": "status:reviewing", "failure_reason": ""}
 
   reviewPrompt: |
     You are the review agent for issue #{{.Issue.Number}} in {{.Repo}}.
@@ -163,77 +163,62 @@ agents:
 
     {{.Issue.CommentsText}}
 
-    The dev agent's changes are checked out in your sandbox working directory
-    (/workspace). Verify the acceptance criteria are satisfied — read the
-    changed files and, where the criteria call for it, run the relevant
-    commands with the bash tool.
+    The repo is checked out at /workspace on the `workbuddy/issue-{{.Issue.Number}}` branch.
 
-    ## How to see what the dev agent changed
+    ## Workflow
 
-    Run `git diff main-base..HEAD` to see the full diff of changes.
-    Run `git diff main-base..HEAD --stat` for a file-level summary.
-    The `main-base` tag represents the base branch before the PR.
+    1. Run `git log --oneline origin/main..HEAD` to see what the dev agent committed.
+    2. Run `git diff origin/main..HEAD` to see the full diff.
+    3. For each acceptance criterion, verify it is satisfied.
+    4. Run relevant tests/linters if AC requires it.
+    5. Check for unrelated deletions, truncation, or corruption.
 
-    ## Review checklist
-
-    1. Read the diff to understand what changed.
-    2. For each acceptance criterion, verify it is satisfied by the changes.
-    3. Check that no unrelated code was deleted or corrupted.
-    4. If the diff shows file truncation or missing code, FAIL the review.
-
-    ## Reporting
+    ## Verdict
 
     Write a comment on the issue with your review findings:
       `gh issue comment {{.Issue.Number}} -R {{.Repo}} --body "..."`
 
-    Include: which ACs pass/fail, and WHY any failed (with specifics).
+    If ALL criteria pass:
+      ```
+      gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:merging --remove-label status:reviewing
+      ```
+    If any fail:
+      ```
+      gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:developing --remove-label status:reviewing
+      ```
 
-    Then output your FINAL line — a single JSON prefixed with `RESULT:`:
-
-    RESULT: {"success": true, "next_label": "status:merging", "failure_reason": ""}
-
-    Set "next_label" to "status:merging" when ALL criteria pass, or
-    "status:developing" with a failure_reason when any fail.
+    Then output: RESULT: {"success": true, "next_label": "status:merging", "failure_reason": ""}
 
   mergePrompt: |
     You are the merge agent for issue #{{.Issue.Number}} in {{.Repo}}.
 
     Title: {{.Issue.Title}}
 
-    The dev agent's changes have been approved by the review agent. Your job
-    is the final quality gate before the coordinator squash-merges the PR.
+    The repo is checked out at /workspace on the `workbuddy/issue-{{.Issue.Number}}` branch.
 
-    ## How to inspect the changes
+    ## Workflow
 
-    Run `git diff main-base..HEAD --stat` for a file-level summary.
-    Run `git diff main-base..HEAD` to see the full diff.
-    The `main-base` tag represents the base branch before the PR.
+    1. `git diff origin/main..HEAD --stat` — scope of changes.
+    2. `git diff origin/main..HEAD` — review the diff.
+    3. Check for accidental deletions or file truncation.
+    4. Run syntax check on changed files (e.g. `python3 -m py_compile`).
+    5. If clean: squash-merge the PR.
 
-    ## Merge readiness checklist
+    ## Merge
 
-    1. Review the diff: are the changes focused and relevant to the issue?
-    2. Check for accidental deletions — if large blocks of code were removed
-       that are unrelated to the issue, REJECT.
-    3. Check for file truncation — if any file ends abruptly mid-line or
-       mid-expression, REJECT.
-    4. Check for syntax: run the appropriate linter/compiler for changed files
-       (e.g. `python3 -m py_compile <file>` for Python).
-    5. If everything looks clean, approve.
+    If ready:
+      ```
+      gh pr merge --squash --delete-branch -R {{.Repo}}
+      gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:merged --remove-label status:merging
+      gh issue close {{.Issue.Number}} -R {{.Repo}}
+      ```
+    If not:
+      ```
+      gh issue comment {{.Issue.Number}} -R {{.Repo}} --body "Merge rejected: <reason>"
+      gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:developing --remove-label status:merging
+      ```
 
-    ## Reporting
-
-    Write a comment on the issue with your merge assessment:
-      `gh issue comment {{.Issue.Number}} -R {{.Repo}} --body "..."`
-
-    Then output your FINAL line — a single JSON prefixed with `RESULT:`:
-
-    RESULT: {"success": true, "next_label": "status:merged", "failure_reason": ""}
-
-    Set "success" to true and "next_label" to "status:merged" if the PR is
-    ready to merge. The coordinator will perform the actual squash-merge.
-
-    If there are issues, set "success" to false and "next_label" to
-    "status:developing" with a failure_reason explaining what needs fixing.
+    Then output: RESULT: {"success": true, "next_label": "status:merged", "failure_reason": ""}
 
 # Ingress for the coordinator Service. Disabled by default; enable in K8s
 # topologies that need external webui + webhook access (decision doc Block 3

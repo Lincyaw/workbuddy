@@ -368,66 +368,15 @@ func (s *AgentBridgeSession) Run(ctx context.Context, events chan<- launchereven
 			meta[MetaInfraFailure] = "true"
 			meta[MetaInfraFailureReason] = perr.Error()
 		case out != nil:
+			// In autonomous mode, the agent handles git push, PR creation,
+			// issue comments, and label changes itself via gh CLI. The
+			// coordinator only records metadata for audit/observability.
 			meta["agentm_next_label"] = out.NextLabel
 			if out.ArtifactPath != "" {
 				meta["agentm_artifact_path"] = out.ArtifactPath
 			}
 			if !out.Success {
 				meta["agentm_failure_reason"] = out.FailureReason
-			}
-			// Coordinator-managed publish path (REQ-142 / #330).
-			// Only invoked when the run succeeded; failed runs already
-			// surface failure_reason for the reporter to comment on.
-			publishOK := false
-			if out.Success && s.GitOps != nil && s.Task != nil {
-				prURL, pubMeta, pubErr := s.publishAgentMArtifact(ctx, out)
-				for k, v := range pubMeta {
-					meta[k] = v
-				}
-				if pubErr != nil {
-					// Publish failure is infra failure: AgentM did its
-					// job, but the coordinator couldn't ship the diff.
-					meta[MetaInfraFailure] = "true"
-					meta[MetaInfraFailureReason] = "agentm publish: " + pubErr.Error()
-				} else {
-					publishOK = true
-					if prURL != "" {
-						meta["pr_url"] = prURL
-					}
-				}
-			}
-			// Coordinator-managed label writer (REQ-146 / #332).
-			// The agent's next_label is the routing decision for the
-			// state machine and MUST be applied regardless of
-			// success/failure — a review-agent returning success=false
-			// with next_label=status:developing is a legitimate bounce.
-			// The only gate is: if the run succeeded AND produced
-			// artifacts, those must have been published first (we must
-			// not advance past a failed publish). Failed runs skip
-			// publish entirely, so publishOK is irrelevant for them.
-			labelGated := (out.Success && publishOK) || !out.Success
-			if labelGated && s.LabelWriter != nil && s.Task != nil && strings.TrimSpace(out.NextLabel) != "" {
-				if applied, applyErr := s.applyAgentMNextLabel(ctx, out.NextLabel); applyErr != nil {
-					meta["agentm_label_apply_error"] = applyErr.Error()
-				} else if applied != "" {
-					meta["agentm_label_applied"] = applied
-					// Post-label merge: when the merge-agent approves
-					// (status:merged), squash-merge the PR.
-					if applied == MergedLabel && s.PRMerger != nil {
-						branch := fmt.Sprintf("workbuddy/issue-%d", s.Task.Issue.Number)
-						if mergeErr := s.PRMerger.MergePR(ctx, s.Task.Repo, branch); mergeErr != nil {
-							meta["agentm_merge_error"] = mergeErr.Error()
-							// Merge failed (conflict, permissions, etc.) — roll
-							// back to developing so the dev-agent can rebase.
-							if s.LabelWriter != nil {
-								_ = s.LabelWriter.ApplyNextLabel(ctx, s.Task.Repo, s.Task.Issue.Number, "status:developing")
-								meta["agentm_label_applied"] = "status:developing"
-							}
-						} else {
-							meta["agentm_pr_merged"] = "true"
-						}
-					}
-				}
 			}
 		}
 	}
@@ -666,22 +615,20 @@ const EnvAgentMObservabilityDir = "AGENTM_OBSERVABILITY_DIR"
 // (persistence.mountPath in values.yaml).
 const DefaultDataDir = "/var/lib/workbuddy"
 
-// EnvAgentMGitBaseRef is the env var workbuddy injects to tell AgentM's
-// agent-env sync to do two-stage seeding (base_ref → HEAD). Review and
-// merge agents need a real git diff to inspect the PR changes.
-const EnvAgentMGitBaseRef = "AGENTM_GIT_BASE_REF"
-
 // EnvAgentMSkillsDir is the env var workbuddy injects to tell AgentM's
-// agent-env sync to upload skill files from this PVC-backed directory
-// into the sandbox at .agentm/skills/ so skill_loader can discover them.
+// agent-env to upload skill files from this PVC-backed directory into the
+// sandbox at .agentm/skills/ so skill_loader can discover them.
 const EnvAgentMSkillsDir = "AGENTM_SKILLS_DIR"
 
+// EnvWorkbuddyRepo is the GitHub repo (OWNER/NAME) for the sandbox to clone.
+const EnvWorkbuddyRepo = "WORKBUDDY_REPO"
+
+// EnvWorkbuddyIssueNum is the issue number the agent is working on.
+const EnvWorkbuddyIssueNum = "WORKBUDDY_ISSUE_NUM"
+
 // injectAgentMEnv adds AgentM-specific env vars derived from the agent
-// config and task context. Injected only when runtime=agentm; other
-// runtimes ignore these fields. Currently sets:
-//   - AGENTM_AGENT_ENV_IMAGE from dev_container_image
-//   - AGENTM_OBSERVABILITY_DIR from task repo+issue (PVC-backed path)
-//   - AGENTM_GIT_BASE_REF for review/merge agents (two-stage sandbox seeding)
+// config and task context. The sandbox uses these to clone the repo and
+// checkout the correct branch autonomously.
 func injectAgentMEnv(agentCfg *config.AgentConfig, env map[string]string, task *TaskContext) map[string]string {
 	if agentCfg == nil || agentCfg.Runtime != config.RuntimeAgentM {
 		return env
@@ -702,12 +649,12 @@ func injectAgentMEnv(agentCfg *config.AgentConfig, env map[string]string, task *
 				fmt.Sprintf("issue-%d", task.Issue.Number),
 			)
 		}
-	}
-	// Review and merge agents need two-stage seeding so they can diff
-	// the PR changes against the base branch inside the sandbox.
-	if agentCfg.Role == "review" || agentCfg.Role == "merge" {
-		if _, exists := env[EnvAgentMGitBaseRef]; !exists {
-			env[EnvAgentMGitBaseRef] = "origin/main"
+		// Repo and issue for sandbox git clone + branch checkout.
+		if _, exists := env[EnvWorkbuddyRepo]; !exists {
+			env[EnvWorkbuddyRepo] = task.Repo
+		}
+		if _, exists := env[EnvWorkbuddyIssueNum]; !exists {
+			env[EnvWorkbuddyIssueNum] = fmt.Sprintf("%d", task.Issue.Number)
 		}
 	}
 	// Skills directory on PVC — uploaded to sandbox by operations_agent_env.
