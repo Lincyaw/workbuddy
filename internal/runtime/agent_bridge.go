@@ -671,6 +671,11 @@ const DefaultDataDir = "/var/lib/workbuddy"
 // merge agents need a real git diff to inspect the PR changes.
 const EnvAgentMGitBaseRef = "AGENTM_GIT_BASE_REF"
 
+// EnvAgentMSkillsDir is the env var workbuddy injects to tell AgentM's
+// agent-env sync to upload skill files from this PVC-backed directory
+// into the sandbox at .agentm/skills/ so skill_loader can discover them.
+const EnvAgentMSkillsDir = "AGENTM_SKILLS_DIR"
+
 // injectAgentMEnv adds AgentM-specific env vars derived from the agent
 // config and task context. Injected only when runtime=agentm; other
 // runtimes ignore these fields. Currently sets:
@@ -704,6 +709,11 @@ func injectAgentMEnv(agentCfg *config.AgentConfig, env map[string]string, task *
 		if _, exists := env[EnvAgentMGitBaseRef]; !exists {
 			env[EnvAgentMGitBaseRef] = "origin/main"
 		}
+	}
+	// Skills directory on PVC — uploaded to sandbox by operations_agent_env.
+	if _, exists := env[EnvAgentMSkillsDir]; !exists {
+		skillsDir := filepath.Join(DefaultDataDir, "skills")
+		env[EnvAgentMSkillsDir] = skillsDir
 	}
 	return env
 }

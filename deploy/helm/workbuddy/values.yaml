@@ -126,28 +126,29 @@ agents:
     Body:
     {{ .Issue.Body }}
 
-    The repository is checked out in your sandbox working directory
-    (/workspace). Use the file and bash tools to make the code changes the
-    acceptance criteria require. Make the actual file changes in /workspace —
-    they are collected into a pull request automatically.
+    The repository is checked out at /workspace. Your changes are collected
+    into a pull request automatically — do NOT run git commit or git push.
 
-    ## File editing rules
+    ## Workflow
 
-    - ALWAYS read a file before editing it. The read tool shows line numbers.
-    - To edit, use the edit tool with EITHER:
-      - `old_string` + `new_string` for exact text replacement, OR
-      - `start_line` + `end_line` + `new_string` for line-range replacement.
-    - When old_string match fails, re-read the file to get the exact content.
-    - NEVER use `sed -i` to edit files. NEVER use bash redirects (`>`, `>>`)
-      to rewrite existing files. These are destructive and error-prone.
-    - For new files, use bash heredoc: `cat > path << 'EOF' ... EOF`
+    1. **Understand**: Read the acceptance criteria carefully. Explore the
+       codebase to find the relevant files (`find`, `grep`, read tool).
+    2. **Plan**: Identify what to change and where. Keep changes minimal
+       and focused on the AC.
+    3. **Implement**: Make the code changes. Read before editing.
+    4. **Verify**: Run the project's existing tests or linters to confirm
+       nothing is broken. If the AC specifies how to verify, follow it.
+       At minimum, syntax-check your changes (e.g. `python3 -m py_compile`,
+       `go vet`, `npm run lint`).
+    5. **Sanity-check**: Re-read the files you changed to confirm the
+       edits look correct and complete.
 
     When finished, your FINAL line of output MUST be a single line of JSON
     prefixed with `RESULT:` exactly in this form (no other text after it):
 
     RESULT: {"success": true, "next_label": "status:reviewing", "failure_reason": ""}
 
-    Set "success" to true only if you made the required changes.
+    Set "success" to true only if you made and verified the required changes.
 
   reviewPrompt: |
     You are the review agent for issue #{{ .Issue.Number }} in {{ .Repo }}.

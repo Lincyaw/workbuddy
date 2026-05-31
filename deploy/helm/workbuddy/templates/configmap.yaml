@@ -50,6 +50,12 @@ data:
       - module: agentm.extensions.builtin.runtime_context
       - module: agentm.extensions.builtin.tool_error_messages
       - module: agentm.extensions.builtin.tool_bash_guard
+      - module: agentm.extensions.builtin.skill_loader
+        config:
+          skill_paths:
+            - /workspace/.agentm/skills
+          include_defaults: false
+          inherit_claude: false
     policy:
       sandbox: danger-full-access
       approval: never
@@ -87,6 +93,12 @@ data:
       - module: agentm.extensions.builtin.runtime_context
       - module: agentm.extensions.builtin.tool_error_messages
       - module: agentm.extensions.builtin.tool_bash_guard
+      - module: agentm.extensions.builtin.skill_loader
+        config:
+          skill_paths:
+            - /workspace/.agentm/skills
+          include_defaults: false
+          inherit_claude: false
     policy:
       sandbox: danger-full-access
       approval: never
@@ -124,6 +136,12 @@ data:
       - module: agentm.extensions.builtin.runtime_context
       - module: agentm.extensions.builtin.tool_error_messages
       - module: agentm.extensions.builtin.tool_bash_guard
+      - module: agentm.extensions.builtin.skill_loader
+        config:
+          skill_paths:
+            - /workspace/.agentm/skills
+          include_defaults: false
+          inherit_claude: false
     policy:
       sandbox: danger-full-access
       approval: never
