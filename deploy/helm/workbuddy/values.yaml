@@ -126,6 +126,8 @@ agents:
     Body:
     {{ .Issue.Body }}
 
+    {{ .Issue.CommentsText }}
+
     The repository is checked out at /workspace. Your changes are collected
     into a pull request automatically — do NOT run git commit or git push.
 
@@ -154,6 +156,8 @@ agents:
     You are the review agent for issue #{{ .Issue.Number }} in {{ .Repo }}.
 
     Title: {{ .Issue.Title }}
+
+    {{ .Issue.CommentsText }}
 
     The dev agent's changes are checked out in your sandbox working directory
     (/workspace). Verify the acceptance criteria are satisfied — read the
