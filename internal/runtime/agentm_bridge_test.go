@@ -267,7 +267,7 @@ func TestAgentMBridge_DevContainerImageNotInjectedForOtherRuntimes(t *testing.T)
 		Name:              "dev-agent",
 		Runtime:           config.RuntimeClaudeCode,
 		DevContainerImage: "ghcr.io/x:y",
-	}, map[string]string{})
+	}, map[string]string{}, nil)
 	if _, ok := env[EnvDevContainerImage]; ok {
 		t.Fatalf("dev_container_image must not leak into non-agentm runtime env, got %v", env)
 	}
@@ -276,7 +276,7 @@ func TestAgentMBridge_DevContainerImageNotInjectedForOtherRuntimes(t *testing.T)
 		Name:    "dev-agent",
 		Runtime: config.RuntimeAgentM,
 		// no DevContainerImage: AgentM falls back to its own default
-	}, map[string]string{})
+	}, map[string]string{}, nil)
 	if _, ok := env2[EnvDevContainerImage]; ok {
 		t.Fatalf("empty dev_container_image must not be injected, got %v", env2)
 	}
@@ -363,5 +363,119 @@ func TestAgentMBridge_SessionLogDurableAndNoLeak(t *testing.T) {
 	}
 	if _, err := os.Stat(tmpDir); !os.IsNotExist(err) {
 		t.Fatalf("backend temp dir %q still exists after Close (err=%v): agentm leaks /tmp", tmpDir, err)
+	}
+}
+
+// TestIssueTraceparent_Deterministic asserts that the trace_id portion of
+// the W3C traceparent is deterministic for the same repo+issue, while the
+// span_id differs between calls.
+func TestIssueTraceparent_Deterministic(t *testing.T) {
+	tp1 := issueTraceparent("LGU-SE-Internal/opentelemetry-demo", 42)
+	tp2 := issueTraceparent("LGU-SE-Internal/opentelemetry-demo", 42)
+
+	parts1 := strings.Split(tp1, "-")
+	parts2 := strings.Split(tp2, "-")
+	if len(parts1) != 4 || len(parts2) != 4 {
+		t.Fatalf("traceparent format invalid: %q / %q", tp1, tp2)
+	}
+
+	// Same trace_id (deterministic from repo+issue)
+	if parts1[1] != parts2[1] {
+		t.Fatalf("same repo+issue must yield same trace_id: %q vs %q", parts1[1], parts2[1])
+	}
+	// Different span_id (random per dispatch)
+	if parts1[2] == parts2[2] {
+		t.Fatalf("span_id should differ between calls: both %q", parts1[2])
+	}
+	// W3C format: version=00, flags=01
+	if parts1[0] != "00" || parts1[3] != "01" {
+		t.Fatalf("expected version=00, flags=01, got %q-%q", parts1[0], parts1[3])
+	}
+	// Hex length: trace_id=32, span_id=16
+	if len(parts1[1]) != 32 {
+		t.Fatalf("trace_id should be 32 hex chars, got %d", len(parts1[1]))
+	}
+	if len(parts1[2]) != 16 {
+		t.Fatalf("span_id should be 16 hex chars, got %d", len(parts1[2]))
+	}
+}
+
+// TestIssueTraceparent_DifferentIssue asserts different issues produce
+// different trace IDs.
+func TestIssueTraceparent_DifferentIssue(t *testing.T) {
+	tp1 := issueTraceparent("Lincyaw/workbuddy", 1)
+	tp2 := issueTraceparent("Lincyaw/workbuddy", 2)
+
+	traceID1 := strings.Split(tp1, "-")[1]
+	traceID2 := strings.Split(tp2, "-")[1]
+	if traceID1 == traceID2 {
+		t.Fatalf("different issues must yield different trace IDs: both %q", traceID1)
+	}
+}
+
+// TestRepoToSlug covers the slug conversion used for filesystem paths.
+func TestRepoToSlug(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"Lincyaw/workbuddy", "Lincyaw-workbuddy"},
+		{"LGU-SE-Internal/opentelemetry-demo", "LGU-SE-Internal-opentelemetry-demo"},
+		{"simple", "simple"},
+	}
+	for _, tc := range cases {
+		got := repoToSlug(tc.in)
+		if got != tc.want {
+			t.Errorf("repoToSlug(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestInjectAgentMEnv_ObservabilityDir asserts that AGENTM_OBSERVABILITY_DIR
+// is set for AgentM runtime with a valid task, and not set otherwise.
+func TestInjectAgentMEnv_ObservabilityDir(t *testing.T) {
+	task := &TaskContext{
+		Repo:  "LGU-SE-Internal/opentelemetry-demo",
+		Issue: IssueContext{Number: 42},
+	}
+
+	// AgentM + valid task → observability dir set
+	env := injectAgentMEnv(&config.AgentConfig{
+		Runtime: config.RuntimeAgentM,
+	}, map[string]string{}, task)
+	want := "/var/lib/workbuddy/traces/LGU-SE-Internal-opentelemetry-demo/issue-42"
+	if got := env[EnvAgentMObservabilityDir]; got != want {
+		t.Fatalf("observability dir = %q, want %q", got, want)
+	}
+
+	// Non-AgentM runtime → not set
+	env2 := injectAgentMEnv(&config.AgentConfig{
+		Runtime: config.RuntimeClaudeCode,
+	}, map[string]string{}, task)
+	if _, ok := env2[EnvAgentMObservabilityDir]; ok {
+		t.Fatalf("observability dir must not be set for non-agentm runtime")
+	}
+
+	// AgentM + nil task → not set
+	env3 := injectAgentMEnv(&config.AgentConfig{
+		Runtime: config.RuntimeAgentM,
+	}, map[string]string{}, nil)
+	if _, ok := env3[EnvAgentMObservabilityDir]; ok {
+		t.Fatalf("observability dir must not be set when task is nil")
+	}
+
+	// AgentM + task with no issue → not set
+	env4 := injectAgentMEnv(&config.AgentConfig{
+		Runtime: config.RuntimeAgentM,
+	}, map[string]string{}, &TaskContext{Repo: "foo/bar"})
+	if _, ok := env4[EnvAgentMObservabilityDir]; ok {
+		t.Fatalf("observability dir must not be set when issue number is 0")
+	}
+
+	// Already-set value is preserved (idempotent)
+	env5 := injectAgentMEnv(&config.AgentConfig{
+		Runtime: config.RuntimeAgentM,
+	}, map[string]string{EnvAgentMObservabilityDir: "/custom"}, task)
+	if got := env5[EnvAgentMObservabilityDir]; got != "/custom" {
+		t.Fatalf("existing value should be preserved, got %q", got)
 	}
 }

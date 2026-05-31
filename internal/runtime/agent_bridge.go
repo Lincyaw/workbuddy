@@ -2,6 +2,10 @@ package runtime
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -165,6 +169,12 @@ func (r *AgentBridgeRuntime) backendInstance() (agent.Backend, error) {
 
 func (r *AgentBridgeRuntime) Start(ctx context.Context, agentCfg *config.AgentConfig, task *TaskContext) (Session, error) {
 	prompt := resolvePrompt(agentCfg, task)
+	// For AgentM dispatches, derive a deterministic TRACEPARENT from the
+	// repo+issue so all sessions for the same issue share a trace ID.
+	traceCtx := ctx
+	if agentCfg.Runtime == config.RuntimeAgentM && task != nil && task.Repo != "" && task.Issue.Number > 0 {
+		traceCtx = issueTraceContext(task.Repo, task.Issue.Number)
+	}
 	spec := agent.Spec{
 		Backend:  agentCfg.Runtime,
 		Workdir:  task.WorkDir,
@@ -173,7 +183,7 @@ func (r *AgentBridgeRuntime) Start(ctx context.Context, agentCfg *config.AgentCo
 		Model:    agentCfg.Policy.Model,
 		Sandbox:  agentCfg.Policy.Sandbox,
 		Approval: agentCfg.Policy.Approval,
-		Env:      injectAgentMEnv(agentCfg, injectTraceContext(ctx, envSliceToMap(BuildScopedEnv(agentCfg, task)), task)),
+		Env:      injectAgentMEnv(agentCfg, injectTraceContext(traceCtx, envSliceToMap(BuildScopedEnv(agentCfg, task)), task), task),
 		Tags: map[string]string{
 			"agent": agentCfg.Name,
 			"repo":  task.Repo,
@@ -647,25 +657,85 @@ func injectTraceContext(ctx context.Context, env map[string]string, task *TaskCo
 // docs/decisions/2026-05-13-k8s-agentm-otel.md (Block 2).
 const EnvDevContainerImage = "AGENTM_AGENT_ENV_IMAGE"
 
+// EnvAgentMObservabilityDir is the env var workbuddy injects into the
+// AgentM subprocess so it writes observability JSONL files to a
+// PVC-backed directory instead of the ephemeral worktree.
+const EnvAgentMObservabilityDir = "AGENTM_OBSERVABILITY_DIR"
+
+// DefaultDataDir is the PVC mount path used by the Helm chart
+// (persistence.mountPath in values.yaml).
+const DefaultDataDir = "/var/lib/workbuddy"
+
 // injectAgentMEnv adds AgentM-specific env vars derived from the agent
-// config. Today that's just dev_container_image → AGENTM_AGENT_ENV_IMAGE,
-// injected only when runtime=agentm; other runtimes ignore the field
-// (and config validation already warned about it).
-func injectAgentMEnv(agentCfg *config.AgentConfig, env map[string]string) map[string]string {
+// config and task context. Injected only when runtime=agentm; other
+// runtimes ignore these fields. Currently sets:
+//   - AGENTM_AGENT_ENV_IMAGE from dev_container_image
+//   - AGENTM_OBSERVABILITY_DIR from task repo+issue (PVC-backed path)
+func injectAgentMEnv(agentCfg *config.AgentConfig, env map[string]string, task *TaskContext) map[string]string {
 	if agentCfg == nil || agentCfg.Runtime != config.RuntimeAgentM {
-		return env
-	}
-	image := strings.TrimSpace(agentCfg.DevContainerImage)
-	if image == "" {
 		return env
 	}
 	if env == nil {
 		env = map[string]string{}
 	}
-	if _, exists := env[EnvDevContainerImage]; !exists {
-		env[EnvDevContainerImage] = image
+	if image := strings.TrimSpace(agentCfg.DevContainerImage); image != "" {
+		if _, exists := env[EnvDevContainerImage]; !exists {
+			env[EnvDevContainerImage] = image
+		}
+	}
+	if task != nil && task.Repo != "" && task.Issue.Number > 0 {
+		if _, exists := env[EnvAgentMObservabilityDir]; !exists {
+			slug := repoToSlug(task.Repo)
+			env[EnvAgentMObservabilityDir] = filepath.Join(
+				DefaultDataDir, "traces", slug,
+				fmt.Sprintf("issue-%d", task.Issue.Number),
+			)
+		}
 	}
 	return env
+}
+
+// repoToSlug converts a repo name like "LGU-SE-Internal/opentelemetry-demo"
+// to "LGU-SE-Internal-opentelemetry-demo" for use in filesystem paths.
+func repoToSlug(repo string) string {
+	return strings.ReplaceAll(repo, "/", "-")
+}
+
+// issueTraceContext returns a context carrying a deterministic OTel trace ID
+// derived from repo+issueNum so that all AgentM dispatches for the same
+// issue share a single trace. The span ID is random per dispatch so each
+// run is distinguishable within the trace.
+func issueTraceContext(repo string, issueNum int) context.Context {
+	h := sha256.New()
+	h.Write([]byte(repo))
+	_ = binary.Write(h, binary.BigEndian, int64(issueNum))
+	sum := h.Sum(nil)
+
+	traceID := hex.EncodeToString(sum[:16])
+	spanID := make([]byte, 8)
+	_, _ = rand.Read(spanID)
+	tp := fmt.Sprintf("00-%s-%s-01", traceID, hex.EncodeToString(spanID))
+
+	// Build a context that the OTel propagator will extract TRACEPARENT from.
+	// We inject via MapCarrier so injectTraceContext picks it up the same way
+	// a real parent span would propagate.
+	carrier := propagation.MapCarrier{"traceparent": tp}
+	return otel.GetTextMapPropagator().Extract(context.Background(), carrier)
+}
+
+// issueTraceparent returns a W3C traceparent header value with a
+// deterministic trace ID derived from repo+issue and a random span ID.
+// Exported for testing.
+func issueTraceparent(repo string, issueNum int) string {
+	h := sha256.New()
+	h.Write([]byte(repo))
+	_ = binary.Write(h, binary.BigEndian, int64(issueNum))
+	sum := h.Sum(nil)
+
+	traceID := hex.EncodeToString(sum[:16])
+	spanID := make([]byte, 8)
+	_, _ = rand.Read(spanID)
+	return fmt.Sprintf("00-%s-%s-01", traceID, hex.EncodeToString(spanID))
 }
 
 func envSliceToMap(entries []string) map[string]string {
