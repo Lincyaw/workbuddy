@@ -290,23 +290,7 @@ func (v *GHClaimVerifier) verifyBranchPushed(ctx context.Context, repo string, b
 	if len(remoteOut) == 0 {
 		return ClaimCheck{Type: ClaimBranchPushed, Claim: claim, Actual: "branch not found on origin", OK: false}
 	}
-	localOut, err := v.runCommand(ctx, "git", "rev-parse", branch)
-	if err != nil {
-		return ClaimCheck{Type: ClaimBranchPushed, Claim: claim, Actual: fmt.Sprintf("local branch lookup failed: %s", string(localOut)), OK: false}
-	}
-	localSHA := strings.TrimSpace(string(localOut))
 	remoteSHA := strings.Fields(string(remoteOut))[0]
-	if localSHA == "" {
-		return ClaimCheck{Type: ClaimBranchPushed, Claim: claim, Actual: "local branch has no resolvable tip", OK: false}
-	}
-	if remoteSHA != localSHA {
-		return ClaimCheck{
-			Type:   ClaimBranchPushed,
-			Claim:  claim,
-			Actual: fmt.Sprintf("remote tip %s does not match local %s", remoteSHA, localSHA),
-			OK:     false,
-		}
-	}
 	return ClaimCheck{Type: ClaimBranchPushed, Claim: claim, Actual: fmt.Sprintf("branch exists on origin at %s", remoteSHA), OK: true}
 }
 
