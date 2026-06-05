@@ -4,7 +4,8 @@ package control
 type Objective struct {
 	BranchPushed   bool
 	PROpen         bool
-	LabelTarget    string // e.g. "status:reviewing"
+	LabelTarget    string // e.g. "status:reviewing" — exact match
+	LabelNotEqual  string // e.g. "status:reviewing" — label must NOT be this value
 	IssueCommented bool
 }
 
@@ -26,7 +27,7 @@ func DevObjective() *Objective {
 // that the label is no longer "status:reviewing".
 func ReviewObjective() *Objective {
 	return &Objective{
-		LabelTarget:    "status:merging",
+		LabelNotEqual:  "status:reviewing",
 		IssueCommented: true,
 	}
 }

@@ -84,9 +84,31 @@ func TestFeedback_ComputesDelta(t *testing.T) {
 				LabelCurrent:   "status:reviewing",
 				IssueCommented: true,
 			},
-			wantMissing: []string{`label is "status:reviewing", want "status:merging"`},
+			wantMissing: []string{`label is still "status:reviewing", want any other status`},
 			wantMet:     []string{"issue commented"},
 			wantAllMet:  false,
+		},
+		{
+			name: "review objective - label moved to merging (pass)",
+			obj:  ReviewObjective(),
+			obs: &Observation{
+				LabelCurrent:   "status:merging",
+				IssueCommented: true,
+			},
+			wantMissing: nil,
+			wantMet:     []string{"label moved from status:reviewing to status:merging", "issue commented"},
+			wantAllMet:  true,
+		},
+		{
+			name: "review objective - label moved to developing (rejection)",
+			obj:  ReviewObjective(),
+			obs: &Observation{
+				LabelCurrent:   "status:developing",
+				IssueCommented: true,
+			},
+			wantMissing: nil,
+			wantMet:     []string{"label moved from status:reviewing to status:developing", "issue commented"},
+			wantAllMet:  true,
 		},
 		{
 			name: "empty objective - trivially met",

@@ -177,6 +177,13 @@ func (r *AgentBridgeRuntime) backendInstance() (agent.Backend, error) {
 }
 
 func (r *AgentBridgeRuntime) Start(ctx context.Context, agentCfg *config.AgentConfig, task *TaskContext) (Session, error) {
+	return r.startWithResume(ctx, agentCfg, task, "")
+}
+
+// startWithResume is the internal Start implementation. When resumeSessionID
+// is non-empty, it is set on the agent.Spec so the agentm backend emits
+// --resume <id> instead of starting a fresh session.
+func (r *AgentBridgeRuntime) startWithResume(ctx context.Context, agentCfg *config.AgentConfig, task *TaskContext, resumeSessionID string) (Session, error) {
 	prompt := resolvePrompt(agentCfg, task)
 	// For AgentM dispatches, derive a deterministic TRACEPARENT from the
 	// repo+issue so all sessions for the same issue share a trace ID.
@@ -185,14 +192,15 @@ func (r *AgentBridgeRuntime) Start(ctx context.Context, agentCfg *config.AgentCo
 		traceCtx = issueTraceContext(task.Repo, task.Issue.Number)
 	}
 	spec := agent.Spec{
-		Backend:  agentCfg.Runtime,
-		Workdir:  task.WorkDir,
-		Prompt:   prompt,
-		Args:     rolloutInvocationArgs(task),
-		Model:    agentCfg.Policy.Model,
-		Sandbox:  agentCfg.Policy.Sandbox,
-		Approval: agentCfg.Policy.Approval,
-		Env:      injectAgentMEnv(agentCfg, injectTraceContext(traceCtx, envSliceToMap(BuildScopedEnv(agentCfg, task)), task), task),
+		Backend:         agentCfg.Runtime,
+		Workdir:         task.WorkDir,
+		Prompt:          prompt,
+		Args:            rolloutInvocationArgs(task),
+		Model:           agentCfg.Policy.Model,
+		Sandbox:         agentCfg.Policy.Sandbox,
+		Approval:        agentCfg.Policy.Approval,
+		Env:             injectAgentMEnv(agentCfg, injectTraceContext(traceCtx, envSliceToMap(BuildScopedEnv(agentCfg, task)), task), task),
+		ResumeSessionID: resumeSessionID,
 		Tags: map[string]string{
 			"agent": agentCfg.Name,
 			"repo":  task.Repo,
@@ -277,27 +285,18 @@ func (r *AgentBridgeRuntime) launchWithControlLoop(ctx context.Context, agentCfg
 
 	var lastResult *Result
 	runAgent := func(ctx context.Context, prompt string, resumeSessionID string) (string, error) {
-		// Build the spec: for the first round, use the original prompt
-		// (Start handles this). For resume rounds, override the spec prompt
-		// with the feedback message and set ResumeSessionID.
+		// For resume rounds, override the prompt with the feedback message.
 		taskCopy := *task
 		agentCfgCopy := *agentCfg
 		if resumeSessionID != "" && prompt != "" {
 			agentCfgCopy.Prompt = prompt
 		}
 
-		sess, err := r.Start(ctx, &agentCfgCopy, &taskCopy)
+		sess, err := r.startWithResume(ctx, &agentCfgCopy, &taskCopy, resumeSessionID)
 		if err != nil {
 			return "", err
 		}
 		defer func() { _ = sess.Close() }()
-
-		// If resuming, inject the ResumeSessionID into the underlying
-		// agent session's spec. This requires reaching into the bridge
-		// session to set it before Run.
-		if bridgeSess, ok := sess.(*AgentBridgeSession); ok && resumeSessionID != "" {
-			bridgeSess.ResumeSessionID = resumeSessionID
-		}
 
 		ch := make(chan launcherevents.Event, 32)
 		done := make(chan struct{})
@@ -385,9 +384,6 @@ type AgentBridgeSession struct {
 	// PRMerger, when non-nil and the applied label is MergedLabel,
 	// squash-merges the PR after the merge-agent approves.
 	PRMerger AgentMPRMerger
-	// ResumeSessionID, when set by the control loop, is passed to the
-	// next agent session for multi-turn continuation.
-	ResumeSessionID string
 }
 
 func (s *AgentBridgeSession) Run(ctx context.Context, events chan<- launcherevents.Event) (*Result, error) {

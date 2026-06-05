@@ -40,6 +40,14 @@ func Feedback(obj *Objective, obs *Observation) *Delta {
 		}
 	}
 
+	if obj.LabelNotEqual != "" {
+		if obs.LabelCurrent != obj.LabelNotEqual && obs.LabelCurrent != "" {
+			d.Met = append(d.Met, fmt.Sprintf("label moved from %s to %s", obj.LabelNotEqual, obs.LabelCurrent))
+		} else {
+			d.Missing = append(d.Missing, fmt.Sprintf("label is still %q, want any other status", obs.LabelCurrent))
+		}
+	}
+
 	if obj.IssueCommented {
 		if obs.IssueCommented {
 			d.Met = append(d.Met, "issue commented")
