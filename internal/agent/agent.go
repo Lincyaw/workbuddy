@@ -27,6 +27,11 @@ type Spec struct {
 	// MaxTurns, when > 0, caps the AgentM agent loop (`--max-turns N`).
 	// Only consumed by the agentm backend.
 	MaxTurns int `json:"max_turns,omitempty"`
+	// ResumeSessionID, when non-empty, tells the agentm backend to use
+	// --resume <id> instead of starting a fresh session. The new --prompt
+	// is appended to that session's history for multi-turn continuation.
+	// Only consumed by the agentm backend.
+	ResumeSessionID string `json:"resume_session_id,omitempty"`
 }
 
 // SpecExtension is one AgentM `-e module[:json]` atom mount.

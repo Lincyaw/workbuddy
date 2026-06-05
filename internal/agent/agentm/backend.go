@@ -519,7 +519,15 @@ func emit(ch chan<- agent.Event, evt agent.Event) {
 // `-e module` flag, or `-e module:<json>` when it carries config.
 // The system prompt is just another extension — no special-casing here.
 func buildArgs(spec agent.Spec, workspace string) []string {
-	args := []string{"--prompt", spec.Prompt}
+	var args []string
+	if spec.ResumeSessionID != "" {
+		args = append(args, "--resume", spec.ResumeSessionID)
+		if spec.Prompt != "" {
+			args = append(args, "--prompt", spec.Prompt)
+		}
+	} else {
+		args = append(args, "--prompt", spec.Prompt)
+	}
 	if scenario := strings.TrimSpace(spec.Scenario); scenario != "" {
 		args = append(args, "--scenario", scenario)
 	}

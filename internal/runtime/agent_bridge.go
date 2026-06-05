@@ -19,6 +19,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/agent/claude"
 	"github.com/Lincyaw/workbuddy/internal/agent/codex"
 	"github.com/Lincyaw/workbuddy/internal/config"
+	"github.com/Lincyaw/workbuddy/internal/control"
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
 
 	"go.opentelemetry.io/otel"
@@ -68,6 +69,14 @@ type AgentBridgeRuntime struct {
 	// the branch. Only fires for AgentM runs whose applied label matches
 	// MergedLabel.
 	PRMerger AgentMPRMerger
+	// ControlObserver, when non-nil, enables the closed-loop control
+	// system for AgentM dispatches. After each agent run, the observer
+	// checks world state (branch/PR/label/comment) against the role's
+	// objective and resumes the agent if post-conditions are not met.
+	ControlObserver control.Observer
+	// ControlMaxRounds caps the number of observe-resume iterations.
+	// Defaults to 5 when zero.
+	ControlMaxRounds int
 }
 
 // AgentMGitOps is the bridge between the runtime package and
@@ -221,6 +230,13 @@ func (r *AgentBridgeRuntime) Start(ctx context.Context, agentCfg *config.AgentCo
 }
 
 func (r *AgentBridgeRuntime) Launch(ctx context.Context, agentCfg *config.AgentConfig, task *TaskContext) (*Result, error) {
+	if agentCfg.Runtime == config.RuntimeAgentM && task != nil && task.Repo != "" && task.Issue.Number > 0 && r.ControlObserver != nil {
+		return r.launchWithControlLoop(ctx, agentCfg, task)
+	}
+	return r.launchDirect(ctx, agentCfg, task)
+}
+
+func (r *AgentBridgeRuntime) launchDirect(ctx context.Context, agentCfg *config.AgentConfig, task *TaskContext) (*Result, error) {
 	sess, err := r.Start(ctx, agentCfg, task)
 	if err != nil {
 		return nil, err
@@ -238,6 +254,114 @@ func (r *AgentBridgeRuntime) Launch(ctx context.Context, agentCfg *config.AgentC
 	close(ch)
 	<-done
 	return result, runErr
+}
+
+func (r *AgentBridgeRuntime) launchWithControlLoop(ctx context.Context, agentCfg *config.AgentConfig, task *TaskContext) (*Result, error) {
+	branch := fmt.Sprintf("workbuddy/issue-%d", task.Issue.Number)
+
+	obj := r.controlObjective(agentCfg)
+
+	maxRounds := r.ControlMaxRounds
+	if maxRounds <= 0 {
+		maxRounds = 5
+	}
+
+	cfg := &control.LoopConfig{
+		Observer:   r.ControlObserver,
+		Controller: &control.Controller{MaxRounds: maxRounds},
+		Repo:       task.Repo,
+		IssueNum:   task.Issue.Number,
+		Branch:     branch,
+		Objective:  obj,
+	}
+
+	var lastResult *Result
+	runAgent := func(ctx context.Context, prompt string, resumeSessionID string) (string, error) {
+		// Build the spec: for the first round, use the original prompt
+		// (Start handles this). For resume rounds, override the spec prompt
+		// with the feedback message and set ResumeSessionID.
+		taskCopy := *task
+		agentCfgCopy := *agentCfg
+		if resumeSessionID != "" && prompt != "" {
+			agentCfgCopy.Prompt = prompt
+		}
+
+		sess, err := r.Start(ctx, &agentCfgCopy, &taskCopy)
+		if err != nil {
+			return "", err
+		}
+		defer func() { _ = sess.Close() }()
+
+		// If resuming, inject the ResumeSessionID into the underlying
+		// agent session's spec. This requires reaching into the bridge
+		// session to set it before Run.
+		if bridgeSess, ok := sess.(*AgentBridgeSession); ok && resumeSessionID != "" {
+			bridgeSess.ResumeSessionID = resumeSessionID
+		}
+
+		ch := make(chan launcherevents.Event, 32)
+		done := make(chan struct{})
+		go func() {
+			for range ch {
+			}
+			close(done)
+		}()
+		result, runErr := sess.Run(ctx, ch)
+		close(ch)
+		<-done
+		lastResult = result
+
+		sessionID := ""
+		if result != nil && result.SessionRef.ID != "" {
+			sessionID = result.SessionRef.ID
+		}
+		return sessionID, runErr
+	}
+
+	loopResult, err := control.Run(ctx, cfg, runAgent)
+	if err != nil && lastResult != nil {
+		return lastResult, err
+	}
+	if err != nil {
+		return nil, err
+	}
+	if lastResult == nil {
+		lastResult = &Result{}
+	}
+	if lastResult.Meta == nil {
+		lastResult.Meta = map[string]string{}
+	}
+	lastResult.Meta["control_rounds"] = fmt.Sprintf("%d", loopResult.Rounds)
+	lastResult.Meta["control_action"] = controlActionString(loopResult.Action)
+	if loopResult.Message != "" {
+		lastResult.Meta["control_message"] = loopResult.Message
+	}
+	return lastResult, nil
+}
+
+// controlObjective returns the right objective for the agent's role.
+func (r *AgentBridgeRuntime) controlObjective(agentCfg *config.AgentConfig) *control.Objective {
+	switch agentCfg.Role {
+	case "review":
+		return control.ReviewObjective()
+	case "merge":
+		return control.MergeObjective()
+	default:
+		return control.DevObjective()
+	}
+}
+
+func controlActionString(a control.Action) string {
+	switch a {
+	case control.ActionComplete:
+		return "complete"
+	case control.ActionBlock:
+		return "block"
+	case control.ActionResume:
+		return "resume"
+	default:
+		return "unknown"
+	}
 }
 
 type BridgeSessionHandle interface {
@@ -261,6 +385,9 @@ type AgentBridgeSession struct {
 	// PRMerger, when non-nil and the applied label is MergedLabel,
 	// squash-merges the PR after the merge-agent approves.
 	PRMerger AgentMPRMerger
+	// ResumeSessionID, when set by the control loop, is passed to the
+	// next agent session for multi-turn continuation.
+	ResumeSessionID string
 }
 
 func (s *AgentBridgeSession) Run(ctx context.Context, events chan<- launcherevents.Event) (*Result, error) {
