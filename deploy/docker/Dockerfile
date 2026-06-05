@@ -35,7 +35,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM python:${PYTHON_VERSION}-slim-bookworm AS runtime
 
 # Pin to a release; bump when upgrading AgentM.
-ARG AGENTM_VERSION=0.2.0
+ARG AGENTM_VERSION=0.2.2
 
 # Host tools: git + gh for autonomous gitops; ca-certificates for HTTPS.
 RUN apt-get update \

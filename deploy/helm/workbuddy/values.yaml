@@ -108,7 +108,7 @@ agents:
   # agent_env_repo scenario seeds the sandbox from the worktree's git HEAD
   # and syncs the agent's diff back — the cwd<->pod sync that makes
   # coordinator-managed PRs non-empty.
-  scenarioName: agent_env_repo
+  scenarioName: sandbox
   model: ""                    # AgentM --model profile name (e.g. "litellm"); empty = AgentM default
   devTimeout: 30m
   reviewTimeout: 30m
@@ -130,31 +130,21 @@ agents:
 
     The repository is checked out at /workspace on branch `workbuddy/issue-{{.Issue.Number}}`.
 
-    ## Workflow
+    You MUST complete ALL steps. Do NOT stop after editing files.
 
-    1. **Understand**: Read the acceptance criteria. Explore the codebase.
-    2. **Implement**: Make the code changes. Read files before editing.
-    3. **Verify**: Run tests/linters to confirm nothing is broken.
-       At minimum: `python3 -m py_compile`, `go vet`, or `npm run lint`.
-    4. **Commit & Push**:
-       ```
-       git add -A && git commit -m "resolve issue #{{.Issue.Number}}"
-       git push origin workbuddy/issue-{{.Issue.Number}}
-       ```
-    5. **Create PR**:
-       ```
-       gh pr create -R {{.Repo}} --title "workbuddy: resolve issue #{{.Issue.Number}}" \
-         --body "Resolves #{{.Issue.Number}}" --head workbuddy/issue-{{.Issue.Number}}
-       ```
-       (If PR already exists, just push — it updates automatically.)
-    6. **Comment on issue** with what you did:
-       `gh issue comment {{.Issue.Number}} -R {{.Repo}} --body "..."`
-    7. **Advance the state machine**:
-       ```
-       gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:reviewing --remove-label status:developing
-       ```
+    ## Step 1: Implement
+    Read the acceptance criteria. Explore relevant files. Make the code changes.
 
-    Then output: RESULT: {"success": true, "next_label": "status:reviewing", "failure_reason": ""}
+    ## Step 2: Submit (CRITICAL — you MUST run this after editing)
+    After making your changes, run this ENTIRE script in ONE bash call:
+    ```bash
+    cd /workspace && git add -A && git commit -m "resolve issue #{{.Issue.Number}}" && git push origin workbuddy/issue-{{.Issue.Number}} && (gh pr create -R {{.Repo}} --title "workbuddy: resolve #{{.Issue.Number}}" --body "Resolves #{{.Issue.Number}}" --head workbuddy/issue-{{.Issue.Number}} 2>/dev/null || true) && gh issue comment {{.Issue.Number}} -R {{.Repo}} --body "Implemented and pushed." && gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:reviewing --remove-label status:developing
+    ```
+    This script commits, pushes, creates a PR, comments, and flips the label. ALL of these are required.
+
+    ## Step 3: Output result
+    Your FINAL message must be EXACTLY this line:
+    RESULT: {"success": true, "next_label": "status:reviewing", "failure_reason": ""}
 
   reviewPrompt: |
     You are the review agent for issue #{{.Issue.Number}} in {{.Repo}}.
@@ -165,29 +155,45 @@ agents:
 
     The repo is checked out at /workspace on the `workbuddy/issue-{{.Issue.Number}}` branch.
 
-    ## Workflow
+    You MUST complete ALL of the following steps in order. Do NOT stop early.
 
-    1. Run `git log --oneline origin/main..HEAD` to see what the dev agent committed.
-    2. Run `git diff origin/main..HEAD` to see the full diff.
-    3. For each acceptance criterion, verify it is satisfied.
-    4. Run relevant tests/linters if AC requires it.
-    5. Check for unrelated deletions, truncation, or corruption.
+    ## Step 1: Inspect the diff
+    ```bash
+    cd /workspace
+    git log --oneline origin/main..HEAD
+    git diff origin/main..HEAD
+    ```
 
-    ## Verdict
+    ## Step 2: Verify acceptance criteria
+    For each AC in the issue body, confirm the diff satisfies it.
+    Run tests/linters if AC requires it.
 
-    Write a comment on the issue with your review findings:
-      `gh issue comment {{.Issue.Number}} -R {{.Repo}} --body "..."`
+    ## Step 3: Check for corruption
+    Look for unrelated deletions, file truncation, or large unexplained removals.
 
+    ## Step 4: Write review comment (MANDATORY)
+    ```bash
+    gh issue comment {{.Issue.Number}} -R {{.Repo}} --body "<your detailed review>"
+    ```
+
+    ## Step 5: Flip label (MANDATORY)
     If ALL criteria pass:
-      ```
-      gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:merging --remove-label status:reviewing
-      ```
-    If any fail:
-      ```
-      gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:developing --remove-label status:reviewing
-      ```
+    ```bash
+    gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:merging --remove-label status:reviewing
+    ```
+    If ANY criterion fails:
+    ```bash
+    gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:developing --remove-label status:reviewing
+    ```
 
-    Then output: RESULT: {"success": true, "next_label": "status:merging", "failure_reason": ""}
+    ## Step 6: Output result (MANDATORY)
+    Your FINAL message must be exactly one of these lines and nothing else:
+
+    On PASS:
+    RESULT: {"success": true, "next_label": "status:merging", "failure_reason": ""}
+
+    On FAIL:
+    RESULT: {"success": false, "next_label": "status:developing", "failure_reason": "<brief reason>"}
 
   mergePrompt: |
     You are the merge agent for issue #{{.Issue.Number}} in {{.Repo}}.
@@ -196,29 +202,42 @@ agents:
 
     The repo is checked out at /workspace on the `workbuddy/issue-{{.Issue.Number}}` branch.
 
-    ## Workflow
+    You MUST complete ALL of the following steps in order. Do NOT stop early.
 
-    1. `git diff origin/main..HEAD --stat` — scope of changes.
-    2. `git diff origin/main..HEAD` — review the diff.
-    3. Check for accidental deletions or file truncation.
-    4. Run syntax check on changed files (e.g. `python3 -m py_compile`).
-    5. If clean: squash-merge the PR.
+    ## Step 1: Inspect changes
+    ```bash
+    cd /workspace
+    git diff origin/main..HEAD --stat
+    git diff origin/main..HEAD
+    ```
 
-    ## Merge
+    ## Step 2: Validate
+    - No accidental deletions or file truncation
+    - Syntax check on changed files (e.g. `python3 -m py_compile <file>`)
 
-    If ready:
-      ```
-      gh pr merge --squash --delete-branch -R {{.Repo}}
-      gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:merged --remove-label status:merging
-      gh issue close {{.Issue.Number}} -R {{.Repo}}
-      ```
-    If not:
-      ```
-      gh issue comment {{.Issue.Number}} -R {{.Repo}} --body "Merge rejected: <reason>"
-      gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:developing --remove-label status:merging
-      ```
+    ## Step 3: Merge or Reject (MANDATORY)
 
-    Then output: RESULT: {"success": true, "next_label": "status:merged", "failure_reason": ""}
+    If changes are clean — merge:
+    ```bash
+    gh pr merge --squash --delete-branch -R {{.Repo}}
+    gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:merged --remove-label status:merging
+    gh issue close {{.Issue.Number}} -R {{.Repo}}
+    ```
+
+    If changes have problems — reject:
+    ```bash
+    gh issue comment {{.Issue.Number}} -R {{.Repo}} --body "Merge rejected: <reason>"
+    gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:developing --remove-label status:merging
+    ```
+
+    ## Step 4: Output result (MANDATORY)
+    Your FINAL message must be exactly one of these lines and nothing else:
+
+    On MERGE:
+    RESULT: {"success": true, "next_label": "status:merged", "failure_reason": ""}
+
+    On REJECT:
+    RESULT: {"success": false, "next_label": "status:developing", "failure_reason": "<brief reason>"}
 
 # Ingress for the coordinator Service. Disabled by default; enable in K8s
 # topologies that need external webui + webhook access (decision doc Block 3
