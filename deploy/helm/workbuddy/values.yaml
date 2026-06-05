@@ -119,7 +119,7 @@ agents:
   # NOT Helm variables; the chart escapes them so they pass through to the
   # workbuddy template engine at dispatch time.
   devPrompt: |
-    You are the dev agent for issue #{{.Issue.Number}} in {{.Repo}}.
+    You are working on issue #{{.Issue.Number}} in {{.Repo}}.
 
     Title: {{.Issue.Title}}
 
@@ -128,116 +128,57 @@ agents:
 
     {{.Issue.CommentsText}}
 
-    The repository is checked out at /workspace on branch `workbuddy/issue-{{.Issue.Number}}`.
+    The repo is cloned at /workspace. You have full git and gh CLI access.
 
-    You MUST complete ALL steps. Do NOT stop after editing files.
+    Read the acceptance criteria. Implement the required changes — code,
+    tests, docs, whatever fits. Verify your work compiles and passes any
+    existing tests.
 
-    ## Step 1: Implement
-    Read the acceptance criteria. Explore relevant files. Make the code changes.
-
-    ## Step 2: Submit (CRITICAL — you MUST run this after editing)
-    After making your changes, run this ENTIRE script in ONE bash call:
-    ```bash
-    cd /workspace && git add -A && git commit -m "resolve issue #{{.Issue.Number}}" && git push origin workbuddy/issue-{{.Issue.Number}} && (gh pr create -R {{.Repo}} --title "workbuddy: resolve #{{.Issue.Number}}" --body "Resolves #{{.Issue.Number}}" --head workbuddy/issue-{{.Issue.Number}} 2>/dev/null || true) && gh issue comment {{.Issue.Number}} -R {{.Repo}} --body "Implemented and pushed." && gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:reviewing --remove-label status:developing
-    ```
-    This script commits, pushes, creates a PR, comments, and flips the label. ALL of these are required.
-
-    ## Step 3: Output result
-    Your FINAL message must be EXACTLY this line:
-    RESULT: {"success": true, "next_label": "status:reviewing", "failure_reason": ""}
+    When done:
+    - Commit and push to branch `workbuddy/issue-{{.Issue.Number}}`
+    - Open a PR referencing this issue
+    - Comment on the issue summarizing what you changed
+    - Flip the label from `status:developing` to `status:reviewing`
 
   reviewPrompt: |
-    You are the review agent for issue #{{.Issue.Number}} in {{.Repo}}.
+    You are reviewing the changes for issue #{{.Issue.Number}} in {{.Repo}}.
 
     Title: {{.Issue.Title}}
+
+    Body:
+    {{.Issue.Body}}
 
     {{.Issue.CommentsText}}
 
-    The repo is checked out at /workspace on the `workbuddy/issue-{{.Issue.Number}}` branch.
+    The repo is at /workspace on the `workbuddy/issue-{{.Issue.Number}}` branch.
+    Run `git diff main-base..HEAD` to see the changes.
 
-    You MUST complete ALL of the following steps in order. Do NOT stop early.
+    For each acceptance criterion, verify it is satisfied. Check for
+    unrelated deletions, file truncation, or corruption.
 
-    ## Step 1: Inspect the diff
-    ```bash
-    cd /workspace
-    git log --oneline origin/main..HEAD
-    git diff origin/main..HEAD
-    ```
-
-    ## Step 2: Verify acceptance criteria
-    For each AC in the issue body, confirm the diff satisfies it.
-    Run tests/linters if AC requires it.
-
-    ## Step 3: Check for corruption
-    Look for unrelated deletions, file truncation, or large unexplained removals.
-
-    ## Step 4: Write review comment (MANDATORY)
-    ```bash
-    gh issue comment {{.Issue.Number}} -R {{.Repo}} --body "<your detailed review>"
-    ```
-
-    ## Step 5: Flip label (MANDATORY)
-    If ALL criteria pass:
-    ```bash
-    gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:merging --remove-label status:reviewing
-    ```
-    If ANY criterion fails:
-    ```bash
-    gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:developing --remove-label status:reviewing
-    ```
-
-    ## Step 6: Output result (MANDATORY)
-    Your FINAL message must be exactly one of these lines and nothing else:
-
-    On PASS:
-    RESULT: {"success": true, "next_label": "status:merging", "failure_reason": ""}
-
-    On FAIL:
-    RESULT: {"success": false, "next_label": "status:developing", "failure_reason": "<brief reason>"}
+    Post your review as a comment on the issue. Then:
+    - If all criteria pass: flip label to `status:merging`
+    - If any fail: flip label back to `status:developing` with your
+      feedback in the comment so the dev agent knows what to fix
 
   mergePrompt: |
-    You are the merge agent for issue #{{.Issue.Number}} in {{.Repo}}.
+    You are the merge gate for issue #{{.Issue.Number}} in {{.Repo}}.
 
     Title: {{.Issue.Title}}
 
-    The repo is checked out at /workspace on the `workbuddy/issue-{{.Issue.Number}}` branch.
+    The repo is at /workspace on the `workbuddy/issue-{{.Issue.Number}}` branch.
+    Run `git diff main-base..HEAD` to see the changes.
 
-    You MUST complete ALL of the following steps in order. Do NOT stop early.
-
-    ## Step 1: Inspect changes
-    ```bash
-    cd /workspace
-    git diff origin/main..HEAD --stat
-    git diff origin/main..HEAD
-    ```
-
-    ## Step 2: Validate
+    Final quality check:
     - No accidental deletions or file truncation
-    - Syntax check on changed files (e.g. `python3 -m py_compile <file>`)
+    - Changed files pass syntax checks
+    - Changes are focused and relevant to the issue
 
-    ## Step 3: Merge or Reject (MANDATORY)
+    If clean: merge the PR (`gh pr merge --squash --delete-branch`),
+    flip label to `status:merged`, and close the issue.
 
-    If changes are clean — merge:
-    ```bash
-    gh pr merge --squash --delete-branch -R {{.Repo}}
-    gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:merged --remove-label status:merging
-    gh issue close {{.Issue.Number}} -R {{.Repo}}
-    ```
-
-    If changes have problems — reject:
-    ```bash
-    gh issue comment {{.Issue.Number}} -R {{.Repo}} --body "Merge rejected: <reason>"
-    gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:developing --remove-label status:merging
-    ```
-
-    ## Step 4: Output result (MANDATORY)
-    Your FINAL message must be exactly one of these lines and nothing else:
-
-    On MERGE:
-    RESULT: {"success": true, "next_label": "status:merged", "failure_reason": ""}
-
-    On REJECT:
-    RESULT: {"success": false, "next_label": "status:developing", "failure_reason": "<brief reason>"}
+    If problems: comment with the reason, flip label back to
+    `status:developing`.
 
 # Ingress for the coordinator Service. Disabled by default; enable in K8s
 # topologies that need external webui + webhook access (decision doc Block 3
