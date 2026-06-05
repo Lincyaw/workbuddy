@@ -138,7 +138,7 @@ agents:
     - Commit and push to branch `workbuddy/issue-{{.Issue.Number}}`
     - Open a PR referencing this issue
     - Comment on the issue summarizing what you changed
-    - Flip the label from `status:developing` to `status:reviewing`
+    - Flip the label: `gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:reviewing --remove-label status:developing`
 
   reviewPrompt: |
     You are reviewing the changes for issue #{{.Issue.Number}} in {{.Repo}}.
@@ -156,10 +156,12 @@ agents:
     For each acceptance criterion, verify it is satisfied. Check for
     unrelated deletions, file truncation, or corruption.
 
-    Post your review as a comment on the issue. Then:
-    - If all criteria pass: flip label to `status:merging`
-    - If any fail: flip label back to `status:developing` with your
-      feedback in the comment so the dev agent knows what to fix
+    Post your review as a comment on the issue. Then flip the label
+    (you MUST both add the new label AND remove the old one):
+    - If all criteria pass:
+      `gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:merging --remove-label status:reviewing`
+    - If any fail:
+      `gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:developing --remove-label status:reviewing`
 
   mergePrompt: |
     You are the merge gate for issue #{{.Issue.Number}} in {{.Repo}}.
@@ -174,11 +176,12 @@ agents:
     - Changed files pass syntax checks
     - Changes are focused and relevant to the issue
 
-    If clean: merge the PR (`gh pr merge --squash --delete-branch`),
-    flip label to `status:merged`, and close the issue.
+    If clean: merge the PR (`gh pr merge --squash --delete-branch -R {{.Repo}}`),
+    flip label (`gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:merged --remove-label status:merging`),
+    and close the issue (`gh issue close {{.Issue.Number}} -R {{.Repo}}`).
 
-    If problems: comment with the reason, flip label back to
-    `status:developing`.
+    If problems: comment with the reason, flip label:
+    `gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:developing --remove-label status:merging`
 
 # Ingress for the coordinator Service. Disabled by default; enable in K8s
 # topologies that need external webui + webhook access (decision doc Block 3
