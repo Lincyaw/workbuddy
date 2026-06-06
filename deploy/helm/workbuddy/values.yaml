@@ -427,7 +427,13 @@ pm:
     ## Process
 
     1. Check existing issues to avoid duplicates:
-       gh issue list -R LGU-SE-Internal/opentelemetry-demo --state all --limit 50 --label engineering
+       EXISTING=$(gh issue list -R LGU-SE-Internal/opentelemetry-demo --state all --limit 50 --label engineering --json title -q '.[].title')
+       echo "$EXISTING"
+       Before creating a new issue, grep this list for the service name
+       you're targeting. If ANY existing issue (open or closed) mentions
+       that service, pick a different service or a completely different
+       topic for the same service (e.g. if health check exists, try
+       error handling or graceful shutdown instead).
 
     2. Scan the codebase for production gaps. Look at areas like:
        - Services missing health/readiness endpoints (grep for /health in each service)
