@@ -3,6 +3,7 @@ package launcher
 import runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 
 type Runtime = runtimepkg.Runtime
+type Capabilities = runtimepkg.Capabilities
 type Session = runtimepkg.Session
 type Result = runtimepkg.Result
 type TaskContext = runtimepkg.TaskContext

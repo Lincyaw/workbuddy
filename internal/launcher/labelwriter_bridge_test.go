@@ -9,6 +9,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/Lincyaw/workbuddy/internal/config"
 	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 )
 
@@ -21,10 +22,11 @@ func (r *recordingLabelWriter) ApplyNextLabel(_ context.Context, _ string, _ int
 	return nil
 }
 
-// TestRegistry_OnlyAgentMGetsLabelWriter: SetAgentMLabelWriter must wire
-// the AgentM bridge runtime's LabelWriter and leave every other
-// registered runtime untouched. Claude/codex still flip their own
-// labels via `gh issue edit` from inside the subprocess, per CLAUDE.md.
+// TestRegistry_OnlyAgentMGetsLabelWriter: the capability-driven
+// SetLabelWriter must wire the LabelWriter onto runtimes whose
+// Capabilities().ManagesOwnLabels is false (agentm) and leave every
+// self-managed runtime (claude/codex) untouched — they keep flipping their
+// own labels via `gh issue edit` from inside the subprocess (ADR §3).
 func TestRegistry_OnlyAgentMGetsLabelWriter(t *testing.T) {
 	l := runtimepkg.NewRegistry()
 	RegisterBuiltins(l)
@@ -35,8 +37,30 @@ func TestRegistry_OnlyAgentMGetsLabelWriter(t *testing.T) {
 	// invokes the writer) lives in the runtime package's bridge tests,
 	// where we drive the actual Run() codepath against fake AgentM and
 	// nop sessions.
-	l.SetAgentMLabelWriter(lw)
-	l.SetAgentMLabelWriter(lw)
+	l.SetLabelWriter(lw)
+	l.SetLabelWriter(lw)
+
+	// The agentm runtime (ManagesOwnLabels=false) must receive the writer;
+	// the self-managed runtimes must not.
+	if got := agentMRuntimeLabelWriter(l); got != lw {
+		t.Fatalf("agentm runtime did not receive the capability-wired label writer (got %v)", got)
+	}
+	for _, name := range []string{config.RuntimeClaudeCode, config.RuntimeCodex} {
+		if rt := l.RuntimeByName(name); rt != nil {
+			if !rt.Capabilities().ManagesOwnLabels {
+				t.Fatalf("self-managed runtime %q must report ManagesOwnLabels=true", name)
+			}
+		}
+	}
+}
+
+// agentMRuntimeLabelWriter returns the LabelWriter wired onto the registered
+// agentm runtime, or nil if none/not an *AgentMRuntime.
+func agentMRuntimeLabelWriter(l *runtimepkg.Registry) runtimepkg.AgentMLabelWriter {
+	if rt, ok := l.RuntimeByName(config.RuntimeAgentM).(*runtimepkg.AgentMRuntime); ok {
+		return rt.LabelWriter
+	}
+	return nil
 }
 
 // TestNewAgentMLabelWriterAdapter_NilStoreIsNoOp: the adapter must

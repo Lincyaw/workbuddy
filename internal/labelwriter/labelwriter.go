@@ -10,12 +10,14 @@
 // transition the agent suggests in its structured Result.
 //
 // This package is wired into the production dispatch path (#332). The chain:
-// cmd/worker.go calls Launcher.SetAgentMLabelWriter with
+// cmd/worker.go calls Launcher.SetLabelWriter with
 // launcher.NewAgentMLabelWriterAdapter(store), which wraps *Writer in a
-// runtime.AgentMLabelWriter; internal/runtime/agent_bridge.go's
-// AgentBridgeSession.Run invokes ApplyNextLabel after a successful AgentM run
-// AND a successful gitops publish. Self-managed runtimes (claude-code, codex)
-// never wire this adapter, so the Go-side label write stays AgentM-only.
+// runtime.AgentMLabelWriter; the capability-driven wiring installs it onto
+// runtimes whose Capabilities().ManagesOwnLabels is false (agentm), and
+// internal/runtime/agentm_runtime.go's AgentMSession.Run invokes
+// ApplyNextLabel after a successful AgentM run. Self-managed runtimes
+// (claude-code, codex) report ManagesOwnLabels and never wire this adapter,
+// so the Go-side label write stays AgentM-only.
 package labelwriter
 
 import (

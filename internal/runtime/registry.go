@@ -50,19 +50,27 @@ func (l *Registry) SetAgentStartedHook(h AgentStartedHook) {
 	}
 }
 
-// SetAgentMLabelWriter installs the coordinator-managed label writer on
-// the AgentM bridge runtime, if one is registered. Re-applies to any
-// already-registered AgentBridgeRuntime keyed on config.RuntimeAgentM so
-// callers don't have to care about registration order. v0.6 / REQ-146:
-// only AgentM consults this hook — claude-code/codex keep flipping
-// labels from inside the agent subprocess.
-func (l *Registry) SetAgentMLabelWriter(lw AgentMLabelWriter) {
-	for name, rt := range l.runtimes {
-		if name != config.RuntimeAgentM {
+// SetLabelWriter installs the coordinator-managed label writer on every
+// registered runtime whose Capabilities().ManagesOwnLabels is false — i.e.
+// sandboxed runtimes (agentm) that cannot flip labels from inside the agent
+// subprocess. Self-managed runtimes (claude-code/codex) report
+// ManagesOwnLabels and are skipped, keeping `gh issue edit` ownership inside
+// the agent. The wiring is capability-driven, not a runtime-name special
+// case (REQ-146; ADR 2026-06-06 §3). Re-applies on each call so callers
+// don't have to care about registration order. Deduplicates aliases so a
+// runtime registered under multiple names is wired exactly once.
+func (l *Registry) SetLabelWriter(lw AgentMLabelWriter) {
+	seen := map[Runtime]struct{}{}
+	for _, rt := range l.runtimes {
+		if _, ok := seen[rt]; ok {
 			continue
 		}
-		if br, ok := rt.(*AgentBridgeRuntime); ok {
-			br.LabelWriter = lw
+		seen[rt] = struct{}{}
+		if rt.Capabilities().ManagesOwnLabels {
+			continue
+		}
+		if writer, ok := rt.(interface{ SetLabelWriter(AgentMLabelWriter) }); ok {
+			writer.SetLabelWriter(lw)
 		}
 	}
 }
@@ -72,6 +80,14 @@ func (l *Registry) SupervisorClient() *supclient.Client { return l.supervisorCli
 
 // OnAgentStarted returns the configured hook (may be nil).
 func (l *Registry) OnAgentStarted() AgentStartedHook { return l.onAgentStarted }
+
+// RuntimeByName returns the runtime registered under name (or an alias), or
+// nil when nothing is registered. It lets capability-aware callers inspect a
+// registered backend's Capabilities() without re-implementing the lookup —
+// used to assert capability-driven LabelWriter wiring across packages.
+func (l *Registry) RuntimeByName(name string) Runtime {
+	return l.runtimes[name]
+}
 
 func (l *Registry) Register(rt Runtime, aliases ...string) {
 	if cr, ok := rt.(*ClaudeRuntime); ok {

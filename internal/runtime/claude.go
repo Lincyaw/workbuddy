@@ -20,6 +20,13 @@ type ClaudeRuntime struct {
 
 func (r *ClaudeRuntime) Name() string { return config.RuntimeClaudeShot }
 
+// Capabilities reports the claude host-exec contract: the agent runs as a
+// host subprocess (not sandboxed), flips its own issue labels via
+// `gh issue edit` from inside the prompt, and needs host gh/git credentials.
+func (r *ClaudeRuntime) Capabilities() Capabilities {
+	return Capabilities{Sandboxed: false, ManagesOwnLabels: true, NeedsHostGHCreds: true}
+}
+
 func (r *ClaudeRuntime) Start(_ context.Context, agent *config.AgentConfig, task *TaskContext) (Session, error) {
 	return NewProcessSession(r.SupervisorClient, r.OnAgentStarted, r.Name(), agent, task, FindClaudeSessionPath), nil
 }

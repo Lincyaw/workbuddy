@@ -9,13 +9,15 @@ import (
 )
 
 // agentmLabelWriterAdapter implements runtimepkg.AgentMLabelWriter on top
-// of internal/labelwriter. It is the v0.6 coordinator-managed label-write
-// bridge (REQ-146 / #332): AgentM declares success, gitops opens the PR,
-// then the bridge invokes this adapter to flip the issue label per
-// Result.Meta["agentm_next_label"]. Per docs/decisions/
-// 2026-05-13-k8s-agentm-otel.md (Block 2) and CLAUDE.md's explicit
-// exception, only AgentM participates — claude-code and codex keep
-// calling `gh issue edit` from inside the agent subprocess.
+// of internal/labelwriter. It is the coordinator-managed label-write
+// bridge (REQ-146 / #332): after a runtime emits a next_label, the bridge
+// invokes this adapter to flip the issue label per
+// Result.Meta["agentm_next_label"]. The writer is wired only onto runtimes
+// whose Capabilities().ManagesOwnLabels == false (currently agentm); the
+// agent self-publishes its branch/PR in autonomous mode (no Go-side gitops
+// publish gate). Runtimes that manage their own labels (claude-code, codex)
+// keep calling `gh issue edit` from inside the agent subprocess and never
+// get this adapter. See docs/decisions/2026-06-06-runtime-strategy-and-convergence.md §1/§3.
 type agentmLabelWriterAdapter struct {
 	writer *labelwriter.Writer
 }

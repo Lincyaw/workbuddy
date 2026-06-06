@@ -435,10 +435,12 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	sessionManager := runtimepkg.NewSessionManager(opts.sessionsDir, localStore)
 	lnch.SetSessionManager(sessionManager)
 
-	// Coordinator-managed label writer for AgentM runs (REQ-146 / #332).
-	// Self-managed runtimes (claude-code, codex) are unaffected — the
-	// Registry setter only mutates the AgentM bridge runtime.
-	lnch.SetAgentMLabelWriter(launcher.NewAgentMLabelWriterAdapter(localStore))
+	// Coordinator-managed label writer for sandboxed runtimes (REQ-146 /
+	// #332). The setter is capability-driven: it wires only runtimes whose
+	// Capabilities().ManagesOwnLabels is false (agentm). Self-managed
+	// runtimes (claude-code, codex) report ManagesOwnLabels and keep
+	// flipping labels via `gh issue edit` from inside the agent subprocess.
+	lnch.SetLabelWriter(launcher.NewAgentMLabelWriterAdapter(localStore))
 
 
 	var httpClient *http.Client

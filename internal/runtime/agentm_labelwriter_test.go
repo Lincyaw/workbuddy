@@ -59,7 +59,7 @@ func TestAgentMBridge_AppliesNextLabelOnSuccess(t *testing.T) {
 		NextLabel: "status:reviewing",
 	})
 	lw := &fakeLabelWriter{}
-	rt := NewAgentBridgeRuntime(config.RuntimeAgentM, func() (agent.Backend, error) {
+	rt := NewAgentMRuntime(func() (agent.Backend, error) {
 		return &agentm.Backend{Binary: fake}, nil
 	})
 	rt.LabelWriter = lw
@@ -104,7 +104,7 @@ func TestAgentMBridge_LabelAppliedOnFailure(t *testing.T) {
 		FailureReason: "ac not met",
 	})
 	lw := &fakeLabelWriter{}
-	rt := NewAgentBridgeRuntime(config.RuntimeAgentM, func() (agent.Backend, error) {
+	rt := NewAgentMRuntime(func() (agent.Backend, error) {
 		return &agentm.Backend{Binary: fake}, nil
 	})
 	rt.LabelWriter = lw
@@ -136,11 +136,13 @@ func TestAgentMBridge_LabelAppliedOnFailure(t *testing.T) {
 // for ModeSuccess.
 func TestAgentMBridge_EmptyNextLabelIsNoOp(t *testing.T) {
 	lw := &fakeLabelWriter{}
-	sess := &AgentBridgeSession{
+	sess := &AgentMSession{
 		LabelWriter: lw,
-		Task: &TaskContext{
-			Repo:  "Lincyaw/workbuddy",
-			Issue: IssueContext{Number: 332},
+		AgentBridgeSession: &AgentBridgeSession{
+			Task: &TaskContext{
+				Repo:  "Lincyaw/workbuddy",
+				Issue: IssueContext{Number: 332},
+			},
 		},
 	}
 	got, err := sess.applyAgentMNextLabel(context.Background(), "   ")
@@ -155,39 +157,26 @@ func TestAgentMBridge_EmptyNextLabelIsNoOp(t *testing.T) {
 	}
 }
 
-// AC-1-3 (runtime gate): claude-code / codex runtimes MUST NEVER touch
-// the label writer regardless of what gets put in their Result.Meta. We
-// model this at the structural level: the AgentBridge struct is the only
-// path that consults LabelWriter, and only when the underlying Session
-// is an AgentM session (the type-assertion gate in Run()). To pin the
-// contract, build an AgentBridge against a claude/codex session-like
-// fake and confirm no call goes through even when LabelWriter is wired.
-//
-// We can't easily construct a real claude/codex session in a unit test,
-// but we CAN drive the bridge against an AgentM fake while declaring the
-// outer runtime as something else — the runtime-name gate that matters
-// for production lives in the registry adapter (only the AgentM
-// AgentBridgeRuntime ever has LabelWriter set), so we additionally
-// assert that path in TestRegistry_OnlyAgentMGetsLabelWriter.
+// AC-1-3 (capability gate): claude-code / codex runtimes MUST NEVER touch
+// the label writer. After the §1/§3 split this is structural, not a runtime
+// -name check: the self-managed host-exec bridge (codex/claude) is a plain
+// AgentBridgeRuntime with NO LabelWriter field and an AgentBridgeSession that
+// carries no Output() extraction at all — only the agentm AgentMRuntime /
+// AgentMSession carry the label path. This test pins the capability contract
+// that drives the wiring: the bridge core reports ManagesOwnLabels=true, so
+// Registry.SetLabelWriter skips it; and a codex-style session (one that does
+// not implement agentm.Output) produces no agentm label meta. The registry
+// -level wiring assertion lives in TestRegistry_OnlyAgentMGetsLabelWriter.
 func TestAgentMBridge_OtherRuntimesNeverWireLabelWriter(t *testing.T) {
-	// Build a fake AgentM session but expose it through a non-AgentM
-	// runtime name. The bridge type-asserts on the SESSION (agentm.Output
-	// interface), not on the runtime name string, so this case actually
-	// is "agentm session under a misconfigured runtime name". The real
-	// runtime-name gate is at the registry layer; see launcher tests.
-	//
-	// What this test guarantees is: when the agent does NOT expose the
-	// Output() / SessionLogPath() interface (i.e. claude-code or codex
-	// sessions, which lack that method), the AgentBridge's
-	// type-assertion `if extractor, ok := s.Session.(interface{...}); ok`
-	// fails closed, the next_label branch is unreachable, and
-	// LabelWriter is never called. Walk that branch with a session that
-	// doesn't implement Output().
-	rt := NewAgentBridgeRuntime(config.RuntimeClaudeCode, func() (agent.Backend, error) {
+	rt := NewAgentBridgeRuntime(config.RuntimeCodex, func() (agent.Backend, error) {
 		return &nopBackend{}, nil
 	})
-	lw := &fakeLabelWriter{}
-	rt.LabelWriter = lw
+
+	// Capability gate: self-managed runtimes own their own labels, so the
+	// capability-driven SetLabelWriter never wires them.
+	if !rt.Capabilities().ManagesOwnLabels {
+		t.Fatalf("self-managed bridge runtime must report ManagesOwnLabels=true")
+	}
 
 	work := t.TempDir()
 	task := &TaskContext{
@@ -198,11 +187,16 @@ func TestAgentMBridge_OtherRuntimesNeverWireLabelWriter(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := rt.Launch(ctx, &config.AgentConfig{Name: "dev-agent", Runtime: config.RuntimeClaudeCode}, task); err != nil {
+	res, err := rt.Launch(ctx, &config.AgentConfig{Name: "dev-agent", Runtime: config.RuntimeCodex}, task)
+	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
-	if calls := lw.Calls(); len(calls) != 0 {
-		t.Fatalf("non-AgentM session must never invoke LabelWriter, got %v", calls)
+	// A non-agentm session never produces the agentm label/next_label meta:
+	// the AgentBridgeSession carries no Output() extraction path.
+	for _, k := range []string{"agentm_next_label", "agentm_label_applied", "agentm_label_error"} {
+		if _, ok := res.Meta[k]; ok {
+			t.Fatalf("non-AgentM session must not emit %q meta, got %v", k, res.Meta)
+		}
 	}
 }
 

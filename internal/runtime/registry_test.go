@@ -77,6 +77,8 @@ type testRuntime struct {
 
 func (t *testRuntime) Name() string { return t.name }
 
+func (t *testRuntime) Capabilities() Capabilities { return Capabilities{} }
+
 func (t *testRuntime) Start(ctx context.Context, agent *config.AgentConfig, task *TaskContext) (Session, error) {
 	if t.start != nil {
 		return t.start(ctx, agent, task)

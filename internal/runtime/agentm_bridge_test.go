@@ -25,7 +25,7 @@ func TestAgentMBridge_CLISuccess(t *testing.T) {
 		Mode:      agentmtest.ModeSuccess,
 		FinalText: "All acceptance criteria met.",
 	})
-	rt := NewAgentBridgeRuntime(config.RuntimeAgentM, func() (agent.Backend, error) {
+	rt := NewAgentMRuntime(func() (agent.Backend, error) {
 		return &agentm.Backend{Binary: fake}, nil
 	})
 
@@ -70,7 +70,7 @@ func TestAgentMBridge_CLISuccess(t *testing.T) {
 // the bridge surfaces next_label on Result.Meta as before.
 func TestAgentMBridge_ResultSuccess(t *testing.T) {
 	fake := agentmtest.BuildFake(t, agentmtest.Config{Mode: agentmtest.ModeResultSuccess})
-	rt := NewAgentBridgeRuntime(config.RuntimeAgentM, func() (agent.Backend, error) {
+	rt := NewAgentMRuntime(func() (agent.Backend, error) {
 		return &agentm.Backend{Binary: fake}, nil
 	})
 
@@ -128,7 +128,7 @@ func TestResolvePrompt_AgentMSuppressesFooter(t *testing.T) {
 	}
 
 	agentmCfg := &config.AgentConfig{Name: "dev", Runtime: config.RuntimeAgentM, Prompt: body}
-	agentmPrompt := resolvePrompt(agentmCfg, task)
+	agentmPrompt := resolveAgentMPrompt(agentmCfg, task)
 	if strings.Contains(agentmPrompt, "gh issue edit") {
 		t.Fatalf("agentm prompt must NOT carry the gh-edit footer:\n%s", agentmPrompt)
 	}
@@ -142,7 +142,7 @@ func TestResolvePrompt_AgentMSuppressesFooter(t *testing.T) {
 // Result.Meta so the reporter can surface it.
 func TestAgentMBridge_MalformedRESULT(t *testing.T) {
 	fake := agentmtest.BuildFake(t, agentmtest.Config{Mode: agentmtest.ModeMalformedJSON})
-	rt := NewAgentBridgeRuntime(config.RuntimeAgentM, func() (agent.Backend, error) {
+	rt := NewAgentMRuntime(func() (agent.Backend, error) {
 		return &agentm.Backend{Binary: fake}, nil
 	})
 
@@ -182,7 +182,7 @@ func TestAgentMBridge_TaskFailure(t *testing.T) {
 		NextLabel:     "status:failed",
 		FailureReason: "acceptance criteria not met",
 	})
-	rt := NewAgentBridgeRuntime(config.RuntimeAgentM, func() (agent.Backend, error) {
+	rt := NewAgentMRuntime(func() (agent.Backend, error) {
 		return &agentm.Backend{Binary: fake}, nil
 	})
 
@@ -222,7 +222,7 @@ func TestAgentMBridge_DevContainerImageEnv(t *testing.T) {
 		Mode:        agentmtest.ModeSuccess,
 		EnvDumpPath: envDump,
 	})
-	rt := NewAgentBridgeRuntime(config.RuntimeAgentM, func() (agent.Backend, error) {
+	rt := NewAgentMRuntime(func() (agent.Backend, error) {
 		return &agentm.Backend{Binary: fake}, nil
 	})
 
@@ -289,7 +289,7 @@ func TestAgentMBridge_DevContainerImageNotInjectedForOtherRuntimes(t *testing.T)
 // is removed on Close() so successful dispatches don't leak /tmp.
 func TestAgentMBridge_SessionLogDurableAndNoLeak(t *testing.T) {
 	fake := agentmtest.BuildFake(t, agentmtest.Config{Mode: agentmtest.ModeSuccess})
-	rt := NewAgentBridgeRuntime(config.RuntimeAgentM, func() (agent.Backend, error) {
+	rt := NewAgentMRuntime(func() (agent.Backend, error) {
 		return &agentm.Backend{Binary: fake}, nil
 	})
 
@@ -319,9 +319,9 @@ func TestAgentMBridge_SessionLogDurableAndNoLeak(t *testing.T) {
 	}
 
 	// Reach into the backend session to capture the temp dir before Close.
-	bridgeSess, ok := sess.(*AgentBridgeSession)
+	bridgeSess, ok := sess.(*AgentMSession)
 	if !ok {
-		t.Fatalf("expected *AgentBridgeSession, got %T", sess)
+		t.Fatalf("expected *AgentMSession, got %T", sess)
 	}
 	logExtractor := bridgeSess.Session.(interface{ SessionLogPath() string })
 

@@ -19,6 +19,8 @@ type mockRuntime struct {
 
 func (m *mockRuntime) Name() string { return m.name }
 
+func (m *mockRuntime) Capabilities() launcher.Capabilities { return launcher.Capabilities{} }
+
 type mockSession struct {
 	rt    *mockRuntime
 	agent *config.AgentConfig

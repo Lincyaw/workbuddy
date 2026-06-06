@@ -45,7 +45,7 @@ func RegisterBuiltins(l *runtimepkg.Registry) {
 	l.Register(newAgentBridgeRuntime(config.RuntimeCodex, func() (agent.Backend, error) {
 		return codex.NewBackend(codex.Config{})
 	}), config.RuntimeCodex, config.RuntimeCodexServer)
-	agentMRuntime := newAgentBridgeRuntime(config.RuntimeAgentM, func() (agent.Backend, error) {
+	agentMRuntime := runtimepkg.NewAgentMRuntime(func() (agent.Backend, error) {
 		return agentm.NewBackend(), nil
 	})
 	l.Register(agentMRuntime, config.RuntimeAgentM)

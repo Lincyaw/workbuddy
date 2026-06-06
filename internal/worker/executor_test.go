@@ -319,6 +319,8 @@ type fakeRuntime struct {
 
 func (f *fakeRuntime) Name() string { return f.name }
 
+func (f *fakeRuntime) Capabilities() runtimepkg.Capabilities { return runtimepkg.Capabilities{} }
+
 func (f *fakeRuntime) Start(ctx context.Context, agent *config.AgentConfig, task *runtimepkg.TaskContext) (runtimepkg.Session, error) {
 	return f.start(ctx, agent, task)
 }

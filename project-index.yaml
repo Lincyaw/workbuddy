@@ -5580,47 +5580,46 @@ requirements:
       3. A stale agent (issue no longer carries the trigger label) →
          the label write is skipped to avoid reverting the state machine.
 
-      Implementation:
+      Implementation (post ADR 2026-06-06 §1/§3 split; see REQ-164):
 
-      - `internal/runtime/agent_bridge.go` grows an AgentMLabelWriter
-        interface, a LabelWriter field on AgentBridgeRuntime /
-        AgentBridgeSession, and an applyAgentMNextLabel helper. The
-        helper opens a span "runtime.agentm.apply_next_label" carrying
+      - `internal/runtime/agentm_runtime.go` owns the AgentMLabelWriter
+        interface, the LabelWriter field on AgentMRuntime / AgentMSession,
+        and the applyAgentMNextLabel helper. The helper opens a span
+        "runtime.agentm.apply_next_label" carrying
         wb.next_label.candidate / wb.next_label.applied so dashboards
         can attribute coordinator-managed state advances distinctly
         from agent-driven `gh issue edit` calls.
 
-      - `internal/runtime/registry.go` exposes SetAgentMLabelWriter,
-        which mutates only the AgentBridgeRuntime registered under
-        config.RuntimeAgentM. Claude-code / codex runtimes are
-        untouched and continue to flip their own labels from inside
-        the agent subprocess.
+      - `internal/runtime/registry.go` exposes SetLabelWriter, which is
+        capability-driven: it wires the writer onto every registered
+        runtime whose Capabilities().ManagesOwnLabels is false (agentm).
+        Claude-code / codex report ManagesOwnLabels=true, are skipped,
+        and continue to flip their own labels from inside the agent
+        subprocess.
 
       - `internal/launcher/labelwriter_bridge.go` adapts
         labelwriter.Writer to the AgentMLabelWriter interface.
-        `cmd/worker.go` calls SetAgentMLabelWriter with the worker's
-        SQLite store right after NewLauncher, mirroring the v0.6
-        gitops wiring.
+        `cmd/worker.go` calls SetLabelWriter with the worker's SQLite
+        store right after NewLauncher.
 
       - Only AgentM runs participate, by structural construction:
-        the bridge's next_label branch sits inside the AgentM-only
-        type-assertion gate that also pulls Output()/SessionLogPath().
-        Claude/codex sessions don't implement that interface, so the
-        whole block is unreachable for them even if the field were
-        somehow set.
+        the next_label path lives entirely on AgentMSession, which the
+        agentm runtime alone produces. The self-managed bridge runtimes
+        produce a plain AgentBridgeSession with no Output()/next_label
+        path at all.
     priority: P1
     version: v0.6.0
     status: tested
     acceptance_criteria:
       - "AC-1-1: Happy-path AgentM run with next_label=`status:reviewing` triggers AgentMLabelWriter.ApplyNextLabel(repo, issueNum, `status:reviewing`) exactly once and stamps Result.Meta[`agentm_label_applied`]."
       - "AC-1-2: AgentM run with success=false still applies a non-empty next_label (routing decision); failure_reason still surfaces on Result.Meta."
-      - "AC-1-3: Runtime=claude-code / codex never invoke the label writer; the bridge gate is structural (Output() type assertion)."
+      - "AC-1-3: Runtime=claude-code / codex never invoke the label writer; the gate is capability-driven (Capabilities().ManagesOwnLabels) — the self-managed bridge runtimes carry no LabelWriter and their AgentBridgeSession has no Output()/next_label path. (ADR 2026-06-06 §1/§3; see REQ-164.)"
       - "AC-1-4: An empty next_label is a no-op (no label-writer call); a stale-agent issue (trigger label gone) skips the write to avoid reverting the state machine."
       - "AC-1-5: A span 'runtime.agentm.apply_next_label' is emitted with wb.next_label.applied=<label> stamped on success."
       - "AC-1-6: `go build ./... && go vet ./... && go test ./... -count=1` all pass."
       - "AC-1-7: project-index.yaml has this REQ entry referencing issue #332."
     code:
-      - internal/runtime/agent_bridge.go
+      - internal/runtime/agentm_runtime.go
       - internal/runtime/registry.go
       - internal/launcher/labelwriter_bridge.go
       - cmd/worker.go
@@ -7062,3 +7061,86 @@ requirements:
       - internal/worker/agent_config_resolve_test.go
     deps:
       - REQ-162
+
+  - id: REQ-164
+    title: Runtime Strategy interface — Capabilities descriptor + capability-driven label-write (ADR 2026-06-06 §1/§3)
+    description: >
+      Step §1 of the convergence refactor in
+      docs/decisions/2026-06-06-runtime-strategy-and-convergence.md
+      (folding in §3 "label-write-as-capability"). Before this change a
+      single AgentBridgeRuntime served BOTH codex and agentm, branching
+      internally on `if agentCfg.Runtime == config.RuntimeAgentM` for the
+      agentm-only behaviors (Output()→next_label extraction, LabelWriter
+      call, ControlObserver wiring, isStaleAgent, scenario/extension spec
+      fields, deterministic per-issue trace context, footer-suppressed
+      prompt). The Registry additionally carried an agentm special-case
+      (SetAgentMLabelWriter gated on `name == config.RuntimeAgentM`).
+
+      This change introduces a Capabilities descriptor on the Runtime
+      interface and splits the branchy bridge into clean per-runtime
+      strategies:
+
+      - `Runtime.Capabilities() Capabilities` returns {Sandboxed,
+        ManagesOwnLabels, NeedsHostGHCreds}. claude-code & codex →
+        {false, true, true} (host-exec, self-managed labels via
+        `gh issue edit`, needs host gh creds); agentm → {true, false,
+        false} (sandboxed via agent-env, coordinator owns labels, no
+        host creds in-process). The descriptor lets the claim filter and
+        a future runtime-benchmark harness reason about backends
+        uniformly; in this change it is USED to drive the label-write
+        decision (not dead).
+
+      - AgentBridgeRuntime becomes a SHARED host-exec core (backend
+        lifecycle, spec assembly, event pump, base Result assembly) that
+        codex composes directly with NO agentm branches and NO label
+        writer. The shared session machinery lives in
+        AgentBridgeSession.runCore so it is composed, not duplicated.
+
+      - AgentMRuntime is a sandboxed strategy that embeds the core and
+        layers the agentm-specific behavior: deterministic trace context,
+        scenario/extension spec fields, footer-suppressed prompt,
+        structured RESULT extraction, coordinator-side label writes, and
+        the control loop. Its AgentMSession embeds AgentBridgeSession and
+        overrides Run to add the Output()→next_label / LabelWriter /
+        stale-agent path. No `if RuntimeAgentM` name branch remains.
+
+      - Registry.SetAgentMLabelWriter (+ the `name == RuntimeAgentM` gate)
+        is replaced by Registry.SetLabelWriter, which installs the
+        LabelWriter on every runtime whose Capabilities().ManagesOwnLabels
+        is false (i.e. agentm) via a capability-gated SetLabelWriter
+        method, deduplicating aliases. cmd/worker.go and the launcher are
+        updated to the new wiring path. Label-write BEHAVIOR is unchanged
+        (REQ-146); only the WIRING path is capability-driven.
+
+      Pure structural refactor: external behavior and all existing passing
+      tests stay green. gha runner / SetSessionStarter / agent.Runner axis
+      is intentionally untouched (that is §6, a separate selection
+      mechanism).
+    priority: P1
+    version: v0.7.0
+    status: tested
+    acceptance_criteria:
+      - "AC-164-1: Runtime interface exposes Capabilities() Capabilities; ClaudeRuntime and the codex AgentBridgeRuntime return {Sandboxed:false, ManagesOwnLabels:true, NeedsHostGHCreds:true}; AgentMRuntime returns {Sandboxed:true, ManagesOwnLabels:false, NeedsHostGHCreds:false}. Covered by internal/runtime/capabilities_test.go (TestCapabilitiesPerRuntime)."
+      - "AC-164-2: No `if agentCfg.Runtime == config.RuntimeAgentM` (or equivalent runtime-name) branch remains in the bridge runtime/session; the agentm-specific behavior lives entirely on AgentMRuntime/AgentMSession in internal/runtime/agentm_runtime.go. codex composes the shared AgentBridgeRuntime core with no agentm branches."
+      - "AC-164-3: Label-write wiring is capability-driven: Registry.SetLabelWriter installs the writer only on runtimes whose Capabilities().ManagesOwnLabels is false (agentm); self-managed runtimes are skipped. SetAgentMLabelWriter and the registry agentm name-gate are removed. Covered by internal/runtime/capabilities_test.go (TestAgentMSetLabelWriterGatedByCapability) and internal/launcher/labelwriter_bridge_test.go (TestRegistry_OnlyAgentMGetsLabelWriter)."
+      - "AC-164-4: Existing AgentM label-write behavior (REQ-146) is preserved unchanged — AppliesNextLabelOnSuccess, LabelAppliedOnFailure, EmptyNextLabelIsNoOp, OtherRuntimesNeverWireLabelWriter all stay green."
+      - "AC-164-5: gha runner / SetSessionStarter starter callback / agent.Runner axis is untouched."
+      - "AC-164-6: `go build ./... && go vet ./... && go test ./... -count=1` all pass."
+    code:
+      - internal/runtime/capabilities.go
+      - internal/runtime/types.go
+      - internal/runtime/claude.go
+      - internal/runtime/agent_bridge.go
+      - internal/runtime/agentm_runtime.go
+      - internal/runtime/registry.go
+      - internal/launcher/launcher.go
+      - internal/launcher/types.go
+      - cmd/worker.go
+    tests:
+      - internal/runtime/capabilities_test.go
+      - internal/runtime/agentm_labelwriter_test.go
+      - internal/runtime/agentm_bridge_test.go
+      - internal/launcher/labelwriter_bridge_test.go
+    deps:
+      - REQ-146
+      - REQ-163

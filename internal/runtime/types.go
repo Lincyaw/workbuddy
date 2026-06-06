@@ -14,6 +14,7 @@ var ErrNotSupported = errors.New("launcher: not supported")
 
 type Runtime interface {
 	Name() string
+	Capabilities() Capabilities
 	Start(ctx context.Context, agent *config.AgentConfig, task *TaskContext) (Session, error)
 	Launch(ctx context.Context, agent *config.AgentConfig, task *TaskContext) (*Result, error)
 }
