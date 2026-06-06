@@ -8,7 +8,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -499,7 +501,9 @@ func (s *AgentBridgeSession) Run(ctx context.Context, events chan<- launchereven
 				meta["agentm_failure_reason"] = out.FailureReason
 			}
 			if out.NextLabel != "" {
-				if _, labelErr := s.applyAgentMNextLabel(ctx, out.NextLabel); labelErr != nil {
+				if s.isStaleAgent(ctx) {
+					meta["agentm_label_skipped"] = "stale: current issue state no longer matches agent trigger"
+				} else if _, labelErr := s.applyAgentMNextLabel(ctx, out.NextLabel); labelErr != nil {
 					meta["agentm_label_error"] = labelErr.Error()
 				}
 			}
@@ -608,6 +612,44 @@ func (s *AgentBridgeSession) applyAgentMNextLabel(ctx context.Context, label str
 	}
 	span.SetAttributes(attribute.String("wb.next_label.applied", label))
 	return label, nil
+}
+
+// isStaleAgent checks whether the issue still carries the status label that
+// triggered this agent. If the state has already moved on (another agent's
+// label write landed first), applying this agent's next_label would revert
+// the state machine — a silent corruption. Best-effort: gh CLI failure is
+// treated as "not stale" so the label write proceeds rather than silently
+// dropping results.
+func (s *AgentBridgeSession) isStaleAgent(ctx context.Context) bool {
+	if s.AgentCfg == nil || s.Task == nil || len(s.AgentCfg.Triggers) == 0 {
+		return false
+	}
+	triggerState := s.AgentCfg.Triggers[0].State
+	if triggerState == "" {
+		return false
+	}
+	expectedLabel := "status:" + strings.ReplaceAll(triggerState, "_", "-")
+
+	bin, err := exec.LookPath("gh")
+	if err != nil {
+		return false
+	}
+	out, err := exec.CommandContext(ctx, bin,
+		"issue", "view", fmt.Sprintf("%d", s.Task.Issue.Number),
+		"--repo", s.Task.Repo,
+		"--json", "labels", "--jq", ".labels[].name",
+	).CombinedOutput()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.TrimSpace(line) == expectedLabel {
+			return false
+		}
+	}
+	log.Printf("[runtime] stale agent %s for %s#%d: expected label %q not found, skipping label transition",
+		s.AgentCfg.Name, s.Task.Repo, s.Task.Issue.Number, expectedLabel)
+	return true
 }
 
 func buildAgentMPRBody(repo string, issueNum int, out *agentm.Output) string {
