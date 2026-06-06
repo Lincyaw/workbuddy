@@ -91,9 +91,9 @@ func (w *DistributedWorker) ExecuteTask(ctx context.Context, task *workerclient.
 	if task == nil {
 		return fmt.Errorf("worker: task is required")
 	}
-	agentCfg, ok := w.deps.Config.Agents[task.AgentName]
-	if !ok {
-		return fmt.Errorf("worker: agent %q not found in local config", task.AgentName)
+	agentCfg, err := w.resolveAgentConfig(task)
+	if err != nil {
+		return err
 	}
 	if w.deps.Executor == nil {
 		return fmt.Errorf("worker: executor is required")
@@ -348,6 +348,29 @@ func (w *DistributedWorker) ExecuteTask(ctx context.Context, task *workerclient.
 		}
 	}
 	return nil
+}
+
+// resolveAgentConfig selects the agent config for a task. It prefers the
+// per-repo config the coordinator resolved and shipped over the wire
+// (ADR 2026-06-06 §2) — this is what lets a single worker serve multiple
+// repos with different agent configs/images without a local config edit.
+//
+// The local-config lookup is a TRANSITIONAL fallback for in-flight /
+// mixed-version deployments where the coordinator does not yet populate
+// task.Agent; remove it once §1 lands and all coordinators ship config over
+// the wire.
+func (w *DistributedWorker) resolveAgentConfig(task *workerclient.Task) (*config.AgentConfig, error) {
+	if task.Agent != nil {
+		return task.Agent, nil
+	}
+	if w.deps.Config == nil {
+		return nil, fmt.Errorf("worker: agent %q not found: no wire config and no local config", task.AgentName)
+	}
+	local, ok := w.deps.Config.Agents[task.AgentName]
+	if !ok {
+		return nil, fmt.Errorf("worker: agent %q not found in local config", task.AgentName)
+	}
+	return local, nil
 }
 
 // submitResultWithRetry attempts SubmitResult up to submitResultMaxAttempts

@@ -7030,3 +7030,47 @@ requirements:
     deps:
       - REQ-160
       - REQ-161
+
+  - id: REQ-163
+    title: Stateless worker — per-task agent config travels over the wire (ADR 2026-06-06 §2)
+    description: >
+      Today the worker resolves agent config from its OWN name-keyed local
+      config (internal/worker/distributed.go: w.deps.Config.Agents[task.AgentName]).
+      The coordinator already holds per-repo agent config (internal/app/
+      repo_runtime.go, including dev_container_image), but the dispatch wire DTO
+      shipped only AgentName, so a single shared worker could not serve multiple
+      repos with different agent configs/images.
+
+      This is step §2 of the convergence refactor in
+      docs/decisions/2026-06-06-runtime-strategy-and-convergence.md. The
+      coordinator now resolves (repo, agentName) → *config.AgentConfig from the
+      PER-REPO registration (PollerManager.ResolveAgentConfig, returning a copy)
+      and ships the resolved config in the dispatched task via a new Agent field
+      on both TaskPollResponse (coordinator) and workerclient.Task (wire DTO).
+      The worker prefers task.Agent and only falls back to the local-config
+      lookup when task.Agent is nil — a TRANSITIONAL fallback for mixed-version
+      rollout, to be removed once §1 lands and all coordinators ship config over
+      the wire. The runtime-alias defaulting is preserved on either source.
+
+      Consequence: the worker becomes stateless w.r.t. repo config — a new repo
+      is dispatchable via repo register alone, and per-repo dev images fall out
+      for free.
+    priority: P1
+    version: v0.7.0
+    status: tested
+    acceptance_criteria:
+      - "AC-163-1: workerclient.Task carries an Agent *config.AgentConfig field that JSON round-trips cleanly and is omitted when nil (backward-compatible wire); covered by internal/workerclient/task_agent_test.go."
+      - "AC-163-2: the coordinator dispatch path (claimNextTask) populates TaskPollResponse.Agent from per-repo registration so two repos declaring different dev_container_image/runtime for the same agent name yield distinct dispatched Agent configs; PollerManager.ResolveAgentConfig returns a deep copy (AgentConfig.DeepCopy) callers cannot use to mutate live config including its slice/map fields; the claimNextTask→TaskPollResponse seam carries the resolved Agent end-to-end; covered by internal/app/resolve_agent_config_test.go (incl. TestClaimNextTaskPopulatesAgentFromRegistration)."
+      - "AC-163-3: the worker uses task.Agent when present and falls back to the local-config lookup only when task.Agent is nil (erroring if neither has the agent); covered by internal/worker/agent_config_resolve_test.go. AgentConfig.Prompt/SourcePath have no json tags so the agent's instructions survive the dispatch wire; covered by internal/workerclient/task_agent_test.go (Prompt round-trip)."
+    code:
+      - internal/workerclient/client.go
+      - internal/app/coordinator.go
+      - internal/app/repo_runtime.go
+      - internal/worker/distributed.go
+      - internal/config/types.go
+    tests:
+      - internal/workerclient/task_agent_test.go
+      - internal/app/resolve_agent_config_test.go
+      - internal/worker/agent_config_resolve_test.go
+    deps:
+      - REQ-162

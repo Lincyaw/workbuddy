@@ -159,6 +159,45 @@ type AgentConfig struct {
 	SourcePath string           `yaml:"-"`
 }
 
+// NOTE: Prompt and SourcePath have no JSON tags on purpose. AgentConfig is
+// serialized to JSON when the coordinator ships per-repo agent config to the
+// worker over the dispatch wire (workerclient.Task.Agent / ADR 2026-06-06 §2).
+// Prompt carries the agent's markdown instructions, so adding `json:"-"` here
+// would silently drop the agent's prompt from every dispatched task.
+
+// DeepCopy returns a copy of the AgentConfig with all reference-typed fields
+// (slices and nested maps) independently allocated, so mutating the returned
+// value cannot affect the original. The nested struct fields (Policy,
+// Permissions, OutputContract, GitHubActions) hold only scalars and are copied
+// by the shallow struct assignment. Used by the coordinator dispatch path to
+// hand out an isolated copy of the live per-repo registration config.
+func (a *AgentConfig) DeepCopy() *AgentConfig {
+	if a == nil {
+		return nil
+	}
+	cp := *a
+	if a.Triggers != nil {
+		cp.Triggers = append([]TriggerRule(nil), a.Triggers...)
+	}
+	if a.Context != nil {
+		cp.Context = append([]string(nil), a.Context...)
+	}
+	if a.Extensions != nil {
+		cp.Extensions = make([]AgentExtension, len(a.Extensions))
+		for i, ext := range a.Extensions {
+			cp.Extensions[i] = ext
+			if ext.Config != nil {
+				cfg := make(map[string]any, len(ext.Config))
+				for k, v := range ext.Config {
+					cfg[k] = v
+				}
+				cp.Extensions[i].Config = cfg
+			}
+		}
+	}
+	return &cp
+}
+
 // AgentExtension is one `-e module[:json]` pair passed to the AgentM CLI.
 // Module is a dotted Python import path; Config is serialized to JSON and
 // appended after a colon when non-empty.

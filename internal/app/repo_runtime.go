@@ -594,6 +594,26 @@ func (pm *PollerManager) MarkAgentCompletedWithDecision(repo string, issueNum in
 	runtime.StateMachine.MarkAgentCompletedWithDecision(repo, issueNum, taskID, agentName, exitCode, currentLabels, decision)
 }
 
+// ResolveAgentConfig returns a deep copy of the per-repo agent config for
+// (repo, agentName), looked up from that repo's own registration. It returns
+// nil when the repo is not registered or has no agent by that name, leaving
+// the worker to fall back to its local config. A deep copy (via
+// AgentConfig.DeepCopy) is returned so callers cannot mutate the live
+// registration config — including its slice/map fields (ADR 2026-06-06 §2).
+func (pm *PollerManager) ResolveAgentConfig(repo, agentName string) *config.AgentConfig {
+	pm.mu.RLock()
+	runtime := pm.runtimes[repo]
+	pm.mu.RUnlock()
+	if runtime == nil || runtime.Config == nil {
+		return nil
+	}
+	agent, ok := runtime.Config.Agents[agentName]
+	if !ok || agent == nil {
+		return nil
+	}
+	return agent.DeepCopy()
+}
+
 // ClearInflight removes one repo runtime's in-memory inflight entry.
 func (pm *PollerManager) ClearInflight(repo string, issueNum int) (*statemachine.InflightGroupSnapshot, bool) {
 	pm.mu.RLock()

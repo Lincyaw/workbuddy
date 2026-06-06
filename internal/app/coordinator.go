@@ -152,6 +152,12 @@ type TaskPollResponse struct {
 	RolloutGroupID string                       `json:"rollout_group_id,omitempty"`
 	Roles          []string                     `json:"roles,omitempty"`
 	Synthesis      *runtimepkg.SynthesisContext `json:"synthesis,omitempty"`
+	// Agent is the per-repo resolved agent config the coordinator looked up
+	// from its own per-repo registration. Shipping it over the wire lets a
+	// single worker serve multiple repos with different agent configs/images
+	// without a local config edit (ADR 2026-06-06 §2). nil when the repo's
+	// config has no matching agent (the worker falls back to local config).
+	Agent *config.AgentConfig `json:"agent,omitempty"`
 }
 
 // RepoRegisterRequest is the body of POST /api/v1/repos/register.
@@ -902,6 +908,14 @@ func (s *FullCoordinatorServer) claimNextTask(worker *store.WorkerRecord) (*Task
 		"worker_id":  worker.ID,
 		"agent_name": task.AgentName,
 	})
+	var agentCfg *config.AgentConfig
+	if s.Pollers != nil {
+		// Resolve the per-repo agent config and ship it in the dispatched
+		// task so the worker need not re-resolve from its own local config
+		// (ADR 2026-06-06 §2). nil here means the repo's registration has no
+		// matching agent; the worker falls back to its local config.
+		agentCfg = s.Pollers.ResolveAgentConfig(task.Repo, task.AgentName)
+	}
 	return &TaskPollResponse{
 		TaskID:         task.ID,
 		Repo:           task.Repo,
@@ -914,6 +928,7 @@ func (s *FullCoordinatorServer) claimNextTask(worker *store.WorkerRecord) (*Task
 		RolloutGroupID: task.RolloutGroupID,
 		Roles:          append([]string(nil), roles...),
 		Synthesis:      s.buildSynthesisPayload(task),
+		Agent:          agentCfg,
 	}, nil
 }
 

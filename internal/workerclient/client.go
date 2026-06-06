@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/config"
 	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
@@ -75,6 +76,14 @@ type Task struct {
 	RolloutGroupID string                       `json:"rollout_group_id,omitempty"`
 	Roles          []string                     `json:"roles,omitempty"`
 	Synthesis      *runtimepkg.SynthesisContext `json:"synthesis,omitempty"`
+	// Agent carries the per-repo resolved agent config the coordinator
+	// looked up from its own per-repo registration (repo, agent_name) →
+	// AgentConfig. When populated, the worker uses it directly instead of
+	// re-resolving from its own local config — this is what makes a single
+	// worker stateless w.r.t. repo config (ADR 2026-06-06 §2). May be nil
+	// against an older coordinator that does not yet ship config over the
+	// wire; the worker then falls back to its local config.
+	Agent *config.AgentConfig `json:"agent,omitempty"`
 }
 
 type ResultRequest struct {
