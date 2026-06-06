@@ -1,6 +1,6 @@
 ---
 name: default
-description: Default 2-agent lifecycle for any workbuddy-tracked issue
+description: Default dev → review → merge lifecycle for any workbuddy-tracked issue
 trigger:
   issue_label: "workbuddy"
 max_retries: 3
@@ -9,13 +9,20 @@ max_review_cycles: 3
 
 ## Default Workflow
 
-Two-agent state machine applied to every issue labeled `workbuddy`. Humans
-author issues with a `## Acceptance Criteria` section; agents decide
-transitions by modifying issue labels via `gh issue edit`. The state machine
-only reacts to label changes — it doesn't care whether a human or an agent
-changed the label. Bug vs feature distinction lives in optional `type:*`
-classification labels, not in separate workflows — the execution path is the
-same either way.
+Built-in preset selected by the `workbuddy` trigger label (see
+`docs/implemented/workflow-presets.md` for the preset model and how to author
+your own). The
+state machine reacts only to label changes — it doesn't care whether a human
+or an agent flipped the label. Bug vs feature distinction lives in optional
+`type:*` classification labels, not in separate workflows — the execution path
+is the same either way.
+
+The lifecycle is dev → review → merge: the dev agent produces the artifact and
+opens a PR, the review agent verifies it against the acceptance criteria, and
+the merge agent rebases onto main, runs a quality check, squash-merges, and
+closes the issue. `synthesizing` is a conditional rollout-reduction branch
+between develop and review (kept for fan-out runs); single-rollout issues skip
+straight to reviewing.
 
 ```yaml
 states:
@@ -38,8 +45,18 @@ states:
     enter_label: "status:reviewing"
     agent: review-agent
     transitions:
-      "status:done": done
+      "status:merging": merging
       "status:developing": developing
+
+  merging:
+    enter_label: "status:merging"
+    agent: merge-agent
+    transitions:
+      "status:merged": merged
+      "status:developing": developing
+
+  merged:
+    enter_label: "status:merged"
 
   blocked:
     enter_label: "status:blocked"
@@ -48,9 +65,6 @@ states:
     # and flip the label back to status:developing.
     transitions:
       "status:developing": developing
-
-  done:
-    enter_label: "status:done"
 
   failed:
     enter_label: "status:failed"
@@ -81,9 +95,9 @@ the next genuine review→developing increments to 1, not cap+1.
 `workbuddy issue restart` is still available for explicit, full-state
 restarts that also clear `first_dispatch_at` (long-flight clock).
 
-`status:done` is the post-merge terminal label; the review-agent (or the human
-who merged the PR) is responsible for closing the issue. The state machine
-does not close issues on behalf of agents.
+`status:merged` is the terminal label. The merge agent squash-merges the PR
+and closes the issue; the state machine itself does not close issues or merge
+PRs on behalf of agents.
 
 ### State graph
 
@@ -92,17 +106,20 @@ does not close issues on behalf of agents.
          │                │
          │      (human rewrites issue)
          ▼                │
-    developing ◄──────────┘
-         │  ▲
-         │  │ (review: any criterion fails; retry, max 3)
-         ▼  │
-     reviewing ──► done (all criteria pass; issue close stays with merge owner)
+    developing ◄──────────┴───────────────┐
+         │  ▲                             │
+         │  │ (review/merge: send back)   │ (rollout fan-in)
+         ▼  │                             │
+   (synthesizing) ──► reviewing ──► merging ──► merged (terminal)
+```
 
-Dev agent: reads `## Acceptance Criteria`, produces the artifact, flips to
-reviewing (or to blocked if criteria missing).
-Review agent: verifies each criterion against the artifact, flips to done or
-back to developing. Closing the issue after merge remains the responsibility of
-the review-agent or the human who merged the PR.
+Dev agent: reads `## Acceptance Criteria`, produces the artifact, opens a PR,
+flips to reviewing (or to synthesizing for multi-rollout fan-in, or to blocked
+if criteria missing).
+Review agent: verifies each criterion against the artifact, flips to merging or
+back to developing.
+Merge agent: rebases onto main, resolves conflicts, runs a quality check,
+squash-merges, closes the issue, flips to merged (or back to developing on a
+failed merge).
 Any revisit of a state — including developing↔blocked — counts toward
 max_retries; exceeding the limit will record retry/failure intent.
-```

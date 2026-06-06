@@ -22,7 +22,7 @@
 | `current-architecture.md` | 当前系统形态、主链路、GH call boundary 和 retry/failure 事实 | `cmd/serve.go`, `internal/router/`, `internal/statemachine/`, `internal/store/` |
 | `current-config-workflow-and-agents.md` | 当前 config/agent/workflow schema 与触发行为 | `internal/config/`, `.github/workbuddy/agents/`, `.github/workbuddy/workflows/` |
 | `agent-schema-vnext.md` | agent schema vNext 的兼容边界、policy/prompt/output_contract 与校验行为 | `internal/config/`, `internal/launcher/`, `.github/workbuddy/agents/` |
-| `agent-catalog.md` | 2-agent catalog（dev-agent, review-agent）与各自 schema/output contract | `.github/workbuddy/agents/`, `internal/config/loader.go` |
+| `agent-catalog.md` | workflow-scoped agent catalog（default preset: dev/review/merge；engineering preset 追加 spec/spec-review/test-gen）与各自 schema/output contract | `.github/workbuddy/agents/`, `internal/config/loader.go` |
 | `current-runtime-reporting-and-audit.md` | launcher、reporter、audit、sessions UI 行为 | `internal/launcher/`, `internal/agent/codex/`, `internal/reporter/`, `internal/audit/`, `internal/webui/` |
 | `remote-runner-github-actions.md` | GitHub Actions remote runner 的 agent config、dispatch/poll 行为 | `internal/config/`, `internal/launcher/`, `.github/workflows/` |
 | `runtime-session-architecture.md` | Runtime.Start → Session.Run 主链路，post-Run label validation | `internal/worker/distributed.go`, `internal/worker/executor.go`, `internal/runtime/`, `internal/launcher/`, `internal/labelcheck/`, `internal/reporter/`, `internal/audit/` |
@@ -35,6 +35,7 @@
 | `runtime-migration-plan.md` | Runtime/Session 迁移完成状态、command deprecation 路线 | `internal/runtime/`, `internal/launcher/process.go` |
 | `pipeline-observability-and-diagnosis.md` | status --tasks/--events/--watch/--stuck、cache invalidate、issue restart、diagnose | `cmd/status.go`, `cmd/diagnose.go`, `cmd/cache_invalidate.go`, `cmd/admin_restart_issue.go` |
 | `worker-execution-boundary.md` | Worker 执行核心、`internal/worker/` 拆分、runtime 收口、GitHub/session boundary（#146~#151 已落地） | `internal/worker/`, `internal/runtime/`, `internal/ghadapter/`, `internal/launcher/` |
+| `workflow-presets.md` | 可配置多 preset 工作流模型：内置 default（dev→review→merge）/ engineering preset、trigger-label 选择、自定义 preset 编写（ADR 2026-06-06 §4） | `.github/workbuddy/workflows/`, `cmd/initdata/`, `deploy/helm/workbuddy/templates/config-configmap.yaml`, `internal/validate/cross_refs.go` |
 
 ## 维护规则
 

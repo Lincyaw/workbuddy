@@ -40,6 +40,7 @@
 - `docs/implemented/distributed-topology-and-cli.md`
 - `docs/implemented/runtime-migration-plan.md`
 - `docs/implemented/pipeline-observability-and-diagnosis.md`
+- `docs/implemented/workflow-presets.md`
 
 ### Planned
 

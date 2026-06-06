@@ -32,10 +32,13 @@ data:
 
     ## Default Workflow
 
-    Three-agent state machine: dev implements, review verifies, merge ships.
-    In coordinator-managed (agentm) mode workbuddy flips labels using the
+    Built-in default preset (dev → review → merge): dev implements, review
+    verifies, merge ships. `synthesizing` is a conditional rollout-reduction
+    branch between develop and review (single-rollout issues skip it). In
+    coordinator-managed (agentm) mode workbuddy flips labels using the
     structured `next_label` the agent returns and squash-merges the PR when
-    the merge-agent approves.
+    the merge-agent approves. This mirrors the in-repo preset at
+    `.github/workbuddy/workflows/default.md`.
 
     ```yaml
     states:
@@ -43,8 +46,16 @@ data:
         enter_label: "status:developing"
         agent: dev-agent
         transitions:
+          "status:synthesizing": synthesizing
           "status:reviewing": reviewing
           "status:blocked": blocked
+
+      synthesizing:
+        enter_label: "status:synthesizing"
+        agent: review-agent
+        mode: synthesize
+        transitions:
+          "status:reviewing": reviewing
 
       reviewing:
         enter_label: "status:reviewing"
@@ -75,7 +86,7 @@ data:
   workflow-engineering.md: |
     ---
     name: engineering
-    description: Spec-driven engineering workflow with parallel test generation and development
+    description: Spec-driven engineering workflow (spec → spec-review → test-gen → dev → review → merge)
     trigger:
       issue_label: "engineering"
     max_retries: 3
@@ -84,9 +95,10 @@ data:
 
     ## Engineering Workflow
 
-    Five-state spec-driven pipeline. Tests are generated from the spec BEFORE
-    implementation exists. A test-gen agent and dev agent run in parallel during
-    the developing state.
+    Spec-driven pipeline. Tests are generated from the spec BEFORE the
+    implementation exists: spec-review hands off to a dedicated test-generating
+    stage, then the dev agent implements against those tests. This mirrors the
+    in-repo preset at `.github/workbuddy/workflows/engineering.md`.
 
     ```yaml
     states:

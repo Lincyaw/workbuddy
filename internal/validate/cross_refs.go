@@ -23,7 +23,7 @@ const (
 	// CodeUnknownRuntime — `runtime:` value not in the registered set.
 	CodeUnknownRuntime = "WB-X003"
 
-	// CodeUnknownRole — `role:` value not in {dev, review}.
+	// CodeUnknownRole — `role:` value not in {dev, review, merge}.
 	CodeUnknownRole = "WB-X004"
 
 	// CodeDuplicateEnterLabel — two states in one workflow share the
@@ -45,11 +45,16 @@ var ValidRuntimes = map[string]struct{}{
 	"agentm":           {},
 }
 
-// ValidRoles is the canonical 2-role catalog. The project deliberately
-// keeps the role set tiny (see CLAUDE.md / docs/decisions/2026-04-15-agent-role-consolidation.md).
+// ValidRoles is the canonical role catalog. Roles are scoped to the active
+// workflow preset (see CLAUDE.md / docs/decisions/2026-06-06-runtime-strategy-and-convergence.md
+// §4, amending docs/decisions/2026-04-15-agent-role-consolidation.md): the default
+// preset uses dev/review/merge; the engineering preset additionally uses the
+// spec/spec-review/test-gen agents (which carry dev/review roles). The set is
+// kept small and matches schemas/agent.schema.json.
 var ValidRoles = map[string]struct{}{
 	"dev":    {},
 	"review": {},
+	"merge":  {},
 }
 
 // validateAgentCrossRefs runs WB-X002, WB-X003, WB-X004 on a single agent.
@@ -103,7 +108,7 @@ func validateAgentCrossRefs(agent *agentDoc) []Diagnostic {
 				Severity: SeverityError,
 				Code:     CodeUnknownRole,
 				Message: fmt.Sprintf(
-					"agent %q declares unknown role %q (valid: dev, review)",
+					"agent %q declares unknown role %q (valid: dev, review, merge)",
 					agent.Name, role,
 				),
 			})

@@ -62,7 +62,7 @@ func init() {
 	serveCmd.Flags().IntP("port", "p", defaultPort, "Coordinator port used when --listen is omitted")
 	serveCmd.Flags().Duration("poll-interval", defaultPollInterval, "GitHub poll interval")
 	serveCmd.Flags().Int("max-parallel-tasks", 0, fmt.Sprintf("Worker task concurrency override (0 = worker default, min(NumCPU, %d))", defaultMaxParallelTasks))
-	serveCmd.Flags().StringSlice("roles", []string{"dev", "test", "review"}, "Worker roles")
+	serveCmd.Flags().StringSlice("roles", []string{"dev", "review", "merge"}, "Worker roles")
 	serveCmd.Flags().String("runtime", config.RuntimeClaudeCode, "Embedded worker runtime capability: claude-code, codex, or agentm")
 	serveCmd.Flags().String("config-dir", ".github/workbuddy", "Configuration directory")
 	serveCmd.Flags().String("db-path", ".workbuddy/workbuddy.db", "SQLite database path shared by coordinator and worker")

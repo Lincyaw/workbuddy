@@ -160,6 +160,10 @@ func initFiles(repo string) ([]scaffoldFile, error) {
 	if err != nil {
 		return nil, fmt.Errorf("init: load review-agent template: %w", err)
 	}
+	mergeAgent, err := fs.ReadFile(initTemplates, "initdata/agents/merge-agent.md")
+	if err != nil {
+		return nil, fmt.Errorf("init: load merge-agent template: %w", err)
+	}
 	workflow, err := fs.ReadFile(initTemplates, "initdata/workflows/default.md")
 	if err != nil {
 		return nil, fmt.Errorf("init: load workflow template: %w", err)
@@ -173,6 +177,7 @@ func initFiles(repo string) ([]scaffoldFile, error) {
 		{path: ".github/workbuddy/config.yaml", mode: 0o644, content: configBuf.Bytes()},
 		{path: ".github/workbuddy/agents/dev-agent.md", mode: 0o644, content: devAgent},
 		{path: ".github/workbuddy/agents/review-agent.md", mode: 0o644, content: reviewAgent},
+		{path: ".github/workbuddy/agents/merge-agent.md", mode: 0o644, content: mergeAgent},
 		{path: ".github/workbuddy/workflows/default.md", mode: 0o644, content: workflow},
 		{path: ".workbuddy/.gitignore", mode: 0o644, content: runtimeGitignore},
 	}, nil

@@ -38,6 +38,9 @@ func TestRunInitWithOpts_CreatesFunctionalServeScaffold(t *testing.T) {
 	if _, ok := cfg.Agents["review-agent"]; !ok {
 		t.Fatalf("review-agent missing from config")
 	}
+	if _, ok := cfg.Agents["merge-agent"]; !ok {
+		t.Fatalf("merge-agent missing from config")
+	}
 	if _, ok := cfg.Workflows["default"]; !ok {
 		t.Fatalf("default workflow missing from config")
 	}
@@ -76,7 +79,7 @@ func TestRunInitWithOpts_JSON(t *testing.T) {
 	if len(result.Directories) != len(initDirs()) {
 		t.Fatalf("directories = %v", result.Directories)
 	}
-	if len(result.Files) != 5 {
+	if len(result.Files) != 6 {
 		t.Fatalf("files = %v", result.Files)
 	}
 }

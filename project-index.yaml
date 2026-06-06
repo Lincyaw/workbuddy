@@ -7144,3 +7144,68 @@ requirements:
     deps:
       - REQ-146
       - REQ-163
+
+  - id: REQ-165
+    title: Configurable multi-preset workflows + merge-gate default + catalog reconciliation (ADR 2026-06-06 §4)
+    description: >
+      Step §4 of the convergence refactor in
+      docs/decisions/2026-06-06-runtime-strategy-and-convergence.md.
+      Workflows are configurable and multi-preset: a repo selects a built-in
+      preset (or authors a custom one) by trigger label
+      (WorkflowTrigger.IssueLabel). This change reconciles the three
+      previously-divergent workflow definitions (repo default.md ending in
+      a no-merge-gate `done`, the Helm default with a merge gate, and an
+      engineering.md missing the test-generating stage) into two coherent,
+      catalog-aligned presets and fixes the CLAUDE.md/catalog contradiction
+      that asserted a global two-role cap.
+
+      Canonical shapes:
+      - default preset (trigger `workbuddy`):
+        developing → (synthesizing) → reviewing → merging → merged, with
+        blocked/failed and the standard back edges. Roles dev/review/merge.
+      - engineering preset (trigger `engineering`):
+        specifying → spec_review → test_generating → developing → reviewing →
+        merging → merged, with blocked/failed and the standard back edges.
+
+      Reconciliation: the in-repo workflows, the `workbuddy init` scaffold
+      (cmd/initdata), and the Helm-bundled presets are brought into parity;
+      merge-agent.md is added to the repo + init catalog (it previously
+      existed only as a Helm prompt); the validator role catalog (ValidRoles)
+      and schemas/agent.schema.json both admit dev/review/merge; serve.go's
+      unbacked `test` default role is replaced with dev/review/merge.
+      MergeObjective() in control/objective.go is now reachable via the
+      `merging` state in both presets (left dormant by design — not
+      force-wired). docs/implemented/workflow-presets.md documents the preset
+      model and custom-preset authoring.
+    priority: P1
+    version: v0.7.0
+    status: tested
+    acceptance_criteria:
+      - "AC-165-1: The repo default preset (.github/workbuddy/workflows/default.md) is developing → (synthesizing) → reviewing → merging → merged with blocked + terminal merged/failed; the engineering preset (.github/workbuddy/workflows/engineering.md) inserts a sequential test_generating state and ends in merging → merged. `workbuddy validate` resolves every referenced agent and passes (exit 0)."
+      - "AC-165-2: merge-agent.md exists in .github/workbuddy/agents/ and cmd/initdata/agents/ with role: merge, triggers state merging, frontmatter shape consistent with dev-agent.md/review-agent.md and valid against schemas/agent.schema.json."
+      - "AC-165-3: The validator role catalog admits merge (internal/validate/cross_refs.go ValidRoles = dev/review/merge); WB-X004 no longer fires on role: merge. Covered by internal/validate tests staying green."
+      - "AC-165-4: serve.go default roles are {dev, review, merge}; the unbacked `test` role is removed and nothing else hardcodes it."
+      - "AC-165-5: Helm and repo presets are in parity — Helm default carries synthesizing; Helm engineering carries the sequential test_generating stage; both end in merged."
+      - "AC-165-6: CLAUDE.md states roles are defined by the active workflow preset (default dev/review/merge, engineering adds spec/spec-review/test-gen), references ADR 2026-06-06 §4 and the amended 2026-04-15 ADR, and the runtime line lists claude-code|codex|agentm. docs/implemented/workflow-presets.md documents the preset/selection/custom-authoring model."
+      - "AC-165-7: `workbuddy init` scaffolds the merge-gate default preset including merge-agent.md; TestRunInitWithOpts asserts merge-agent presence and the 6-file scaffold."
+      - "AC-165-8: `go build ./... && go vet ./... && go test ./... -count=1`, `workbuddy validate`, and `workbuddy validate-docs --strict` all pass."
+    code:
+      - .github/workbuddy/workflows/default.md
+      - .github/workbuddy/workflows/engineering.md
+      - .github/workbuddy/agents/merge-agent.md
+      - .github/workbuddy/agents/spec-review-agent.md
+      - cmd/initdata/workflows/default.md
+      - cmd/initdata/agents/merge-agent.md
+      - cmd/init.go
+      - cmd/serve.go
+      - internal/validate/cross_refs.go
+      - deploy/helm/workbuddy/templates/config-configmap.yaml
+      - CLAUDE.md
+      - docs/implemented/workflow-presets.md
+    tests:
+      - cmd/init_test.go
+      - cmd/validate_test.go
+      - internal/validate/validate_codes_test.go
+    deps:
+      - REQ-014
+      - REQ-163

@@ -2,7 +2,7 @@
 
 GitHub Issue-driven agent orchestration platform. Hub-Spoke architecture: a Coordinator polls GitHub Issues and manages the label-based state machine; Workers execute agent instances (Claude Code, Codex, etc.). Agents follow the **Agent-as-Router** pattern (LangGraph-style) — each agent decides the next state by modifying issue labels via `gh issue edit`.
 
-The catalog is deliberately minimal: only two roles exist, `role:dev` and `role:review`. No `test-agent`. Tests are covered by acceptance criteria in the issue; dev-agent produces tests as part of its artifact; review-agent verifies them. See `docs/decisions/2026-04-15-agent-role-consolidation.md`.
+Roles are defined by the **active workflow preset**, not fixed globally. The built-in `default` preset uses `role:dev` → `role:review` → `role:merge` (dev implements + tests, review verifies, merge ships). The built-in `engineering` preset additionally uses the spec / spec-review / test-gen agents (spec-driven: tests are generated from the spec before implementation). Selection is by trigger label (per repo); custom presets are supported. See `docs/implemented/workflow-presets.md` for the preset model and `docs/decisions/2026-06-06-runtime-strategy-and-convergence.md` §4 (which amends `docs/decisions/2026-04-15-agent-role-consolidation.md` — the minimalism principle still holds *within* a workflow, but the catalog is now workflow-scoped).
 
 ## Architecture
 
@@ -19,11 +19,14 @@ The catalog is deliberately minimal: only two roles exist, `role:dev` and `role:
                     │         │
                  Worker A  Worker B
                  repo:X    repo:Y
-                 role:dev  role:dev
-                 role:     role:
-                 review    review
+                 roles:    roles:
+                 dev,      dev,
+                 review,   review,
+                 merge     merge
                  runtime:  runtime:
                  claude    codex
+       (roles come from the active workflow preset;
+        engineering preset adds spec/spec-review/test-gen)
 ```
 
 One runtime topology: the Worker always talks to the Coordinator over HTTP.
@@ -132,7 +135,7 @@ Simpler code that maps clearly to requirements > clever abstractions.
 - Testing strategy: unit tests use mock/fake for `gh` CLI calls; integration tests use real `gh` against a test repo
 - File naming: Go standard — lowercase, underscore separated, `_test.go` suffix for tests
 - Agent config: `command` field MUST include routing instructions (gh issue edit for label changes)
-- Agent config: `runtime` field selects execution backend (claude-code | codex), default claude-code
+- Agent config: `runtime` field selects execution backend (claude-code | codex | agentm), default claude-code
 - GH call boundary: Go code only reads GitHub (Poller: gh issue/pr list) and writes comments (Reporter: gh issue comment). Label changes are done by agent subprocesses themselves via `gh issue edit`. Do not add GH write operations to Go code for label manipulation. **Exception**: For `runtime: agentm` (coordinator-managed mode), label changes are applied by coordinator via `internal/labelwriter`. This is the only sanctioned Go-side label write path.
 - Session audit: Agent execution produces session artifacts (conversation logs, tool call history) that must be captured and stored alongside stdout/stderr
 - Editor JSON Schemas: `schemas/agent.schema.json` and `schemas/workflow.schema.json` describe the YAML frontmatter for `.github/workbuddy/agents/*.md` and `.github/workbuddy/workflows/*.md`. Wire them up in your editor (e.g. VSCode `yaml.schemas`) for autocomplete + inline lints. The state-machine YAML embedded in the workflow Markdown body is enforced by `workbuddy validate`, not by the workflow JSON Schema.

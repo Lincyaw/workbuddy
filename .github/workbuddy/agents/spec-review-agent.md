@@ -8,7 +8,9 @@ runtime: codex
 policy:
   sandbox: danger-full-access
   approval: never
-  timeout: 15m
+  # Must be >= worker.stale_inference.idle_threshold (30m) or the watchdog
+  # kills the agent before its own timeout fires (validator code WB-S001).
+  timeout: 30m
 context:
   - Repo
   - Issue.Number
