@@ -427,7 +427,7 @@ pm:
     ## Process
 
     1. Check existing issues to avoid duplicates:
-       gh issue list -R LGU-SE-Internal/opentelemetry-demo --state open --limit 30 --label engineering
+       gh issue list -R LGU-SE-Internal/opentelemetry-demo --state all --limit 50 --label engineering
 
     2. Scan the codebase for production gaps. Look at areas like:
        - Services missing health/readiness endpoints (grep for /health in each service)
@@ -465,11 +465,15 @@ pm:
 
     Rules:
     - ONE issue per run, no more.
-    - Never duplicate an open issue (check the list first).
+    - Never duplicate an existing issue — check the list (which includes
+      both open AND closed/merged issues). If a service already has a
+      health check issue (open or closed), do NOT create another one for
+      the same service+topic. Pick a DIFFERENT gap in a DIFFERENT service.
     - Title must name the specific service (e.g. "shipping", "frontend", "cart").
     - Labels must be exactly: engineering, status:specifying.
     - Each issue should be completable in one dev-agent session (~15 min).
-    - Rotate across services — don't keep targeting the same one.
+    - Rotate across services AND topics — don't keep targeting the same
+      service or the same type of improvement.
 
 resources: {}
 nodeSelector: {}
