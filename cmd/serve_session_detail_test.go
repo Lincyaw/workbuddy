@@ -68,7 +68,7 @@ func TestServeSessionDetailFallsBackToLocalForEmptyAuditURL(t *testing.T) {
 	}
 
 	api := &app.FullCoordinatorServer{Store: st, AuthEnabled: true, AuthToken: "serve-secret"}
-	mux := buildCoordinatorMux(api, st, eventlog.NewEventLogger(st), dbPath, nil, nil, "")
+	mux := buildCoordinatorMux(api, st, eventlog.NewEventLogger(st), dbPath, nil, nil, "", true)
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 

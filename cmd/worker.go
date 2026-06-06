@@ -94,6 +94,13 @@ type workerOpts struct {
 	// coordinatorTunnel enables the worker-initiated WebSocket tunnel used for
 	// coordinator-to-worker management/session API reads behind NAT.
 	coordinatorTunnel bool
+	// singlePod is true when this worker runs in-process with its coordinator
+	// on a shared store (the `workbuddy serve` topology). ADR 2026-06-06 §5:
+	// the reverse coordinator tunnel would be a self-loop (the coordinator is
+	// in the same process), so single-pod forces it off; session reads are
+	// served from the shared store via the coordinator's local handler. Set by
+	// runServeWithOutput; never exposed as a CLI flag.
+	singlePod bool
 }
 
 type workerIssueReader interface {
@@ -286,10 +293,23 @@ func advertisedWorkerMgmtBaseURL(opts *workerOpts, localBaseURL string) string {
 	return strings.TrimRight(strings.TrimSpace(localBaseURL), "/")
 }
 
+// applySinglePodWorkerGate enforces ADR 2026-06-06 §5 for the `serve`
+// topology: when the worker shares a process (and store) with its
+// coordinator, the reverse WebSocket tunnel would dial back into the same
+// process — a self-loop. Force it off; session reads are served from the
+// shared store via the coordinator's local handler short-circuit.
+func applySinglePodWorkerGate(opts *workerOpts) {
+	if opts == nil || !opts.singlePod {
+		return
+	}
+	opts.coordinatorTunnel = false
+}
+
 func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader workerIssueReader, parentCtx ...context.Context) error {
 	if opts == nil {
 		return fmt.Errorf("worker: options are required")
 	}
+	applySinglePodWorkerGate(opts)
 	tracingShutdown, tracingErr := tracing.Init(context.Background(), "worker")
 	if tracingErr != nil {
 		log.Printf("[worker] warning: tracing init failed: %v", tracingErr)

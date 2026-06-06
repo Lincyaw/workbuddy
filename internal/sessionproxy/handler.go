@@ -660,6 +660,17 @@ func (h *Handler) fanOutListing(parent context.Context, q map[string][]string) (
 			h.emitOfflineNoAudit(worker.ID, repo)
 			continue
 		}
+		// ADR 2026-06-06 §5: in single-pod (`serve`) the resolver opts the
+		// loopback short-circuit in. A worker whose audit_url points back at
+		// this coordinator is served from the shared local store instead of
+		// dialling a self-loop — route it into the same in-process local
+		// bucket the empty-audit_url workers use. Split-host keeps
+		// localAuditFallback off, so IsLocalAuditURL is always false there and
+		// the audit_url dial below is preserved byte-for-byte.
+		if h.resolver != nil && h.resolver.IsLocalAuditURL(auditURL) {
+			emptyAuditWorkers = append(emptyAuditWorkers, worker.ID)
+			continue
+		}
 		wg.Add(1)
 		go func(workerID, base string) {
 			defer wg.Done()

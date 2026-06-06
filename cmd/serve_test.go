@@ -314,7 +314,7 @@ func TestServeAuthWrapsNonHealthRoutes(t *testing.T) {
 		AuthEnabled: true,
 		AuthToken:   "serve-secret",
 	}
-	mux := buildCoordinatorMux(api, st, eventlog.NewEventLogger(st), filepath.Join(t.TempDir(), "serve.db"), nil, nil, "")
+	mux := buildCoordinatorMux(api, st, eventlog.NewEventLogger(st), filepath.Join(t.TempDir(), "serve.db"), nil, nil, "", true)
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 

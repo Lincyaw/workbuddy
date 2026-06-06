@@ -7209,3 +7209,59 @@ requirements:
     deps:
       - REQ-014
       - REQ-163
+
+  - id: REQ-166
+    title: Single-pod session-read local short-circuit + self-tunnel skip (ADR 2026-06-06 §5)
+    description: >
+      Step §5 of the convergence refactor in
+      docs/decisions/2026-06-06-runtime-strategy-and-convergence.md.
+      In single-pod (`workbuddy serve`) the coordinator and worker run in one
+      process over one shared SQLite store, which made the split-host
+      session-viewing stack a hot-path no-op: session reads fanned out,
+      resolved to the embedded worker's loopback audit_url, and reverse-proxied
+      back into the same process; the embedded worker also opened a reverse
+      WebSocket tunnel to the in-process coordinator (a self-loop).
+
+      This change feature-gates that indirection OFF in single-pod while
+      leaving the split-host machinery (sessionproxy / wstunnel / resolver /
+      tunnel-client) fully intact for genuine split-host
+      `coordinator`+`worker` deployments:
+      - The single-pod signal is the existing coordinatorOpts.sharedStoreWithWorker
+        (set true only by serve), threaded into buildCoordinatorMux as an
+        explicit singlePod bool.
+      - When single-pod, the resolver enables the loopback short-circuit
+        (WithLocalAuditFallback) so /api/v1/sessions/{id} detail reads resolve
+        to the local handler over the shared store instead of dialling a
+        self-loop; the fan-out listing (/api/v1/sessions, and the issue-detail
+        lister) buckets a loopback-audit_url worker into the same in-process
+        local read via Resolver.IsLocalAuditURL.
+      - The embedded worker forces coordinatorTunnel off in single-pod
+        (workerOpts.singlePod + applySinglePodWorkerGate), so no reverse
+        self-tunnel is started.
+
+      Split-host leaves localAuditFallback off (default), so IsLocalAuditURL is
+      always false there and the audit_url dial / tunnel routing is preserved
+      byte-for-byte. serve session-viewing (listing + detail) is verified still
+      working end-to-end via the local path.
+    priority: P1
+    version: v0.7.0
+    status: tested
+    acceptance_criteria:
+      - "AC-166-1: serve threads single-pod into the coordinator (buildCoordinatorMux singlePod=opts.sharedStoreWithWorker) and into the embedded worker (workerOpts.singlePod=true)."
+      - "AC-166-2: In single-pod the resolver enables WithLocalAuditFallback; a session whose owning worker advertises a loopback audit_url is served from the shared local store for both detail (/api/v1/sessions/{id}) and fan-out listing (/api/v1/sessions), with no worker marked offline."
+      - "AC-166-3: In single-pod the embedded worker does not open the reverse coordinator tunnel (applySinglePodWorkerGate forces coordinatorTunnel=false)."
+      - "AC-166-4: Split-host is unchanged — singlePod=false leaves localAuditFallback off (Resolver.IsLocalAuditURL returns false) so audit_url dial + tunnel routing are preserved; the standalone worker's tunnel setting is left untouched."
+      - "AC-166-5: The split-host session stack (sessionproxy, wstunnel, resolver, tunnel-client) is retained, not removed."
+      - "AC-166-6: `go build ./... && go vet ./... && go test ./... -count=1` all pass."
+    code:
+      - cmd/serve.go
+      - cmd/coordinator.go
+      - cmd/worker.go
+      - internal/sessionproxy/resolver.go
+      - internal/sessionproxy/handler.go
+    tests:
+      - cmd/serve_single_pod_test.go
+      - cmd/serve_session_detail_test.go
+    deps:
+      - REQ-120
+      - REQ-122
