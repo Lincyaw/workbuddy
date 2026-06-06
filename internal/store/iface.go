@@ -128,6 +128,7 @@ type Store interface {
 	MaxTransitionCounts() ([]TransitionMaxCount, error)
 	IncrementDevReviewCycleCount(repo string, issueNum int) (int, error)
 	IncrementSynthCycleCount(repo string, issueNum int) (int, error)
+	IncrementTotalTransitionCount(repo string, issueNum int) (int, error)
 	TouchIssueFirstDispatch(repo string, issueNum int) error
 	MarkIssueCycleCapHit(repo string, issueNum int) error
 	MarkIssueSynthCycleCapHit(repo string, issueNum int) error

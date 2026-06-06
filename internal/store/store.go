@@ -512,6 +512,7 @@ func (s *dbStore) createTables() error {
 			issue_num INTEGER NOT NULL,
 			dev_review_cycle_count INTEGER NOT NULL DEFAULT 0,
 			synth_cycle_count INTEGER NOT NULL DEFAULT 0,
+			total_transitions INTEGER NOT NULL DEFAULT 0,
 			first_dispatch_at DATETIME,
 			cap_hit_at DATETIME,
 			synth_cap_hit_at DATETIME,
@@ -574,6 +575,9 @@ func (s *dbStore) createTables() error {
 	}
 	if _, err := s.db.Exec(`ALTER TABLE issue_cycle_state ADD COLUMN synth_cap_hit_at DATETIME`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("store: alter issue_cycle_state add synth_cap_hit_at: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE issue_cycle_state ADD COLUMN total_transitions INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("store: alter issue_cycle_state add total_transitions: %w", err)
 	}
 	taskQueueMigrations := []string{
 		`ALTER TABLE task_queue ADD COLUMN role TEXT NOT NULL DEFAULT ''`,

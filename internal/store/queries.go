@@ -1002,6 +1002,31 @@ func (s *dbStore) IncrementSynthCycleCount(repo string, issueNum int) (int, erro
 	return count, nil
 }
 
+// IncrementTotalTransitionCount atomically increments the per-issue
+// total_transitions counter and returns the new value. The row is created
+// on first call. Used by the state machine to enforce a hard cap on total
+// state transitions per issue, catching any loop pattern (not just
+// dev↔review).
+func (s *dbStore) IncrementTotalTransitionCount(repo string, issueNum int) (int, error) {
+	if s.isMySQL() {
+		return s.mysqlIncrementCycleCount(repo, issueNum, "total_transitions")
+	}
+	var count int
+	err := s.db.QueryRow(
+		`INSERT INTO issue_cycle_state (repo, issue_num, total_transitions, updated_at)
+		 VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+		 ON CONFLICT (repo, issue_num)
+		 DO UPDATE SET total_transitions = total_transitions + 1,
+		               updated_at = CURRENT_TIMESTAMP
+		 RETURNING total_transitions`,
+		repo, issueNum,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("store: increment total_transitions: %w", err)
+	}
+	return count, nil
+}
+
 // TouchIssueFirstDispatch records the first time an agent was dispatched for
 // (repo, issueNum). Subsequent calls are no-ops. Used by the long-flight
 // stuck detector to measure total in-flight time independent of per-state
@@ -1058,7 +1083,7 @@ func (s *dbStore) MarkIssueSynthCycleCapHit(repo string, issueNum int) error {
 func (s *dbStore) QueryIssueCycleState(repo string, issueNum int) (*IssueCycleState, error) {
 	row := s.db.QueryRow(
 		`SELECT repo, issue_num, dev_review_cycle_count, synth_cycle_count,
-		        first_dispatch_at, cap_hit_at, synth_cap_hit_at, updated_at
+		        total_transitions, first_dispatch_at, cap_hit_at, synth_cap_hit_at, updated_at
 		 FROM issue_cycle_state
 		 WHERE repo = ? AND issue_num = ?`,
 		repo, issueNum,
@@ -1066,7 +1091,7 @@ func (s *dbStore) QueryIssueCycleState(repo string, issueNum int) (*IssueCycleSt
 	var rec IssueCycleState
 	var firstDispatch, capHit, synthCapHit, updated sql.NullString
 	err := row.Scan(&rec.Repo, &rec.IssueNum, &rec.DevReviewCycleCount, &rec.SynthCycleCount,
-		&firstDispatch, &capHit, &synthCapHit, &updated)
+		&rec.TotalTransitions, &firstDispatch, &capHit, &synthCapHit, &updated)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

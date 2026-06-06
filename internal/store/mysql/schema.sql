@@ -232,6 +232,7 @@ CREATE TABLE IF NOT EXISTS issue_cycle_state (
     issue_num              INT          NOT NULL,
     dev_review_cycle_count INT          NOT NULL DEFAULT 0,
     synth_cycle_count      INT          NOT NULL DEFAULT 0,
+    total_transitions      INT          NOT NULL DEFAULT 0,
     first_dispatch_at      DATETIME(6)  DEFAULT NULL,
     cap_hit_at             DATETIME(6)  DEFAULT NULL,
     synth_cap_hit_at       DATETIME(6)  DEFAULT NULL,

@@ -78,7 +78,7 @@ CREATE TABLE issue_dependencies (repo, issue_num, depends_on_repo, depends_on_is
 CREATE TABLE issue_dependency_state (repo, issue_num, verdict, resume_label, blocked_reason_hash, override_active, graph_version, last_reaction_blocked, last_evaluated_at);
 CREATE TABLE issue_claim (repo, issue_num, worker_id, claim_token, acquired_at, expires_at);
 CREATE TABLE issue_pipeline_hazards (repo, issue_num, kind, fingerprint, detected_at);
-CREATE TABLE issue_cycle_state (repo, issue_num, dev_review_cycle_count, synth_cycle_count, first_dispatch_at, cap_hit_at, synth_cap_hit_at, updated_at);
+CREATE TABLE issue_cycle_state (repo, issue_num, dev_review_cycle_count, synth_cycle_count, total_transitions, first_dispatch_at, cap_hit_at, synth_cap_hit_at, updated_at);
 `
 }
 

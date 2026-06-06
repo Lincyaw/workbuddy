@@ -157,6 +157,7 @@ type IssueCycleState struct {
 	IssueNum            int
 	DevReviewCycleCount int
 	SynthCycleCount     int
+	TotalTransitions    int
 	FirstDispatchAt     time.Time
 	CapHitAt            time.Time
 	SynthCapHitAt       time.Time

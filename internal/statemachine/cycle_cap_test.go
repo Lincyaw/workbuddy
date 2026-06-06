@@ -2,6 +2,7 @@ package statemachine
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/Lincyaw/workbuddy/internal/alertbus"
@@ -371,6 +372,206 @@ func TestCycleCapResetOnBlockedToDeveloping(t *testing.T) {
 	if len(rep.calls) != 1 {
 		t.Fatalf("unexpected extra cap-hit reporter calls: %d", len(rep.calls))
 	}
+}
+
+// TestCycleTotalTransitionCapBlocksReviewMergeLoop: a reviewing↔merging loop
+// that the dev↔review cap does not cover must be caught by the total
+// transition cap. This is the root cause fix for the unbounded
+// reviewing↔merging cycle bug.
+func TestCycleTotalTransitionCapBlocksReviewMergeLoop(t *testing.T) {
+	// Build a workflow with reviewing↔merging states, high dev↔review cap
+	// so only the total transition cap fires.
+	st := newTestStore(t)
+	rec := &fakeRecorder{}
+	dispatch := make(chan DispatchRequest, 64)
+	bus := alertbus.NewBus(64)
+	wf := &config.WorkflowConfig{
+		Name:            "merge-flow",
+		MaxRetries:      99,
+		MaxReviewCycles: 99, // disable the dev↔review cap
+		Trigger:         config.WorkflowTrigger{IssueLabel: "workbuddy"},
+		States: map[string]*config.State{
+			"developing": {
+				EnterLabel: "status:developing",
+				Agent:      "dev-agent",
+				Transitions: map[string]string{
+					"status:reviewing": "reviewing",
+				},
+			},
+			"reviewing": {
+				EnterLabel: "status:reviewing",
+				Agent:      "review-agent",
+				Transitions: map[string]string{
+					"status:merging":    "merging",
+					"status:developing": "developing",
+				},
+			},
+			"merging": {
+				EnterLabel: "status:merging",
+				Agent:      "merge-agent",
+				Transitions: map[string]string{
+					"status:reviewing": "reviewing",
+					"status:done":      "done",
+				},
+			},
+			"done": {EnterLabel: "status:done"},
+		},
+	}
+	sm := NewStateMachine(map[string]*config.WorkflowConfig{"merge-flow": wf}, st, dispatch, rec, bus)
+	rep := &fakeCycleCapReporter{}
+	sm.SetCycleCapReporter(rep)
+
+	const repo = "test/repo"
+	const issue = 900
+
+	// Drive exactly MaxTotalTransitions state entries, then verify
+	// the next one is blocked.
+	//
+	// Layout: developing(1) → reviewing(2) → then loop merging/reviewing.
+	stepStateEntry(t, sm, repo, issue, "status:developing")
+	<-dispatch
+	sm.MarkAgentCompleted(repo, issue, "t1", "dev-agent", 0, []string{"workbuddy", "status:developing"})
+
+	stepStateEntry(t, sm, repo, issue, "status:reviewing")
+	<-dispatch
+	sm.MarkAgentCompleted(repo, issue, "t2", "review-agent", 0, []string{"workbuddy", "status:reviewing"})
+
+	// 2 transitions used. Now loop merging↔reviewing until we exhaust
+	// MaxTotalTransitions. Each full loop iteration uses 2 transitions.
+	usedTransitions := 2
+	loopIdx := 0
+	for usedTransitions+2 <= MaxTotalTransitions {
+		stepStateEntry(t, sm, repo, issue, "status:merging")
+		<-dispatch
+		sm.MarkAgentCompleted(repo, issue, fmt.Sprintf("tm-%d", loopIdx), "merge-agent", 1, []string{"workbuddy", "status:merging"})
+
+		stepStateEntry(t, sm, repo, issue, "status:reviewing")
+		<-dispatch
+		sm.MarkAgentCompleted(repo, issue, fmt.Sprintf("tr-%d", loopIdx), "review-agent", 0, []string{"workbuddy", "status:reviewing"})
+
+		usedTransitions += 2
+		loopIdx++
+	}
+	// Use any remaining single transition before the cap.
+	if usedTransitions < MaxTotalTransitions {
+		stepStateEntry(t, sm, repo, issue, "status:merging")
+		<-dispatch
+		sm.MarkAgentCompleted(repo, issue, "tm-last", "merge-agent", 1, []string{"workbuddy", "status:merging"})
+		usedTransitions++
+	}
+
+	// Now we are at exactly MaxTotalTransitions. The next state entry
+	// should be blocked (totalCount becomes MaxTotalTransitions+1 > MaxTotalTransitions).
+	stepStateEntry(t, sm, repo, issue, "status:reviewing")
+
+	select {
+	case req := <-dispatch:
+		t.Fatalf("dispatch must be blocked after total transition cap, got %+v", req)
+	default:
+	}
+
+	// Verify the event was logged.
+	capEvents := rec.find(eventlog.TypeTotalTransitionCapReached)
+	if len(capEvents) == 0 {
+		t.Fatalf("expected total_transition_cap_reached event")
+	}
+
+	// Verify the cap reporter was called.
+	if len(rep.calls) == 0 {
+		t.Fatalf("expected cap reporter to be called")
+	}
+
+	// Verify the total transitions count in the store.
+	state, err := sm.store.QueryIssueCycleState(repo, issue)
+	if err != nil {
+		t.Fatalf("QueryIssueCycleState: %v", err)
+	}
+	if state == nil {
+		t.Fatalf("issue_cycle_state row missing")
+	}
+	if state.TotalTransitions <= MaxTotalTransitions {
+		t.Fatalf("total_transitions = %d, expected > %d", state.TotalTransitions, MaxTotalTransitions)
+	}
+}
+
+// TestCycleTotalTransitionCapResetOnBlockedToDeveloping: after a total
+// transition cap blocks and a human resets via blocked→developing, the
+// total transition counter must also reset.
+func TestCycleTotalTransitionCapResetOnBlockedToDeveloping(t *testing.T) {
+	st := newTestStore(t)
+	rec := &fakeRecorder{}
+	dispatch := make(chan DispatchRequest, 64)
+	bus := alertbus.NewBus(64)
+	wf := &config.WorkflowConfig{
+		Name:            "dev-flow",
+		MaxRetries:      99,
+		MaxReviewCycles: 99,
+		Trigger:         config.WorkflowTrigger{IssueLabel: "workbuddy"},
+		States: map[string]*config.State{
+			"developing": {
+				EnterLabel: "status:developing",
+				Agent:      "dev-agent",
+				Transitions: map[string]string{
+					"status:reviewing": "reviewing",
+					"status:blocked":   "blocked",
+				},
+			},
+			"reviewing": {
+				EnterLabel: "status:reviewing",
+				Agent:      "review-agent",
+				Transitions: map[string]string{
+					"status:developing": "developing",
+				},
+			},
+			"blocked": {EnterLabel: "status:blocked"},
+			"done":    {EnterLabel: "status:done"},
+		},
+	}
+	sm := NewStateMachine(map[string]*config.WorkflowConfig{"dev-flow": wf}, st, dispatch, rec, bus)
+	rep := &fakeCycleCapReporter{}
+	sm.SetCycleCapReporter(rep)
+
+	const repo = "test/repo"
+	const issue = 950
+
+	// Accumulate some transitions.
+	for i := 0; i < 3; i++ {
+		stepStateEntry(t, sm, repo, issue, "status:developing")
+		<-dispatch
+		sm.MarkAgentCompleted(repo, issue, "td-"+string(rune('a'+i)), "dev-agent", 0, []string{"workbuddy", "status:developing"})
+
+		stepStateEntry(t, sm, repo, issue, "status:reviewing")
+		<-dispatch
+		sm.MarkAgentCompleted(repo, issue, "tr-"+string(rune('a'+i)), "review-agent", 1, []string{"workbuddy", "status:reviewing"})
+	}
+
+	// Check that total_transitions is > 0.
+	state, err := sm.store.QueryIssueCycleState(repo, issue)
+	if err != nil {
+		t.Fatalf("QueryIssueCycleState pre-reset: %v", err)
+	}
+	if state == nil || state.TotalTransitions == 0 {
+		t.Fatalf("expected non-zero total_transitions before reset, got %+v", state)
+	}
+
+	// Human flips to blocked, then back to developing — Option A reset.
+	stepStateEntry(t, sm, repo, issue, "status:blocked")
+	stepStateEntry(t, sm, repo, issue, "status:developing")
+	<-dispatch
+
+	// ResetIssueCycleState deletes the row, so total_transitions is gone.
+	state, err = sm.store.QueryIssueCycleState(repo, issue)
+	if err != nil {
+		t.Fatalf("QueryIssueCycleState post-reset: %v", err)
+	}
+	// After the reset, either the row is nil (deleted) or total_transitions
+	// should be 1 (the developing entry that just happened after the reset).
+	if state != nil && state.TotalTransitions > 1 {
+		t.Fatalf("total_transitions post-reset = %d, expected 0 or 1", state.TotalTransitions)
+	}
+
+	_ = rec
+	_ = rep
 }
 
 // TestCycleCapTouchFirstDispatch: state-entry into developing must record

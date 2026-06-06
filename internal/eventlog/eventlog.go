@@ -60,6 +60,7 @@ const (
 	TypeDevReviewCycleApproaching   = "dev_review_cycle_approaching"
 	TypeDevReviewCycleCapReached    = "dev_review_cycle_cap_reached"
 	TypeDevReviewCycleCountReset    = "dev_review_cycle_count_reset"
+	TypeTotalTransitionCapReached   = "total_transition_cap_reached"
 	TypeLongFlightStuck             = "long_flight_stuck_detected"
 	// TypeRolloutGroupStarted fires once per rollout fan-out group when the
 	// state machine dispatches the sibling rollouts. Payload:
@@ -188,6 +189,7 @@ var AllEventTypes = []string{
 	TypeDevReviewCycleApproaching,
 	TypeDevReviewCycleCapReached,
 	TypeDevReviewCycleCountReset,
+	TypeTotalTransitionCapReached,
 	TypeLongFlightStuck,
 	TypeRolloutGroupStarted,
 	TypeRolloutGroupResolved,

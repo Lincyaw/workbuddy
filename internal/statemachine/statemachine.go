@@ -92,6 +92,13 @@ const DefaultIssueClaimLease = 30 * time.Minute
 const DefaultMaxReviewCycles = 3
 const DefaultMaxSynthCycles = 2
 
+// MaxTotalTransitions is the hard cap on total state transitions per issue.
+// Unlike the dev↔review cycle counter (which only counts developing re-entries
+// from reviewing), this counter increments on every state entry and catches
+// any loop pattern — including reviewing↔merging loops that the dev↔review
+// cap does not cover.
+const MaxTotalTransitions = 15
+
 // State names recognized by the dev↔review cycle counter. These match the
 // canonical default workflow shipped in `.github/workbuddy/workflows/default.md`.
 const (
@@ -495,6 +502,40 @@ func (sm *StateMachine) processWorkflowEvent(ctx context.Context, wf *config.Wor
 		// periodically against an issue already sitting in the same state —
 		// so they must not advance the cycle counter or trip the cap.
 		if event.Type != poller.EventIssueResynced {
+			// Total transition cap: catches any loop pattern, not just dev↔review.
+			if sm.store != nil {
+				totalCount, err := sm.store.IncrementTotalTransitionCount(event.Repo, event.IssueNum)
+				if err != nil {
+					log.Printf("[statemachine] increment total transition count for %s#%d: %v", event.Repo, event.IssueNum, err)
+				}
+				if totalCount > MaxTotalTransitions {
+					log.Printf("[statemachine] total transition cap hit for %s#%d: %d transitions (max %d)", event.Repo, event.IssueNum, totalCount, MaxTotalTransitions)
+					sm.eventlog.Log(eventlog.TypeTotalTransitionCapReached, event.Repo, event.IssueNum, map[string]any{
+						"workflow":          wf.Name,
+						"total_transitions": totalCount,
+						"max_transitions":   MaxTotalTransitions,
+					})
+					sm.publishAlert(alertbus.KindDevReviewCycleCapReached, alertbus.SeverityError, event.Repo, event.IssueNum, "", map[string]any{
+						"workflow":          wf.Name,
+						"total_transitions": totalCount,
+						"max_transitions":   MaxTotalTransitions,
+						"reason":            "total_transition_cap",
+					})
+					if sm.capReporter != nil {
+						info := CycleCapInfo{
+							WorkflowName:    wf.Name,
+							CycleCount:      totalCount,
+							MaxReviewCycles: MaxTotalTransitions,
+							HitAt:           time.Now().UTC(),
+						}
+						if err := sm.capReporter.ReportDevReviewCycleCap(ctx, event.Repo, event.IssueNum, info); err != nil {
+							log.Printf("[statemachine] report total transition cap for %s#%d: %v", event.Repo, event.IssueNum, err)
+						}
+					}
+					return nil
+				}
+			}
+
 			blocked, err := sm.applyDevReviewCycleCap(ctx, wf, event.Repo, event.IssueNum, currentStateName)
 			if err != nil {
 				return err
