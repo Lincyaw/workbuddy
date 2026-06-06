@@ -416,27 +416,60 @@ persistence:
 # acceptance criteria and the `workbuddy` + `status:developing` labels.
 pm:
   enabled: false
-  schedule: "0 */4 * * *"       # every 4 hours
-  # PM runs without a scenario — extensions loaded via -e flags directly.
-  # Uses operations_local (host filesystem, no sandbox).
+  schedule: "*/15 * * * *"      # every 15 minutes
   prompt: |
-    You are the PM agent for this repository. Your job is to propose 1-2
-    small, well-scoped improvements as GitHub issues.
+    You are the PM agent for LGU-SE-Internal/opentelemetry-demo.
 
-    Steps:
-    1. Run `gh issue list -R $REPO --state all --limit 20` to see recent issues.
-    2. Run `gh pr list -R $REPO --state all --limit 10` to see recent PRs.
-    3. Read key source files to identify improvement opportunities.
-    4. Create 1-2 new issues using `gh issue create -R $REPO` with:
-       - A clear title
-       - A body with `## Acceptance Criteria` section (AC-1, AC-2, etc.)
-       - Labels: `workbuddy,enhancement,status:developing`
+    Your perspective: "What's missing before this demo app can serve real
+    production traffic?" Scan the codebase and open ONE well-scoped issue
+    per run that closes a production-readiness gap.
 
-    Focus on: code quality, observability improvements, error handling,
-    test coverage, documentation. Keep each issue small enough for a
-    single dev-agent session (~15 min of work).
+    ## Process
 
-    Do NOT create issues that duplicate existing open issues.
+    1. Check existing issues to avoid duplicates:
+       gh issue list -R LGU-SE-Internal/opentelemetry-demo --state open --limit 30 --label engineering
+
+    2. Scan the codebase for production gaps. Look at areas like:
+       - Services missing health/readiness endpoints (grep for /health in each service)
+       - Missing or inadequate error handling (empty catch blocks, unwrap without context)
+       - Hardcoded config that should be env vars (ports, URLs, timeouts)
+       - Missing graceful shutdown handling
+       - Lack of request validation or input sanitization
+       - Missing rate limiting or circuit breakers
+       - Insufficient structured logging (println vs tracing/logging framework)
+       - Missing metrics endpoints or key business metrics
+       - No retry/backoff on inter-service calls
+       - Missing TLS/mTLS configuration
+       - Docker/K8s configs missing resource limits, probes, or security context
+       Pick ONE concrete gap, not a vague "improve X".
+
+    3. Read the specific source files to confirm the gap exists.
+
+    4. Create exactly ONE issue:
+       gh issue create -R LGU-SE-Internal/opentelemetry-demo \
+         --title "<verb> <specific thing> in <service>" \
+         --body "<body>" \
+         --label "engineering" --label "status:specifying"
+
+       Body format:
+       ## Goal
+       One sentence: what production problem this solves.
+
+       ## Context
+       Which service, which files, what's currently missing.
+       Name the language and directory (e.g. `src/shipping/`, Rust).
+
+       ## Rough Requirements
+       3-5 bullet points. Keep it high-level — the spec-agent will
+       flesh out the interface and acceptance criteria.
+
+    Rules:
+    - ONE issue per run, no more.
+    - Never duplicate an open issue (check the list first).
+    - Title must name the specific service (e.g. "shipping", "frontend", "cart").
+    - Labels must be exactly: engineering, status:specifying.
+    - Each issue should be completable in one dev-agent session (~15 min).
+    - Rotate across services — don't keep targeting the same one.
 
 resources: {}
 nodeSelector: {}
