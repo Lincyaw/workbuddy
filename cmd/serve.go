@@ -208,6 +208,11 @@ func runServeWithOutput(opts *serveOpts, ghReader poller.GHReader, launcherOverr
 			shutdownTimeout:   defaultWorkerShutdownDeadline,
 			concurrency:       serveWorkerConcurrency(opts.maxParallelTasks),
 			mgmtAddr:          defaultWorkerMgmtAddr,
+			// ADR 2026-06-06 §5: serve = coordinator + worker in one process on
+			// one shared DB. The single-pod flag forces the reverse coordinator
+			// tunnel off (it would be a self-loop) and pairs with the
+			// coordinator's local session-read short-circuit.
+			singlePod: true,
 		}, launcherOverride, nil, ctx)
 	}()
 

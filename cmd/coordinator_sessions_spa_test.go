@@ -39,7 +39,7 @@ func TestCoordinatorRoutesSessionsThroughSPAFallback(t *testing.T) {
 	}
 
 	api := &app.FullCoordinatorServer{Store: st, AuthEnabled: true, AuthToken: "spa-secret"}
-	mux := buildCoordinatorMux(api, st, eventlog.NewEventLogger(st), dbPath, nil, nil, "")
+	mux := buildCoordinatorMux(api, st, eventlog.NewEventLogger(st), dbPath, nil, nil, "", false)
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 

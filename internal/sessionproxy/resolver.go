@@ -285,6 +285,19 @@ func (r *Resolver) CandidateWorkers(repo string) ([]store.WorkerRecord, error) {
 	return rows, nil
 }
 
+// IsLocalAuditURL reports whether the given audit_url should be served by
+// the coordinator's local handler instead of being dialled. It returns
+// true only when the loopback short-circuit is enabled
+// (WithLocalAuditFallback) AND the URL's host is one of the coordinator's
+// "self" hosts. The fan-out listing path uses this to route a single-pod
+// (`serve`) worker's loopback audit_url to the shared local store rather
+// than reverse-proxying back into the same process (ADR 2026-06-06 §5).
+// Split-host leaves the fallback off, so this always returns false there
+// and the normal audit_url dial is preserved.
+func (r *Resolver) IsLocalAuditURL(auditURL string) bool {
+	return r.isLocalURL(strings.TrimSpace(auditURL))
+}
+
 // isLocalURL reports whether u's host portion matches one of the
 // coordinator's "self" hosts. Used to short-circuit local fall-back so
 // the coordinator does not proxy to itself.

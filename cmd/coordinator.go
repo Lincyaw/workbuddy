@@ -535,7 +535,7 @@ func runCoordinatorWithOpts(opts *coordinatorOpts, ghReader poller.GHReader, par
 	srv := &http.Server{
 		Addr: resolveListenAddr(opts.listenAddr, port),
 		Handler: otelhttp.NewHandler(
-			buildCoordinatorMux(api, st, evlog, opts.dbPath, taskHub, hooksDispatcher, hooksConfigPath),
+			buildCoordinatorMux(api, st, evlog, opts.dbPath, taskHub, hooksDispatcher, hooksConfigPath, opts.sharedStoreWithWorker),
 			"workbuddy.coordinator.http",
 		),
 	}
@@ -702,7 +702,13 @@ func resolveListenAddr(listenAddr string, port int) string {
 	return listenAddr
 }
 
-func buildCoordinatorMux(api *app.FullCoordinatorServer, st store.Store, evlog *eventlog.EventLogger, dbPath string, taskHub *tasknotify.Hub, hooksDispatcher *hooks.Dispatcher, hooksConfigPath string) *http.ServeMux {
+// singlePod is true when this coordinator runs in-process with its worker on a
+// shared store (the `workbuddy serve` topology). ADR 2026-06-06 §5: in that mode
+// the split-host session-viewing fan-out resolves to the embedded worker's own
+// loopback and reverse-proxies back into the same process — a hot-path no-op. We
+// feature-gate the local short-circuit on so session reads are served straight
+// from the shared store. The split-host wiring is otherwise untouched.
+func buildCoordinatorMux(api *app.FullCoordinatorServer, st store.Store, evlog *eventlog.EventLogger, dbPath string, taskHub *tasknotify.Hub, hooksDispatcher *hooks.Dispatcher, hooksConfigPath string, singlePod bool) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", api.HandleHealth)
 
@@ -767,6 +773,17 @@ func buildCoordinatorMux(api *app.FullCoordinatorServer, st store.Store, evlog *
 	resolver := sessionproxy.NewResolver(st)
 	if hostname, err := os.Hostname(); err == nil && strings.TrimSpace(hostname) != "" {
 		resolver.WithLocalHost(hostname)
+	}
+	// ADR 2026-06-06 §5: single-pod (`serve`) opts the loopback short-circuit
+	// IN, so a session whose owning worker advertises a loopback audit_url is
+	// served from the shared local store instead of the coordinator dialling
+	// itself. The embedded worker also skips the audit listener entirely (empty
+	// audit_url), which already lands on the local handler; enabling the
+	// fallback here makes the local-read intent explicit and covers the case
+	// where a single-pod worker is configured to advertise a loopback URL.
+	// Split-host leaves this OFF (default), preserving the proxy/tunnel path.
+	if singlePod {
+		resolver.WithLocalAuditFallback(true)
 	}
 	// Adapt the in-memory wstunnel.Registry to sessionproxy's
 	// TunnelConnectivity interface. The legacy WorkerRecord.Tunnel
