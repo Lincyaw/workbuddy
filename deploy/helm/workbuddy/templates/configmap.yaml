@@ -54,6 +54,7 @@ data:
         config:
           skill_paths:
             - /workspace/.agentm/skills
+            - /opt/agentm/skills
           include_defaults: false
           inherit_claude: false
     policy:
@@ -97,6 +98,7 @@ data:
         config:
           skill_paths:
             - /workspace/.agentm/skills
+            - /opt/agentm/skills
           include_defaults: false
           inherit_claude: false
     policy:
@@ -114,6 +116,141 @@ data:
     ---
 
     {{ .Values.agents.reviewPrompt | default "" | nindent 4 }}
+  spec-agent.md: |
+    ---
+    name: spec-agent
+    description: AgentM spec agent (agent-env sandbox, repo-synced)
+    triggers:
+      - state: specifying
+    role: dev
+    runtime: agentm
+    scenario: {{ .Values.agents.scenarioName }}
+    {{- if .Values.agentEnv.image }}
+    dev_container_image: {{ .Values.agentEnv.image }}
+    {{- end }}
+    extensions:
+      - module: agentm.extensions.builtin.tool_result_cap
+        config:
+          max_chars: 24000
+          preview_chars: 6000
+      - module: agentm.extensions.builtin.dedup
+      - module: agentm.extensions.builtin.retry_policy
+      - module: agentm.extensions.builtin.runtime_context
+      - module: agentm.extensions.builtin.tool_error_messages
+      - module: agentm.extensions.builtin.tool_bash_guard
+      - module: agentm.extensions.builtin.skill_loader
+        config:
+          skill_paths:
+            - /workspace/.agentm/skills
+            - /opt/agentm/skills
+          include_defaults: false
+          inherit_claude: false
+    policy:
+      sandbox: danger-full-access
+      approval: never
+      timeout: {{ .Values.agents.specTimeout | default "30m" }}
+      {{- if .Values.agents.model }}
+      model: {{ .Values.agents.model }}
+      {{- end }}
+    context:
+      - Repo
+      - Issue.Number
+      - Issue.Title
+      - Issue.Body
+      - Issue.CommentsText
+    ---
+
+    {{ .Values.agents.specPrompt | default "" | nindent 4 }}
+  spec-review-agent.md: |
+    ---
+    name: spec-review-agent
+    description: AgentM spec review agent (agent-env sandbox, repo-synced)
+    triggers:
+      - state: spec_review
+    role: review
+    runtime: agentm
+    scenario: {{ .Values.agents.scenarioName }}
+    {{- if .Values.agentEnv.image }}
+    dev_container_image: {{ .Values.agentEnv.image }}
+    {{- end }}
+    extensions:
+      - module: agentm.extensions.builtin.tool_result_cap
+        config:
+          max_chars: 24000
+          preview_chars: 6000
+      - module: agentm.extensions.builtin.dedup
+      - module: agentm.extensions.builtin.retry_policy
+      - module: agentm.extensions.builtin.runtime_context
+      - module: agentm.extensions.builtin.tool_error_messages
+      - module: agentm.extensions.builtin.tool_bash_guard
+      - module: agentm.extensions.builtin.skill_loader
+        config:
+          skill_paths:
+            - /workspace/.agentm/skills
+            - /opt/agentm/skills
+          include_defaults: false
+          inherit_claude: false
+    policy:
+      sandbox: danger-full-access
+      approval: never
+      timeout: {{ .Values.agents.specReviewTimeout | default "15m" }}
+      {{- if .Values.agents.model }}
+      model: {{ .Values.agents.model }}
+      {{- end }}
+    context:
+      - Repo
+      - Issue.Number
+      - Issue.Title
+      - Issue.Body
+      - Issue.CommentsText
+    ---
+
+    {{ .Values.agents.specReviewPrompt | default "" | nindent 4 }}
+  test-gen-agent.md: |
+    ---
+    name: test-gen-agent
+    description: AgentM test generation agent (agent-env sandbox, repo-synced)
+    triggers:
+      - state: test_generating
+    role: dev
+    runtime: agentm
+    scenario: {{ .Values.agents.scenarioName }}
+    {{- if .Values.agentEnv.image }}
+    dev_container_image: {{ .Values.agentEnv.image }}
+    {{- end }}
+    extensions:
+      - module: agentm.extensions.builtin.tool_result_cap
+        config:
+          max_chars: 24000
+          preview_chars: 6000
+      - module: agentm.extensions.builtin.dedup
+      - module: agentm.extensions.builtin.retry_policy
+      - module: agentm.extensions.builtin.runtime_context
+      - module: agentm.extensions.builtin.tool_error_messages
+      - module: agentm.extensions.builtin.tool_bash_guard
+      - module: agentm.extensions.builtin.skill_loader
+        config:
+          skill_paths:
+            - /workspace/.agentm/skills
+            - /opt/agentm/skills
+          include_defaults: false
+          inherit_claude: false
+    policy:
+      sandbox: danger-full-access
+      approval: never
+      timeout: {{ .Values.agents.testGenTimeout | default "30m" }}
+      {{- if .Values.agents.model }}
+      model: {{ .Values.agents.model }}
+      {{- end }}
+    context:
+      - Repo
+      - Issue.Number
+      - Issue.Title
+      - Issue.Body
+      - Issue.CommentsText
+    ---
+
+    {{ .Values.agents.testGenPrompt | default "" | nindent 4 }}
   merge-agent.md: |
     ---
     name: merge-agent
@@ -140,6 +277,7 @@ data:
         config:
           skill_paths:
             - /workspace/.agentm/skills
+            - /opt/agentm/skills
           include_defaults: false
           inherit_claude: false
     policy:

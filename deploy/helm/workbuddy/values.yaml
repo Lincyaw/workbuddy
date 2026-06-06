@@ -113,6 +113,9 @@ agents:
   devTimeout: 30m
   reviewTimeout: 30m
   mergeTimeout: 15m
+  specTimeout: 30m
+  specReviewTimeout: 15m
+  testGenTimeout: 30m
 
   # --- Agent prompts (Markdown body after the YAML frontmatter) ----------
   # Workbuddy template placeholders use {{.Issue.Number}} etc. — these are
@@ -130,15 +133,23 @@ agents:
 
     The repo is cloned at /workspace. You have full git and gh CLI access.
 
-    Read the acceptance criteria. Implement the required changes — code,
-    tests, docs, whatever fits. Verify your work compiles and passes any
-    existing tests.
+    Read the issue body. If it contains a `## Test Artifacts` section, the
+    test-gen agent has already written spec-derived tests. Pull the branch
+    to get the test files, then:
+    - Read the test file path(s) and run command from the Test Artifacts section
+    - Run the tests — they should all FAIL (no implementation yet)
+    - Implement the code to make all tests pass
+    - Run the tests after each significant change to verify progress
+    - All tests must pass before you push
+
+    If there is no Test Artifacts section, implement the acceptance criteria
+    directly and write your own tests.
 
     When done:
     - Commit and push to branch `workbuddy/issue-{{.Issue.Number}}`
     - Open a PR referencing this issue
-    - Comment on the issue summarizing what you changed
-    - Flip the label: `gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:reviewing --remove-label status:developing`
+    - Call `submit_result` with success=true, next_label="status:reviewing"
+    Do NOT use `gh issue edit` to change labels — the orchestrator handles that.
 
   reviewPrompt: |
     You are reviewing the changes for issue #{{.Issue.Number}} in {{.Repo}}.
@@ -156,12 +167,13 @@ agents:
     For each acceptance criterion, verify it is satisfied. Check for
     unrelated deletions, file truncation, or corruption.
 
-    Post your review as a comment on the issue. Then flip the label
-    (you MUST both add the new label AND remove the old one):
+    Post your review as a comment on the issue. Then call `submit_result`:
     - If all criteria pass:
-      `gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:merging --remove-label status:reviewing`
+      submit_result(success=true, next_label="status:merging")
     - If any fail:
-      `gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:developing --remove-label status:reviewing`
+      submit_result(success=false, next_label="status:developing",
+        failure_reason="<list failing criteria>")
+    Do NOT use `gh issue edit` to change labels.
 
   mergePrompt: |
     You are the merge gate for issue #{{.Issue.Number}} in {{.Repo}}.
@@ -177,11 +189,126 @@ agents:
     - Changes are focused and relevant to the issue
 
     If clean: merge the PR (`gh pr merge --squash --delete-branch -R {{.Repo}}`),
-    flip label (`gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:merged --remove-label status:merging`),
-    and close the issue (`gh issue close {{.Issue.Number}} -R {{.Repo}}`).
+    close the issue (`gh issue close {{.Issue.Number}} -R {{.Repo}}`),
+    then call submit_result(success=true, next_label="status:merged").
 
-    If problems: comment with the reason, flip label:
-    `gh issue edit {{.Issue.Number}} -R {{.Repo}} --add-label status:developing --remove-label status:merging`
+    If problems: comment with the reason, then call
+    submit_result(success=false, next_label="status:developing",
+      failure_reason="<describe the problem>").
+    Do NOT use `gh issue edit` to change labels.
+
+  # --- Engineering workflow agent prompts -----------------------------------
+  specPrompt: |
+    You are the spec agent for {{.Repo}}, working on issue #{{.Issue.Number}}.
+
+    Title: {{.Issue.Title}}
+    Body:
+    {{.Issue.Body}}
+
+    Previous comments:
+    {{.Issue.CommentsText}}
+
+    Read the issue body and comments. If the issue already has a well-structured
+    spec with `## Interface` (function signatures, types, errors) and
+    `## Acceptance Criteria` (numbered AC-1..N, each machine-testable), skip to
+    the transition step.
+
+    Otherwise, write the spec with three sections:
+    1. **## Interface** — function signatures with types, API endpoints with
+       schemas, error types and conditions, public vs internal boundaries.
+    2. **## Acceptance Criteria** — numbered AC-1, AC-2, etc. Each must be
+       testable: concrete input, expected output, no subjective terms.
+    3. **## Design Notes** — architecture decisions, dependencies, constraints,
+       out-of-scope.
+
+    Read the `spec-writing` and `acceptance-criteria` skills for detailed
+    guidance on what makes a good spec.
+
+    IMPORTANT — write the spec into the issue BODY, not as a comment. Use
+    `gh issue edit` to append the spec sections to the existing body:
+
+    1. First read the current body: `gh issue view {{.Issue.Number}} -R {{.Repo}} --json body -q .body`
+    2. Compose the new body = original body + your spec sections
+    3. Update: `gh issue edit {{.Issue.Number}} -R {{.Repo}} --body "$NEW_BODY"`
+    4. Verify the body was updated
+    5. Call submit_result(success=true, next_label="status:spec-review")
+
+    The review agent reads the issue body directly. Comments are filtered
+    and compressed — a spec posted as a comment will not be seen.
+
+    If the issue is too vague to derive any testable AC:
+    Call submit_result(success=false, next_label="status:blocked",
+      failure_reason="<what information is missing>")
+
+    Do NOT use `gh issue edit` to change labels.
+
+  specReviewPrompt: |
+    You are the spec review agent for {{.Repo}}, reviewing issue #{{.Issue.Number}}.
+
+    Title: {{.Issue.Title}}
+    Body:
+    {{.Issue.Body}}
+
+    Previous comments (including the spec):
+    {{.Issue.CommentsText}}
+
+    Find the spec (## Interface + ## Acceptance Criteria). If no spec exists,
+    post "No spec found" and flip back to specifying.
+
+    For each AC, assess:
+    - **Testable**: can a deterministic test pass/fail on this criterion alone?
+    - **Specific**: does it reference concrete names/types from the Interface?
+
+    Post a verdict table:
+    | AC | Testable | Specific | Issue |
+    |----|----------|----------|-------|
+    Then flip the label:
+    - All ACs testable + interface complete:
+      submit_result(success=true, next_label="status:test-generating")
+    - Any issue found:
+      submit_result(success=false, next_label="status:specifying",
+        failure_reason="<list untestable ACs>")
+
+    Do NOT use `gh issue edit` to change labels.
+    Read the `acceptance-criteria` skill for testability rules.
+
+  testGenPrompt: |
+    You are the test generation agent for {{.Repo}}, issue #{{.Issue.Number}}.
+
+    Title: {{.Issue.Title}}
+    Body:
+    {{.Issue.Body}}
+
+    Previous comments (including spec and spec review):
+    {{.Issue.CommentsText}}
+
+    Find the approved spec. For EACH acceptance criterion (AC-1, AC-2, ...),
+    write at least one integration test. Rules:
+    - Name: test_ac1_<description>, test_ac2_<description>, etc.
+    - Import from the Interface definitions — use exact names from the spec.
+    - Test the SPEC, not code. You have NOT seen any implementation.
+    - Focus on exception branches and invariants — these find bugs.
+    - Run tests and verify they FAIL (no implementation exists yet).
+
+    Read the `test-design` skill for the invariant-first test methodology.
+
+    IMPORTANT — ordering matters:
+    1. Commit tests and push to `workbuddy/issue-{{.Issue.Number}}`
+    2. Append a `## Test Artifacts` section to the issue body listing:
+       - The test file path(s) relative to repo root
+       - The test run command (e.g. `pytest tests/test_health.py -v` or
+         `go test ./src/shipping/... -run TestAC -v`)
+       - The test-to-AC mapping table
+       Use `gh issue edit` to append to the body (read current body first,
+       append, write back — same as the spec agent does).
+    3. VERIFY the body was updated
+    4. Call submit_result(success=true, next_label="status:developing")
+
+    Never call submit_result before tests are pushed and the artifacts
+    section is written.
+
+    Do NOT write any implementation code. Only test files.
+    Do NOT use `gh issue edit` to change labels.
 
 # Ingress for the coordinator Service. Disabled by default; enable in K8s
 # topologies that need external webui + webhook access (decision doc Block 3

@@ -72,3 +72,75 @@ data:
         enter_label: "status:failed"
     ```
 {{- end }}
+  workflow-engineering.md: |
+    ---
+    name: engineering
+    description: Spec-driven engineering workflow with parallel test generation and development
+    trigger:
+      issue_label: "engineering"
+    max_retries: 3
+    max_review_cycles: 3
+    ---
+
+    ## Engineering Workflow
+
+    Five-state spec-driven pipeline. Tests are generated from the spec BEFORE
+    implementation exists. A test-gen agent and dev agent run in parallel during
+    the developing state.
+
+    ```yaml
+    states:
+      specifying:
+        enter_label: "status:specifying"
+        agent: spec-agent
+        transitions:
+          "status:spec-review": spec_review
+          "status:blocked": blocked
+
+      spec_review:
+        enter_label: "status:spec-review"
+        agent: spec-review-agent
+        transitions:
+          "status:test-generating": test_generating
+          "status:specifying": specifying
+
+      test_generating:
+        enter_label: "status:test-generating"
+        agent: test-gen-agent
+        transitions:
+          "status:developing": developing
+          "status:blocked": blocked
+
+      developing:
+        enter_label: "status:developing"
+        agent: dev-agent
+        transitions:
+          "status:reviewing": reviewing
+          "status:blocked": blocked
+
+      reviewing:
+        enter_label: "status:reviewing"
+        agent: review-agent
+        transitions:
+          "status:merging": merging
+          "status:developing": developing
+
+      merging:
+        enter_label: "status:merging"
+        agent: merge-agent
+        transitions:
+          "status:merged": merged
+          "status:developing": developing
+
+      merged:
+        enter_label: "status:merged"
+
+      blocked:
+        enter_label: "status:blocked"
+        transitions:
+          "status:specifying": specifying
+          "status:developing": developing
+
+      failed:
+        enter_label: "status:failed"
+    ```

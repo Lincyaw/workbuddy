@@ -195,6 +195,10 @@ spec:
               mountPath: {{ $cfgDir }}/workflows/default.md
               subPath: workflow-default.md
               readOnly: true
+            - name: config
+              mountPath: {{ $cfgDir }}/workflows/engineering.md
+              subPath: workflow-engineering.md
+              readOnly: true
             - name: agents
               mountPath: {{ $cfgDir }}/agents
               readOnly: true

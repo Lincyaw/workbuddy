@@ -491,15 +491,17 @@ func (s *AgentBridgeSession) Run(ctx context.Context, events chan<- launchereven
 			meta[MetaInfraFailure] = "true"
 			meta[MetaInfraFailureReason] = perr.Error()
 		case out != nil:
-			// In autonomous mode, the agent handles git push, PR creation,
-			// issue comments, and label changes itself via gh CLI. The
-			// coordinator only records metadata for audit/observability.
 			meta["agentm_next_label"] = out.NextLabel
 			if out.ArtifactPath != "" {
 				meta["agentm_artifact_path"] = out.ArtifactPath
 			}
 			if !out.Success {
 				meta["agentm_failure_reason"] = out.FailureReason
+			}
+			if out.NextLabel != "" {
+				if _, labelErr := s.applyAgentMNextLabel(ctx, out.NextLabel); labelErr != nil {
+					meta["agentm_label_error"] = labelErr.Error()
+				}
 			}
 		}
 	}

@@ -35,7 +35,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM python:${PYTHON_VERSION}-slim-bookworm AS runtime
 
 # Pin to a release; bump when upgrading AgentM.
-ARG AGENTM_VERSION=0.2.3
+ARG AGENTM_VERSION=0.2.4
 
 # Host tools: git + gh for autonomous gitops; ca-certificates for HTTPS.
 RUN apt-get update \
@@ -61,14 +61,26 @@ ENV VIRTUAL_ENV=${AGENTM_HOME}/venv
 # `agentm[agent-env]` pulls in the ARL sandbox SDK (arl-env); the
 # operations_agent_env atom and agent_env_repo scenario are builtin and
 # resolve by name — no entry-point package, no AGENTM_PROJECT_ROOT.
+COPY deploy/docker/agentm-${AGENTM_VERSION}-py3-none-any.whl /tmp/
 RUN uv venv "${VIRTUAL_ENV}" \
     && uv pip install --no-cache --python "${VIRTUAL_ENV}/bin/python" \
-         "agentm[agent-env]==${AGENTM_VERSION}" \
-    && "${VIRTUAL_ENV}/bin/agentm" --help >/dev/null
+         "/tmp/agentm-${AGENTM_VERSION}-py3-none-any.whl[agent-env]" \
+    && "${VIRTUAL_ENV}/bin/agentm" --help >/dev/null \
+    && rm /tmp/agentm-*.whl
 
 ENV PATH=${VIRTUAL_ENV}/bin:${PATH}
 
 COPY --from=build /out/workbuddy /usr/local/bin/workbuddy
+
+# Pre-installed AgentM skills for the engineering workflow (spec-writing,
+# test-design, code-review-standards, etc.). DefaultResourceLoader discovers
+# them at $AGENTM_HOME/skills/<name>/SKILL.md automatically.
+COPY deploy/agentm/skills/ ${AGENTM_HOME}/skills/
+
+# Workbuddy-specific atoms (submit_result tool, etc.). Loaded via
+# --extension flag or extensions: list in agent configs. Home contrib
+# auto-discovery finds them at $AGENTM_HOME/contrib/extensions/.
+COPY deploy/agentm/extensions/ ${AGENTM_HOME}/contrib/extensions/
 
 WORKDIR /var/lib/workbuddy
 
