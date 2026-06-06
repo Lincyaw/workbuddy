@@ -339,6 +339,14 @@ func (w *DistributedWorker) ExecuteTask(ctx context.Context, task *workerclient.
 	if err := w.deps.Reporter.ReportVerified(reportCtx, task.Repo, task.IssueNum, task.AgentName, result, sessionID, w.deps.WorkerID, 0, workflowMaxRetries(w.deps.Config, task.Workflow), labelSummary, reportWorkDir, verifyRes, nil); err != nil {
 		log.Printf("[worker] report failed: %v", err)
 	}
+
+	if result != nil && result.Meta != nil {
+		if reason := result.Meta["agentm_failure_reason"]; reason != "" {
+			if err := w.deps.Reporter.PostReviewVerdict(reportCtx, task.Repo, task.IssueNum, reason); err != nil {
+				log.Printf("[worker] review verdict post failed: %v", err)
+			}
+		}
+	}
 	return nil
 }
 

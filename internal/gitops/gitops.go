@@ -265,29 +265,6 @@ func (c *Client) existingPRURL(ctx context.Context, repo, branch string) string 
 	return lastNonEmptyLine(stdout)
 }
 
-// MergePR squash-merges the open PR whose head branch is `branch` in `repo`,
-// then deletes the remote branch. Called by the coordinator after the
-// merge-agent approves the PR (status:merged label applied). Uses `gh pr merge`
-// which handles authentication the same way as `gh pr create`.
-func (c *Client) MergePR(ctx context.Context, repo, branch string) error {
-	if repo == "" {
-		return errors.New("gitops: MergePR: empty repo")
-	}
-	if branch == "" {
-		return errors.New("gitops: MergePR: empty branch")
-	}
-	_, stderr, err := c.runner().Run(ctx, "", nil, c.gh(),
-		"pr", "merge", branch,
-		"--repo", repo,
-		"--squash",
-		"--delete-branch",
-	)
-	if err != nil {
-		return fmt.Errorf("gitops: gh pr merge: %w (%s)", err, strings.TrimSpace(stderr))
-	}
-	return nil
-}
-
 func lastNonEmptyLine(s string) string {
 	lines := strings.Split(strings.TrimSpace(s), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {

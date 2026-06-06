@@ -67,20 +67,6 @@ func (l *Registry) SetAgentMLabelWriter(lw AgentMLabelWriter) {
 	}
 }
 
-// SetAgentMPRMerger attaches a PR merger to any registered AgentBridgeRuntime
-// keyed on config.RuntimeAgentM. After the merge-agent returns status:merged,
-// the bridge invokes this to squash-merge the PR.
-func (l *Registry) SetAgentMPRMerger(m AgentMPRMerger) {
-	for name, rt := range l.runtimes {
-		if name != config.RuntimeAgentM {
-			continue
-		}
-		if br, ok := rt.(*AgentBridgeRuntime); ok {
-			br.PRMerger = m
-		}
-	}
-}
-
 // SupervisorClient returns the configured client (nil before SetSupervisorClient).
 func (l *Registry) SupervisorClient() *supclient.Client { return l.supervisorClient }
 

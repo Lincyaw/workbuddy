@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/config"
-	"github.com/Lincyaw/workbuddy/internal/gitops"
 	"github.com/Lincyaw/workbuddy/internal/launcher"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
@@ -441,9 +440,6 @@ func runWorkerWithOpts(opts *workerOpts, lnch *runtimepkg.Registry, reader worke
 	// Registry setter only mutates the AgentM bridge runtime.
 	lnch.SetAgentMLabelWriter(launcher.NewAgentMLabelWriterAdapter(localStore))
 
-	// Coordinator-managed PR merger for the merge-agent. When the
-	// merge-agent returns status:merged, the bridge squash-merges the PR.
-	lnch.SetAgentMPRMerger(&gitops.Client{})
 
 	var httpClient *http.Client
 	if opts.caCert != "" {

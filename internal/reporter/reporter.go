@@ -280,6 +280,19 @@ func (r *Reporter) ReportNeedsHuman(ctx context.Context, repo string, issueNum i
 	})
 }
 
+// PostReviewVerdict posts a verdict-marked comment so that
+// FormatComments (taskprep) can surface it to the next agent as
+// "Latest review verdict". Called after a review/merge agent rejects.
+func (r *Reporter) PostReviewVerdict(ctx context.Context, repo string, issueNum int, failureReason string) error {
+	if failureReason == "" {
+		return nil
+	}
+	body := "<!-- workbuddy:review-verdict -->\n## Review Feedback\n\n" + failureReason
+	return r.writeWithRateLimitRetry(ctx, repo, issueNum, "review_verdict", func() error {
+		return r.gh.WriteComment(repo, issueNum, body)
+	})
+}
+
 // ReportSynthesisNeedsHuman posts a needs-human recommendation when a
 // synthesize-mode run failed to produce a valid structured decision.
 func (r *Reporter) ReportSynthesisNeedsHuman(ctx context.Context, repo string, issueNum int, reason string) error {

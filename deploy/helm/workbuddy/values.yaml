@@ -181,19 +181,29 @@ agents:
     Title: {{.Issue.Title}}
 
     The repo is at /workspace on the `workbuddy/issue-{{.Issue.Number}}` branch.
-    Run `git diff main-base..HEAD` to see the changes.
 
-    Final quality check:
+    Step 1 — Sync with main and resolve conflicts:
+    ```
+    git fetch origin main
+    git rebase origin/main
+    ```
+    If there are conflicts, resolve them (accept the changes that make sense
+    for this PR, preserve main's newer work where appropriate), then
+    `git rebase --continue`. After rebase, force-push:
+    `git push --force-with-lease origin workbuddy/issue-{{.Issue.Number}}`
+
+    Step 2 — Quality check (`git diff origin/main..HEAD`):
     - No accidental deletions or file truncation
     - Changed files pass syntax checks
     - Changes are focused and relevant to the issue
 
-    If clean: merge the PR (`gh pr merge --squash --delete-branch -R {{.Repo}}`),
-    close the issue (`gh issue close {{.Issue.Number}} -R {{.Repo}}`),
+    Step 3 — Merge:
+    If clean: `gh pr merge --squash --delete-branch -R {{.Repo}}`
+    then `gh issue close {{.Issue.Number}} -R {{.Repo}}`
     then call submit_result(success=true, next_label="status:merged").
 
-    If problems: comment with the reason, then call
-    submit_result(success=false, next_label="status:developing",
+    If you cannot resolve conflicts or quality check fails: comment with the
+    reason, then call submit_result(success=false, next_label="status:developing",
       failure_reason="<describe the problem>").
     Do NOT use `gh issue edit` to change labels.
 

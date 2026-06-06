@@ -66,11 +66,6 @@ type AgentBridgeRuntime struct {
 	// `gh issue edit` from inside the agent subprocess and MUST NOT
 	// have this hook wired — the per-runtime gate lives in Run() below.
 	LabelWriter AgentMLabelWriter
-	// PRMerger, when non-nil, is invoked after the merge-agent applies
-	// the merged label. The coordinator squash-merges the PR and deletes
-	// the branch. Only fires for AgentM runs whose applied label matches
-	// MergedLabel.
-	PRMerger AgentMPRMerger
 	// ControlObserver, when non-nil, enables the closed-loop control
 	// system for AgentM dispatches. After each agent run, the observer
 	// checks world state (branch/PR/label/comment) against the role's
@@ -108,19 +103,6 @@ type AgentMLabelWriter interface {
 	// Gitea backends route to the right wire protocol.
 	ApplyNextLabel(ctx context.Context, repo string, issueNum int, label string) error
 }
-
-// AgentMPRMerger is the bridge between the runtime package and
-// internal/gitops for the merge-agent post-label step. When the
-// merge-agent returns next_label matching MergedLabel, the coordinator
-// squash-merges the PR and deletes the branch.
-type AgentMPRMerger interface {
-	MergePR(ctx context.Context, repo, branch string) error
-}
-
-// MergedLabel is the label value that triggers coordinator-side PR merge
-// after the merge-agent approves. Must match the workflow's merged state
-// enter_label.
-const MergedLabel = "status:merged"
 
 // ErrNoChangesToPublish signals that an AgentMGitOps.PublishArtifact call
 // found no working-tree changes — the agent declared success but its
@@ -235,7 +217,6 @@ func (r *AgentBridgeRuntime) startWithResume(ctx context.Context, agentCfg *conf
 		Task:        task,
 		GitOps:      r.GitOps,
 		LabelWriter: r.LabelWriter,
-		PRMerger:    r.PRMerger,
 	}, nil
 }
 
@@ -383,9 +364,6 @@ type AgentBridgeSession struct {
 	// succeeds. Strict sequence: if the PR cannot be opened we MUST NOT
 	// advance the state machine (REQ-146 / #332).
 	LabelWriter AgentMLabelWriter
-	// PRMerger, when non-nil and the applied label is MergedLabel,
-	// squash-merges the PR after the merge-agent approves.
-	PRMerger AgentMPRMerger
 }
 
 func (s *AgentBridgeSession) Run(ctx context.Context, events chan<- launcherevents.Event) (*Result, error) {
