@@ -1,14 +1,16 @@
 package runtime
 
 // Tests for the v0.6 coordinator-managed label writer hook (REQ-146 /
-// #332). These cover the AgentM-only contract: on success+publish-OK we
-// fire the LabelWriter with the agent-suggested label; on failure or
+// #332). AgentM runs in autonomous mode — the agent does its own git
+// push / PR — so the label transition is the only Go-side state-machine
+// write. These cover the AgentM-only contract: on a valid non-empty
+// next_label we fire the LabelWriter with the agent-suggested label,
+// regardless of any Go-side publish; on an empty next_label or
 // non-AgentM runtimes we MUST NOT fire it. The fake AgentM binary from
 // agentmtest drives the underlying agent.Session.
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -49,19 +51,17 @@ func (f *fakeLabelWriter) Calls() []labelCall {
 }
 
 // AC-1-1: AgentM happy path with a non-empty next_label and a configured
-// GitOps + LabelWriter pair MUST trigger the label writer with the exact
-// label the agent emitted, and stamp Result.Meta["agentm_label_applied"].
+// LabelWriter MUST trigger the label writer with the exact label the
+// agent emitted, and stamp Result.Meta["agentm_label_applied"].
 func TestAgentMBridge_AppliesNextLabelOnSuccess(t *testing.T) {
 	fake := agentmtest.BuildFake(t, agentmtest.Config{
 		Mode:      agentmtest.ModeResultSuccess,
 		NextLabel: "status:reviewing",
 	})
-	gops := &fakeGitOps{prURL: "https://example.com/pull/1"}
 	lw := &fakeLabelWriter{}
 	rt := NewAgentBridgeRuntime(config.RuntimeAgentM, func() (agent.Backend, error) {
 		return &agentm.Backend{Binary: fake}, nil
 	})
-	rt.GitOps = gops
 	rt.LabelWriter = lw
 
 	work := t.TempDir()
@@ -93,23 +93,20 @@ func TestAgentMBridge_AppliesNextLabelOnSuccess(t *testing.T) {
 	}
 }
 
-// AC-1-2: AgentM run with success=false MUST NOT fire the label writer.
-// failure_reason still flows into Meta for the reporter to surface.
-// Failed runs (success=false) still apply next_label — a review-agent
-// bouncing an issue back to developing is a legitimate routing decision.
-// Only the gitops publish is skipped (no artifact to commit).
+// AC-1-2: AgentM run with success=false still applies next_label — a
+// review-agent bouncing an issue back to developing is a legitimate
+// routing decision. failure_reason still flows into Meta for the reporter
+// to surface.
 func TestAgentMBridge_LabelAppliedOnFailure(t *testing.T) {
 	fake := agentmtest.BuildFake(t, agentmtest.Config{
 		Mode:          agentmtest.ModeFailure,
 		NextLabel:     "status:developing",
 		FailureReason: "ac not met",
 	})
-	gops := &fakeGitOps{}
 	lw := &fakeLabelWriter{}
 	rt := NewAgentBridgeRuntime(config.RuntimeAgentM, func() (agent.Backend, error) {
 		return &agentm.Backend{Binary: fake}, nil
 	})
-	rt.GitOps = gops
 	rt.LabelWriter = lw
 
 	work := t.TempDir()
@@ -130,43 +127,6 @@ func TestAgentMBridge_LabelAppliedOnFailure(t *testing.T) {
 	}
 	if calls[0].label != "status:developing" {
 		t.Fatalf("expected label %q, got %q", "status:developing", calls[0].label)
-	}
-	if got := len(gops.calls); got != 0 {
-		t.Fatalf("publish must be skipped on failure, got %d calls", got)
-	}
-}
-
-// Sequencing contract (matches the spec on #332): if gitops publish
-// fails, the label writer MUST NOT fire — we cannot advance the state
-// machine when the PR was not opened.
-func TestAgentMBridge_NoLabelWhenPublishFails(t *testing.T) {
-	fake := agentmtest.BuildFake(t, agentmtest.Config{
-		Mode:      agentmtest.ModeResultSuccess,
-		NextLabel: "status:reviewing",
-	})
-	gops := &fakeGitOps{err: errors.New("commit-push: permission denied")}
-	lw := &fakeLabelWriter{}
-	rt := NewAgentBridgeRuntime(config.RuntimeAgentM, func() (agent.Backend, error) {
-		return &agentm.Backend{Binary: fake}, nil
-	})
-	rt.GitOps = gops
-	rt.LabelWriter = lw
-
-	work := t.TempDir()
-	task := &TaskContext{
-		Repo:    "Lincyaw/workbuddy",
-		WorkDir: work,
-		Issue:   IssueContext{Number: 332},
-		Session: SessionContext{ID: "test-session"},
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	res, _ := rt.Launch(ctx, &config.AgentConfig{Name: "dev-agent", Runtime: config.RuntimeAgentM}, task)
-	if calls := lw.Calls(); len(calls) != 0 {
-		t.Fatalf("expected 0 label-writer calls when publish fails, got %v", calls)
-	}
-	if !IsInfraFailure(res) {
-		t.Fatalf("publish failure should mark infra failure, meta=%v", res.Meta)
 	}
 }
 

@@ -7,7 +7,6 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/agent/agentm"
 	"github.com/Lincyaw/workbuddy/internal/agent/codex"
 	"github.com/Lincyaw/workbuddy/internal/config"
-	"github.com/Lincyaw/workbuddy/internal/gitops"
 	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 	supclient "github.com/Lincyaw/workbuddy/internal/supervisor/client"
 )
@@ -49,10 +48,5 @@ func RegisterBuiltins(l *runtimepkg.Registry) {
 	agentMRuntime := newAgentBridgeRuntime(config.RuntimeAgentM, func() (agent.Backend, error) {
 		return agentm.NewBackend(), nil
 	})
-	// Coordinator-managed publish path for AgentM only (REQ-142).
-	// claude-code / codex stay self-managed (no GitOps adapter wired on
-	// those runtimes), so they keep calling `gh issue edit` / `git push`
-	// from inside the agent subprocess as today.
-	agentMRuntime.GitOps = NewAgentMGitOpsAdapter(nil, gitops.Author{})
 	l.Register(agentMRuntime, config.RuntimeAgentM)
 }

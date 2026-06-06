@@ -49,19 +49,13 @@ type AgentBridgeRuntime struct {
 	BackendMu   sync.Mutex
 	NewBackend  func() (agent.Backend, error)
 	RuntimeName string
-	// GitOps, when non-nil, is invoked by the AgentM bridge after a
-	// successful run with a non-empty artifact: the coordinator commits
-	// the artifact to a `workbuddy/issue-N` branch, pushes, and opens a
-	// PR. v0.6 coordinator-managed dispatch per
-	// docs/decisions/2026-05-13-k8s-agentm-otel.md (Block 2). Other
-	// runtimes (claude-code, codex) remain self-managed; this hook is
-	// only consulted when the underlying session is AgentM.
-	GitOps AgentMGitOps
 	// LabelWriter, when non-nil, is invoked by the AgentM bridge after a
-	// successful run AND a successful GitOps publish to apply the
-	// `next_label` value the agent emitted on its structured Result.
-	// Coordinator-managed label writes are the v0.6 closing of the
-	// AgentM state-machine loop (REQ-146, #332). Self-managed runtimes
+	// run to apply the `next_label` value the agent emitted on its
+	// structured Result. AgentM runs in autonomous mode — the agent does
+	// its own git push / PR — so the only Go-side state-machine write is
+	// this label transition. Coordinator-managed label writes are the v0.6
+	// closing of the AgentM state-machine loop (REQ-146, #332). Self-managed
+	// runtimes
 	// (claude-code, codex) keep flipping labels themselves via
 	// `gh issue edit` from inside the agent subprocess and MUST NOT
 	// have this hook wired — the per-runtime gate lives in Run() below.
@@ -74,19 +68,6 @@ type AgentBridgeRuntime struct {
 	// ControlMaxRounds caps the number of observe-resume iterations.
 	// Defaults to 5 when zero.
 	ControlMaxRounds int
-}
-
-// AgentMGitOps is the bridge between the runtime package and
-// internal/gitops. Defined locally so runtime stays a leaf-of-leaves;
-// production wiring constructs an adapter that satisfies this interface
-// around a *gitops.Client.
-type AgentMGitOps interface {
-	// PublishArtifact commits whatever is staged in req.RepoLocalPath
-	// (the AgentM workspace) onto req.Branch, pushes, and opens a PR.
-	// Returns the PR URL on success. An ErrNoChangesToPublish return
-	// means the agent produced no diff; the caller MUST treat that as
-	// a no-op publish, not a failure.
-	PublishArtifact(ctx context.Context, req AgentMPublishRequest) (prURL string, err error)
 }
 
 // AgentMLabelWriter is the bridge between the runtime package and
@@ -102,24 +83,6 @@ type AgentMLabelWriter interface {
 	// to consult the repo registration for host_kind so GitHub and
 	// Gitea backends route to the right wire protocol.
 	ApplyNextLabel(ctx context.Context, repo string, issueNum int, label string) error
-}
-
-// ErrNoChangesToPublish signals that an AgentMGitOps.PublishArtifact call
-// found no working-tree changes — the agent declared success but its
-// workspace is identical to the base branch. Callers surface this as
-// metadata, not as a failure.
-var ErrNoChangesToPublish = fmt.Errorf("agent bridge: agentm produced no changes to publish")
-
-// AgentMPublishRequest is the input to AgentMGitOps.PublishArtifact.
-type AgentMPublishRequest struct {
-	Repo          string
-	IssueNumber   int
-	IssueTitle    string
-	Branch        string
-	CommitMessage string
-	PRTitle       string
-	PRBody        string
-	RepoLocalPath string
 }
 
 func NewAgentBridgeRuntime(runtimeName string, factory func() (agent.Backend, error)) *AgentBridgeRuntime {
@@ -215,7 +178,6 @@ func (r *AgentBridgeRuntime) startWithResume(ctx context.Context, agentCfg *conf
 		Handle:      handle,
 		AgentCfg:    agentCfg,
 		Task:        task,
-		GitOps:      r.GitOps,
 		LabelWriter: r.LabelWriter,
 	}, nil
 }
@@ -356,13 +318,10 @@ type AgentBridgeSession struct {
 	Handle   BridgeSessionHandle
 	AgentCfg *config.AgentConfig
 	Task     *TaskContext
-	// GitOps, when non-nil and the underlying session is AgentM,
-	// publishes the artifact (commit/push/PR) after a successful run.
-	GitOps AgentMGitOps
 	// LabelWriter, when non-nil and the underlying session is AgentM,
-	// applies the agent-suggested next_label AFTER GitOps publish
-	// succeeds. Strict sequence: if the PR cannot be opened we MUST NOT
-	// advance the state machine (REQ-146 / #332).
+	// applies the agent-suggested next_label after the run. AgentM is
+	// autonomous (it pushes its own branch / PR), so this label write is
+	// the only Go-side state-machine transition (REQ-146 / #332).
 	LabelWriter AgentMLabelWriter
 }
 
@@ -481,8 +440,10 @@ func (s *AgentBridgeSession) Run(ctx context.Context, events chan<- launchereven
 			if out.NextLabel != "" {
 				if s.isStaleAgent(ctx) {
 					meta["agentm_label_skipped"] = "stale: current issue state no longer matches agent trigger"
-				} else if _, labelErr := s.applyAgentMNextLabel(ctx, out.NextLabel); labelErr != nil {
+				} else if applied, labelErr := s.applyAgentMNextLabel(ctx, out.NextLabel); labelErr != nil {
 					meta["agentm_label_error"] = labelErr.Error()
+				} else if applied != "" {
+					meta["agentm_label_applied"] = applied
 				}
 			}
 		}
@@ -503,61 +464,6 @@ func (s *AgentBridgeSession) Run(ctx context.Context, events chan<- launchereven
 			Kind: agentResult.SessionRef.Kind,
 		},
 	}, err
-}
-
-// publishAgentMArtifact is the coordinator-managed commit+push+PR step
-// (REQ-142). It runs only when the underlying session is AgentM and the
-// bridge runtime has a GitOps adapter configured.
-func (s *AgentBridgeSession) publishAgentMArtifact(ctx context.Context, out *agentm.Output) (string, map[string]string, error) {
-	if s.Task == nil {
-		return "", nil, nil
-	}
-	repo := s.Task.Repo
-	issueNum := s.Task.Issue.Number
-	if repo == "" || issueNum <= 0 {
-		return "", nil, nil
-	}
-	workdir := s.Task.WorkDir
-	if workdir == "" {
-		workdir = s.Task.RepoRoot
-	}
-	if workdir == "" {
-		return "", nil, fmt.Errorf("no workdir on task context")
-	}
-
-	branch := fmt.Sprintf("workbuddy/issue-%d", issueNum)
-	commitMsg := fmt.Sprintf("workbuddy(agentm): resolve issue #%d", issueNum)
-	title := s.Task.Issue.Title
-	if title == "" {
-		title = fmt.Sprintf("workbuddy: resolve issue #%d", issueNum)
-	} else {
-		title = fmt.Sprintf("workbuddy: %s", title)
-	}
-	body := buildAgentMPRBody(repo, issueNum, out)
-
-	req := AgentMPublishRequest{
-		Repo:          repo,
-		IssueNumber:   issueNum,
-		IssueTitle:    s.Task.Issue.Title,
-		Branch:        branch,
-		CommitMessage: commitMsg,
-		PRTitle:       title,
-		PRBody:        body,
-		RepoLocalPath: workdir,
-	}
-
-	prURL, err := s.GitOps.PublishArtifact(ctx, req)
-	meta := map[string]string{}
-	if err != nil {
-		if isNoChangesErr(err) {
-			meta["agentm_publish"] = "no_changes"
-			return "", meta, nil
-		}
-		return "", meta, err
-	}
-	meta["agentm_publish"] = "published"
-	meta["agentm_pr_branch"] = branch
-	return prURL, meta, nil
 }
 
 // applyAgentMNextLabel invokes the coordinator-managed label writer for
@@ -628,30 +534,6 @@ func (s *AgentBridgeSession) isStaleAgent(ctx context.Context) bool {
 	log.Printf("[runtime] stale agent %s for %s#%d: expected label %q not found, skipping label transition",
 		s.AgentCfg.Name, s.Task.Repo, s.Task.Issue.Number, expectedLabel)
 	return true
-}
-
-func buildAgentMPRBody(repo string, issueNum int, out *agentm.Output) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Resolves %s#%d.\n\n", repo, issueNum)
-	b.WriteString("Generated by workbuddy AgentM coordinator-managed dispatch.\n")
-	if out != nil && out.NextLabel != "" {
-		fmt.Fprintf(&b, "\nAgent next_label: `%s`\n", out.NextLabel)
-	}
-	if out != nil && out.SessionLogPath != "" {
-		fmt.Fprintf(&b, "\nSession log: `%s`\n", out.SessionLogPath)
-	}
-	return b.String()
-}
-
-func isNoChangesErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	if err == ErrNoChangesToPublish {
-		return true
-	}
-	return strings.Contains(err.Error(), "no changes to commit") ||
-		strings.Contains(err.Error(), "no changes to publish")
 }
 
 func (s *AgentBridgeSession) SetApprover(Approver) error { return ErrNotSupported }
