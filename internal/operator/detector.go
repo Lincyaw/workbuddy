@@ -17,6 +17,7 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/alertbus"
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/liveness"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
@@ -31,10 +32,16 @@ const (
 	SeverityInfo  = "info"
 	SeverityWarn  = "warn"
 	SeverityError = "error"
+)
 
-	leaseExpiredGrace = 30 * time.Second
-	taskStuckAfter    = 10 * time.Minute
-	missingLabelAfter = 5 * time.Minute
+// Alert thresholds derive from the shared liveness source of truth (ADR
+// 2026-06-06 §6). The operator only EMITS alerts, so these are read-only
+// derivations; single-sourcing them keeps the alerting layer aligned with
+// the watchdog/reaper/forensic layers instead of drifting independently.
+var (
+	leaseExpiredGrace = liveness.Default().LeaseExpiredGrace
+	taskStuckAfter    = liveness.Default().PendingTaskStuckAfter
+	missingLabelAfter = liveness.Default().MissingLabelAfter
 )
 
 // Alert is the structured anomaly emitted by the operator detector.
@@ -86,7 +93,7 @@ type repoContext struct {
 func NewDetector(opts DetectorOptions) *Detector {
 	cfg := opts.Config
 	if cfg.CheckInterval <= 0 {
-		cfg.CheckInterval = 60 * time.Second
+		cfg.CheckInterval = liveness.Default().AlertCheckInterval
 	}
 	if cfg.DedupWindow <= 0 {
 		cfg.DedupWindow = 5 * time.Minute
@@ -301,7 +308,7 @@ func (d *Detector) detectRepoAlerts(ctx context.Context, repoCtx repoContext, no
 		if worker.Status != "online" {
 			continue
 		}
-		if now.Sub(worker.LastHeartbeat) > 3*d.workerHeartbeatInterval {
+		if now.Sub(worker.LastHeartbeat) > liveness.Default().WorkerHeartbeatStaleAfter(d.workerHeartbeatInterval) {
 			alerts = append(alerts, d.newAlert(now, KindWorkerMissing, SeverityError, map[string]any{
 				"repo":      repo,
 				"worker_id": worker.ID,

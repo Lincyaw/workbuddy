@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/Lincyaw/workbuddy/internal/liveness"
 )
 
 // Config holds the watchdog parameters.
@@ -49,15 +51,7 @@ type CompletionAwareActivityChecker interface {
 //
 // Watch blocks until ctx is done. It should be called in a goroutine.
 func Watch(ctx context.Context, cfg Config, checker ActivityChecker, cancel context.CancelFunc) {
-	if cfg.CheckInterval <= 0 {
-		cfg.CheckInterval = 30 * time.Second
-	}
-	if cfg.IdleThreshold <= 0 {
-		cfg.IdleThreshold = 10 * time.Minute
-	}
-	if cfg.CompletedGracePeriod <= 0 {
-		cfg.CompletedGracePeriod = time.Minute
-	}
+	cfg = withDefaults(cfg)
 
 	ticker := time.NewTicker(cfg.CheckInterval)
 	defer ticker.Stop()
@@ -74,6 +68,25 @@ func Watch(ctx context.Context, cfg Config, checker ActivityChecker, cancel cont
 			}
 		}
 	}
+}
+
+// withDefaults fills in any non-positive Config field from the shared
+// liveness source of truth (ADR 2026-06-06 §6) so the watchdog's idle-kill
+// threshold can never drift out of the layering ordering with the
+// reaper/forensic detectors. The worker.stale_inference.* config knobs
+// remain authoritative and only fall through to these when unset.
+func withDefaults(cfg Config) Config {
+	dl := liveness.Default()
+	if cfg.CheckInterval <= 0 {
+		cfg.CheckInterval = dl.IdleCheckInterval
+	}
+	if cfg.IdleThreshold <= 0 {
+		cfg.IdleThreshold = dl.IdleKill
+	}
+	if cfg.CompletedGracePeriod <= 0 {
+		cfg.CompletedGracePeriod = dl.CompletedGracePeriod
+	}
+	return cfg
 }
 
 // isStale returns true when the agent has produced no session file output

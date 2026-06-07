@@ -7265,3 +7265,62 @@ requirements:
     deps:
       - REQ-120
       - REQ-122
+
+  - id: REQ-167
+    title: Unified liveness/stuck thresholds (single source + ordering invariant) (ADR 2026-06-06 §6)
+    description: >
+      Step §6 (feedback-threshold unification) of the convergence refactor in
+      docs/decisions/2026-06-06-runtime-strategy-and-convergence.md.
+
+      Four liveness/stuck mechanisms previously hardcoded INDEPENDENT
+      threshold constants in four packages, which could silently drift into
+      contradiction (the audit found staleinference could kill an agent ~110
+      min before diagnose would even classify it stuck):
+      - staleinference (in-execution watchdog) — KILLS a hung agent.
+      - taskreaper (orphan reaper) — MARKS orphaned running rows failed.
+      - operator (alerting detector) — EMITS alerts.
+      - diagnose (on-demand CLI) — FORENSIC, takes no action.
+
+      These measure DIFFERENT things (agent idle-since-output vs worker
+      heartbeat-orphan vs lease-expiry vs total-runtime), so they are depth
+      layers, not duplicates. This change removes DRIFT POTENTIAL — not
+      production timing — by introducing a single shared source of truth
+      (internal/liveness) holding all the named durations, having all four
+      detectors DERIVE their thresholds from it, and encoding the meaningful
+      ordering invariants as a tested guard (liveness.Defaults.Validate).
+
+      Effective production timings are preserved byte-for-byte (a pinning
+      test asserts each historical value). The watchdog config knobs
+      (worker.stale_inference.{idle_threshold,check_interval,
+      completed_grace_period}) remain authoritative and only fall through to
+      the shared fallbacks when unset. The unused diagnose defaultOrphanedAfter
+      const was removed (dead code); the "2 × timeout" derivation now lives
+      once in liveness.ForensicOrphanedAfterFor.
+    priority: P1
+    version: v0.7.0
+    status: tested
+    acceptance_criteria:
+      - "AC-167-1: internal/liveness is the single source of truth holding the named liveness durations (idle_kill, idle_check_interval, completed_grace_period, orphan_reaper_grace, reaper_interval, alert_check_interval, lease_expired_grace, pending_task_stuck_after, missing_label_after, agent_timeout, forensic_orphan_factor, stuck_issue_threshold, no_child_grace_period, worker_heartbeat_stale_factor); the four detector packages import it without cycles."
+      - "AC-167-2: staleinference, operator (lease/stuck/missing-label/check-interval/heartbeat), taskreaper (interval+grace), and diagnose (stuck/agent-timeout/idle/no-child/tunnel-stale + per-task 2×timeout orphaned-after) all DERIVE their thresholds from liveness.Default(); per-package derivation tests assert this."
+      - "AC-167-2b: the config loader is NOT a second source of truth — config.applyWorkerDefaults (staleinference idle/check/completed-grace) and config.applyOperatorDefaults (operator check_interval) inject defaults derived from liveness.Default(), so the production worker/operator path (LoadConfig fills these before the runtime sees a zero) flows from liveness; TestApplyWorkerDefaultsDeriveFromLiveness / TestApplyOperatorDefaultsDeriveFromLiveness assert this."
+      - "AC-167-3: The meaningful ordering invariants are encoded and tested via liveness.Defaults.Validate(): idle_kill <= agent_timeout, and orphan_reaper_grace <= forensic_orphaned_after. (idle_kill vs orphan_reaper_grace is intentionally not ordered — different clocks/hosts — and this is documented.) A future edit that breaks the ordering fails TestDefaultValidates/TestValidateRejectsBrokenOrdering."
+      - "AC-167-4: Effective production timings are unchanged — TestHistoricalEffectiveTimings pins every detector's pre-unification value (staleinference 10m/30s/60s; taskreaper 60s/5m; operator 60s/30s/10m/5m + 3×heartbeat; diagnose 60m/10m/120m/2m/1h/45s)."
+      - "AC-167-5: worker.stale_inference.* config knobs stay authoritative over the liveness-derived defaults — both at the watchdog (TestWithDefaults_ConfigOverrideFlows) and at the loader (TestApplyWorkerDefaultsOverrideFlows / TestApplyOperatorDefaultsCheckIntervalOverrideFlows) — and diagnose stays FORENSIC (no behavior change, report-only)."
+      - "AC-167-6: `go build ./... && go vet ./... && go test ./... -count=1` all pass."
+    code:
+      - internal/liveness/liveness.go
+      - internal/staleinference/watchdog.go
+      - internal/operator/detector.go
+      - internal/app/task_reaper.go
+      - internal/diagnose/diagnose.go
+      - internal/config/loader.go
+    tests:
+      - internal/liveness/liveness_test.go
+      - internal/staleinference/watchdog_test.go
+      - internal/operator/liveness_derivation_test.go
+      - internal/app/task_reaper_test.go
+      - internal/diagnose/liveness_derivation_test.go
+      - internal/config/liveness_defaults_test.go
+    deps:
+      - REQ-037
+      - REQ-151

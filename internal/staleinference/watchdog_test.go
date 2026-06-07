@@ -6,7 +6,41 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Lincyaw/workbuddy/internal/liveness"
 )
+
+// TestWithDefaults_DerivesFromLiveness verifies the watchdog's fallback
+// thresholds come from the shared liveness source of truth (ADR §6), not a
+// local hardcoded constant.
+func TestWithDefaults_DerivesFromLiveness(t *testing.T) {
+	dl := liveness.Default()
+	got := withDefaults(Config{})
+	if got.IdleThreshold != dl.IdleKill {
+		t.Errorf("IdleThreshold fallback = %s, want shared %s", got.IdleThreshold, dl.IdleKill)
+	}
+	if got.CheckInterval != dl.IdleCheckInterval {
+		t.Errorf("CheckInterval fallback = %s, want shared %s", got.CheckInterval, dl.IdleCheckInterval)
+	}
+	if got.CompletedGracePeriod != dl.CompletedGracePeriod {
+		t.Errorf("CompletedGracePeriod fallback = %s, want shared %s", got.CompletedGracePeriod, dl.CompletedGracePeriod)
+	}
+}
+
+// TestWithDefaults_ConfigOverrideFlows verifies that explicit config knobs
+// (worker.stale_inference.*) stay authoritative and are NOT overwritten by
+// the shared fallbacks.
+func TestWithDefaults_ConfigOverrideFlows(t *testing.T) {
+	in := Config{
+		IdleThreshold:        7 * time.Minute,
+		CheckInterval:        5 * time.Second,
+		CompletedGracePeriod: 42 * time.Second,
+	}
+	got := withDefaults(in)
+	if got != in {
+		t.Fatalf("explicit config must be preserved: got %+v, want %+v", got, in)
+	}
+}
 
 type fakeChecker struct {
 	mtime       time.Time

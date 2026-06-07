@@ -6,23 +6,28 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/liveness"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
 
 // Default knobs for the TaskReaper. The reaper is best-effort house-keeping
 // for status=running rows whose worker stopped heart-beating; the values are
-// deliberately conservative so a transient hiccup never racing with a real
+// deliberately conservative so a transient hiccup never races with a real
 // worker recovery. See REQ-151 (issue #345 Wave 2).
-const (
+//
+// Both values DERIVE from the shared liveness source of truth (ADR
+// 2026-06-06 §6). The grace keys off *worker* heartbeat liveness, a
+// different clock from the watchdog's agent-idle signal, so liveness does
+// NOT order idle_kill against reaper_grace; the invariants it enforces are
+// idle_kill <= agent_timeout and reaper_grace <= forensic_orphaned_after.
+// The grace remains 5× the default worker heartbeat interval (15s).
+var (
 	// DefaultTaskReaperInterval is how often the reaper checks for stale
 	// running rows when no explicit override is supplied.
-	DefaultTaskReaperInterval = 60 * time.Second
+	DefaultTaskReaperInterval = liveness.Default().ReaperInterval
 	// DefaultTaskReaperGrace is the grace period (no heartbeat) after which
-	// a status=running row is considered stale. Chosen as 5× the default
-	// worker heartbeat interval (15s) so a worker that misses one or two
-	// heartbeats due to GC or transient load does NOT get its task reaped
-	// out from underneath it.
-	DefaultTaskReaperGrace = 5 * time.Minute
+	// a status=running row is considered stale.
+	DefaultTaskReaperGrace = liveness.Default().OrphanReaperGrace
 )
 
 // taskReaperEventLogger is the narrow eventlog surface the reaper needs.
