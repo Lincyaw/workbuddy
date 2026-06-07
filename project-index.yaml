@@ -2818,6 +2818,19 @@ requirements:
       restart`. The dispatch block is enforced at the orchestration layer
       regardless of label state, so the user-visible effect ("agent stops
       retrying after the cap") is identical to an auto-flip.
+
+      Refactor note (ADR 2026-06-06 §6 cycle-cap dedup): the dev↔review and
+      synth (REQ-117) caps now share ONE parameterized decision mechanism —
+      StateMachine.enforceCycleCap driven by a cycleCapSpec — instead of two
+      near-identical functions. On the store side the SQLite increment bodies
+      collapse into dbStore.incrementCycleCount(column) (mirroring the existing
+      mysqlIncrementCycleCount) and the cap-hit stamps into markIssueCapHit
+      (column); the public Store methods are thin column-bound wrappers. The
+      two counters/columns (`dev_review_cycle_count`/`synth_cycle_count`),
+      their distinct defaults (3 vs 2), distinct cap-hit stamps, and distinct
+      events/alerts/heads-up behavior are deliberately PRESERVED as
+      independent budgets — TestCycleCapBudgetsAreIndependent pins that no
+      future edit collapses them into a shared budget.
     priority: P1
     version: v0.5.0
     status: tested

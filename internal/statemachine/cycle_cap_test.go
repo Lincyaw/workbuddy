@@ -594,3 +594,83 @@ func TestCycleCapTouchFirstDispatch(t *testing.T) {
 		t.Fatalf("first_dispatch_at not recorded for %+v", state)
 	}
 }
+
+// TestCycleCapBudgetsAreIndependent pins the dedup invariant (ADR §6): the
+// dev↔review and synth caps share ONE decision mechanism (enforceCycleCap) but
+// MUST remain independent budgets. Driving the dev↔review loop all the way to
+// its cap must not advance the synth counter or trip its cap, and vice versa.
+// A future edit that accidentally collapses the two into a shared budget would
+// fail here.
+func TestCycleCapBudgetsAreIndependent(t *testing.T) {
+	sm, _, _, _, _ := newCapTestSM(t, 3)
+	ctx := context.Background()
+	const repo = "test/repo"
+	const issue = 700
+
+	wf := sm.workflows["dev-flow"]
+	devSpec := devReviewCycleCapSpec(wf)
+	synthSpec := synthCycleCapSpec(wf)
+
+	// Drive the dev↔review loop to its cap.
+	for i := 1; i <= devSpec.maxCycles; i++ {
+		blocked, err := sm.enforceCycleCap(ctx, wf, repo, issue, devSpec)
+		if err != nil {
+			t.Fatalf("dev enforceCycleCap iter %d: %v", i, err)
+		}
+		wantBlocked := i >= devSpec.maxCycles
+		if blocked != wantBlocked {
+			t.Fatalf("dev iter %d blocked = %v, want %v", i, blocked, wantBlocked)
+		}
+	}
+
+	// The synth budget must be untouched: not incremented, not capped.
+	state, err := sm.store.QueryIssueCycleState(repo, issue)
+	if err != nil {
+		t.Fatalf("QueryIssueCycleState: %v", err)
+	}
+	if state.DevReviewCycleCount != devSpec.maxCycles {
+		t.Fatalf("dev_review_cycle_count = %d, want %d", state.DevReviewCycleCount, devSpec.maxCycles)
+	}
+	if state.SynthCycleCount != 0 {
+		t.Fatalf("synth budget leaked from dev loop: synth_cycle_count = %d, want 0", state.SynthCycleCount)
+	}
+	if state.CapHitAt.IsZero() {
+		t.Fatalf("dev cap_hit_at not stamped")
+	}
+	if !state.SynthCapHitAt.IsZero() {
+		t.Fatalf("synth cap stamped while only the dev loop hit its cap")
+	}
+
+	// Now drive the synth loop to its (distinct, smaller) cap. It must engage
+	// at its own threshold regardless of the already-maxed dev counter.
+	for i := 1; i <= synthSpec.maxCycles; i++ {
+		blocked, err := sm.enforceCycleCap(ctx, wf, repo, issue, synthSpec)
+		if err != nil {
+			t.Fatalf("synth enforceCycleCap iter %d: %v", i, err)
+		}
+		wantBlocked := i >= synthSpec.maxCycles
+		if blocked != wantBlocked {
+			t.Fatalf("synth iter %d blocked = %v, want %v", i, blocked, wantBlocked)
+		}
+	}
+
+	state, err = sm.store.QueryIssueCycleState(repo, issue)
+	if err != nil {
+		t.Fatalf("QueryIssueCycleState after synth: %v", err)
+	}
+	if state.SynthCycleCount != synthSpec.maxCycles {
+		t.Fatalf("synth_cycle_count = %d, want %d", state.SynthCycleCount, synthSpec.maxCycles)
+	}
+	if state.DevReviewCycleCount != devSpec.maxCycles {
+		t.Fatalf("dev budget mutated by synth loop: dev_review_cycle_count = %d, want %d", state.DevReviewCycleCount, devSpec.maxCycles)
+	}
+	if state.SynthCapHitAt.IsZero() {
+		t.Fatalf("synth cap_hit_at not stamped at its own threshold")
+	}
+
+	// The two caps must be distinct values — guards against unifying the
+	// thresholds as well as the counters.
+	if devSpec.maxCycles == synthSpec.maxCycles {
+		t.Fatalf("dev and synth caps must stay distinct, both = %d", devSpec.maxCycles)
+	}
+}

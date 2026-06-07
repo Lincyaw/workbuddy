@@ -924,27 +924,39 @@ func (s *dbStore) QueryWorkflowTransitions(instanceID string) ([]WorkflowTransit
 // used by the max_review_cycles cap and the long-flight stuck detector.
 // ---------------------------------------------------------------------------
 
-// IncrementDevReviewCycleCount atomically increments the per-issue
-// dev_review_cycle_count and returns the new value. The row is created on
-// first call. updated_at is bumped to CURRENT_TIMESTAMP.
-func (s *dbStore) IncrementDevReviewCycleCount(repo string, issueNum int) (int, error) {
+// incrementCycleCount atomically increments the per-issue counter named by
+// `column` and returns the new value. The row is created on first call;
+// updated_at is bumped to CURRENT_TIMESTAMP. This is the single
+// implementation behind every per-issue cycle counter (dev↔review, synth,
+// total transitions) — the public wrappers below differ only in which
+// column they target. The column name is always a private package literal
+// (never user input), so direct interpolation is safe.
+func (s *dbStore) incrementCycleCount(repo string, issueNum int, column string) (int, error) {
 	if s.isMySQL() {
-		return s.mysqlIncrementCycleCount(repo, issueNum, "dev_review_cycle_count")
+		return s.mysqlIncrementCycleCount(repo, issueNum, column)
 	}
 	var count int
 	err := s.db.QueryRow(
-		`INSERT INTO issue_cycle_state (repo, issue_num, dev_review_cycle_count, updated_at)
-		 VALUES (?, ?, 1, CURRENT_TIMESTAMP)
-		 ON CONFLICT (repo, issue_num)
-		 DO UPDATE SET dev_review_cycle_count = dev_review_cycle_count + 1,
-		               updated_at = CURRENT_TIMESTAMP
-		 RETURNING dev_review_cycle_count`,
+		fmt.Sprintf(
+			`INSERT INTO issue_cycle_state (repo, issue_num, %s, updated_at)
+			 VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+			 ON CONFLICT (repo, issue_num)
+			 DO UPDATE SET %s = %s + 1, updated_at = CURRENT_TIMESTAMP
+			 RETURNING %s`,
+			column, column, column, column,
+		),
 		repo, issueNum,
 	).Scan(&count)
 	if err != nil {
-		return 0, fmt.Errorf("store: increment dev_review_cycle_count: %w", err)
+		return 0, fmt.Errorf("store: increment %s: %w", column, err)
 	}
 	return count, nil
+}
+
+// IncrementDevReviewCycleCount atomically increments the per-issue
+// dev_review_cycle_count and returns the new value.
+func (s *dbStore) IncrementDevReviewCycleCount(repo string, issueNum int) (int, error) {
+	return s.incrementCycleCount(repo, issueNum, "dev_review_cycle_count")
 }
 
 // mysqlIncrementCycleCount emulates SQLite `RETURNING` on MySQL: an
@@ -982,49 +994,18 @@ func (s *dbStore) mysqlIncrementCycleCount(repo string, issueNum int, column str
 	return count, nil
 }
 
+// IncrementSynthCycleCount atomically increments the per-issue
+// synth_cycle_count and returns the new value.
 func (s *dbStore) IncrementSynthCycleCount(repo string, issueNum int) (int, error) {
-	if s.isMySQL() {
-		return s.mysqlIncrementCycleCount(repo, issueNum, "synth_cycle_count")
-	}
-	var count int
-	err := s.db.QueryRow(
-		`INSERT INTO issue_cycle_state (repo, issue_num, synth_cycle_count, updated_at)
-		 VALUES (?, ?, 1, CURRENT_TIMESTAMP)
-		 ON CONFLICT (repo, issue_num)
-		 DO UPDATE SET synth_cycle_count = synth_cycle_count + 1,
-		               updated_at = CURRENT_TIMESTAMP
-		 RETURNING synth_cycle_count`,
-		repo, issueNum,
-	).Scan(&count)
-	if err != nil {
-		return 0, fmt.Errorf("store: increment synth_cycle_count: %w", err)
-	}
-	return count, nil
+	return s.incrementCycleCount(repo, issueNum, "synth_cycle_count")
 }
 
 // IncrementTotalTransitionCount atomically increments the per-issue
-// total_transitions counter and returns the new value. The row is created
-// on first call. Used by the state machine to enforce a hard cap on total
-// state transitions per issue, catching any loop pattern (not just
-// dev↔review).
+// total_transitions counter and returns the new value. Used by the state
+// machine to enforce a hard cap on total state transitions per issue,
+// catching any loop pattern (not just dev↔review).
 func (s *dbStore) IncrementTotalTransitionCount(repo string, issueNum int) (int, error) {
-	if s.isMySQL() {
-		return s.mysqlIncrementCycleCount(repo, issueNum, "total_transitions")
-	}
-	var count int
-	err := s.db.QueryRow(
-		`INSERT INTO issue_cycle_state (repo, issue_num, total_transitions, updated_at)
-		 VALUES (?, ?, 1, CURRENT_TIMESTAMP)
-		 ON CONFLICT (repo, issue_num)
-		 DO UPDATE SET total_transitions = total_transitions + 1,
-		               updated_at = CURRENT_TIMESTAMP
-		 RETURNING total_transitions`,
-		repo, issueNum,
-	).Scan(&count)
-	if err != nil {
-		return 0, fmt.Errorf("store: increment total_transitions: %w", err)
-	}
-	return count, nil
+	return s.incrementCycleCount(repo, issueNum, "total_transitions")
 }
 
 // TouchIssueFirstDispatch records the first time an agent was dispatched for
@@ -1046,36 +1027,38 @@ func (s *dbStore) TouchIssueFirstDispatch(repo string, issueNum int) error {
 	return nil
 }
 
-// MarkIssueCycleCapHit records the moment the issue tripped the
-// max_review_cycles cap. Idempotent.
-func (s *dbStore) MarkIssueCycleCapHit(repo string, issueNum int) error {
+// markIssueCapHit stamps the cap-hit timestamp column named by `column` with
+// the moment the issue tripped a cap. Idempotent (COALESCE keeps the first
+// stamp). Single implementation behind the per-loop cap-hit markers; the
+// column name is always a private package literal (never user input).
+func (s *dbStore) markIssueCapHit(repo string, issueNum int, column string) error {
 	_, err := s.db.Exec(
-		`INSERT INTO issue_cycle_state (repo, issue_num, cap_hit_at, updated_at)
-		 VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-		 ON CONFLICT (repo, issue_num)
-		 DO UPDATE SET cap_hit_at = COALESCE(issue_cycle_state.cap_hit_at, CURRENT_TIMESTAMP),
-		               updated_at = CURRENT_TIMESTAMP`,
+		fmt.Sprintf(
+			`INSERT INTO issue_cycle_state (repo, issue_num, %s, updated_at)
+			 VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+			 ON CONFLICT (repo, issue_num)
+			 DO UPDATE SET %s = COALESCE(issue_cycle_state.%s, CURRENT_TIMESTAMP),
+			               updated_at = CURRENT_TIMESTAMP`,
+			column, column, column,
+		),
 		repo, issueNum,
 	)
 	if err != nil {
-		return fmt.Errorf("store: mark issue cycle cap hit: %w", err)
+		return fmt.Errorf("store: mark issue cap hit %s: %w", column, err)
 	}
 	return nil
 }
 
+// MarkIssueCycleCapHit records the moment the issue tripped the
+// max_review_cycles (dev↔review) cap. Idempotent.
+func (s *dbStore) MarkIssueCycleCapHit(repo string, issueNum int) error {
+	return s.markIssueCapHit(repo, issueNum, "cap_hit_at")
+}
+
+// MarkIssueSynthCycleCapHit records the moment the issue tripped the synth
+// cycle cap. Idempotent.
 func (s *dbStore) MarkIssueSynthCycleCapHit(repo string, issueNum int) error {
-	_, err := s.db.Exec(
-		`INSERT INTO issue_cycle_state (repo, issue_num, synth_cap_hit_at, updated_at)
-		 VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-		 ON CONFLICT (repo, issue_num)
-		 DO UPDATE SET synth_cap_hit_at = COALESCE(issue_cycle_state.synth_cap_hit_at, CURRENT_TIMESTAMP),
-		               updated_at = CURRENT_TIMESTAMP`,
-		repo, issueNum,
-	)
-	if err != nil {
-		return fmt.Errorf("store: mark issue synth cycle cap hit: %w", err)
-	}
-	return nil
+	return s.markIssueCapHit(repo, issueNum, "synth_cap_hit_at")
 }
 
 // QueryIssueCycleState returns the per-issue cycle counter and timing. Returns

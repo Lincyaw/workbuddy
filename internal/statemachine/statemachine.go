@@ -751,32 +751,109 @@ func (sm *StateMachine) applyDevReviewCycleCap(ctx context.Context, wf *config.W
 
 	reviewSource := sm.latestTransitionIntoState(wf.Name, repo, issueNum, stateNameReviewing)
 	if reviewSource == "synthesizing" {
-		return sm.applySynthCycleCap(ctx, wf, repo, issueNum)
+		return sm.enforceCycleCap(ctx, wf, repo, issueNum, synthCycleCapSpec(wf))
 	}
 
-	cycleCount, err := sm.store.IncrementDevReviewCycleCount(repo, issueNum)
-	if err != nil {
-		return false, fmt.Errorf("statemachine: increment dev_review_cycle_count: %w", err)
-	}
+	return sm.enforceCycleCap(ctx, wf, repo, issueNum, devReviewCycleCapSpec(wf))
+}
 
+// cycleCapSpec parameterizes a single per-issue loop cap. The dev↔review and
+// synth caps are the same decision logic (increment → log count → on cap-hit
+// stamp+report+stop, optionally heads-up at cap-1) over distinct counters,
+// caps, and audit kinds — this struct captures only what differs so both
+// route through enforceCycleCap.
+type cycleCapSpec struct {
+	// synth selects the synth counter/cap-hit store columns; otherwise the
+	// dev↔review columns are used. The two loops are independent budgets.
+	synth bool
+	// maxCycles is the cap threshold for this loop.
+	maxCycles int
+	// countLabel / capLabel name the counter and cap in the audit payload
+	// (e.g. "cycle_count"/"max_review_cycles" vs "synth_cycle_count"/"max_synth_cycles").
+	countLabel string
+	capLabel   string
+	// errContext labels the increment error wrap ("increment dev_review_cycle_count").
+	errContext string
+	// capHitMarkLog labels the mark-cap-hit log line on store error.
+	capHitMarkLog string
+	// emitCountEvent logs TypeDevReviewCycleCount on every increment when set;
+	// the synth loop suppresses the per-increment count event.
+	emitCountEvent bool
+	// alertOnCapHit publishes KindDevReviewCycleCapReached when set.
+	alertOnCapHit bool
+	// headsUp emits the cap-approaching event+alert at cap-1 when set.
+	headsUp bool
+}
+
+func devReviewCycleCapSpec(wf *config.WorkflowConfig) cycleCapSpec {
 	maxCycles := wf.MaxReviewCycles
 	if maxCycles <= 0 {
 		maxCycles = DefaultMaxReviewCycles
 	}
-
-	payload := map[string]any{
-		"workflow":          wf.Name,
-		"cycle_count":       cycleCount,
-		"max_review_cycles": maxCycles,
+	return cycleCapSpec{
+		maxCycles:      maxCycles,
+		countLabel:     "cycle_count",
+		capLabel:       "max_review_cycles",
+		errContext:     "increment dev_review_cycle_count",
+		capHitMarkLog:  "mark issue cycle cap hit",
+		emitCountEvent: true,
+		alertOnCapHit:  true,
+		headsUp:        true,
 	}
-	sm.eventlog.Log(eventlog.TypeDevReviewCycleCount, repo, issueNum, payload)
+}
+
+func synthCycleCapSpec(_ *config.WorkflowConfig) cycleCapSpec {
+	return cycleCapSpec{
+		synth:          true,
+		maxCycles:      DefaultMaxSynthCycles,
+		countLabel:     "synth_cycle_count",
+		capLabel:       "max_synth_cycles",
+		errContext:     "increment synth_cycle_count",
+		capHitMarkLog:  "mark synth cycle cap hit",
+		emitCountEvent: false,
+		alertOnCapHit:  false,
+		headsUp:        false,
+	}
+}
+
+// enforceCycleCap runs the shared loop-cap decision over the counter/cap/audit
+// kinds named by spec. Returns (blocked=true) when the cap is hit and dispatch
+// must halt. Both the dev↔review and synth caps route through here; their
+// distinct counters, thresholds, and events are preserved via spec — they
+// remain independent budgets.
+func (sm *StateMachine) enforceCycleCap(ctx context.Context, wf *config.WorkflowConfig, repo string, issueNum int, spec cycleCapSpec) (bool, error) {
+	// Bind the store methods for the selected loop. The two loops write
+	// distinct counter/cap-hit columns and must never share a budget.
+	increment := sm.store.IncrementDevReviewCycleCount
+	markCapHit := sm.store.MarkIssueCycleCapHit
+	if spec.synth {
+		increment = sm.store.IncrementSynthCycleCount
+		markCapHit = sm.store.MarkIssueSynthCycleCapHit
+	}
+
+	cycleCount, err := increment(repo, issueNum)
+	if err != nil {
+		return false, fmt.Errorf("statemachine: %s: %w", spec.errContext, err)
+	}
+
+	maxCycles := spec.maxCycles
+	payload := map[string]any{
+		"workflow":      wf.Name,
+		spec.countLabel: cycleCount,
+		spec.capLabel:   maxCycles,
+	}
+	if spec.emitCountEvent {
+		sm.eventlog.Log(eventlog.TypeDevReviewCycleCount, repo, issueNum, payload)
+	}
 
 	if cycleCount >= maxCycles {
-		if err := sm.store.MarkIssueCycleCapHit(repo, issueNum); err != nil {
-			log.Printf("[statemachine] mark issue cycle cap hit for %s#%d: %v", repo, issueNum, err)
+		if err := markCapHit(repo, issueNum); err != nil {
+			log.Printf("[statemachine] %s for %s#%d: %v", spec.capHitMarkLog, repo, issueNum, err)
 		}
 		sm.eventlog.Log(eventlog.TypeDevReviewCycleCapReached, repo, issueNum, payload)
-		sm.publishAlert(alertbus.KindDevReviewCycleCapReached, alertbus.SeverityError, repo, issueNum, "", payload)
+		if spec.alertOnCapHit {
+			sm.publishAlert(alertbus.KindDevReviewCycleCapReached, alertbus.SeverityError, repo, issueNum, "", payload)
+		}
 		if sm.capReporter != nil {
 			info := CycleCapInfo{
 				WorkflowName:    wf.Name,
@@ -791,47 +868,15 @@ func (sm *StateMachine) applyDevReviewCycleCap(ctx context.Context, wf *config.W
 		return true, nil
 	}
 
-	if cycleCount == maxCycles-1 {
+	if spec.headsUp && cycleCount == maxCycles-1 {
 		warnPayload := map[string]any{
-			"workflow":          wf.Name,
-			"cycle_count":       cycleCount,
-			"max_review_cycles": maxCycles,
-			"remaining":         maxCycles - cycleCount,
+			"workflow":      wf.Name,
+			spec.countLabel: cycleCount,
+			spec.capLabel:   maxCycles,
+			"remaining":     maxCycles - cycleCount,
 		}
 		sm.eventlog.Log(eventlog.TypeDevReviewCycleApproaching, repo, issueNum, warnPayload)
 		sm.publishAlert(alertbus.KindDevReviewCycleApproaching, alertbus.SeverityWarn, repo, issueNum, "", warnPayload)
-	}
-	return false, nil
-}
-
-func (sm *StateMachine) applySynthCycleCap(ctx context.Context, wf *config.WorkflowConfig, repo string, issueNum int) (bool, error) {
-	cycleCount, err := sm.store.IncrementSynthCycleCount(repo, issueNum)
-	if err != nil {
-		return false, fmt.Errorf("statemachine: increment synth_cycle_count: %w", err)
-	}
-	maxCycles := DefaultMaxSynthCycles
-	payload := map[string]any{
-		"workflow":          wf.Name,
-		"synth_cycle_count": cycleCount,
-		"max_synth_cycles":  maxCycles,
-	}
-	if cycleCount >= maxCycles {
-		if err := sm.store.MarkIssueSynthCycleCapHit(repo, issueNum); err != nil {
-			log.Printf("[statemachine] mark synth cycle cap hit for %s#%d: %v", repo, issueNum, err)
-		}
-		sm.eventlog.Log(eventlog.TypeDevReviewCycleCapReached, repo, issueNum, payload)
-		if sm.capReporter != nil {
-			info := CycleCapInfo{
-				WorkflowName:    wf.Name,
-				CycleCount:      cycleCount,
-				MaxReviewCycles: maxCycles,
-				HitAt:           time.Now().UTC(),
-			}
-			if err := sm.capReporter.ReportDevReviewCycleCap(ctx, repo, issueNum, info); err != nil {
-				log.Printf("[statemachine] report synth cycle cap for %s#%d: %v", repo, issueNum, err)
-			}
-		}
-		return true, nil
 	}
 	return false, nil
 }
