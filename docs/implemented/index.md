@@ -24,7 +24,6 @@
 | `agent-schema-vnext.md` | agent schema vNext 的兼容边界、policy/prompt/output_contract 与校验行为 | `internal/config/`, `internal/launcher/`, `.github/workbuddy/agents/` |
 | `agent-catalog.md` | workflow-scoped agent catalog（default preset: dev/review/merge；engineering preset 追加 spec/spec-review/test-gen）与各自 schema/output contract | `.github/workbuddy/agents/`, `internal/config/loader.go` |
 | `current-runtime-reporting-and-audit.md` | launcher、reporter、audit、sessions UI 行为 | `internal/launcher/`, `internal/agent/codex/`, `internal/reporter/`, `internal/audit/`, `internal/webui/` |
-| `remote-runner-github-actions.md` | GitHub Actions remote runner 的 agent config、dispatch/poll 行为 | `internal/config/`, `internal/launcher/`, `.github/workflows/` |
 | `runtime-session-architecture.md` | Runtime.Start → Session.Run 主链路，post-Run label validation | `internal/worker/distributed.go`, `internal/worker/executor.go`, `internal/runtime/`, `internal/launcher/`, `internal/labelcheck/`, `internal/reporter/`, `internal/audit/` |
 | `event-schema-v1.md` | Event Schema v1 合同、runtime 映射、artifact 消费路径 | `internal/launcher/events/`, `internal/launcher/agent_bridge.go`, `internal/agent/codex/events.go`, `internal/launcher/claude_stream.go` |
 | `current-persistence-and-workspace.md` | 存储、事件日志、worker registry、worktree 隔离 | `internal/store/`, `internal/eventlog/`, `internal/registry/`, `internal/workspace/` |

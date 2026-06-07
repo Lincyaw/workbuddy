@@ -1,8 +1,6 @@
 package launcher
 
 import (
-	"context"
-
 	"github.com/Lincyaw/workbuddy/internal/agent"
 	"github.com/Lincyaw/workbuddy/internal/agent/agentm"
 	"github.com/Lincyaw/workbuddy/internal/agent/codex"
@@ -24,12 +22,6 @@ func NewLauncher(client *supclient.Client, hook runtimepkg.AgentStartedHook) *La
 	l := runtimepkg.NewRegistry()
 	l.SetSupervisorClient(client)
 	l.SetAgentStartedHook(hook)
-	l.SetSessionStarter(func(_ context.Context, agent *config.AgentConfig, task *runtimepkg.TaskContext) (runtimepkg.Session, error, bool) {
-		if agent != nil && agent.Runner == config.RunnerGitHubActions {
-			return runtimepkg.NewGHASession(agent, task), nil, true
-		}
-		return nil, nil, false
-	})
 	RegisterBuiltins(l)
 	return l
 }

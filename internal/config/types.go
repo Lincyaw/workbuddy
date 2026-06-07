@@ -104,14 +104,6 @@ type OutputContractConfig struct {
 	SchemaFile string `yaml:"schema_file"`
 }
 
-// GitHubActionsRunnerConfig defines the workflow and polling knobs for the
-// remote GitHub Actions runner.
-type GitHubActionsRunnerConfig struct {
-	Workflow     string        `yaml:"workflow"`
-	Ref          string        `yaml:"ref"`
-	PollInterval time.Duration `yaml:"poll_interval"`
-}
-
 // AgentConfig defines an agent loaded from .github/workbuddy/agents/*.md.
 //
 // The new format (issue #204 batch 2) stores agent metadata in YAML frontmatter
@@ -120,20 +112,18 @@ type GitHubActionsRunnerConfig struct {
 // after the closing `---`, never parsed from YAML. Frontmatter no longer
 // accepts a `prompt:` field.
 type AgentConfig struct {
-	Name           string                    `yaml:"name"`
-	Description    string                    `yaml:"description"`
-	Triggers       []TriggerRule             `yaml:"triggers"`
-	Role           string                    `yaml:"role"`
-	Runner         string                    `yaml:"runner"`
-	Runtime        string                    `yaml:"runtime"`
-	Command        string                    `yaml:"command"`
-	Context        []string                  `yaml:"context"`
-	Prompt         string                    `yaml:"-"` // markdown body, populated by the loader
-	Policy         PolicyConfig              `yaml:"policy"`
-	Permissions    PermissionsConfig         `yaml:"permissions"`
-	GitHubActions  GitHubActionsRunnerConfig `yaml:"github_actions"`
-	OutputContract OutputContractConfig      `yaml:"output_contract"`
-	Timeout        time.Duration             `yaml:"timeout"`
+	Name           string               `yaml:"name"`
+	Description    string               `yaml:"description"`
+	Triggers       []TriggerRule        `yaml:"triggers"`
+	Role           string               `yaml:"role"`
+	Runtime        string               `yaml:"runtime"`
+	Command        string               `yaml:"command"`
+	Context        []string             `yaml:"context"`
+	Prompt         string               `yaml:"-"` // markdown body, populated by the loader
+	Policy         PolicyConfig         `yaml:"policy"`
+	Permissions    PermissionsConfig    `yaml:"permissions"`
+	OutputContract OutputContractConfig `yaml:"output_contract"`
+	Timeout        time.Duration        `yaml:"timeout"`
 	// DevContainerImage names the dev container image AgentM should run
 	// inside when the runtime is `agentm`. workbuddy passes the value
 	// through to the AgentM subprocess as the env var
@@ -168,7 +158,7 @@ type AgentConfig struct {
 // DeepCopy returns a copy of the AgentConfig with all reference-typed fields
 // (slices and nested maps) independently allocated, so mutating the returned
 // value cannot affect the original. The nested struct fields (Policy,
-// Permissions, OutputContract, GitHubActions) hold only scalars and are copied
+// Permissions, OutputContract) hold only scalars and are copied
 // by the shallow struct assignment. Used by the coordinator dispatch path to
 // hand out an isolated copy of the live per-repo registration config.
 func (a *AgentConfig) DeepCopy() *AgentConfig {

@@ -27,11 +27,6 @@
       "enum": ["codex", "claude-code", "claude-agent-sdk", "agentm"],
       "description": "Agent execution backend. `agentm` was added in v0.5 (host-exec only in v0.5; coordinator-managed sandbox in v0.6). See docs/planned/agentm-runtime.md for the invocation/output contract."
     },
-    "runner": {
-      "type": "string",
-      "enum": ["local", "github-actions"],
-      "description": "Where the runtime executes. Defaults to local."
-    },
     "triggers": {
       "type": "array",
       "minItems": 1,
@@ -93,11 +88,6 @@
       "type": "object",
       "additionalProperties": true,
       "description": "Subprocess capability boundaries. See internal/config/types.go PermissionsConfig for the full structure."
-    },
-    "github_actions": {
-      "type": "object",
-      "additionalProperties": true,
-      "description": "Knobs used when runner=github-actions."
     },
     "output_contract": {
       "type": "object",

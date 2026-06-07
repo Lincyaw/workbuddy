@@ -24,9 +24,6 @@ func (w Warning) String() string {
 }
 
 const (
-	RunnerLocal         = "local"
-	RunnerGitHubActions = "github-actions"
-
 	RuntimeClaudeCode  = "claude-code"
 	RuntimeClaudeShot  = "claude-oneshot"
 	RuntimeCodex       = "codex"
@@ -56,10 +53,6 @@ var validRuntimes = map[string]bool{
 }
 
 var publicRuntimes = []string{RuntimeClaudeCode, RuntimeCodex, RuntimeCodexServer, RuntimeAgentM}
-var validRunners = map[string]bool{
-	RunnerLocal:         true,
-	RunnerGitHubActions: true,
-}
 
 // LoadConfig loads the full configuration from the given config directory.
 // It returns the parsed config, a list of non-fatal warnings, and any error.
@@ -252,12 +245,6 @@ func parseAgentFile(path string) (*AgentConfig, []Warning, error) {
 	if agent.Runtime == "" {
 		agent.Runtime = RuntimeClaudeCode
 	}
-	if agent.Runner == "" {
-		agent.Runner = RunnerLocal
-	}
-	if !validRunners[agent.Runner] {
-		return nil, nil, fmt.Errorf("config: %s: invalid runner %q (valid: %s, %s)", fname, agent.Runner, RunnerLocal, RunnerGitHubActions)
-	}
 	if !validRuntimes[agent.Runtime] {
 		return nil, nil, fmt.Errorf("config: %s: invalid runtime %q (valid: %s)", fname, agent.Runtime, strings.Join(publicRuntimes, ", "))
 	}
@@ -285,21 +272,6 @@ func normalizeAgentConfig(agent *AgentConfig) ([]Warning, error) {
 
 	if agent.Policy.Timeout > 0 {
 		agent.Timeout = agent.Policy.Timeout
-	}
-	if agent.Runner == "" {
-		agent.Runner = RunnerLocal
-	}
-	switch agent.Runner {
-	case RunnerLocal:
-	case RunnerGitHubActions:
-		if agent.GitHubActions.Workflow == "" {
-			agent.GitHubActions.Workflow = "workbuddy-remote-runner.yml"
-		}
-		if agent.GitHubActions.PollInterval <= 0 {
-			agent.GitHubActions.PollInterval = 5 * time.Second
-		}
-	default:
-		return warnings, fmt.Errorf("unsupported runner %q", agent.Runner)
 	}
 	if agent.OutputContract.SchemaFile != "" {
 		if strings.TrimSpace(agent.OutputContract.SchemaFile) == "" {

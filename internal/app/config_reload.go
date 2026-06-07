@@ -306,19 +306,17 @@ func workflowsChanged(prev, next map[string]*config.WorkflowConfig) bool {
 
 func marshalComparableAgents(in map[string]*config.AgentConfig) string {
 	type comparableAgent struct {
-		Name           string                           `json:"name"`
-		Description    string                           `json:"description"`
-		Triggers       []config.TriggerRule             `json:"triggers"`
-		Role           string                           `json:"role"`
-		Runner         string                           `json:"runner"`
-		Runtime        string                           `json:"runtime"`
-		Command        string                           `json:"command"`
-		Prompt         string                           `json:"prompt"`
-		Policy         config.PolicyConfig              `json:"policy"`
-		Permissions    config.PermissionsConfig         `json:"permissions"`
-		GitHubActions  config.GitHubActionsRunnerConfig `json:"github_actions"`
-		OutputContract config.OutputContractConfig      `json:"output_contract"`
-		Timeout        time.Duration                    `json:"timeout"`
+		Name           string                      `json:"name"`
+		Description    string                      `json:"description"`
+		Triggers       []config.TriggerRule        `json:"triggers"`
+		Role           string                      `json:"role"`
+		Runtime        string                      `json:"runtime"`
+		Command        string                      `json:"command"`
+		Prompt         string                      `json:"prompt"`
+		Policy         config.PolicyConfig         `json:"policy"`
+		Permissions    config.PermissionsConfig    `json:"permissions"`
+		OutputContract config.OutputContractConfig `json:"output_contract"`
+		Timeout        time.Duration               `json:"timeout"`
 	}
 	out := make(map[string]comparableAgent, len(in))
 	for name, agent := range in {
@@ -330,13 +328,11 @@ func marshalComparableAgents(in map[string]*config.AgentConfig) string {
 			Description:    agent.Description,
 			Triggers:       append([]config.TriggerRule(nil), agent.Triggers...),
 			Role:           agent.Role,
-			Runner:         agent.Runner,
 			Runtime:        agent.Runtime,
 			Command:        agent.Command,
 			Prompt:         agent.Prompt,
 			Policy:         agent.Policy,
 			Permissions:    agent.Permissions,
-			GitHubActions:  agent.GitHubActions,
 			OutputContract: agent.OutputContract,
 			Timeout:        agent.Timeout,
 		}

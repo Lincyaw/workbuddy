@@ -11,7 +11,6 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/config"
 	launcherevents "github.com/Lincyaw/workbuddy/internal/launcher/events"
-	runtimepkg "github.com/Lincyaw/workbuddy/internal/runtime"
 )
 
 func newTestTask(t *testing.T) *TaskContext {
@@ -213,36 +212,6 @@ func TestLaunch_Cancel(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cancel") && !strings.Contains(err.Error(), "signal") {
 		t.Errorf("expected cancel-related error, got: %v", err)
-	}
-}
-
-func TestStart_GitHubActionsRunnerUsesRemoteSession(t *testing.T) {
-	launcher := newTestLauncher(t)
-	task := newTestTask(t)
-	agent := &config.AgentConfig{
-		Name:    "remote-agent",
-		Runner:  config.RunnerGitHubActions,
-		Runtime: config.RuntimeCodex,
-		Prompt:  "remote",
-		GitHubActions: config.GitHubActionsRunnerConfig{
-			Workflow:     "workbuddy-remote-runner.yml",
-			Ref:          "main",
-			PollInterval: time.Millisecond,
-		},
-		Timeout: time.Minute,
-	}
-
-	session, err := launcher.Start(context.Background(), agent, task)
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer func() { _ = session.Close() }()
-	remote, ok := session.(*runtimepkg.GHASession)
-	if !ok {
-		t.Fatalf("session type = %T, want *runtime.GHASession", session)
-	}
-	if remote.Client == nil {
-		t.Fatal("expected GitHub Actions client")
 	}
 }
 
