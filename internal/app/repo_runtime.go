@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -14,6 +15,8 @@ import (
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/dependency"
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/giteareader"
+	"github.com/Lincyaw/workbuddy/internal/labelwriter"
 	"github.com/Lincyaw/workbuddy/internal/poller"
 	"github.com/Lincyaw/workbuddy/internal/registry"
 	"github.com/Lincyaw/workbuddy/internal/reporter"
@@ -248,7 +251,15 @@ func (pm *PollerManager) StartOrUpdate(rec store.RepoRegistrationRecord) error {
 	if interval <= 0 {
 		interval = pm.pollInterval
 	}
-	p := poller.NewPoller(pm.ghReader, pm.store, rec.Repo, interval)
+	// Select the issue/PR read provider by the registration's host_kind
+	// (ADR 2026-06-06 §6 "Gitea read gap"). github/absent keeps the shared
+	// gh-CLI reader; gitea gets a per-repo Gitea REST reader so a Gitea-hosted
+	// repo can be polled, not just GitHub.
+	reader, err := pm.readerForRepo(rec)
+	if err != nil {
+		return err
+	}
+	p := poller.NewPoller(reader, pm.store, rec.Repo, interval)
 	if err := p.PreCheck(); err != nil {
 		return err
 	}
@@ -269,12 +280,12 @@ func (pm *PollerManager) StartOrUpdate(rec store.RepoRegistrationRecord) error {
 		sm.SetCycleCapReporter(&cycleCapReporterAdapter{rep: pm.reporter})
 		sm.SetSynthesisNeedsHumanReporter(pm.reporter)
 	}
-	depResolver := dependency.NewResolver(pm.store, pm.ghReader, pm.eventlog, pm.alertBus)
+	depResolver := dependency.NewResolver(pm.store, reader, pm.eventlog, pm.alertBus)
 	rt := router.NewRouter(cfg.Agents, pm.registry, pm.store, rec.Repo, pm.repoRoot, nil, nil, false)
 	rt.SetWorkflows(cfg.Workflows)
 	// Surface router-side silent skips via the shared eventlog (REQ-149 / #345).
 	rt.SetEventRecorder(pm.eventlog)
-	if issueDataReader, ok := pm.ghReader.(router.IssueDataReader); ok {
+	if issueDataReader, ok := reader.(router.IssueDataReader); ok {
 		rt.SetIssueDataReader(issueDataReader)
 	}
 	runCtx, cancel := context.WithCancel(pm.rootCtx)
@@ -325,6 +336,31 @@ func (pm *PollerManager) StartOrUpdate(rec store.RepoRegistrationRecord) error {
 		log.Printf("[coordinator] recovery: %s: %v", rec.Repo, err)
 	}
 	return nil
+}
+
+// readerForRepo picks the issue/PR read provider for a repo registration by
+// its host_kind (ADR 2026-06-06 §6). github (or absent / malformed config)
+// returns the shared gh-CLI reader so existing GitHub deployments are
+// unaffected; gitea returns a per-repo Gitea REST reader authenticated with
+// GITEA_TOKEN. host_kind parsing is shared with the label-write side via
+// labelwriter.ResolveHostKind so the read and write halves stay consistent.
+func (pm *PollerManager) readerForRepo(rec store.RepoRegistrationRecord) (poller.GHReader, error) {
+	kind, giteaBase := labelwriter.ResolveHostKind(rec.ConfigJSON)
+	switch kind {
+	case labelwriter.HostKindGitea:
+		if giteaBase == "" {
+			return nil, fmt.Errorf("repo %s: host_kind=gitea but gitea_base_url is missing in registration config", rec.Repo)
+		}
+		token := os.Getenv("GITEA_TOKEN")
+		if token == "" {
+			return nil, fmt.Errorf("repo %s: host_kind=gitea but GITEA_TOKEN is not set", rec.Repo)
+		}
+		return giteareader.New(http.DefaultClient, giteaBase, token), nil
+	default:
+		// github / absent / unsupported all fall back to the gh-CLI reader,
+		// preserving today's GitHub-only behaviour.
+		return pm.ghReader, nil
+	}
 }
 
 // recoverOrphanedActiveStates re-emits EventIssueCreated for any cached open

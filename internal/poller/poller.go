@@ -105,7 +105,17 @@ type ChangeEvent struct {
 // GHReader interface (mockable for testing)
 // ---------------------------------------------------------------------------
 
-// GHReader abstracts GitHub read operations via gh CLI.
+// GHReader is the provider-neutral issue/PR read interface the Poller depends
+// on. Despite the historical name it is NOT GitHub-specific: it has two
+// implementations selected per repo by host_kind (ADR 2026-06-06 §6 "Gitea
+// read gap"):
+//
+//   - internal/ghadapter.CLI — GitHub, via the gh CLI (host_kind github/absent).
+//   - internal/giteareader.Reader — Gitea, via the Gitea REST API
+//     (host_kind gitea).
+//
+// PollerManager picks the implementation in readerForRepo; the GitHub path is
+// the default so existing GitHub-only deployments are unaffected.
 type GHReader interface {
 	ListIssues(repo string) ([]Issue, error)
 	ListPRs(repo string) ([]PR, error)

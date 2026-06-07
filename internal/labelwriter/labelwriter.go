@@ -153,22 +153,39 @@ func (w *Writer) resolveHostKind(repo string) (kind, giteaBase string, err error
 	// returns nil, nil for sql.ErrNoRows). Coordinator-managed runs on
 	// unregistered repos are allowed at bootstrap time — default to
 	// GitHub so existing single-host deployments work.
-	if rec == nil || strings.TrimSpace(rec.ConfigJSON) == "" {
+	if rec == nil {
 		return HostKindGitHub, "", nil
+	}
+	kind, giteaBase = ResolveHostKind(rec.ConfigJSON)
+	return kind, giteaBase, nil
+}
+
+// ResolveHostKind parses a repo registration's ConfigJSON for the host_kind
+// and gitea_base_url fields. It is the single shared parser used by both the
+// label-write side (this package) and the issue/PR read side (PollerManager
+// picking a poller reader) so host-kind selection stays consistent across the
+// read and write halves of the provider abstraction.
+//
+// Missing, empty, or malformed ConfigJSON all default to HostKindGitHub, so
+// existing GitHub-only deployments never have to migrate their registrations.
+// The returned giteaBase has any trailing slash trimmed.
+func ResolveHostKind(configJSON string) (kind, giteaBase string) {
+	if strings.TrimSpace(configJSON) == "" {
+		return HostKindGitHub, ""
 	}
 	var cfg struct {
 		HostKind     string `json:"host_kind"`
 		GiteaBaseURL string `json:"gitea_base_url"`
 	}
-	if err := json.Unmarshal([]byte(rec.ConfigJSON), &cfg); err != nil {
+	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
 		// Tolerate malformed ConfigJSON: fall back to GitHub.
-		return HostKindGitHub, "", nil
+		return HostKindGitHub, ""
 	}
 	kind = strings.ToLower(strings.TrimSpace(cfg.HostKind))
 	if kind == "" {
 		kind = HostKindGitHub
 	}
-	return kind, strings.TrimRight(cfg.GiteaBaseURL, "/"), nil
+	return kind, strings.TrimRight(cfg.GiteaBaseURL, "/")
 }
 
 func (w *Writer) applyViaGH(ctx context.Context, repo string, issueNum int, label string) error {

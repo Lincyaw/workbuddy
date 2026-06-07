@@ -17,6 +17,11 @@ type GHCLIReader struct {
 	Client *ghadapter.CLI
 }
 
+// NOTE: GHCLIReader is GitHub-only (gh CLI). The polling read path is
+// host_kind-routed (see PollerManager.readerForRepo + internal/giteareader),
+// but the agent-context reads that still go through this type are NOT yet
+// routed by host_kind, so full Gitea end-to-end is not wired — only polling.
+// See docs/decisions/2026-06-06-runtime-strategy-and-convergence.md §6.
 func (g *GHCLIReader) cli() *ghadapter.CLI {
 	if g != nil && g.Client != nil {
 		return g.Client
