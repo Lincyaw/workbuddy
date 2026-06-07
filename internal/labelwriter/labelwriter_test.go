@@ -281,6 +281,31 @@ func TestApplyNextLabel_GiteaErrorStatus(t *testing.T) {
 	}
 }
 
+func TestResolveHostKind(t *testing.T) {
+	cases := []struct {
+		name     string
+		config   string
+		wantKind string
+		wantBase string
+	}{
+		{"empty defaults github", "", HostKindGitHub, ""},
+		{"malformed defaults github", `{not json`, HostKindGitHub, ""},
+		{"explicit github", `{"host_kind":"github"}`, HostKindGitHub, ""},
+		{"absent kind defaults github", `{"environment":"prod"}`, HostKindGitHub, ""},
+		{"gitea trims trailing slash", `{"host_kind":"gitea","gitea_base_url":"https://g.example/"}`, HostKindGitea, "https://g.example"},
+		{"gitea case-insensitive", `{"host_kind":"GITEA","gitea_base_url":"https://g.example"}`, HostKindGitea, "https://g.example"},
+		{"unsupported preserved", `{"host_kind":"bitbucket"}`, "bitbucket", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kind, base := ResolveHostKind(tc.config)
+			if kind != tc.wantKind || base != tc.wantBase {
+				t.Fatalf("ResolveHostKind(%q) = (%q,%q), want (%q,%q)", tc.config, kind, base, tc.wantKind, tc.wantBase)
+			}
+		})
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

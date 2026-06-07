@@ -965,6 +965,8 @@ func (s *FullCoordinatorServer) buildSynthesisPayload(task *store.TaskRecord) *r
 			break
 		}
 	}
+	// GitHub-only: synthesis related-PR reads are not yet host_kind-routed
+	// (the §6 Gitea read provider covers polling, not this agent-context path).
 	gh := ghadapter.NewCLI()
 	relatedPRs, err := gh.ListRelatedPRs(task.Repo, task.IssueNum)
 	if err != nil {

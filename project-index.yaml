@@ -7322,3 +7322,58 @@ requirements:
     deps:
       - REQ-037
       - REQ-151
+
+  - id: REQ-168
+    title: Host-kind-selectable issue/PR read provider + Gitea reader (poller no longer GitHub-only) (ADR 2026-06-06 §6)
+    description: >
+      Step §6 ("Gitea read gap") of the convergence refactor in
+      docs/decisions/2026-06-06-runtime-strategy-and-convergence.md.
+
+      The label-WRITE side was already provider-abstracted by host_kind
+      (internal/labelwriter picks a GitHub gh-CLI path or a Gitea REST path
+      from the repo registration's host_kind). The issue/PR READ side was not:
+      the poller's GHReader interface had a single implementation
+      (internal/ghadapter.CLI, shelling out to the gh CLI), so only GitHub
+      repos could be polled.
+
+      This change abstracts the READ side behind the (now provider-neutral)
+      poller.GHReader interface — keeping the historical name to avoid a
+      sweeping cross-package rename — and adds a Gitea implementation
+      (internal/giteareader.Reader) against the Gitea REST API, mapping Gitea
+      JSON into the SAME poller.Issue / poller.PR / poller.IssueDetails structs
+      the GitHub path produces. PollerManager.readerForRepo selects the
+      implementation per repo by host_kind (github / absent / malformed /
+      unsupported → the shared gh-CLI reader, unchanged; gitea → a per-repo
+      Gitea reader authenticated with GITEA_TOKEN). host_kind parsing is shared
+      with the write side via the new labelwriter.ResolveHostKind so the read
+      and write halves stay consistent.
+
+      Field mapping (Gitea → struct): issue/PR number, title, body, state
+      (lower-cased for IssueDetails), label NAMES (the state machine keys off
+      these), author (user.login), PR head ref → Branch, PR html_url → URL,
+      comments (user.login / body / created_at as RFC3339). PR rows returned by
+      Gitea's shared issues endpoint are excluded from ListIssues. Documented
+      gaps: Gitea exposes no equivalent of GitHub's stateReason or
+      closedByPullRequestsReferences, so IssueDetails.StateReason is left empty
+      and ClosedByLinkedPR false; provider-neutral poll close-detection (issue
+      dropping out of the open list) still works.
+    priority: P1
+    version: v0.7.0
+    status: tested
+    acceptance_criteria:
+      - "AC-168-1: poller.GHReader is the provider-neutral issue/PR read interface with two implementations selected by host_kind — internal/ghadapter.CLI (GitHub, gh CLI) and internal/giteareader.Reader (Gitea, REST API); its doc comment states this."
+      - "AC-168-2: internal/giteareader.Reader satisfies poller.GHReader (ListIssues/ListPRs/CheckRepoAccess/ReadIssue) plus ReadIssueComments, mapping Gitea JSON into poller.Issue/PR/IssueDetails with faithful label-name/author/head-ref/url/comment fields; PR rows are excluded from ListIssues; the HTTP client is indirected (HTTPDoer) so tests intercept calls with no network."
+      - "AC-168-3: PollerManager.readerForRepo selects the reader by host_kind via labelwriter.ResolveHostKind — github/absent/malformed/unsupported keep the shared gh-CLI reader (GitHub path byte-for-byte unchanged); gitea returns a per-repo giteareader.Reader using gitea_base_url + GITEA_TOKEN, erroring clearly when either is missing."
+      - "AC-168-4: labelwriter.ResolveHostKind is the single shared host_kind parser used by both the write side (labelwriter) and the read side (PollerManager), defaulting empty/malformed/absent config to host_kind=github."
+      - "AC-168-5: `go build ./... && go vet ./... && go test ./... -count=1` all pass; the Gitea reader and the selection are covered by no-network tests."
+    code:
+      - internal/poller/poller.go
+      - internal/giteareader/giteareader.go
+      - internal/labelwriter/labelwriter.go
+      - internal/app/repo_runtime.go
+    tests:
+      - internal/giteareader/giteareader_test.go
+      - internal/app/reader_select_test.go
+      - internal/labelwriter/labelwriter_test.go
+    deps:
+      - REQ-141
