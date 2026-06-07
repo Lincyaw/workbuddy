@@ -9,8 +9,21 @@ import (
 	"time"
 
 	"github.com/Lincyaw/workbuddy/internal/eventlog"
+	"github.com/Lincyaw/workbuddy/internal/liveness"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
+
+// TestReaperDefaultsDeriveFromLiveness verifies the reaper's default
+// interval/grace come from the shared liveness source of truth (ADR §6).
+func TestReaperDefaultsDeriveFromLiveness(t *testing.T) {
+	dl := liveness.Default()
+	if DefaultTaskReaperInterval != dl.ReaperInterval {
+		t.Errorf("DefaultTaskReaperInterval = %s, want shared %s", DefaultTaskReaperInterval, dl.ReaperInterval)
+	}
+	if DefaultTaskReaperGrace != dl.OrphanReaperGrace {
+		t.Errorf("DefaultTaskReaperGrace = %s, want shared %s", DefaultTaskReaperGrace, dl.OrphanReaperGrace)
+	}
+}
 
 // TestTaskReaperEmitsEvent pins the audit-trail contract for the periodic
 // reaper (REQ-151, issue #345 Wave 2). It seeds a stale running task, runs

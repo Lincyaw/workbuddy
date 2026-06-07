@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Lincyaw/workbuddy/internal/liveness"
 	"gopkg.in/yaml.v3"
 )
 
@@ -150,14 +151,20 @@ func applyWorkerDefaults(cfg *WorkerConfig) {
 	if cfg == nil {
 		return
 	}
+	// Defaults derive from the shared liveness source of truth (ADR
+	// 2026-06-06 §6) so the loader is NOT a second source: editing
+	// liveness.Default() provably flows to the production worker path.
+	// Explicit worker.stale_inference.* values stay authoritative and are
+	// only filled here when unset/non-positive.
+	dl := liveness.Default()
 	if cfg.StaleInference.IdleThreshold <= 0 {
-		cfg.StaleInference.IdleThreshold = 10 * time.Minute
+		cfg.StaleInference.IdleThreshold = dl.IdleKill
 	}
 	if cfg.StaleInference.CheckInterval <= 0 {
-		cfg.StaleInference.CheckInterval = 30 * time.Second
+		cfg.StaleInference.CheckInterval = dl.IdleCheckInterval
 	}
 	if cfg.StaleInference.CompletedGracePeriod <= 0 {
-		cfg.StaleInference.CompletedGracePeriod = time.Minute
+		cfg.StaleInference.CompletedGracePeriod = dl.CompletedGracePeriod
 	}
 }
 
@@ -171,8 +178,11 @@ func applyOperatorDefaults(cfg *OperatorConfig, explicit bool) {
 	if !explicit && !cfg.Enabled && cfg.CheckInterval == 0 && cfg.DedupWindow == 0 && strings.TrimSpace(cfg.InboxDir) == "" {
 		cfg.Enabled = true
 	}
+	// The operator scan interval derives from the shared liveness source of
+	// truth (ADR 2026-06-06 §6); DedupWindow/InboxDir are operator-local
+	// concerns, not liveness thresholds, so they stay literal here.
 	if cfg.CheckInterval <= 0 {
-		cfg.CheckInterval = 60 * time.Second
+		cfg.CheckInterval = liveness.Default().AlertCheckInterval
 	}
 	if cfg.DedupWindow <= 0 {
 		cfg.DedupWindow = 5 * time.Minute

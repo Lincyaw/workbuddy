@@ -13,6 +13,7 @@ import (
 
 	"github.com/Lincyaw/workbuddy/internal/config"
 	"github.com/Lincyaw/workbuddy/internal/dependency"
+	"github.com/Lincyaw/workbuddy/internal/liveness"
 	recoverpkg "github.com/Lincyaw/workbuddy/internal/recover"
 	"github.com/Lincyaw/workbuddy/internal/store"
 )
@@ -39,21 +40,32 @@ const (
 	// reports against workers that were demonstrably online and
 	// heartbeating (#345 Wave 3 follow-up).
 	KindWorkerTunnelDown = "worker_tunnel_down"
+)
 
-	stuckThreshold       = time.Hour
-	defaultAgentTimeout  = 60 * time.Minute
-	defaultIdleThreshold = 10 * time.Minute
-	defaultOrphanedAfter = 2 * defaultAgentTimeout
-	noChildGracePeriod = 2 * time.Minute
+// Forensic thresholds derive from the shared liveness source of truth (ADR
+// 2026-06-06 §6). diagnose is the LOOSEST, on-demand FORENSIC layer: it only
+// reports, never acts, and its orphaned-after threshold (2 × agent timeout)
+// is enforced by liveness.Validate to be >= the orphan-reaper grace, so a
+// forensic report can never contradict an automatic reap that is still
+// pending. The shared module reproduces the historical values exactly.
+var (
+	stuckThreshold      = liveness.Default().StuckIssueThreshold
+	defaultAgentTimeout = liveness.Default().AgentTimeout
+	// defaultIdleThreshold is the forensic session-idle fallback used when
+	// no worker.stale_inference.idle_threshold is configured. It mirrors the
+	// in-execution watchdog's idle-kill threshold (the forensic
+	// session-stale check uses 2 × this; see taskSessionSignal).
+	defaultIdleThreshold = liveness.Default().IdleKill
+	noChildGracePeriod   = liveness.Default().NoChildGracePeriod
 )
 
 // TunnelHeartbeatStaleAfter is the maximum heartbeat age before a worker
-// is considered unreachable for dispatch. It mirrors operator.Detector's
-// 3×heartbeat staleness window (default 15s interval → 45s) and is the
-// single source of truth shared between the structured finding
-// (KindWorkerTunnelDown) and the text-mode tunnel status line so the two
-// surfaces can never disagree (#345 Wave 3-B).
-const TunnelHeartbeatStaleAfter = 45 * time.Second
+// is considered unreachable for dispatch. It derives from the shared
+// liveness heartbeat-staleness window (operator.Detector's 3×heartbeat:
+// default 15s interval → 45s) and is the single source of truth shared
+// between the structured finding (KindWorkerTunnelDown) and the text-mode
+// tunnel status line so the two surfaces can never disagree (#345 Wave 3-B).
+var TunnelHeartbeatStaleAfter = liveness.Default().WorkerHeartbeatStaleAfter(15 * time.Second)
 
 // IsHealthyTunneledWorker reports whether the worker is currently
 // reachable for dispatch — Status == "online" with a fresh heartbeat
@@ -425,7 +437,9 @@ func orphanedThresholdForTask(task store.TaskRecord, agentTimeouts map[string]ti
 	if d, ok := agentTimeouts[task.AgentName]; ok && d > 0 {
 		timeout = d
 	}
-	return 2 * timeout
+	// The "2 × timeout" relationship lives in the shared liveness module so
+	// the forensic orphaned-after stays ordered after the reaper grace.
+	return liveness.Default().ForensicOrphanedAfterFor(timeout)
 }
 
 func taskSessionSignal(st store.Store, task store.TaskRecord, now time.Time, idleThreshold time.Duration) (string, time.Duration, bool, error) {
