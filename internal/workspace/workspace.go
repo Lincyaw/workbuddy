@@ -154,6 +154,19 @@ func (m *Manager) syncExistingWorktree(wtPath, branchName string) error {
 	if out, err := pullCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("workspace: sync reused worktree %s on %s: %s: %w", wtPath, branchName, strings.TrimSpace(string(out)), err)
 	}
+
+	checkRef := exec.Command("git", "rev-parse", "--verify", "origin/main")
+	checkRef.Dir = wtPath
+	if err := checkRef.Run(); err == nil {
+		rebaseCmd := exec.Command("git", "rebase", "origin/main")
+		rebaseCmd.Dir = wtPath
+		if out, err := rebaseCmd.CombinedOutput(); err != nil {
+			abortCmd := exec.Command("git", "rebase", "--abort")
+			abortCmd.Dir = wtPath
+			_ = abortCmd.Run()
+			log.Printf("[workspace] rebase origin/main failed in %s (non-fatal, continuing): %s", wtPath, strings.TrimSpace(string(out)))
+		}
+	}
 	return nil
 }
 

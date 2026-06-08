@@ -133,6 +133,14 @@ agents:
 
     The repo is cloned at /workspace. You have full git and gh CLI access.
 
+    Before starting, sync your branch with main to avoid stale diffs:
+    ```
+    git fetch origin main
+    git rebase origin/main
+    ```
+    If rebase has conflicts, resolve them before proceeding. Only change
+    files directly related to this issue — never modify unrelated services.
+
     Read the issue body. If it contains a `## Test Artifacts` section, the
     test-gen agent has already written spec-derived tests. Pull the branch
     to get the test files, then:
